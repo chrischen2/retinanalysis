@@ -15,7 +15,7 @@ def select_directory(title):
 
 def create_config(config_path, config_name,
                       data_dir, analysis_dir, 
-                      h5_dir, meta_dir, tags_dir, username = 'drezeanu'):
+                      h5_dir, meta_dir, tags_dir, username = 'chrischen'):
 
     config = ConfigParser()
     config[config_name] = {'Analysis': analysis_dir,
