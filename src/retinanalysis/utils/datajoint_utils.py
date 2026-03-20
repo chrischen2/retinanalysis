@@ -1,3 +1,4 @@
+from __future__ import annotations
 from retinanalysis.utils import (H5_DIR, QUERY_DIR,
                                  ANALYSIS_DIR,
                                  schema)
@@ -10,8 +11,8 @@ import json
 from tqdm.auto import tqdm
 from IPython.display import display
 import h5py 
-from typing import (List,
-                    Optional)
+from typing import (List,Optional)
+
 
 def plot_mosaics_for_datasets(df_exp_search: pd.DataFrame,
                               cell_types: List[str] = ['OnP', 'OffP', 'OnM', 'OffM'],
@@ -85,25 +86,18 @@ def plot_mosaics_for_datasets(df_exp_search: pd.DataFrame,
 
 
 
-def djconnect(host_address: str = '127.0.0.1', user: str = 'root', password: str = 'simple'):
+def djconnect(host_address: str = '127.0.0.1',
+              user: str = 'root',
+              password: str = 'simple'):
     """
-    Connect to local datajoint database container active inside docker.
-    Note: The docker database container MUST be running.
-    
-    Parameters:
-    host_address (str): IP address of mysql/datajoint server. Default '127.0.0.1'
-    user (str): username to log onto server. Default 'root'
-    password (str): password to log onto server. Default 'simple'
-
-    Default parameters should not be changed unless you have created a custom
-    config of the mysql/datajoint docker image and database container.
+    Connect to local DataJoint database container active inside docker.
     """
 
     try:
-        dj.config["database.host"] = f"{host_address}"
-        dj.config["database.user"] = f"{user}"
-        dj.config["database.password"] = f"{password}"
-        dj.conn()
+        dj.config["database.host"] = host_address
+        dj.config["database.user"] = user
+        dj.config["database.password"] = password
+        dj.conn().connect()
     except Exception as e:
         print(f"Could not connect to DataJoint database: {e}")
 
@@ -1070,3 +1064,152 @@ def get_datasets_from_protocol_names_sc(
         print(df)
 
     return df
+
+def _strip_protocol_name(protocol_name: Optional[str]) -> str:
+    if protocol_name is None:
+        return ""
+    return str(protocol_name).split(".")[-1]
+
+def _clean_str(x) -> str:
+    if x is None:
+        return ""
+    s = str(x).strip()
+    return "" if s == "" or s.lower() == "none" else s
+
+
+def _stable_unique_join(values) -> str:
+    seen = set()
+    out = []
+    for v in values:
+        v = _clean_str(v)
+        if not v:
+            continue
+        key = v.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(v)
+    return ", ".join(out)
+
+
+def normalize_cell_type(raw: str) -> str:
+    """
+    Map raw cell type names to canonical short labels.
+
+    Examples:
+        RGC\\OFF-midget -> offM
+        bipolar\\ON-diffuse -> BP
+        photoreceptor\\L cone -> lCone
+    """
+    if raw is None:
+        return "unknown"
+
+    s = raw.strip().lower()
+
+    mapping = {
+        # ---- RGC ----
+        "rgc": "RGC",
+        "rgc\\off-midget": "offM",
+        "rgc\\off-parasol": "offP",
+        "rgc\\off-transient": "offT",
+        "rgc\\off-sustained": "offS",
+
+        "rgc\\on-midget": "onM",
+        "rgc\\on-parasol": "onP",
+        "rgc\\on-transient": "onT",
+        "rgc\\on-alpha": "onS",   # your convention
+
+        "rgc\\w3/local edge detector": "W3",
+        "rgc\\small bistratified": "SBC",
+
+        # ---- interneurons ----
+        "amacrine": "AC",
+        "bipolar": "BP",
+        "bipolar\\off-diffuse": "BP",
+        "bipolar\\on-diffuse": "BP",
+        "horizontal": "Hor",
+
+        # ---- photoreceptors ----
+        "photoreceptor\\l cone": "lCone",
+        "photoreceptor\\m cone": "mCone",
+        "photoreceptor\\rod": "rod",
+
+        # ---- fallback ----
+        "unknown": "unknown",
+    }
+
+    return mapping.get(s, "unknown")    
+
+def get_single_cell_dataset_summary(verbose: bool = True) -> pd.DataFrame:
+    """
+    Summarize all non-MEA experiments (is_mea = 0).
+
+    Returns one row per experiment with columns:
+        exp_name
+        n_cells
+        cell_types
+        protocols_ran
+        species
+
+    Notes
+    -----
+    - cell_types are normalized to canonical short labels
+    - protocols are queried via EpochBlock, not EpochGroup
+    """
+    exp_ids, exp_names, species_labels = (schema.Experiment() & 'is_mea=0').fetch(
+        'id', 'exp_name', 'label'
+    )
+
+    rows = []
+
+    for exp_id, exp_name, species in zip(exp_ids, exp_names, species_labels):
+        exp_id = int(exp_id)
+
+        # ---- cells ----
+        cell_q = schema.Cell() & f'experiment_id={exp_id}'
+        cell_ids, cell_types_direct, cell_props = cell_q.fetch('id', 'type', 'properties')
+
+        n_cells = len(set(cell_ids.tolist())) if len(cell_ids) > 0 else 0
+
+        resolved_cell_types = []
+        for ctype, props in zip(cell_types_direct, cell_props):
+            raw_type = _clean_str(ctype)
+
+            # fallback to properties['type'] if Cell.type is empty
+            if not raw_type and isinstance(props, dict):
+                raw_type = _clean_str(props.get('type'))
+
+            resolved_cell_types.append(normalize_cell_type(raw_type))
+
+        cell_types_str = _stable_unique_join(resolved_cell_types)
+
+        # ---- protocols ----
+        # IMPORTANT: use EpochBlock for protocol queries because of "no_group_protocol"
+        eb_q = schema.EpochBlock() & f'experiment_id={exp_id}'
+        protocol_ids = eb_q.fetch('protocol_id')
+
+        if len(protocol_ids) > 0:
+            protocol_ids = sorted(set(int(pid) for pid in protocol_ids.tolist()))
+            protocol_names = (schema.Protocol() & [{'protocol_id': pid} for pid in protocol_ids]).fetch('name')
+            protocol_short = [_strip_protocol_name(p) for p in protocol_names]
+            protocols_str = _stable_unique_join(protocol_short)
+        else:
+            protocols_str = ""
+
+        rows.append({
+            'exp_name': exp_name,
+            'n_cells': int(n_cells),
+            'cell_types': cell_types_str,
+            'protocols_ran': protocols_str,
+            'species': species,
+        })
+
+    df_summary = pd.DataFrame(rows)
+
+    if len(df_summary) > 0:
+        df_summary = df_summary.sort_values('exp_name', kind='stable').reset_index(drop=True)
+
+    if verbose:
+        print(f'Found {len(df_summary)} single-cell experiments.')
+        print(df_summary)
+
+    return df_summary
