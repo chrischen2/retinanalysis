@@ -941,3 +941,132 @@ def get_epochblock_amp_data(exp_name: str, block_id: int, str_h5: Optional[str]=
     sample_rate = sample_rates[0]
 
     return amp_data, sample_rate
+
+
+def strip_protocol_name(protocol_name: str) -> str:
+    if protocol_name is None:
+        return None
+    return protocol_name.split('.')[-1]
+
+
+def search_protocol_sc(str_search: str, b_exact_match: bool = False, verbose: bool = True):
+    protocols = np.unique(schema.Protocol().fetch('name'))
+    q = str_search.lower()
+
+    matches = []
+    for p in protocols:
+        p_short = strip_protocol_name(p)
+        if b_exact_match:
+            if p.lower() == q or p_short.lower() == q:
+                matches.append(p)
+        else:
+            if q in p.lower() or q in p_short.lower():
+                matches.append(p)
+
+    matches = np.array(matches)
+
+    if verbose:
+        print(f'\nFound {len(matches)} protocols matching "{str_search}":')
+        for m in matches:
+            print(f'  {strip_protocol_name(m)}   ({m})')
+    return matches
+
+
+def get_datasets_from_protocol_names_sc(
+    ls_protocol_names: str | List[str],
+    b_exact_match: bool = False,
+    verbose: bool = True
+) -> pd.DataFrame:
+
+    if isinstance(ls_protocol_names, str):
+        ls_protocol_names = [ls_protocol_names]
+
+    found_protocols = []
+    if b_exact_match:
+        all_protocols = set(schema.Protocol().fetch('name'))
+        for p in ls_protocol_names:
+            if p in all_protocols:
+                found_protocols.append(p)
+            else:
+                for full_name in all_protocols:
+                    if strip_protocol_name(full_name).lower() == p.lower():
+                        found_protocols.append(full_name)
+    else:
+        for p in ls_protocol_names:
+            found_protocols.extend(search_protocol_sc(p, b_exact_match=False, verbose=False))
+
+    found_protocols = list(np.unique(found_protocols))
+
+    if len(found_protocols) == 0:
+        return pd.DataFrame(columns=[
+            'exp_name', 'protocol_name', 'species_type',
+            'recording_technique', 'cell_label',
+            'pipette_solution', 'cell_type'
+        ])
+
+    protocol_query = (schema.Protocol() & [f'name="{p}"' for p in found_protocols]).proj(
+        protocol_id='protocol_id',
+        protocol_full_name='name'
+    )
+
+    experiment_query = (schema.Experiment() & 'is_mea=0').proj(
+        experiment_id='id',
+        exp_name='exp_name',
+        species_type='label'
+    )
+
+    cell_query = schema.Cell.proj(
+        cell_id='id',
+        prep_id='parent_id',
+        cell_label='label',
+        cell_type='type'
+    )  # type: ignore
+
+    epoch_group_query = schema.EpochGroup.proj(
+        group_id='id',
+        experiment_id='experiment_id',
+        cell_id='parent_id',
+        protocol_id='protocol_id',
+        group_properties='properties'
+    )  # type: ignore
+
+    epoch_group_query = epoch_group_query.proj(
+        ...,
+        recording_technique="group_properties->>'$.recordingTechnique'",
+        pipette_solution="group_properties->>'$.pipetteSolution'"
+    )
+
+    q = experiment_query * epoch_group_query * cell_query * protocol_query
+    df = q.fetch(format='frame').reset_index()
+
+    if len(df) == 0:
+        return pd.DataFrame(columns=[
+            'exp_name', 'protocol_name', 'species_type',
+            'recording_technique', 'cell_label',
+            'pipette_solution', 'cell_type'
+        ])
+
+    df['protocol_name'] = df['protocol_full_name'].apply(strip_protocol_name)
+
+    df = df[
+        [
+            'exp_name',
+            'protocol_name',
+            'species_type',
+            'recording_technique',
+            'cell_label',
+            'pipette_solution',
+            'cell_type',
+        ]
+    ].drop_duplicates()
+
+    df = df.sort_values(
+        ['exp_name', 'protocol_name', 'cell_label'],
+        kind='stable'
+    ).reset_index(drop=True)
+
+    if verbose:
+        print(f'\nFound {len(df)} matching rows across {df["exp_name"].nunique()} experiments.\n')
+        print(df)
+
+    return df
