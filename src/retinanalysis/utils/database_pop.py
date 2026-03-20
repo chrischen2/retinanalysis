@@ -588,6 +588,10 @@ def append_data(data_dir: str, meta_dir: str, tags_dir: str, username: str, db_p
     ls_new_exp = []
     for meta, data, tags in tqdm(meta_list, desc='Experiments'):
         exp_name = os.path.basename(data)[:-3]
+
+            # Skip macOS resource fork files
+        if os.path.basename(meta).startswith('._'):
+            continue
         # check if meta already in database
         if len(Experiment & {'exp_name' : exp_name}) == 1:
             print(f"Already in database: {exp_name}")
@@ -595,10 +599,17 @@ def append_data(data_dir: str, meta_dir: str, tags_dir: str, username: str, db_p
         
         print("Adding", meta, flush=True)
         # not in database, add to database
-        with open(meta, 'r') as f:
+        # with open(meta, 'r') as f:
+        #     meta_dict = json.load(f)
+        #     # To this:
+        print(f"Loading meta: {meta}")
+        with open(meta, 'r', encoding='latin-1') as f:
             meta_dict = json.load(f)
-        with open(tags, 'r') as f:
+        print(f"Loading tags: {tags}")
+        with open(tags, 'r', encoding='latin-1') as f:
             tags_dict = json.load(f)
+        # with open(tags, 'r') as f:
+        #     tags_dict = json.load(f)
         append_experiment(meta, data, tags, meta_dict, user, tags_dict)
         records_added += 1
         ls_new_exp.append(exp_name)
