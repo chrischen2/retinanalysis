@@ -633,8 +633,9 @@ def add_parameters_col(df, ls_params, src_col: str='epoch_parameters'):
     return df
 
 
-def get_epoch_data_from_exp(exp_name: str, block_id: int, ls_params: Optional[List]=None,
-                                stim_time_name: str='stimTime') -> pd.DataFrame:
+def get_epoch_data_from_exp(exp_name: str, block_id: int, b_LED: Optional[bool]=False,
+                            ls_params: Optional[List]=None,
+                            stim_time_name: str='stimTime') -> pd.DataFrame:
     # Filter Experiment by exp_name, EpochBlock by block_id, then join down to Epoch
     ex_q = schema.Experiment() & f'exp_name="{exp_name}"'
     is_mea = (ex_q.fetch1('is_mea') == 1)
@@ -669,8 +670,6 @@ def get_epoch_data_from_exp(exp_name: str, block_id: int, ls_params: Optional[Li
 
     df = e_q.fetch(format='frame')
     df = df.reset_index()
-    # Make frame_times_ms list using json.loads
-    df['frame_times_ms'] = df['frame_times_ms'].apply(lambda x: json.loads(x))
 
     if is_mea:
         df['datafile_name'] = df['data_dir'].apply(lambda x: os.path.split(x)[-1])
@@ -695,6 +694,13 @@ def get_epoch_data_from_exp(exp_name: str, block_id: int, ls_params: Optional[Li
             'epoch_parameters'] + ls_time_cols + \
             ['experiment_id', 'group_id', 'block_id', 'protocol_id', 'epoch_id']
     df = df[ls_order]
+
+    if b_LED:
+        # Delete frame_times_ms column
+        df = df.drop(columns=['frame_times_ms'])
+    else:
+        # Make frame_times_ms list using json.loads
+        df['frame_times_ms'] = df['frame_times_ms'].apply(lambda x: json.loads(x))
     
     # Add column for 'epoch_index'
     df.index = df.index.rename('epoch_index')
@@ -721,7 +727,7 @@ def get_epochblock_query(exp_name: str, block_id: int):
     eb_q = eb_q & f'block_id={block_id}'
     return eb_q
 
-def get_epochblock_timing(exp_name: str, block_id: int):
+def get_epochblock_timing(exp_name: str, block_id: int, b_LED: bool=False) -> dict:
     eb_q = get_epochblock_query(exp_name, block_id)
     df = eb_q.fetch(format='frame').reset_index()
     if len(df) > 1:
@@ -730,29 +736,18 @@ def get_epochblock_timing(exp_name: str, block_id: int):
         raise ValueError(f'No EpochBlock found for {exp_name} {block_id}')
     d_data = df.loc[0].to_dict()
     is_mea = df.loc[0, 'is_mea']
-    # epoch_starts = d_data['block_properties']['epochStarts']
-    # epoch_ends = d_data['block_properties']['epochEnds']
-    # n_samples = d_data['block_properties']['n_samples']
-    # frame_times_ms = d_data['block_properties']['frameTimesMs']
 
     d_timing = {
         'exp_name': exp_name,
-        'block_id': block_id,
-        # 'epoch_starts': epoch_starts,
-        # 'epoch_ends': epoch_ends,
-        # 'n_samples': n_samples,
-        # 'frame_times_ms': frame_times_ms
+        'block_id': block_id
     }
     
-    # For MEA data, this has epoch_starts, epoch_ends, n_samples, frame_times_ms
+    # For MEA data, 'block_properties' has epoch_starts, epoch_ends, n_samples, and if LED frame_times_ms
     # For SC data, this has just frame_times_ms
-    # d_group = d_data['block_properties']
-    # for key in d_group.keys():
-    #     d_timing[key] = d_group[key]
-    d_timing['frameTimesMs'] = d_data['block_properties']['frameTimesMs']
+    if not b_LED:
+        d_timing['frameTimesMs'] = d_data['block_properties']['frameTimesMs']
+    
     if is_mea:
-        # d_timing['epochStarts'] = d_data['block_properties']['epochStarts']
-        # d_timing['epochEnds'] = d_data['block_properties']['epochEnds']
         epoch_starts = d_data['block_properties']['epochStarts']
         epoch_ends = d_data['block_properties']['epochEnds']
 
@@ -765,8 +760,9 @@ def get_epochblock_timing(exp_name: str, block_id: int):
             epoch_starts = epoch_starts[:len(epoch_ends)]
             print(f'Keeping only {len(epoch_starts)} epochs.')
 
-            # Remove last epoch of frame times as well
-            d_timing['frameTimesMs'].pop()
+            if not b_LED:
+                # Remove last epoch of frame times as well
+                d_timing['frameTimesMs'].pop()
             
         elif len(epoch_ends) != len(epoch_starts):
             raise ValueError("Mismatch in number of epoch starts and ends.")
@@ -793,6 +789,9 @@ def get_epochblock_timing(exp_name: str, block_id: int):
             raise ValueError(f'For {exp_name} block {block_id}, found {n_epoch_times} epoch times but only {n_epochs} epochs in metadata.')
 
     d_timing['n_epochs'] = n_epochs
+    
+    # TODO: Check if preTime, stimTime and tailTime exist in first epoch
+    
     e_q = e_q.proj(
         pre_time="parameters->>'$.preTime'",
         stim_time="parameters->>'$.stimTime'",
@@ -806,44 +805,45 @@ def get_epochblock_timing(exp_name: str, block_id: int):
     pre_time_ms = float(df_transitions.loc[0, 'pre_time'])
     stim_time_ms = float(df_transitions.loc[0, 'stim_time'])
     tail_time_ms = float(df_transitions.loc[0, 'tail_time'])
-    stage_frame_rate = df_transitions.loc[0, 'stage_frame_rate']
-    if stage_frame_rate is None:
-        print(f'Warning: for {exp_name} block {block_id}, error in finding stage frame rate.')
-    else:
-        stage_frame_rate = float(stage_frame_rate)
-
+    
     d_timing['pre_time_ms'] = pre_time_ms
     d_timing['stim_time_ms'] = stim_time_ms
     d_timing['tail_time_ms'] = tail_time_ms
-    d_timing['stage_frame_rate'] = stage_frame_rate
+    
+    if not b_LED:
+        stage_frame_rate = df_transitions.loc[0, 'stage_frame_rate']
+        if stage_frame_rate is None:
+            print(f'Warning: for {exp_name} block {block_id}, error in finding stage frame rate.')
+            print(f'If this is for an LED stimulus, be sure to set b_LED=True!\n')
+        else:
+            stage_frame_rate = float(stage_frame_rate)
+
+        d_timing['stage_frame_rate'] = stage_frame_rate
     
 
-    try:
-        # Set transition times from measured frame times
-        pre_frames = np.floor(pre_time_ms * 1e-3 * stage_frame_rate).astype(int)
-        stim_frames = np.floor(stim_time_ms * 1e-3 * stage_frame_rate).astype(int)
+    if not b_LED:
+        try:
+            # Set transition times from measured frame times
+            pre_frames = np.floor(pre_time_ms * 1e-3 * stage_frame_rate).astype(int)
+            stim_frames = np.floor(stim_time_ms * 1e-3 * stage_frame_rate).astype(int)
 
-        # This assumes protocol is visible >=preTime and <preTime+stimTime.
-        # Assumption is broken in many places like SpatialNoise where it's <(preTime+stimTime) * 1.011
-        frame_times_ms = d_timing['frameTimesMs']
-        n_epochs = len(frame_times_ms)
-        actual_onset_times_ms = [frame_times_ms[i][pre_frames] for i in range(n_epochs)]
-        actual_offset_times_ms = [frame_times_ms[i][pre_frames+stim_frames] for i in range(n_epochs)]
-    # Exceptions can occur when frame_times_ms are messed up and don't have correct number of frames.
-    except Exception as e:
-        print(f'Error occurred while getting actual onset/offset times: {e}')
-        print('It could be that frame_times_ms do not have the correct number of frames due to some error in frame detection.')
-        print('Check the frame monitor sample rate! On MEA Rigs, prefer 1k, errors likely with 10k.')
-        actual_onset_times_ms = []
-        actual_offset_times_ms = []
-    # print(f'For {exp_name} block {block_id}:')
-    # print(f'Set pre_time_ms={pre_time_ms}, stim_time_ms={stim_time_ms}, tail_time_ms={tail_time_ms}')
-    # print(f'Delivered pre_frames={pre_frames}, stim_frames={stim_frames}')
-    # print(f'Actual onset times (ms): {actual_onset_times_ms}')
-    # print(f'Actual offset times (ms): {actual_offset_times_ms}')
+            # This assumes protocol is visible >=preTime and <preTime+stimTime.
+            # Assumption is broken in many places like SpatialNoise where it's <(preTime+stimTime) * 1.011
+            frame_times_ms = d_timing['frameTimesMs']
+            n_epochs = len(frame_times_ms)
+            actual_onset_times_ms = [frame_times_ms[i][pre_frames] for i in range(n_epochs)]
+            actual_offset_times_ms = [frame_times_ms[i][pre_frames+stim_frames] for i in range(n_epochs)]
+        
+        # Exceptions can occur when frame_times_ms are messed up and don't have correct number of frames.
+        except Exception as e:
+            print(f'Error occurred while getting actual onset/offset times: {e}')
+            print('It could be that frame_times_ms do not have the correct number of frames due to some error in frame detection.')
+            print('Check the frame monitor sample rate! On MEA Rigs, prefer 1k, errors likely with 10k.')
+            actual_onset_times_ms = []
+            actual_offset_times_ms = []
 
-    d_timing['actual_onset_times_ms'] = actual_onset_times_ms
-    d_timing['actual_offset_times_ms'] = actual_offset_times_ms
+        d_timing['actual_onset_times_ms'] = actual_onset_times_ms
+        d_timing['actual_offset_times_ms'] = actual_offset_times_ms
 
     return d_timing
 
@@ -899,6 +899,10 @@ def get_epochblock_frame_data(exp_name: str, block_id: int, str_h5: Optional[str
         print(f'Loaded {frame_data.shape} frame_data.\n')
 
     sample_rates = df_frame['sample_rate'].unique().astype(float)
+    if len(sample_rates) == 0 and len(frame_data)==0:
+        print(f"WARNING: Didn't find any frame monitor data and sample rate.")
+        print(f"If this is for LED stimulus, be sure to set b_LED=True to skip loading this.\n")
+        return np.array([]), None
     if len(sample_rates) != 1:
         raise ValueError(f'Expected single sample rate for Frame Monitor data, but found {len(sample_rates)}: {sample_rates}')
     sample_rate = sample_rates[0]
@@ -937,3 +941,132 @@ def get_epochblock_amp_data(exp_name: str, block_id: int, str_h5: Optional[str]=
     sample_rate = sample_rates[0]
 
     return amp_data, sample_rate
+
+
+def strip_protocol_name(protocol_name: str) -> str:
+    if protocol_name is None:
+        return None
+    return protocol_name.split('.')[-1]
+
+
+def search_protocol_sc(str_search: str, b_exact_match: bool = False, verbose: bool = True):
+    protocols = np.unique(schema.Protocol().fetch('name'))
+    q = str_search.lower()
+
+    matches = []
+    for p in protocols:
+        p_short = strip_protocol_name(p)
+        if b_exact_match:
+            if p.lower() == q or p_short.lower() == q:
+                matches.append(p)
+        else:
+            if q in p.lower() or q in p_short.lower():
+                matches.append(p)
+
+    matches = np.array(matches)
+
+    if verbose:
+        print(f'\nFound {len(matches)} protocols matching "{str_search}":')
+        for m in matches:
+            print(f'  {strip_protocol_name(m)}   ({m})')
+    return matches
+
+
+def get_datasets_from_protocol_names_sc(
+    ls_protocol_names: str | List[str],
+    b_exact_match: bool = False,
+    verbose: bool = True
+) -> pd.DataFrame:
+
+    if isinstance(ls_protocol_names, str):
+        ls_protocol_names = [ls_protocol_names]
+
+    found_protocols = []
+    if b_exact_match:
+        all_protocols = set(schema.Protocol().fetch('name'))
+        for p in ls_protocol_names:
+            if p in all_protocols:
+                found_protocols.append(p)
+            else:
+                for full_name in all_protocols:
+                    if strip_protocol_name(full_name).lower() == p.lower():
+                        found_protocols.append(full_name)
+    else:
+        for p in ls_protocol_names:
+            found_protocols.extend(search_protocol_sc(p, b_exact_match=False, verbose=False))
+
+    found_protocols = list(np.unique(found_protocols))
+
+    if len(found_protocols) == 0:
+        return pd.DataFrame(columns=[
+            'exp_name', 'protocol_name', 'species_type',
+            'recording_technique', 'cell_label',
+            'pipette_solution', 'cell_type'
+        ])
+
+    protocol_query = (schema.Protocol() & [f'name="{p}"' for p in found_protocols]).proj(
+        protocol_id='protocol_id',
+        protocol_full_name='name'
+    )
+
+    experiment_query = (schema.Experiment() & 'is_mea=0').proj(
+        experiment_id='id',
+        exp_name='exp_name',
+        species_type='label'
+    )
+
+    cell_query = schema.Cell.proj(
+        cell_id='id',
+        prep_id='parent_id',
+        cell_label='label',
+        cell_type='type'
+    )  # type: ignore
+
+    epoch_group_query = schema.EpochGroup.proj(
+        group_id='id',
+        experiment_id='experiment_id',
+        cell_id='parent_id',
+        protocol_id='protocol_id',
+        group_properties='properties'
+    )  # type: ignore
+
+    epoch_group_query = epoch_group_query.proj(
+        ...,
+        recording_technique="group_properties->>'$.recordingTechnique'",
+        pipette_solution="group_properties->>'$.pipetteSolution'"
+    )
+
+    q = experiment_query * epoch_group_query * cell_query * protocol_query
+    df = q.fetch(format='frame').reset_index()
+
+    if len(df) == 0:
+        return pd.DataFrame(columns=[
+            'exp_name', 'protocol_name', 'species_type',
+            'recording_technique', 'cell_label',
+            'pipette_solution', 'cell_type'
+        ])
+
+    df['protocol_name'] = df['protocol_full_name'].apply(strip_protocol_name)
+
+    df = df[
+        [
+            'exp_name',
+            'protocol_name',
+            'species_type',
+            'recording_technique',
+            'cell_label',
+            'pipette_solution',
+            'cell_type',
+        ]
+    ].drop_duplicates()
+
+    df = df.sort_values(
+        ['exp_name', 'protocol_name', 'cell_label'],
+        kind='stable'
+    ).reset_index(drop=True)
+
+    if verbose:
+        print(f'\nFound {len(df)} matching rows across {df["exp_name"].nunique()} experiments.\n')
+        print(df)
+
+    return df
