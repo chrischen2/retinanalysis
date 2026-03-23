@@ -150,10 +150,10 @@ def get_exp_summary(exp_name: str) -> Optional[pd.DataFrame]:
     """
 
     exp_ids = (schema.Experiment() & f'exp_name="{exp_name}"').fetch('id')
-    exp_id = exp_ids[0]
     if len(exp_ids) == 0:
         print(f'Experiment "{exp_name}" not found!')
         return None
+    exp_id = exp_ids[0]
     is_mea = (schema.Experiment() & f'id={exp_id}').fetch1('is_mea')
 
     epoch_group_query = schema.EpochGroup() & f'experiment_id={exp_id}'

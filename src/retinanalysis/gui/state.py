@@ -69,14 +69,18 @@ class AppState(param.Parameterized):
         """Load an experiment and add it to the session."""
         if exp_name in self.loaded_exp_names:
             return
-        from retinanalysis.utils.datajoint_utils import get_exp_summary
-        df_exp = get_exp_summary(exp_name)
-        if df_exp is None or len(df_exp) == 0:
-            return
-        summaries = dict(self.exp_summaries)
-        summaries[exp_name] = df_exp
-        self.exp_summaries = summaries
-        self.loaded_exp_names = self.loaded_exp_names + [exp_name]
+        try:
+            from retinanalysis.utils.datajoint_utils import get_exp_summary
+            df_exp = get_exp_summary(exp_name)
+            if df_exp is None or len(df_exp) == 0:
+                print(f"[SCExplorer] No data found for experiment '{exp_name}'.")
+                return
+            summaries = dict(self.exp_summaries)
+            summaries[exp_name] = df_exp
+            self.exp_summaries = summaries
+            self.loaded_exp_names = self.loaded_exp_names + [exp_name]
+        except Exception as e:
+            print(f"[SCExplorer] Error loading experiment '{exp_name}': {e}")
  
     def remove_experiment(self, exp_name):
         """Unload an experiment from the session."""
@@ -97,6 +101,18 @@ class AppState(param.Parameterized):
                 del blocks[key]
         self.loaded_blocks = blocks
  
+    def select_block(self, exp_name, block_id):
+        """Load a block and select all its epochs for plotting."""
+        try:
+            sb, rb = self.get_or_load_block(exp_name, block_id, b_spiking=True)
+            n_epochs = len(rb.amp_data)
+            epochs = [(exp_name, block_id, i) for i in range(n_epochs)]
+            self.selected_epochs = epochs
+            return sb, rb
+        except Exception as e:
+            print(f"[SCExplorer] Error loading block {block_id}: {e}")
+            return None
+
     def get_or_load_block(self, exp_name, block_id, b_spiking=True):
         """Get cached StimBlock/SCResponseBlock or load them."""
         key = (exp_name, block_id)
