@@ -46,7 +46,9 @@ dependencies = [
   "xarray",
   "dask",
   "netCDF4",
-  "bottleneck"]
+  "bottleneck",
+  "panel",
+  "h5py"]
 
 [project.urls]
 Documentation = "https://github.com/DRezeanu/retinanalysis#readme"
