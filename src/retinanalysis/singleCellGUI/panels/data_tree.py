@@ -54,12 +54,13 @@ class DataTree(pn.reactive.ReactiveHTML):
         .sc-tree .block-time { color: #666; }
         .sc-tree .block-dur { color: #999; font-size: 11px; }
       </style>
-      <div class="sc-tree">${_tree_html}</div>
+      <div id="sc_tree" class="sc-tree"></div>
     </div>
     """
 
     _scripts = {
         'render': """
+            sc_tree.innerHTML = data._tree_html;
             tree_container.addEventListener('click', function(e) {
                 var block = e.target.closest('.block-item');
                 if (!block) return;
@@ -74,6 +75,9 @@ class DataTree(pn.reactive.ReactiveHTML):
                 // Send block ID to Python (timestamp ensures re-clicks trigger)
                 data.selected_block_id = block.getAttribute('data-node-id') + '|' + Date.now();
             });
+        """,
+        '_tree_html': """
+            sc_tree.innerHTML = data._tree_html;
         """,
     }
 
