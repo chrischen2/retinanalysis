@@ -7,8 +7,6 @@ Clicking a block loads all its epochs and shows raw traces.
 import panel as pn
 import param
 
-from retinanalysis.singleCellGUI.state import AppState
-
 
 class _TreeNode:
     """Internal representation of a tree node."""
@@ -31,7 +29,6 @@ class DataTree(pn.reactive.ReactiveHTML):
     Clicking a block auto-loads its epochs and plots all raw traces.
     """
 
-    state = param.ClassSelector(class_=AppState)
     selected_block_id = param.String(default='', doc="Block node ID selected by click")
     _tree_html = param.String(default='', doc="Rendered tree HTML content")
 
@@ -89,7 +86,8 @@ class DataTree(pn.reactive.ReactiveHTML):
     }
 
     def __init__(self, state, **params):
-        super().__init__(state=state, **params)
+        super().__init__(**params)
+        self._state = state
 
         # Watch the JS-synced parameter for block selection
         self.param.watch(self._on_block_select, 'selected_block_id')
@@ -98,7 +96,7 @@ class DataTree(pn.reactive.ReactiveHTML):
         for p in ['loaded_exp_names', 'exp_summaries', 'protocol_filter',
                    'protocol_match_mode', 'celltype_filter',
                    'recording_technique_filter', 'custom_filters']:
-            state.param.watch(self._rebuild, p)
+            self._state.param.watch(self._rebuild, p)
 
         self._rebuild()
 
@@ -109,14 +107,14 @@ class DataTree(pn.reactive.ReactiveHTML):
     def _build_tree_data(self):
         """Build the nested tree structure from loaded experiment summaries."""
         roots = []
-        for exp_name in self.state.loaded_exp_names:
-            df = self.state.exp_summaries.get(exp_name)
+        for exp_name in self._state.loaded_exp_names:
+            df = self._state.exp_summaries.get(exp_name)
             if df is None or df.empty:
                 continue
 
             # Look up species
-            row_all = self.state.all_experiments_df[
-                self.state.all_experiments_df['exp_name'] == exp_name
+            row_all = self._state.all_experiments_df[
+                self._state.all_experiments_df['exp_name'] == exp_name
             ]
             species = row_all['species'].values[0] if len(row_all) > 0 else ''
 
@@ -248,8 +246,8 @@ class DataTree(pn.reactive.ReactiveHTML):
 
     def _apply_filters(self, roots):
         """Remove nodes that don't match the current filters. Returns pruned copy."""
-        protocol_filter = self.state.protocol_filter.strip()
-        match_mode = self.state.protocol_match_mode
+        protocol_filter = self._state.protocol_filter.strip()
+        match_mode = self._state.protocol_match_mode
 
         def matches_protocol(node):
             if not protocol_filter:
@@ -372,7 +370,7 @@ class DataTree(pn.reactive.ReactiveHTML):
         block_id = int(parts[2])
 
         # Load block and select all its epochs (triggers trace viewer)
-        self.state.select_block(exp_name, block_id)
+        self._state.select_block(exp_name, block_id)
 
         # Rebuild to update highlight
         self._rebuild()
