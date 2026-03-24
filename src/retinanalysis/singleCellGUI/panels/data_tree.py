@@ -1,7 +1,7 @@
 """Hierarchical data tree browser.
 
-Displays: exp_name -> Cell -> EpochGroup -> EpochBlock
-Clicking a block loads all its epochs and shows raw traces.
+Displays: exp_name -> Cell -> EpochGroup -> EpochBlock -> Epochs
+Clicking a block expands its epochs. Clicking an epoch shows its raw trace.
 """
 
 import panel as pn
@@ -16,7 +16,7 @@ class _TreeNode:
     def __init__(self, node_id, label, level, data=None, parent_id=None):
         self.node_id = node_id
         self.label = label
-        self.level = level  # 'experiment', 'cell', 'epoch_group', 'epoch_block'
+        self.level = level  # 'experiment', 'cell', 'epoch_group', 'epoch_block', 'epoch'
         self.data = data or {}
         self.children = []
         self.parent_id = parent_id
@@ -26,10 +26,11 @@ class DataTree(pn.reactive.ReactiveHTML):
     """Hierarchical tree browser built from loaded experiment summaries.
 
     The tree is rendered as ReactiveHTML with proper JS-Python data binding.
-    Clicking a block auto-loads its epochs and plots all raw traces.
+    Clicking a block expands to show individual epochs.
+    Clicking an epoch selects it and triggers the trace viewer.
     """
 
-    selected_block_id = param.String(default='', doc="Block node ID selected by click")
+    selected_node_id = param.String(default='', doc="Node ID selected by click")
     _tree_html = param.String(default='', doc="Rendered tree HTML content")
 
     _template = """
@@ -46,13 +47,16 @@ class DataTree(pn.reactive.ReactiveHTML):
         .sc-tree .node-exp { font-weight: bold; font-size: 13px; }
         .sc-tree .node-cell { color: #1a5276; font-weight: 600; font-size: 13px; }
         .sc-tree .node-grp { color: #1e8449; font-size: 13px; }
+        .sc-tree .node-blk summary { font-size: 12px; color: #333; }
+        .sc-tree .node-blk summary:hover { background: #e8f4fd; }
+        .sc-tree .epoch-item { cursor: pointer; font-size: 12px; padding: 3px 8px;
+          border-radius: 3px; margin: 1px 0; user-select: none; }
+        .sc-tree .epoch-item:hover { background: #e8f4fd; }
+        .sc-tree .epoch-item.selected { background: #cce5ff; font-weight: 600; }
         .sc-tree .block-item { cursor: pointer; font-size: 12px; padding: 3px 8px;
           border-radius: 3px; margin: 1px 0; user-select: none; }
         .sc-tree .block-item:hover { background: #e8f4fd; }
         .sc-tree .block-item.selected { background: #d4edfc; font-weight: 600; }
-        .sc-tree .block-protocol { color: #7d3c98; }
-        .sc-tree .block-time { color: #666; }
-        .sc-tree .block-dur { color: #999; font-size: 11px; }
       </style>
       <div id="sc_tree" class="sc-tree"></div>
     </div>
@@ -62,18 +66,29 @@ class DataTree(pn.reactive.ReactiveHTML):
         'render': """
             sc_tree.innerHTML = data._tree_html;
             tree_container.addEventListener('click', function(e) {
-                var block = e.target.closest('.block-item');
-                if (!block) return;
-
-                // Remove highlight from all blocks
-                var all = tree_container.querySelectorAll('.block-item');
-                for (var j = 0; j < all.length; j++) {
-                    all[j].classList.remove('selected');
+                // Check for epoch click first
+                var epoch = e.target.closest('.epoch-item');
+                if (epoch) {
+                    var all = tree_container.querySelectorAll('.epoch-item, .block-item');
+                    for (var j = 0; j < all.length; j++) {
+                        all[j].classList.remove('selected');
+                    }
+                    epoch.classList.add('selected');
+                    data.selected_node_id = epoch.getAttribute('data-node-id') + '|' + Date.now();
+                    e.stopPropagation();
+                    return;
                 }
-                // Highlight clicked block
-                block.classList.add('selected');
-                // Send block ID to Python (timestamp ensures re-clicks trigger)
-                data.selected_block_id = block.getAttribute('data-node-id') + '|' + Date.now();
+                // Check for block click (on the summary text, not the triangle)
+                var block = e.target.closest('.block-item');
+                if (block) {
+                    var all = tree_container.querySelectorAll('.epoch-item, .block-item');
+                    for (var j = 0; j < all.length; j++) {
+                        all[j].classList.remove('selected');
+                    }
+                    block.classList.add('selected');
+                    data.selected_node_id = block.getAttribute('data-node-id') + '|' + Date.now();
+                    return;
+                }
             });
         """,
         '_tree_html': """
@@ -84,9 +99,11 @@ class DataTree(pn.reactive.ReactiveHTML):
     def __init__(self, state, **params):
         super().__init__(**params)
         self._state = state
+        # Track which blocks have been expanded (loaded epoch count)
+        self._expanded_blocks = {}  # (exp_name, block_id) -> n_epochs
 
-        # Watch the JS-synced parameter for block selection
-        self.param.watch(self._on_block_select, 'selected_block_id')
+        # Watch the JS-synced parameter for selection
+        self.param.watch(self._on_node_select, 'selected_node_id')
 
         # Rebuild tree when experiments or filters change
         for p in ['loaded_exp_names', 'exp_summaries', 'protocol_filter',
@@ -182,63 +199,72 @@ class DataTree(pn.reactive.ReactiveHTML):
 
                         # Each row in df_group is an epoch block
                         for _, eb_row in df_group.iterrows():
-                            block_id = int(eb_row.get('block_id', 0))
-                            protocol = eb_row.get('protocol_name', '')
-                            start_time = eb_row.get('start_time', None)
-                            duration = eb_row.get('duration_minutes', None)
-
-                            # Build block label: timestamp + protocol
-                            time_str = ''
-                            if start_time is not None:
-                                try:
-                                    time_str = start_time.strftime('%H:%M:%S')
-                                except Exception:
-                                    pass
-
-                            block_label = time_str if time_str else f"Block {block_id}"
-                            block_label += f"  {self._short_protocol(protocol)}"
-                            if duration is not None:
-                                block_label += f" ({duration:.1f}m)"
-
-                            block_node = _TreeNode(
-                                node_id=f"blk:{exp_name}:{block_id}",
-                                label=block_label,
-                                level='epoch_block',
-                                data={'exp_name': exp_name, 'block_id': block_id,
-                                      'protocol_name': protocol},
-                                parent_id=group_node.node_id,
+                            block_node = self._make_block_node(
+                                exp_name, eb_row, group_node.node_id
                             )
                             group_node.children.append(block_node)
                         cell_node.children.append(group_node)
                 else:
                     # No group_label — put blocks directly under cell
                     for _, eb_row in df_cell.iterrows():
-                        block_id = int(eb_row.get('block_id', 0))
-                        protocol = eb_row.get('protocol_name', '')
-                        start_time = eb_row.get('start_time', None)
-
-                        time_str = ''
-                        if start_time is not None:
-                            try:
-                                time_str = start_time.strftime('%H:%M:%S')
-                            except Exception:
-                                pass
-
-                        block_label = time_str if time_str else f"Block {block_id}"
-                        block_label += f"  {self._short_protocol(protocol)}"
-
-                        block_node = _TreeNode(
-                            node_id=f"blk:{exp_name}:{block_id}",
-                            label=block_label,
-                            level='epoch_block',
-                            data={'exp_name': exp_name, 'block_id': block_id,
-                                  'protocol_name': protocol},
-                            parent_id=cell_node.node_id,
+                        block_node = self._make_block_node(
+                            exp_name, eb_row, cell_node.node_id
                         )
                         cell_node.children.append(block_node)
                 exp_node.children.append(cell_node)
             roots.append(exp_node)
         return roots
+
+    def _make_block_node(self, exp_name, eb_row, parent_id):
+        """Create a block node, including epoch children if expanded."""
+        block_id = int(eb_row.get('block_id', 0))
+        protocol = eb_row.get('protocol_name', '')
+        start_time = eb_row.get('start_time', None)
+        duration = eb_row.get('duration_minutes', None)
+
+        time_str = ''
+        if start_time is not None:
+            try:
+                time_str = start_time.strftime('%H:%M:%S')
+            except Exception:
+                pass
+
+        block_label = time_str if time_str else f"Block {block_id}"
+        block_label += f"  {self._short_protocol(protocol)}"
+        if duration is not None:
+            block_label += f" ({duration:.1f}m)"
+
+        block_node = _TreeNode(
+            node_id=f"blk:{exp_name}:{block_id}",
+            label=block_label,
+            level='epoch_block',
+            data={'exp_name': exp_name, 'block_id': block_id,
+                  'protocol_name': protocol, 'start_time': start_time},
+            parent_id=parent_id,
+        )
+
+        # Add epoch children if this block has been expanded
+        key = (exp_name, block_id)
+        if key in self._expanded_blocks:
+            n_epochs = self._expanded_blocks[key]
+            for i in range(n_epochs):
+                epoch_label = f"Epoch {i + 1}"
+                if start_time is not None:
+                    try:
+                        epoch_label += f" ({start_time.strftime('%b %d, %H:%M:%S')})"
+                    except Exception:
+                        pass
+                epoch_node = _TreeNode(
+                    node_id=f"ep:{exp_name}:{block_id}:{i}",
+                    label=epoch_label,
+                    level='epoch',
+                    data={'exp_name': exp_name, 'block_id': block_id,
+                          'epoch_idx': i},
+                    parent_id=block_node.node_id,
+                )
+                block_node.children.append(epoch_node)
+
+        return block_node
 
     def _apply_filters(self, roots):
         """Remove nodes that don't match the current filters. Returns pruned copy."""
@@ -287,25 +313,49 @@ class DataTree(pn.reactive.ReactiveHTML):
     # ------------------------------------------------------------------
 
     def _render_html(self, roots):
-        """Render the tree as nested HTML with clickable blocks."""
-        # Extract real block ID (strip timestamp suffix used for re-click detection)
-        selected = self.selected_block_id.split('|')[0] if self.selected_block_id else ''
+        """Render the tree as nested HTML with expandable blocks and clickable epochs."""
+        selected = self.selected_node_id.split('|')[0] if self.selected_node_id else ''
         lines = []
 
         def render_node(node, depth=0):
             node_id_safe = node.node_id.replace('"', '&quot;')
 
-            if node.level == 'epoch_block':
-                # Blocks are clickable leaf items (not collapsible)
+            if node.level == 'epoch':
+                # Epochs are clickable leaf items
                 is_selected = node.node_id == selected
                 sel_class = ' selected' if is_selected else ''
                 lines.append(
-                    f'<li><div class="block-item{sel_class}" '
+                    f'<li><div class="epoch-item{sel_class}" '
                     f'data-node-id="{node_id_safe}">'
                     f'{node.label}</div></li>'
                 )
+            elif node.level == 'epoch_block':
+                if node.children:
+                    # Block with epochs: collapsible
+                    is_selected = node.node_id == selected
+                    sel_class = ' selected' if is_selected else ''
+                    lines.append(f'<li class="node-blk"><details open>')
+                    lines.append(
+                        f'<summary><span class="block-item{sel_class}" '
+                        f'data-node-id="{node_id_safe}">'
+                        f'{node.label}</span></summary>'
+                    )
+                    lines.append('<ul>')
+                    for child in node.children:
+                        render_node(child, depth + 1)
+                    lines.append('</ul>')
+                    lines.append('</details></li>')
+                else:
+                    # Block not yet expanded: clickable to expand
+                    is_selected = node.node_id == selected
+                    sel_class = ' selected' if is_selected else ''
+                    lines.append(
+                        f'<li><div class="block-item{sel_class}" '
+                        f'data-node-id="{node_id_safe}">'
+                        f'{node.label}</div></li>'
+                    )
             else:
-                # Collapsible parent nodes
+                # Collapsible parent nodes (experiment, cell, epoch_group)
                 css_class = {
                     'experiment': 'node-exp',
                     'cell': 'node-cell',
@@ -347,35 +397,51 @@ class DataTree(pn.reactive.ReactiveHTML):
         html = self._render_html(roots)
         self._tree_html = html
 
-    def _on_block_select(self, event):
-        """Handle block click: load the block and select all its epochs."""
+    def _on_node_select(self, event):
+        """Handle click on a tree node (block or epoch)."""
         raw_value = event.new
         if not raw_value:
             return
 
-        # Strip timestamp suffix (used for re-click detection)
-        block_node_id = raw_value.split('|')[0]
+        node_id = raw_value.split('|')[0]
 
-        if not block_node_id.startswith('blk:'):
-            return
+        if node_id.startswith('ep:'):
+            # Epoch click: select single epoch
+            parts = node_id.split(':')
+            if len(parts) < 4:
+                return
+            exp_name = parts[1]
+            block_id = int(parts[2])
+            epoch_idx = int(parts[3])
 
-        parts = block_node_id.split(':')
-        if len(parts) < 3:
-            return
-        exp_name = parts[1]
-        block_id = int(parts[2])
+            # Ensure block is loaded
+            self._state.get_or_load_block(exp_name, block_id, b_spiking=True)
+            self._state.selected_epochs = [(exp_name, block_id, epoch_idx)]
+            self._rebuild()
 
-        # Load block and select all its epochs (triggers trace viewer)
-        self._state.select_block(exp_name, block_id)
+        elif node_id.startswith('blk:'):
+            # Block click: expand to show epochs (load block to get epoch count)
+            parts = node_id.split(':')
+            if len(parts) < 3:
+                return
+            exp_name = parts[1]
+            block_id = int(parts[2])
 
-        # Rebuild to update highlight
-        self._rebuild()
+            try:
+                sb, rb = self._state.get_or_load_block(exp_name, block_id, b_spiking=True)
+                n_epochs = len(rb.amp_data)
+                self._expanded_blocks[(exp_name, block_id)] = n_epochs
+
+                # Select all epochs in block
+                epochs = [(exp_name, block_id, i) for i in range(n_epochs)]
+                self._state.selected_epochs = epochs
+            except Exception as e:
+                print(f"[DataTree] Error loading block {block_id}: {e}")
+
+            self._rebuild()
 
     def __panel__(self):
         return pn.Column(
-            pn.pane.Markdown("### Data Browser", margin=(0, 5)),
             self,
             sizing_mode='stretch_width',
-            scroll=True,
-            max_height=500,
         )

@@ -1,4 +1,23 @@
-"""SCExplorer: main application composing all panels into a 3-column layout."""
+"""SCExplorer: main application with Clarinet-style layout.
+
+Layout:
+  ┌──────────────────────────────────────────────────────────────┐
+  │  Toolbar: [Add Experiment dropdown] [Processors] [Pipeline]  │
+  ├──────────────────┬───────────────────────────────────────────┤
+  │  Left Panel      │  Center: Trace Viewer                     │
+  │  ┌────────────┐  │  ┌─────────────────────────────────────┐  │
+  │  │ Data Tree   │  │  │  [Overlay | Grid]  [✓ Show Spikes] │  │
+  │  │ (browse     │  │  │                                     │  │
+  │  │  hierarchy) │  │  │  Matplotlib plot                    │  │
+  │  │             │  │  │                                     │  │
+  │  ├────────────┤  │  │                                     │  │
+  │  │ Properties  │  │  │                                     │  │
+  │  │ (key-value) │  │  │  [2D/Time(s)]                      │  │
+  │  └────────────┘  │  └─────────────────────────────────────┘  │
+  ├──────────────────┴───────────────────────────────────────────┤
+  │  Status bar                                                   │
+  └──────────────────────────────────────────────────────────────┘
+"""
 
 import panel as pn
 
@@ -9,6 +28,7 @@ from retinanalysis.singleCellGUI.panels.data_tree import DataTree
 from retinanalysis.singleCellGUI.panels.trace_viewer import TraceViewer
 from retinanalysis.singleCellGUI.panels.analysis_panel import AnalysisPanel
 from retinanalysis.singleCellGUI.panels.export_panel import ExportPanel
+from retinanalysis.singleCellGUI.panels.properties_table import PropertiesTable
 
 
 class SCExplorer:
@@ -40,36 +60,63 @@ class SCExplorer:
         self.trace_viewer = TraceViewer(self.state)
         self.analysis_panel = AnalysisPanel(self.state, extra_plugin_dirs=extra_plugin_dirs)
         self.export_panel = ExportPanel(self.state)
+        self.properties_table = PropertiesTable(self.state)
 
-    def _build_layout(self):
-        """Compose the 3-column layout."""
-        sidebar = pn.Column(
-            self.experiment_selector,
-            pn.layout.Divider(),
-            self.filter_panel,
-            pn.layout.Divider(),
-            self.data_tree,
-            pn.layout.Divider(),
-            self.export_panel,
-            width=380,
-            scroll=True,
+        # Status bar
+        self._status = pn.pane.Markdown(
+            "_Ready_",
+            style={'font-size': '11px', 'color': '#666', 'padding': '2px 8px',
+                   'background': '#f5f5f5', 'border-top': '1px solid #ddd'},
+            sizing_mode='stretch_width',
         )
 
-        main_area = pn.Column(
+    def _build_layout(self):
+        """Compose the Clarinet-style layout."""
+
+        # -- Toolbar (top bar) --
+        toolbar = pn.Row(
+            self.experiment_selector,
+            pn.layout.HSpacer(),
+            pn.pane.Markdown("**Epoch Processors**", margin=(10, 5)),
+            self.analysis_panel,
+            background='#f8f8f8',
+            sizing_mode='stretch_width',
+            height=None,
+        )
+
+        # -- Left panel: tree + filter + properties --
+        left_panel = pn.Column(
+            self.filter_panel,
+            pn.layout.Divider(),
+            pn.pane.Markdown("### Data Browser", margin=(0, 5)),
+            self.data_tree,
+            pn.layout.Divider(),
+            self.properties_table,
+            width=320,
+            scroll=True,
+            sizing_mode='stretch_height',
+        )
+
+        # -- Center: trace viewer --
+        center = pn.Column(
             self.trace_viewer,
             sizing_mode='stretch_both',
         )
 
-        analysis_sidebar = pn.Column(
-            self.analysis_panel,
-            width=280,
-            scroll=True,
+        # -- Main body (left + center) --
+        body = pn.Row(
+            left_panel,
+            center,
+            sizing_mode='stretch_both',
+            min_height=500,
         )
 
-        layout = pn.Row(
-            sidebar,
-            main_area,
-            analysis_sidebar,
+        # -- Full layout --
+        layout = pn.Column(
+            toolbar,
+            pn.layout.Divider(margin=(0, 0)),
+            body,
+            self._status,
             sizing_mode='stretch_both',
             min_height=600,
         )

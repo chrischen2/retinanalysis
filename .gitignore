@@ -1,5 +1,6 @@
 databases
 *__pycache__
+clarinet_ref/
 *.ini
 src/retinanalysis/assets/images/
 src/retinanalysis/assets/resources/
