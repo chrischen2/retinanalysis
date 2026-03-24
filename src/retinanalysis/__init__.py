@@ -73,8 +73,7 @@ from .classes import dedup
 from .classes.dedup import DedupBlock
 
 # GUI (lazy import — only loaded when accessed)
-from . import gui
-SingleCellGUI = gui
+from . import singleCellGUI
  
 
 

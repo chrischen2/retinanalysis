@@ -7,7 +7,7 @@ Clicking a block loads all its epochs and shows raw traces.
 import panel as pn
 import param
 
-from retinanalysis.gui.state import AppState
+from retinanalysis.singleCellGUI.state import AppState
 
 
 class _TreeNode:
@@ -41,7 +41,7 @@ class DataTree(pn.viewable.Viewer):
         )
         # Bridge widget: JS writes block selection here, Python watches it
         self._selection_bridge = pn.widgets.TextInput(
-            value='', visible=False, css_classes=['sc-tree-selection-bridge'],
+            value='', visible=False, css_classes=['_sc-tree-bridge'],
         )
         self._selection_bridge.param.watch(self._on_selection_bridge, 'value')
 
@@ -329,8 +329,8 @@ function selectBlock(blockNodeId) {
     }
 
     // Send block ID to Python via bridge (find by CSS class)
-    var bridgeContainer = document.querySelector('.sc-tree-selection-bridge');
-    var bridge = bridgeContainer ? bridgeContainer.querySelector('input') : null;
+    var bridgeWrapper = document.querySelector('._sc-tree-bridge');
+    var bridge = bridgeWrapper ? bridgeWrapper.querySelector('input') : null;
     if (bridge) {
         var nativeInputValueSetter = Object.getOwnPropertyDescriptor(
             window.HTMLInputElement.prototype, 'value').set;

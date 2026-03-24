@@ -9,7 +9,7 @@ import inspect
 import os
 from pathlib import Path
  
-from retinanalysis.gui.analysis._base import AnalysisPlugin
+from retinanalysis.singleCellGUI.analysis._base import AnalysisPlugin
  
  
 def discover_plugins(extra_dirs=None):
