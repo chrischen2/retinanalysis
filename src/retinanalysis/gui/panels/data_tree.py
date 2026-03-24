@@ -1,7 +1,7 @@
 """Hierarchical data tree browser.
 
-Displays: exp_name → Cell → EpochGroup → EpochBlock → Epoch
-with checkboxes for selection at every level.
+Displays: exp_name -> Cell -> EpochGroup -> EpochBlock
+Clicking a block loads all its epochs and shows raw traces.
 """
 
 import panel as pn
@@ -18,7 +18,7 @@ class _TreeNode:
     def __init__(self, node_id, label, level, data=None, parent_id=None):
         self.node_id = node_id
         self.label = label
-        self.level = level  # 'experiment', 'cell', 'epoch_group', 'epoch_block', 'epoch'
+        self.level = level  # 'experiment', 'cell', 'epoch_group', 'epoch_block'
         self.data = data or {}
         self.children = []
         self.parent_id = parent_id
@@ -27,9 +27,8 @@ class _TreeNode:
 class DataTree(pn.viewable.Viewer):
     """Hierarchical tree browser built from loaded experiment summaries.
 
-    The tree is rendered as HTML with checkboxes.  JS callbacks handle
-    parent/child propagation and send selections back to Python via a
-    hidden TextInput bridge.
+    The tree is rendered as HTML with a clickable hierarchy.
+    Clicking a block auto-loads its epochs and plots all raw traces.
     """
 
     state = param.ClassSelector(class_=AppState)
@@ -40,16 +39,14 @@ class DataTree(pn.viewable.Viewer):
         self._html_pane = pn.pane.HTML(
             "", sizing_mode='stretch_width', min_height=200,
         )
-        # Bridge widget: JS writes JSON selection here, Python watches it
-        self._bridge_id = f"sc_tree_bridge_{id(self)}"
+        # Bridge widget: JS writes block selection here, Python watches it
         self._selection_bridge = pn.widgets.TextInput(
-            value='[]', visible=False,
-            css_classes=[self._bridge_id],
+            value='', visible=False,
         )
         self._selection_bridge.param.watch(self._on_selection_bridge, 'value')
 
-        # Epoch cache: {(exp_name, block_id): df_epochs}
-        self._epoch_cache = {}
+        # Track which block is currently selected for highlighting
+        self._selected_block_id = None
 
         # Rebuild tree when experiments or filters change
         for p in ['loaded_exp_names', 'exp_summaries', 'protocol_filter',
@@ -77,9 +74,25 @@ class DataTree(pn.viewable.Viewer):
             ]
             species = row_all['species'].values[0] if len(row_all) > 0 else ''
 
+            # Get experiment start date if available
+            exp_date = ''
+            if 'start_time' in df.columns:
+                first_time = df['start_time'].min()
+                if first_time is not None:
+                    try:
+                        exp_date = first_time.strftime('%m/%d/%y, %H:%M:%S')
+                    except Exception:
+                        pass
+
+            exp_label = exp_name
+            if exp_date:
+                exp_label = f"{exp_date}"
+            if species:
+                exp_label += f" ({species})"
+
             exp_node = _TreeNode(
                 node_id=f"exp:{exp_name}",
-                label=f"{exp_name} ({species})" if species else exp_name,
+                label=exp_label,
                 level='experiment',
                 data={'exp_name': exp_name},
             )
@@ -90,9 +103,20 @@ class DataTree(pn.viewable.Viewer):
                 continue
 
             for cell_label, df_cell in df.groupby('cell_label', sort=True):
+                # Get cell type if available
+                cell_type = ''
+                if 'cell_type' in df_cell.columns:
+                    types = df_cell['cell_type'].dropna().unique()
+                    if len(types) > 0 and types[0] != 'Unknown':
+                        cell_type = str(types[0])
+
+                cell_display = str(cell_label)
+                if cell_type:
+                    cell_display += f" ({cell_type})"
+
                 cell_node = _TreeNode(
                     node_id=f"cell:{exp_name}:{cell_label}",
-                    label=str(cell_label),
+                    label=cell_display,
                     level='cell',
                     data={'exp_name': exp_name, 'cell_label': cell_label},
                     parent_id=exp_node.node_id,
@@ -120,55 +144,30 @@ class DataTree(pn.viewable.Viewer):
                         for _, eb_row in df_group.iterrows():
                             block_id = int(eb_row.get('block_id', 0))
                             protocol = eb_row.get('protocol_name', '')
+                            start_time = eb_row.get('start_time', None)
+                            duration = eb_row.get('duration_minutes', None)
+
+                            # Build block label: timestamp + protocol
+                            time_str = ''
+                            if start_time is not None:
+                                try:
+                                    time_str = start_time.strftime('%H:%M:%S')
+                                except Exception:
+                                    pass
+
+                            block_label = time_str if time_str else f"Block {block_id}"
+                            block_label += f"  {self._short_protocol(protocol)}"
+                            if duration is not None:
+                                block_label += f" ({duration:.1f}m)"
+
                             block_node = _TreeNode(
                                 node_id=f"blk:{exp_name}:{block_id}",
-                                label=f"Block {block_id} ({self._short_protocol(protocol)})",
+                                label=block_label,
                                 level='epoch_block',
                                 data={'exp_name': exp_name, 'block_id': block_id,
                                       'protocol_name': protocol},
                                 parent_id=group_node.node_id,
                             )
-
-                            # Add epoch leaves from cache
-                            epoch_key = (exp_name, block_id)
-                            if epoch_key in self._epoch_cache:
-                                df_epochs = self._epoch_cache[epoch_key]
-                                for e_idx in range(len(df_epochs)):
-                                    # Build a short param summary
-                                    param_parts = []
-                                    for col in df_epochs.columns:
-                                        if col in ('preTime', 'stimTime', 'tailTime',
-                                                    'exp_name', 'group_label',
-                                                    'protocol_name', 'frame_times_ms',
-                                                    'epoch_parameters', 'experiment_id',
-                                                    'group_id', 'block_id', 'protocol_id',
-                                                    'epoch_id'):
-                                            continue
-                                        val = df_epochs.iloc[e_idx].get(col)
-                                        if val is not None:
-                                            param_parts.append(f"{col}={val}")
-                                    param_str = ", ".join(param_parts[:3])
-
-                                    epoch_node = _TreeNode(
-                                        node_id=f"epoch:{exp_name}:{block_id}:{e_idx}",
-                                        label=f"Epoch {e_idx}" + (f" ({param_str})" if param_str else ""),
-                                        level='epoch',
-                                        data={'exp_name': exp_name, 'block_id': block_id,
-                                              'epoch_idx': e_idx},
-                                        parent_id=block_node.node_id,
-                                    )
-                                    block_node.children.append(epoch_node)
-                            else:
-                                # Placeholder — epochs load on expand
-                                placeholder = _TreeNode(
-                                    node_id=f"loading:{exp_name}:{block_id}",
-                                    label="(click block to load epochs...)",
-                                    level='epoch',
-                                    data={},
-                                    parent_id=block_node.node_id,
-                                )
-                                block_node.children.append(placeholder)
-
                             group_node.children.append(block_node)
                         cell_node.children.append(group_node)
                 else:
@@ -176,9 +175,21 @@ class DataTree(pn.viewable.Viewer):
                     for _, eb_row in df_cell.iterrows():
                         block_id = int(eb_row.get('block_id', 0))
                         protocol = eb_row.get('protocol_name', '')
+                        start_time = eb_row.get('start_time', None)
+
+                        time_str = ''
+                        if start_time is not None:
+                            try:
+                                time_str = start_time.strftime('%H:%M:%S')
+                            except Exception:
+                                pass
+
+                        block_label = time_str if time_str else f"Block {block_id}"
+                        block_label += f"  {self._short_protocol(protocol)}"
+
                         block_node = _TreeNode(
                             node_id=f"blk:{exp_name}:{block_id}",
-                            label=f"Block {block_id} ({self._short_protocol(protocol)})",
+                            label=block_label,
                             level='epoch_block',
                             data={'exp_name': exp_name, 'block_id': block_id,
                                   'protocol_name': protocol},
@@ -193,8 +204,6 @@ class DataTree(pn.viewable.Viewer):
         """Remove nodes that don't match the current filters. Returns pruned copy."""
         protocol_filter = self.state.protocol_filter.strip()
         match_mode = self.state.protocol_match_mode
-        celltype_filter = set(self.state.celltype_filter) if self.state.celltype_filter else None
-        rec_tech_filter = set(self.state.recording_technique_filter) if self.state.recording_technique_filter else None
 
         def matches_protocol(node):
             if not protocol_filter:
@@ -218,7 +227,7 @@ class DataTree(pn.viewable.Viewer):
                 if fc is not None:
                     filtered_children.append(fc)
             # If a non-leaf node has no visible children after filtering, hide it too
-            if node.level in ('experiment', 'cell', 'epoch_group', 'epoch_block'):
+            if node.level in ('experiment', 'cell', 'epoch_group'):
                 if node.children and not filtered_children:
                     return None
             node.children = filtered_children
@@ -238,115 +247,94 @@ class DataTree(pn.viewable.Viewer):
     # ------------------------------------------------------------------
 
     def _render_html(self, roots):
-        """Render the tree as nested HTML <ul> with checkboxes."""
+        """Render the tree as nested HTML with clickable blocks."""
+        selected = self._selected_block_id or ''
         lines = [
             '<style>',
-            '.sc-tree ul { list-style: none; padding-left: 18px; margin: 2px 0; }',
+            '.sc-tree { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }',
+            '.sc-tree ul { list-style: none; padding-left: 16px; margin: 1px 0; }',
             '.sc-tree li { margin: 1px 0; }',
-            '.sc-tree label { cursor: pointer; user-select: none; font-size: 13px; }',
-            '.sc-tree .node-exp { font-weight: bold; }',
-            '.sc-tree .node-cell { color: #1a5276; }',
-            '.sc-tree .node-epoch_group { color: #1e8449; }',
-            '.sc-tree .node-epoch_block { color: #7d3c98; }',
-            '.sc-tree .node-epoch { color: #333; }',
             '.sc-tree details { margin: 1px 0; }',
-            '.sc-tree summary { cursor: pointer; font-size: 13px; }',
-            '.sc-tree input[type=checkbox] { margin-right: 4px; }',
-            '.sc-tree .load-btn { font-size: 11px; color: #2980b9; cursor: pointer; ',
-            '  background: none; border: 1px solid #2980b9; border-radius: 3px; padding: 1px 6px; margin-left: 6px; }',
+            '.sc-tree summary { cursor: pointer; font-size: 13px; padding: 2px 4px; border-radius: 3px; }',
+            '.sc-tree summary:hover { background: #f0f0f0; }',
+            '.sc-tree .node-exp { font-weight: bold; font-size: 13px; }',
+            '.sc-tree .node-cell { color: #1a5276; font-weight: 600; font-size: 13px; }',
+            '.sc-tree .node-grp { color: #1e8449; font-size: 13px; }',
+            '.sc-tree .block-item { cursor: pointer; font-size: 12px; padding: 3px 8px; ',
+            '  border-radius: 3px; margin: 1px 0; user-select: none; }',
+            '.sc-tree .block-item:hover { background: #e8f4fd; }',
+            '.sc-tree .block-item.selected { background: #d4edfc; font-weight: 600; }',
+            '.sc-tree .block-protocol { color: #7d3c98; }',
+            '.sc-tree .block-time { color: #666; }',
+            '.sc-tree .block-dur { color: #999; font-size: 11px; }',
             '</style>',
             '<div class="sc-tree">',
         ]
 
         def render_node(node, depth=0):
-            css_class = f"node-{node.level}" if node.level != 'experiment' else 'node-exp'
             node_id_safe = node.node_id.replace('"', '&quot;')
-            is_leaf = node.level == 'epoch'
-            is_placeholder = node.node_id.startswith('loading:')
 
-            if is_placeholder:
-                # Show a "load" button for epoch blocks
-                parent_data = node.parent_id or ''
+            if node.level == 'epoch_block':
+                # Blocks are clickable leaf items (not collapsible)
+                is_selected = node.node_id == selected
+                sel_class = ' selected' if is_selected else ''
                 lines.append(
-                    f'<li><button class="load-btn" '
-                    f'onclick="loadEpochs(\'{parent_data}\')">'
-                    f'{node.label}</button></li>'
-                )
-                return
-
-            if is_leaf:
-                lines.append(
-                    f'<li><label class="{css_class}">'
-                    f'<input type="checkbox" class="epoch-cb" '
+                    f'<li><div class="block-item{sel_class}" '
                     f'data-node-id="{node_id_safe}" '
-                    f'onchange="updateSelection(this)"/> '
-                    f'{node.label}</label></li>'
+                    f'onclick="selectBlock(\'{node_id_safe}\')">'
+                    f'{node.label}</div></li>'
                 )
             else:
-                has_children = bool(node.children)
-                open_attr = ' open' if depth < 1 else ''
+                # Collapsible parent nodes
+                css_class = {
+                    'experiment': 'node-exp',
+                    'cell': 'node-cell',
+                    'epoch_group': 'node-grp',
+                }.get(node.level, '')
+
+                open_attr = ' open' if depth < 2 else ''
                 lines.append(f'<details{open_attr}>')
                 lines.append(
                     f'<summary class="{css_class}">'
-                    f'<input type="checkbox" class="group-cb" '
-                    f'data-node-id="{node_id_safe}" '
-                    f'onchange="toggleChildren(this)"/> '
                     f'{node.label}</summary>'
                 )
-                if has_children:
+                if node.children:
                     lines.append('<ul>')
                     for child in node.children:
                         render_node(child, depth + 1)
                     lines.append('</ul>')
                 lines.append('</details>')
 
-        lines.append('<ul>')
-        for root in roots:
-            render_node(root)
-        lines.append('</ul>')
+        if not roots:
+            lines.append('<p style="color: #999; font-size: 13px; padding: 8px;">'
+                         'No experiments loaded. Use "Add Experiment" above.</p>')
+        else:
+            lines.append('<ul style="padding-left: 0;">')
+            for root in roots:
+                render_node(root)
+            lines.append('</ul>')
 
-        # JS for checkbox propagation and selection bridging
-        bridge_class = self._bridge_id
+        # JS: clicking a block sends its ID to the Python bridge
+        bridge_id = self._selection_bridge.id
         lines.append(f'''
 <script>
-function _scTreeGetBridge() {{
-    var el = document.querySelector('.{bridge_class} input[type=text]');
-    if (!el) el = document.querySelector('.{bridge_class}');
-    return el;
-}}
-
-function toggleChildren(cb) {{
-    var parent = cb.closest('details');
-    if (!parent) return;
-    var children = parent.querySelectorAll('input[type=checkbox]');
-    for (var i = 0; i < children.length; i++) {{
-        children[i].checked = cb.checked;
+function selectBlock(blockNodeId) {{
+    // Highlight the selected block
+    var allBlocks = document.querySelectorAll('.sc-tree .block-item');
+    for (var i = 0; i < allBlocks.length; i++) {{
+        allBlocks[i].classList.remove('selected');
     }}
-    updateSelection();
-}}
-
-function updateSelection(cb) {{
-    var all = document.querySelectorAll('.sc-tree .epoch-cb:checked');
-    var ids = [];
-    for (var i = 0; i < all.length; i++) {{
-        ids.push(all[i].getAttribute('data-node-id'));
+    var clicked = document.querySelector('.sc-tree .block-item[data-node-id="' + blockNodeId + '"]');
+    if (clicked) {{
+        clicked.classList.add('selected');
     }}
-    var bridge = _scTreeGetBridge();
+
+    // Send block ID to Python via bridge
+    var bridge = document.getElementById('{bridge_id}');
     if (bridge) {{
         var nativeInputValueSetter = Object.getOwnPropertyDescriptor(
             window.HTMLInputElement.prototype, 'value').set;
-        nativeInputValueSetter.call(bridge, JSON.stringify(ids));
-        bridge.dispatchEvent(new Event('input', {{ bubbles: true }}));
-        bridge.dispatchEvent(new Event('change', {{ bubbles: true }}));
-    }}
-}}
-
-function loadEpochs(blockNodeId) {{
-    var bridge = _scTreeGetBridge();
-    if (bridge) {{
-        var nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-            window.HTMLInputElement.prototype, 'value').set;
-        nativeInputValueSetter.call(bridge, JSON.stringify({{"load": blockNodeId}}));
+        nativeInputValueSetter.call(bridge, blockNodeId);
         bridge.dispatchEvent(new Event('input', {{ bubbles: true }}));
         bridge.dispatchEvent(new Event('change', {{ bubbles: true }}));
     }}
@@ -369,47 +357,24 @@ function loadEpochs(blockNodeId) {{
         self._html_pane.object = html
 
     def _on_selection_bridge(self, event):
-        """Handle selection changes and load requests from JS."""
-        import json
-        try:
-            data = json.loads(event.new)
-        except (json.JSONDecodeError, TypeError):
+        """Handle block click: load the block and select all its epochs."""
+        block_node_id = event.new
+        if not block_node_id or not block_node_id.startswith('blk:'):
             return
 
-        if isinstance(data, dict) and 'load' in data:
-            self._handle_load_request(data['load'])
-            return
-
-        # data is a list of epoch node IDs like "epoch:exp_name:block_id:epoch_idx"
-        epochs = []
-        for node_id in data:
-            if not node_id.startswith('epoch:'):
-                continue
-            parts = node_id.split(':')
-            if len(parts) >= 4:
-                exp_name = parts[1]
-                block_id = int(parts[2])
-                epoch_idx = int(parts[3])
-                epochs.append((exp_name, block_id, epoch_idx))
-        self.state.selected_epochs = epochs
-
-    def _handle_load_request(self, block_node_id):
-        """Load epochs for a block when user clicks the load button."""
-        # block_node_id is like "blk:exp_name:block_id"
-        if not block_node_id.startswith('blk:'):
-            return
         parts = block_node_id.split(':')
         if len(parts) < 3:
             return
         exp_name = parts[1]
         block_id = int(parts[2])
 
-        if (exp_name, block_id) not in self._epoch_cache:
-            try:
-                sb, rb = self.state.get_or_load_block(exp_name, block_id, b_spiking=False)
-                self._epoch_cache[(exp_name, block_id)] = sb.df_epochs
-            except Exception:
-                return
+        # Update highlight state and rebuild tree HTML
+        self._selected_block_id = block_node_id
+
+        # Load block and select all its epochs (triggers trace viewer)
+        self.state.select_block(exp_name, block_id)
+
+        # Rebuild to update highlight
         self._rebuild()
 
     def __panel__(self):
