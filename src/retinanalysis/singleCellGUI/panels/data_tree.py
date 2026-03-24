@@ -24,29 +24,75 @@ class _TreeNode:
         self.parent_id = parent_id
 
 
-class DataTree(pn.viewable.Viewer):
+class DataTree(pn.reactive.ReactiveHTML):
     """Hierarchical tree browser built from loaded experiment summaries.
 
-    The tree is rendered as HTML with a clickable hierarchy.
+    The tree is rendered as ReactiveHTML with proper JS-Python data binding.
     Clicking a block auto-loads its epochs and plots all raw traces.
     """
 
     state = param.ClassSelector(class_=AppState)
+    selected_block_id = param.String(default='', doc="Block node ID selected by click")
+    _tree_html = param.String(default='', doc="Rendered tree HTML content")
+
+    _template = """
+    <div id="tree_container" style="
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        min-height: 200px;
+    ">
+      <style>
+        .sc-tree ul { list-style: none; padding-left: 16px; margin: 1px 0; }
+        .sc-tree li { margin: 1px 0; }
+        .sc-tree details { margin: 1px 0; }
+        .sc-tree summary { cursor: pointer; font-size: 13px; padding: 2px 4px; border-radius: 3px; }
+        .sc-tree summary:hover { background: #f0f0f0; }
+        .sc-tree .node-exp { font-weight: bold; font-size: 13px; }
+        .sc-tree .node-cell { color: #1a5276; font-weight: 600; font-size: 13px; }
+        .sc-tree .node-grp { color: #1e8449; font-size: 13px; }
+        .sc-tree .block-item { cursor: pointer; font-size: 12px; padding: 3px 8px;
+          border-radius: 3px; margin: 1px 0; user-select: none; }
+        .sc-tree .block-item:hover { background: #e8f4fd; }
+        .sc-tree .block-item.selected { background: #d4edfc; font-weight: 600; }
+        .sc-tree .block-protocol { color: #7d3c98; }
+        .sc-tree .block-time { color: #666; }
+        .sc-tree .block-dur { color: #999; font-size: 11px; }
+      </style>
+      <div class="sc-tree">${_tree_html}</div>
+    </div>
+    """
+
+    _scripts = {
+        'render': """
+            self._attachClickHandlers = function() {
+                var blocks = tree_container.querySelectorAll('.block-item');
+                for (var i = 0; i < blocks.length; i++) {
+                    (function(el) {
+                        el.addEventListener('click', function() {
+                            // Remove highlight from all blocks
+                            var all = tree_container.querySelectorAll('.block-item');
+                            for (var j = 0; j < all.length; j++) {
+                                all[j].classList.remove('selected');
+                            }
+                            // Highlight clicked block
+                            el.classList.add('selected');
+                            // Send block ID to Python (append timestamp so re-clicks trigger)
+                            data.selected_block_id = el.getAttribute('data-node-id') + '|' + Date.now();
+                        });
+                    })(blocks[i]);
+                }
+            };
+            self._attachClickHandlers();
+        """,
+        '_tree_html': """
+            self._attachClickHandlers();
+        """,
+    }
 
     def __init__(self, state, **params):
         super().__init__(state=state, **params)
 
-        self._html_pane = pn.pane.HTML(
-            "", sizing_mode='stretch_width', min_height=200,
-        )
-        # Bridge widget: JS writes block selection here, Python watches it
-        self._selection_bridge = pn.widgets.TextInput(
-            value='', visible=False, css_classes=['_sc-tree-bridge'],
-        )
-        self._selection_bridge.param.watch(self._on_selection_bridge, 'value')
-
-        # Track which block is currently selected for highlighting
-        self._selected_block_id = None
+        # Watch the JS-synced parameter for block selection
+        self.param.watch(self._on_block_select, 'selected_block_id')
 
         # Rebuild tree when experiments or filters change
         for p in ['loaded_exp_names', 'exp_summaries', 'protocol_filter',
@@ -248,28 +294,9 @@ class DataTree(pn.viewable.Viewer):
 
     def _render_html(self, roots):
         """Render the tree as nested HTML with clickable blocks."""
-        selected = self._selected_block_id or ''
-        lines = [
-            '<style>',
-            '.sc-tree { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }',
-            '.sc-tree ul { list-style: none; padding-left: 16px; margin: 1px 0; }',
-            '.sc-tree li { margin: 1px 0; }',
-            '.sc-tree details { margin: 1px 0; }',
-            '.sc-tree summary { cursor: pointer; font-size: 13px; padding: 2px 4px; border-radius: 3px; }',
-            '.sc-tree summary:hover { background: #f0f0f0; }',
-            '.sc-tree .node-exp { font-weight: bold; font-size: 13px; }',
-            '.sc-tree .node-cell { color: #1a5276; font-weight: 600; font-size: 13px; }',
-            '.sc-tree .node-grp { color: #1e8449; font-size: 13px; }',
-            '.sc-tree .block-item { cursor: pointer; font-size: 12px; padding: 3px 8px; ',
-            '  border-radius: 3px; margin: 1px 0; user-select: none; }',
-            '.sc-tree .block-item:hover { background: #e8f4fd; }',
-            '.sc-tree .block-item.selected { background: #d4edfc; font-weight: 600; }',
-            '.sc-tree .block-protocol { color: #7d3c98; }',
-            '.sc-tree .block-time { color: #666; }',
-            '.sc-tree .block-dur { color: #999; font-size: 11px; }',
-            '</style>',
-            '<div class="sc-tree">',
-        ]
+        # Extract real block ID (strip timestamp suffix used for re-click detection)
+        selected = self.selected_block_id.split('|')[0] if self.selected_block_id else ''
+        lines = []
 
         def render_node(node, depth=0):
             node_id_safe = node.node_id.replace('"', '&quot;')
@@ -280,8 +307,7 @@ class DataTree(pn.viewable.Viewer):
                 sel_class = ' selected' if is_selected else ''
                 lines.append(
                     f'<li><div class="block-item{sel_class}" '
-                    f'data-node-id="{node_id_safe}" '
-                    f'onclick="selectBlock(\'{node_id_safe}\')">'
+                    f'data-node-id="{node_id_safe}">'
                     f'{node.label}</div></li>'
                 )
             else:
@@ -314,35 +340,6 @@ class DataTree(pn.viewable.Viewer):
                 render_node(root)
             lines.append('</ul>')
 
-        # JS: clicking a block sends its ID to the Python bridge
-        lines.append('''
-<script>
-function selectBlock(blockNodeId) {
-    // Highlight the selected block
-    var allBlocks = document.querySelectorAll('.sc-tree .block-item');
-    for (var i = 0; i < allBlocks.length; i++) {
-        allBlocks[i].classList.remove('selected');
-    }
-    var clicked = document.querySelector('.sc-tree .block-item[data-node-id="' + blockNodeId + '"]');
-    if (clicked) {
-        clicked.classList.add('selected');
-    }
-
-    // Send block ID to Python via bridge (find by CSS class)
-    var bridgeWrapper = document.querySelector('._sc-tree-bridge');
-    var bridge = bridgeWrapper ? bridgeWrapper.querySelector('input') : null;
-    if (bridge) {
-        var nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-            window.HTMLInputElement.prototype, 'value').set;
-        nativeInputValueSetter.call(bridge, blockNodeId);
-        bridge.dispatchEvent(new Event('input', { bubbles: true }));
-        bridge.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-}
-</script>
-''')
-
-        lines.append('</div>')
         return '\n'.join(lines)
 
     # ------------------------------------------------------------------
@@ -354,12 +351,18 @@ function selectBlock(blockNodeId) {
         roots = self._build_tree_data()
         roots = self._apply_filters(roots)
         html = self._render_html(roots)
-        self._html_pane.object = html
+        self._tree_html = html
 
-    def _on_selection_bridge(self, event):
+    def _on_block_select(self, event):
         """Handle block click: load the block and select all its epochs."""
-        block_node_id = event.new
-        if not block_node_id or not block_node_id.startswith('blk:'):
+        raw_value = event.new
+        if not raw_value:
+            return
+
+        # Strip timestamp suffix (used for re-click detection)
+        block_node_id = raw_value.split('|')[0]
+
+        if not block_node_id.startswith('blk:'):
             return
 
         parts = block_node_id.split(':')
@@ -367,9 +370,6 @@ function selectBlock(blockNodeId) {
             return
         exp_name = parts[1]
         block_id = int(parts[2])
-
-        # Update highlight state and rebuild tree HTML
-        self._selected_block_id = block_node_id
 
         # Load block and select all its epochs (triggers trace viewer)
         self.state.select_block(exp_name, block_id)
@@ -380,8 +380,7 @@ function selectBlock(blockNodeId) {
     def __panel__(self):
         return pn.Column(
             pn.pane.Markdown("### Data Browser", margin=(0, 5)),
-            self._html_pane,
-            self._selection_bridge,
+            self,
             sizing_mode='stretch_width',
             scroll=True,
             max_height=500,
