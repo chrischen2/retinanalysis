@@ -60,28 +60,20 @@ class DataTree(pn.reactive.ReactiveHTML):
 
     _scripts = {
         'render': """
-            self._attachClickHandlers = function() {
-                var blocks = tree_container.querySelectorAll('.block-item');
-                for (var i = 0; i < blocks.length; i++) {
-                    (function(el) {
-                        el.addEventListener('click', function() {
-                            // Remove highlight from all blocks
-                            var all = tree_container.querySelectorAll('.block-item');
-                            for (var j = 0; j < all.length; j++) {
-                                all[j].classList.remove('selected');
-                            }
-                            // Highlight clicked block
-                            el.classList.add('selected');
-                            // Send block ID to Python (append timestamp so re-clicks trigger)
-                            data.selected_block_id = el.getAttribute('data-node-id') + '|' + Date.now();
-                        });
-                    })(blocks[i]);
+            tree_container.addEventListener('click', function(e) {
+                var block = e.target.closest('.block-item');
+                if (!block) return;
+
+                // Remove highlight from all blocks
+                var all = tree_container.querySelectorAll('.block-item');
+                for (var j = 0; j < all.length; j++) {
+                    all[j].classList.remove('selected');
                 }
-            };
-            self._attachClickHandlers();
-        """,
-        '_tree_html': """
-            self._attachClickHandlers();
+                // Highlight clicked block
+                block.classList.add('selected');
+                // Send block ID to Python (timestamp ensures re-clicks trigger)
+                data.selected_block_id = block.getAttribute('data-node-id') + '|' + Date.now();
+            });
         """,
     }
 
