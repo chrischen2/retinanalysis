@@ -74,6 +74,9 @@ from .classes.dedup import DedupBlock
 
 # GUI (lazy import — only loaded when accessed)
 from . import singleCellGUI
+
+# Standalone single-cell analysis utilities
+from . import SCutils
  
 
 
