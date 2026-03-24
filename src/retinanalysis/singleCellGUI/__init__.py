@@ -4,10 +4,10 @@ Quick start in a Jupyter notebook::
 
     import retinanalysis as ra
     ra.populate_database()
-    explorer = ra.gui.launch_explorer()
+    explorer = ra.singleCellGUI.launch_explorer()
 """
 
-from retinanalysis.gui.app import SCExplorer
+from retinanalysis.singleCellGUI.app import SCExplorer
 
 
 def launch_explorer(extra_plugin_dirs=None, inline=False, port=0):

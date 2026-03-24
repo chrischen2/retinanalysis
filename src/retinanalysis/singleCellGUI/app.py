@@ -2,13 +2,13 @@
 
 import panel as pn
 
-from retinanalysis.gui.state import AppState
-from retinanalysis.gui.panels.experiment_selector import ExperimentSelector
-from retinanalysis.gui.panels.filter_panel import FilterPanel
-from retinanalysis.gui.panels.data_tree import DataTree
-from retinanalysis.gui.panels.trace_viewer import TraceViewer
-from retinanalysis.gui.panels.analysis_panel import AnalysisPanel
-from retinanalysis.gui.panels.export_panel import ExportPanel
+from retinanalysis.singleCellGUI.state import AppState
+from retinanalysis.singleCellGUI.panels.experiment_selector import ExperimentSelector
+from retinanalysis.singleCellGUI.panels.filter_panel import FilterPanel
+from retinanalysis.singleCellGUI.panels.data_tree import DataTree
+from retinanalysis.singleCellGUI.panels.trace_viewer import TraceViewer
+from retinanalysis.singleCellGUI.panels.analysis_panel import AnalysisPanel
+from retinanalysis.singleCellGUI.panels.export_panel import ExportPanel
 
 
 class SCExplorer:
@@ -18,7 +18,7 @@ class SCExplorer:
 
         import retinanalysis as ra
         ra.populate_database()
-        explorer = ra.gui.launch_explorer()
+        explorer = ra.singleCellGUI.launch_explorer()
 
     After interacting with the GUI, access loaded data programmatically::
 

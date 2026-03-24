@@ -3,9 +3,9 @@
 import panel as pn
 import param
  
-from retinanalysis.gui.state import AppState
-from retinanalysis.gui.analysis import discover_plugins
-from retinanalysis.gui.analysis._base import AnalysisPlugin
+from retinanalysis.singleCellGUI.state import AppState
+from retinanalysis.singleCellGUI.analysis import discover_plugins
+from retinanalysis.singleCellGUI.analysis._base import AnalysisPlugin
  
  
 class AnalysisPanel(pn.viewable.Viewer):

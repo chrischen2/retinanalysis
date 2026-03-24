@@ -3,7 +3,7 @@
 import panel as pn
 import param
  
-from retinanalysis.gui.state import AppState
+from retinanalysis.singleCellGUI.state import AppState
  
  
 class ExperimentSelector(pn.viewable.Viewer):

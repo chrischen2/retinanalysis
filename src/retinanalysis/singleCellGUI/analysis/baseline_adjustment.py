@@ -2,7 +2,7 @@
  
 import param
 import numpy as np
-from retinanalysis.gui.analysis._base import AnalysisPlugin
+from retinanalysis.singleCellGUI.analysis._base import AnalysisPlugin
  
  
 class BaselineAdjustment(AnalysisPlugin):

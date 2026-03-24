@@ -7,7 +7,7 @@ import matplotlib
 matplotlib.use('agg')
 import matplotlib.pyplot as plt
  
-from retinanalysis.gui.state import AppState
+from retinanalysis.singleCellGUI.state import AppState
  
  
 class TraceViewer(pn.viewable.Viewer):
