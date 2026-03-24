@@ -41,7 +41,7 @@ class DataTree(pn.viewable.Viewer):
         )
         # Bridge widget: JS writes block selection here, Python watches it
         self._selection_bridge = pn.widgets.TextInput(
-            value='', visible=False,
+            value='', visible=False, css_classes=['sc-tree-selection-bridge'],
         )
         self._selection_bridge.param.watch(self._on_selection_bridge, 'value')
 
@@ -315,30 +315,30 @@ class DataTree(pn.viewable.Viewer):
             lines.append('</ul>')
 
         # JS: clicking a block sends its ID to the Python bridge
-        bridge_id = self._selection_bridge.id
-        lines.append(f'''
+        lines.append('''
 <script>
-function selectBlock(blockNodeId) {{
+function selectBlock(blockNodeId) {
     // Highlight the selected block
     var allBlocks = document.querySelectorAll('.sc-tree .block-item');
-    for (var i = 0; i < allBlocks.length; i++) {{
+    for (var i = 0; i < allBlocks.length; i++) {
         allBlocks[i].classList.remove('selected');
-    }}
+    }
     var clicked = document.querySelector('.sc-tree .block-item[data-node-id="' + blockNodeId + '"]');
-    if (clicked) {{
+    if (clicked) {
         clicked.classList.add('selected');
-    }}
+    }
 
-    // Send block ID to Python via bridge
-    var bridge = document.getElementById('{bridge_id}');
-    if (bridge) {{
+    // Send block ID to Python via bridge (find by CSS class)
+    var bridgeContainer = document.querySelector('.sc-tree-selection-bridge');
+    var bridge = bridgeContainer ? bridgeContainer.querySelector('input') : null;
+    if (bridge) {
         var nativeInputValueSetter = Object.getOwnPropertyDescriptor(
             window.HTMLInputElement.prototype, 'value').set;
         nativeInputValueSetter.call(bridge, blockNodeId);
-        bridge.dispatchEvent(new Event('input', {{ bubbles: true }}));
-        bridge.dispatchEvent(new Event('change', {{ bubbles: true }}));
-    }}
-}}
+        bridge.dispatchEvent(new Event('input', { bubbles: true }));
+        bridge.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+}
 </script>
 ''')
 
