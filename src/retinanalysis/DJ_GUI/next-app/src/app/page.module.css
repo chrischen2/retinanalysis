@@ -1,0 +1,17 @@
+.main {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6rem;
+  min-height: 100vh;
+}
+
+.card {
+  margin: 1%;
+  padding: 1%;
+  background-color: lightgray;
+  /* add shadow */
+  box-shadow: 0 4px 12px 0 rgba(0, 0, 0, 0.5);
+  border-radius: 10px;
+}

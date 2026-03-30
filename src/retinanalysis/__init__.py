@@ -73,7 +73,7 @@ from .classes import dedup
 from .classes.dedup import DedupBlock
 
 # GUI (lazy import — only loaded when accessed)
-from . import singleCellGUI
+from . import DJ_GUI
 
 # Standalone single-cell analysis utilities
 from . import SCutils

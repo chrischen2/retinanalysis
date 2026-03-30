@@ -48,7 +48,8 @@ dependencies = [
   "netCDF4",
   "bottleneck",
   "panel",
-  "h5py"]
+  "h5py",
+  "dj-server"]
 
 [project.urls]
 Documentation = "https://github.com/DRezeanu/retinanalysis#readme"
