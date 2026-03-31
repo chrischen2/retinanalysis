@@ -687,6 +687,6 @@ def reload_celltypefiles(experiment_names: list=None):
         experiment_names = 'all experiments'
     print(f'Found {len(sc_q)} chunks for {experiment_names}.')
     print(f'Deleting associated {len(ctf_q)} cell type files.')
-    ctf_q.delete(safemode=False)
+    ctf_q.delete(prompt=False)
     
     append_celltypefiles(sc_q)
