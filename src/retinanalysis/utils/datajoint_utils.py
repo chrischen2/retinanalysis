@@ -1,4 +1,3 @@
-from __future__ import annotations
 from retinanalysis.utils import (H5_DIR, QUERY_DIR,
                                  ANALYSIS_DIR,
                                  schema)
@@ -11,8 +10,8 @@ import json
 from tqdm.auto import tqdm
 from IPython.display import display
 import h5py 
-from typing import (List,Optional)
-
+from typing import (List,
+                    Optional)
 
 def plot_mosaics_for_datasets(df_exp_search: pd.DataFrame,
                               cell_types: List[str] = ['OnP', 'OffP', 'OnM', 'OffM'],
@@ -86,18 +85,25 @@ def plot_mosaics_for_datasets(df_exp_search: pd.DataFrame,
 
 
 
-def djconnect(host_address: str = '127.0.0.1',
-              user: str = 'root',
-              password: str = 'simple'):
+def djconnect(host_address: str = '127.0.0.1', user: str = 'root', password: str = 'simple'):
     """
-    Connect to local DataJoint database container active inside docker.
+    Connect to local datajoint database container active inside docker.
+    Note: The docker database container MUST be running.
+    
+    Parameters:
+    host_address (str): IP address of mysql/datajoint server. Default '127.0.0.1'
+    user (str): username to log onto server. Default 'root'
+    password (str): password to log onto server. Default 'simple'
+
+    Default parameters should not be changed unless you have created a custom
+    config of the mysql/datajoint docker image and database container.
     """
 
     try:
-        dj.config["database.host"] = host_address
-        dj.config["database.user"] = user
-        dj.config["database.password"] = password
-        dj.conn().connect()
+        dj.config["database.host"] = f"{host_address}"
+        dj.config["database.user"] = f"{user}"
+        dj.config["database.password"] = f"{password}"
+        dj.conn()
     except Exception as e:
         print(f"Could not connect to DataJoint database: {e}")
 
@@ -150,10 +156,10 @@ def get_exp_summary(exp_name: str) -> Optional[pd.DataFrame]:
     """
 
     exp_ids = (schema.Experiment() & f'exp_name="{exp_name}"').fetch('id')
+    exp_id = exp_ids[0]
     if len(exp_ids) == 0:
         print(f'Experiment "{exp_name}" not found!')
         return None
-    exp_id = exp_ids[0]
     is_mea = (schema.Experiment() & f'id={exp_id}').fetch1('is_mea')
 
     epoch_group_query = schema.EpochGroup() & f'experiment_id={exp_id}'
@@ -462,6 +468,75 @@ def get_noise_name_by_exp(exp_name: str) -> str:
 
     return noise_protocol_name
 
+def get_stage_frame_rate_by_exp(exp_name: str):
+    exp_q = schema.Experiment() & f'exp_name="{exp_name}"'
+    exp_id = exp_q.fetch1('id')
+    eb_q = schema.EpochBlock() & f'experiment_id={exp_id}'
+    # Get epochs for all these epoch blocks based on id (parent_id)
+    e_q = schema.Epoch() & [f'parent_id={eb_id}' for eb_id in eb_q.fetch('id')]
+    e_q = e_q.proj(
+        stage_frame_rate="parameters->>'$.frameRate'"
+    )
+    stage_frame_rates = e_q.fetch('stage_frame_rate')
+    stage_frame_rates = stage_frame_rates.astype(float)
+    # Remove NaN values if any
+    stage_frame_rates = stage_frame_rates[~np.isnan(stage_frame_rates)]
+    if len(np.unique(stage_frame_rates))!=1:
+        print(f'Warning: Multiple stage frame rates found for experiment {exp_name}: {np.unique(stage_frame_rates)}')
+        print(f'd_display will keep the first one: {stage_frame_rates[0]}')
+
+    return stage_frame_rates[0]
+
+
+def get_display_params_by_exp(exp_name: str, verbose: bool = True):
+    # Rig H
+    if 'H' in exp_name:
+        raise NotImplementedError('LCR display params not defined for Rig H yet.')
+    # Rig C
+    elif 'C' in exp_name:
+        if verbose:
+            print(f'For Rig C {exp_name}:')
+        if int(exp_name[:8]) < 20230926:
+            disp_type = 'OLED'
+            mu_per_pixel = 3.8
+            n_ht = 600
+            n_wt = 800
+            mean_frame_rate = 60.31807657
+        else:
+            disp_type = 'LCR'
+            # As saved in sta_analysis.py. Rig Config indicates 3.37 so not sure what's best...
+            # I figure sta_analysis.py value is better as that's used to generate STAs 
+            # and will be useful to convert regen stim from pixel to stixel space.
+            mu_per_pixel = 3.34 
+            n_ht = 1140
+            n_wt = 1824
+            mean_frame_rate = 59.941548817817917
+    # Rig E (Fred confocal)
+    elif 'E' in exp_name:
+        if verbose:
+            print(f'For Rig E {exp_name}, assuming ConfocalWithLightCrafterAbove rig config:')
+        disp_type = 'LCR'
+        mu_per_pixel = 1.3
+        n_ht = 1140
+        n_wt = 1824
+        mean_frame_rate = 59.9422
+    else:
+        raise ValueError(f'Unexpected Rig identified in MEA experiment name {exp_name} !')
+
+    stage_frame_rate = get_stage_frame_rate_by_exp(exp_name)
+
+    d_display = {
+        'disp_type': disp_type,
+        'mu_per_pixel': mu_per_pixel,
+        'n_ht': n_ht,
+        'n_wt': n_wt,
+        'mean_frame_rate': mean_frame_rate,
+        'stage_frame_rate': stage_frame_rate,
+    }
+    if verbose:
+        print(d_display)
+    return d_display
+
 def get_typing_files_for_datasets(df: pd.DataFrame, ls_cell_types: list = ['OffP', 'OffM', 'OnP', 'OnM'],
                                   verbose: bool = False):
     # Return df_typed with columns:
@@ -759,32 +834,56 @@ def get_epochblock_timing(exp_name: str, block_id: int, b_LED: bool=False) -> di
                 d_timing['frameTimesMs'].pop()
             
         elif len(epoch_ends) != len(epoch_starts):
-            raise ValueError("Mismatch in number of epoch starts and ends.")
+            if len(epoch_ends) > len(epoch_starts):
+                n_extra_ends = len(epoch_ends)-len(epoch_starts)
+                print(f"Epoch Starts: {[(i, epoch_starts[i]) for i in range(len(epoch_starts))]}")
+                print(f"Epoch Ends: {[(i, epoch_ends[i]) for i in range(len(epoch_ends))]}\n")
+                for _ in range(n_extra_ends):
+                    idx_to_remove = input('More ends than starts, select index (from 0) to remove:')
+                    print(f'Removing epoch end #{int(idx_to_remove)}\n')
+                    epoch_ends.pop(int(idx_to_remove))
+                    print(f"Epoch Starts: {[(i, epoch_starts[i]) for i in range(len(epoch_starts))]}")
+                    print(f"Epoch Ends: {[(i, epoch_ends[i]) for i in range(len(epoch_ends))]}\n")
+            elif len(epoch_starts) > len(epoch_ends):
+                n_extra_starts = len(epoch_starts)-len(epoch_ends)
+                print(f"Epoch Starts: {[(i, epoch_starts[i]) for i in range(len(epoch_starts))]}")
+                print(f"Epoch Ends: {[(i, epoch_ends[i]) for i in range(len(epoch_ends))]}\n")
+                for _ in range(n_extra_starts):
+                    idx_to_remove = input('More starts than ends, select index (from 0) to remove:')
+                    print(f'Removing epoch start #{int(idx_to_remove)}\n')
+                    epoch_starts.pop(int(idx_to_remove))
+                    print(f"Epoch Starts: {[(i, epoch_starts[i]) for i in range(len(epoch_starts))]}")
+                    print(f"Epoch Ends: {[(i, epoch_ends[i]) for i in range(len(epoch_ends))]}\n")
+            else:
+                raise ValueError(f"Mismatch in number of epoch starts and ends: {len(epoch_starts)} starts and but {len(epoch_ends)} ends.")
 
-        n_epoch_times = len(epoch_starts)
         d_timing['epochStarts'] = epoch_starts
         d_timing['epochEnds'] = epoch_ends
         d_timing['n_samples'] = d_data['block_properties']['n_samples']
 
     # Get stim timing and frame rate
     e_q = schema.Epoch() & f'parent_id={block_id}'
-    # Sometimes have extra epochStarts and epochEnds. TODO debug? eg-20250527C data007
-    # The definitive number of epochs though should be the number of epochs we have metadata for
     n_epochs = len(e_q)
 
-    # If mea, check for inequality with number of epochStarts and epochEnds
+    # If mea, check for inequality with number of epochStarts and epochs of metadata
     if is_mea:
-        # Can have 1 more metadata entry in case of symphony crash
+        n_epoch_times = len(d_timing['epochStarts'])
+        # Can have 1 more metadata entry in case of failed TTL signal... in that case throwing away metadata and using only those epochs
+        # where we have reliable starts and stops.
         if n_epochs > n_epoch_times:
-            print(f'Warning: For {exp_name} block {block_id}, found {n_epochs} epochs in metadata but only {n_epoch_times} epoch times.')
+            print(f'Warning: For {exp_name} block {block_id}, found {n_epochs} epochs in metadata but only {n_epoch_times} epoch starts.')
             print(f'Assuming n_epochs = {n_epoch_times}')
             n_epochs = n_epoch_times
+        # Can have 1 less metadata entry in case of symphony crash... in that case, throwing away the epoch starts and stops that have no
+        # associated metadata
         elif n_epochs < n_epoch_times:
-            raise ValueError(f'For {exp_name} block {block_id}, found {n_epoch_times} epoch times but only {n_epochs} epochs in metadata.')
+            print(f'Warning: for {exp_name} block {block_id}, found {n_epoch_times} epoch starts but only {n_epochs} epochs in metadata.')
+            print(f'Assuming there are {n_epochs} completed epochs.')
+            d_timing['epochStarts'] = d_timing['epochStarts'][:n_epochs]
+            d_timing['epochEnds'] = d_timing['epochEnds'][:n_epochs]
+
 
     d_timing['n_epochs'] = n_epochs
-    
-    # TODO: Check if preTime, stimTime and tailTime exist in first epoch
     
     e_q = e_q.proj(
         pre_time="parameters->>'$.preTime'",
@@ -792,13 +891,29 @@ def get_epochblock_timing(exp_name: str, block_id: int, b_LED: bool=False) -> di
         tail_time="parameters->>'$.tailTime'",
         stage_frame_rate="parameters->>'$.frameRate'"
     )
+
     df_transitions = e_q.fetch(format='frame').drop_duplicates().reset_index()
+
     if len(df_transitions) != 1:
         display(df_transitions)
         raise ValueError(f'Expected a unique set of timing parameters for {exp_name} {block_id}, but found {len(df_transitions)}')
-    pre_time_ms = float(df_transitions.loc[0, 'pre_time'])
-    stim_time_ms = float(df_transitions.loc[0, 'stim_time'])
-    tail_time_ms = float(df_transitions.loc[0, 'tail_time'])
+
+    # Check if preTime, stimTime and tailTime exist, which they sometimes don't for LED stimuli.
+    if df_transitions.at[0, 'pre_time'] is None:
+        print(f'Warning: preTime not found for {exp_name} block {block_id}. Possible for LED stimuli, setting to 0.')
+        df_transitions.loc[0, 'pre_time'] = 0
+
+    if df_transitions.at[0, 'stim_time'] is None:
+        print(f'Warning: stimTime not found for {exp_name} block {block_id}. Possible for LED stimuli, setting to 0.')
+        df_transitions.loc[0, 'stim_time'] = 0
+    
+    if df_transitions.at[0, 'tail_time'] is None:
+        print(f'Warning: tailTime not found for {exp_name} block {block_id}. Possible for LED stimuli, setting to 0.')
+        df_transitions.loc[0, 'tail_time'] = 0
+
+    pre_time_ms = float(df_transitions.at[0, 'pre_time'])
+    stim_time_ms = float(df_transitions.at[0, 'stim_time'])
+    tail_time_ms = float(df_transitions.at[0, 'tail_time'])
     
     d_timing['pre_time_ms'] = pre_time_ms
     d_timing['stim_time_ms'] = stim_time_ms
@@ -935,281 +1050,3 @@ def get_epochblock_amp_data(exp_name: str, block_id: int, str_h5: Optional[str]=
     sample_rate = sample_rates[0]
 
     return amp_data, sample_rate
-
-
-def strip_protocol_name(protocol_name: str) -> str:
-    if protocol_name is None:
-        return None
-    return protocol_name.split('.')[-1]
-
-
-def search_protocol_sc(str_search: str, b_exact_match: bool = False, verbose: bool = True):
-    protocols = np.unique(schema.Protocol().fetch('name'))
-    q = str_search.lower()
-
-    matches = []
-    for p in protocols:
-        p_short = strip_protocol_name(p)
-        if b_exact_match:
-            if p.lower() == q or p_short.lower() == q:
-                matches.append(p)
-        else:
-            if q in p.lower() or q in p_short.lower():
-                matches.append(p)
-
-    matches = np.array(matches)
-
-    if verbose:
-        print(f'\nFound {len(matches)} protocols matching "{str_search}":')
-        for m in matches:
-            print(f'  {strip_protocol_name(m)}   ({m})')
-    return matches
-
-
-def get_datasets_from_protocol_names_sc(
-    ls_protocol_names: str | List[str],
-    b_exact_match: bool = False,
-    verbose: bool = True
-) -> pd.DataFrame:
-
-    if isinstance(ls_protocol_names, str):
-        ls_protocol_names = [ls_protocol_names]
-
-    found_protocols = []
-    if b_exact_match:
-        all_protocols = set(schema.Protocol().fetch('name'))
-        for p in ls_protocol_names:
-            if p in all_protocols:
-                found_protocols.append(p)
-            else:
-                for full_name in all_protocols:
-                    if strip_protocol_name(full_name).lower() == p.lower():
-                        found_protocols.append(full_name)
-    else:
-        for p in ls_protocol_names:
-            found_protocols.extend(search_protocol_sc(p, b_exact_match=False, verbose=False))
-
-    found_protocols = list(np.unique(found_protocols))
-
-    if len(found_protocols) == 0:
-        return pd.DataFrame(columns=[
-            'exp_name', 'protocol_name', 'species_type',
-            'recording_technique', 'cell_label',
-            'pipette_solution', 'cell_type'
-        ])
-
-    protocol_query = (schema.Protocol() & [f'name="{p}"' for p in found_protocols]).proj(
-        protocol_id='protocol_id',
-        protocol_full_name='name'
-    )
-
-    experiment_query = (schema.Experiment() & 'is_mea=0').proj(
-        experiment_id='id',
-        exp_name='exp_name',
-        species_type='label'
-    )
-
-    cell_query = schema.Cell.proj(
-        cell_id='id',
-        prep_id='parent_id',
-        cell_label='label',
-        cell_type='type'
-    )  # type: ignore
-
-    epoch_group_query = schema.EpochGroup.proj(
-        group_id='id',
-        experiment_id='experiment_id',
-        cell_id='parent_id',
-        protocol_id='protocol_id',
-        group_properties='properties'
-    )  # type: ignore
-
-    epoch_group_query = epoch_group_query.proj(
-        ...,
-        recording_technique="group_properties->>'$.recordingTechnique'",
-        pipette_solution="group_properties->>'$.pipetteSolution'"
-    )
-
-    q = experiment_query * epoch_group_query * cell_query * protocol_query
-    df = q.fetch(format='frame').reset_index()
-
-    if len(df) == 0:
-        return pd.DataFrame(columns=[
-            'exp_name', 'protocol_name', 'species_type',
-            'recording_technique', 'cell_label',
-            'pipette_solution', 'cell_type'
-        ])
-
-    df['protocol_name'] = df['protocol_full_name'].apply(strip_protocol_name)
-
-    df = df[
-        [
-            'exp_name',
-            'protocol_name',
-            'species_type',
-            'recording_technique',
-            'cell_label',
-            'pipette_solution',
-            'cell_type',
-        ]
-    ].drop_duplicates()
-
-    df = df.sort_values(
-        ['exp_name', 'protocol_name', 'cell_label'],
-        kind='stable'
-    ).reset_index(drop=True)
-
-    if verbose:
-        print(f'\nFound {len(df)} matching rows across {df["exp_name"].nunique()} experiments.\n')
-        print(df)
-
-    return df
-
-def _strip_protocol_name(protocol_name: Optional[str]) -> str:
-    if protocol_name is None:
-        return ""
-    return str(protocol_name).split(".")[-1]
-
-def _clean_str(x) -> str:
-    if x is None:
-        return ""
-    s = str(x).strip()
-    return "" if s == "" or s.lower() == "none" else s
-
-
-def _stable_unique_join(values) -> str:
-    seen = set()
-    out = []
-    for v in values:
-        v = _clean_str(v)
-        if not v:
-            continue
-        key = v.lower()
-        if key not in seen:
-            seen.add(key)
-            out.append(v)
-    return ", ".join(out)
-
-
-def normalize_cell_type(raw: str) -> str:
-    """
-    Map raw cell type names to canonical short labels.
-
-    Examples:
-        RGC\\OFF-midget -> offM
-        bipolar\\ON-diffuse -> BP
-        photoreceptor\\L cone -> lCone
-    """
-    if raw is None:
-        return "unknown"
-
-    s = raw.strip().lower()
-
-    mapping = {
-        # ---- RGC ----
-        "rgc": "RGC",
-        "rgc\\off-midget": "offM",
-        "rgc\\off-parasol": "offP",
-        "rgc\\off-transient": "offT",
-        "rgc\\off-sustained": "offS",
-
-        "rgc\\on-midget": "onM",
-        "rgc\\on-parasol": "onP",
-        "rgc\\on-transient": "onT",
-        "rgc\\on-alpha": "onS",   # your convention
-
-        "rgc\\w3/local edge detector": "W3",
-        "rgc\\small bistratified": "SBC",
-
-        # ---- interneurons ----
-        "amacrine": "AC",
-        "bipolar": "BP",
-        "bipolar\\off-diffuse": "BP",
-        "bipolar\\on-diffuse": "BP",
-        "horizontal": "Hor",
-
-        # ---- photoreceptors ----
-        "photoreceptor\\l cone": "lCone",
-        "photoreceptor\\m cone": "mCone",
-        "photoreceptor\\rod": "rod",
-
-        # ---- fallback ----
-        "unknown": "unknown",
-    }
-
-    return mapping.get(s, "unknown")    
-
-def get_single_cell_dataset_summary(verbose: bool = True) -> pd.DataFrame:
-    """
-    Summarize all non-MEA experiments (is_mea = 0).
-
-    Returns one row per experiment with columns:
-        exp_name
-        n_cells
-        cell_types
-        protocols_ran
-        species
-
-    Notes
-    -----
-    - cell_types are normalized to canonical short labels
-    - protocols are queried via EpochBlock, not EpochGroup
-    """
-    exp_ids, exp_names, species_labels = (schema.Experiment() & 'is_mea=0').fetch(
-        'id', 'exp_name', 'label'
-    )
-
-    rows = []
-
-    for exp_id, exp_name, species in zip(exp_ids, exp_names, species_labels):
-        exp_id = int(exp_id)
-
-        # ---- cells ----
-        cell_q = schema.Cell() & f'experiment_id={exp_id}'
-        cell_ids, cell_types_direct, cell_props = cell_q.fetch('id', 'type', 'properties')
-
-        n_cells = len(set(cell_ids.tolist())) if len(cell_ids) > 0 else 0
-
-        resolved_cell_types = []
-        for ctype, props in zip(cell_types_direct, cell_props):
-            raw_type = _clean_str(ctype)
-
-            # fallback to properties['type'] if Cell.type is empty
-            if not raw_type and isinstance(props, dict):
-                raw_type = _clean_str(props.get('type'))
-
-            resolved_cell_types.append(normalize_cell_type(raw_type))
-
-        cell_types_str = _stable_unique_join(resolved_cell_types)
-
-        # ---- protocols ----
-        # IMPORTANT: use EpochBlock for protocol queries because of "no_group_protocol"
-        eb_q = schema.EpochBlock() & f'experiment_id={exp_id}'
-        protocol_ids = eb_q.fetch('protocol_id')
-
-        if len(protocol_ids) > 0:
-            protocol_ids = sorted(set(int(pid) for pid in protocol_ids.tolist()))
-            protocol_names = (schema.Protocol() & [{'protocol_id': pid} for pid in protocol_ids]).fetch('name')
-            protocol_short = [_strip_protocol_name(p) for p in protocol_names]
-            protocols_str = _stable_unique_join(protocol_short)
-        else:
-            protocols_str = ""
-
-        rows.append({
-            'exp_name': exp_name,
-            'n_cells': int(n_cells),
-            'cell_types': cell_types_str,
-            'protocols_ran': protocols_str,
-            'species': species,
-        })
-
-    df_summary = pd.DataFrame(rows)
-
-    if len(df_summary) > 0:
-        df_summary = df_summary.sort_values('exp_name', kind='stable').reset_index(drop=True)
-
-    if verbose:
-        print(f'Found {len(df_summary)} single-cell experiments.')
-        print(df_summary)
-
-    return df_summary

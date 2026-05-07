@@ -25,21 +25,32 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dependencies = [
-  "datajoint",
-  "dj-server",
-  "h5py",
   "hdf5storage",
-  "ipykernel",
-  "matplotlib",
-  "matplotlib_venn",
-  "numpy==2.2.6",
+  "h5py",
+  "statsmodels",
+  "progressbar2",
+  "Cython",
+  "setuptools",
   "opencv-python",
-  "pandas",
+  "matplotlib",
   "scikit-learn",
+  "pybind11",
   "scipy==1.15",
-  "tqdm",
+  "numpy==2.2.6",
+  "pandas",
+  "seaborn",
+  "datajoint==0.14.4",
+  "ipywidgets",
+  "ipympl",
+  "matplotlib_venn",
+  "torch",
+  "torchaudio",
+  "torchvision",
+  "ipykernel",
   "xarray",
-]
+  "dask",
+  "netCDF4",
+  "bottleneck"]
 
 [project.urls]
 Documentation = "https://github.com/DRezeanu/retinanalysis#readme"
