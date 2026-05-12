@@ -27,6 +27,53 @@ from matplotlib.patches import Ellipse
 from retinanalysis.utils.vision_utils import get_ells
 
 
+def electrode_positions_canvas_px(
+    analysis_chunk,
+    mea_center_canvas_px: Optional[Tuple[float, float]] = None,
+    microns_per_pixel: Optional[float] = None,
+    flip_y: bool = True,
+) -> np.ndarray:
+    """Convert MEA electrode positions (microns) to canvas-pixel coords.
+
+    The Litke 512-electrode array stores electrode locations in MEA chip
+    microns, centered at ``(0, 0)`` (typical extent: x ∈ [-945, 945],
+    y ∈ [-450, 450]). To put them on the same axes as the cell mosaic
+    and stimulus frame, we map MEA µm → canvas pixels assuming standard
+    rig co-registration: the MEA is centered on the display canvas and
+    uses the same physical scale (``microns_per_pixel``).
+
+    Parameters
+    ----------
+    analysis_chunk : AnalysisChunk
+        Source of ``vcd.get_electrode_map()``, ``canvas_size``, and
+        ``microns_per_pixel``.
+    mea_center_canvas_px : (x, y), optional
+        Canvas-pixel coords of the MEA center. Defaults to canvas center.
+    microns_per_pixel : float, optional
+        Display scale. Defaults to ``analysis_chunk.microns_per_pixel``.
+    flip_y : bool
+        MEA chip uses math-up y; canvas uses image-down y. Negate y when
+        True (default).
+
+    Returns
+    -------
+    np.ndarray
+        ``(n_electrodes, 2)`` array of (x_canvas, y_canvas) coordinates.
+    """
+    em_um = analysis_chunk.vcd.get_electrode_map()  # (n, 2) in µm
+    if microns_per_pixel is None:
+        microns_per_pixel = analysis_chunk.microns_per_pixel
+    if mea_center_canvas_px is None:
+        canvas_w, canvas_h = analysis_chunk.canvas_size
+        mea_center_canvas_px = (canvas_w / 2.0, canvas_h / 2.0)
+
+    cx, cy = mea_center_canvas_px
+    em_canvas = np.empty_like(em_um, dtype=float)
+    em_canvas[:, 0] = cx + em_um[:, 0] / microns_per_pixel
+    em_canvas[:, 1] = cy + (-em_um[:, 1] if flip_y else em_um[:, 1]) / microns_per_pixel
+    return em_canvas
+
+
 def _select_cells_by_type(analysis_chunk,
                           cell_types: Optional[Iterable[str]],
                           minimum_n: int,
@@ -73,6 +120,10 @@ def plot_stim_with_mosaic(
     edge_alpha: float = 0.9,
     edge_linewidth: float = 1.2,
     legend: bool = True,
+    show_electrodes: bool = False,
+    electrode_kwargs: Optional[dict] = None,
+    mea_center_canvas_px: Optional[Tuple[float, float]] = None,
+    flip_electrode_y: bool = True,
     **imshow_kwargs,
 ) -> Axes:
     """Overlay the cell-type mosaic on a stimulus frame.
@@ -110,6 +161,20 @@ def plot_stim_with_mosaic(
         (``fill_alpha=0``) so the stim shows through.
     legend : bool
         Add a legend mapping color → cell type.
+    show_electrodes : bool
+        Overlay the MEA electrode grid (Litke 512 array) on the plot.
+    electrode_kwargs : dict, optional
+        Forwarded to ``ax.scatter`` for the electrode dots. Defaults to
+        ``dict(s=4, c='white', edgecolors='black', linewidths=0.3,
+        alpha=0.6, zorder=5)`` so dots stay readable on either a
+        natural image or a noise frame.
+    mea_center_canvas_px : (x, y), optional
+        Canvas-pixel coords of the MEA chip center. Defaults to canvas
+        center, which is the standard co-registration.
+    flip_electrode_y : bool
+        Flip electrode y when overlaying (MEA chip uses math-up y, canvas
+        uses image-down y). Default True. Set False if your rig stores
+        electrode positions already in image-down y.
     **imshow_kwargs : dict
         Forwarded to ``ax.imshow`` (e.g. ``vmin``, ``vmax``).
     """
@@ -169,6 +234,19 @@ def plot_stim_with_mosaic(
             edgecolor=color, linewidth=edge_linewidth,
             label=f'{ct} (n={len(d_ells_by_type[ct])})',
         ))
+
+    # --- Optional electrode overlay (MEA chip → canvas pixels)
+    if show_electrodes:
+        em_canvas = electrode_positions_canvas_px(
+            analysis_chunk,
+            mea_center_canvas_px=mea_center_canvas_px,
+            flip_y=flip_electrode_y,
+        )
+        defaults = dict(s=4, c='white', edgecolors='black',
+                        linewidths=0.3, alpha=0.6, zorder=5)
+        if electrode_kwargs:
+            defaults.update(electrode_kwargs)
+        ax.scatter(em_canvas[:, 0], em_canvas[:, 1], **defaults)
 
     # --- Limits / labels
     ax.set_xlim(0, canvas_w)

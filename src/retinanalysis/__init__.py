@@ -47,7 +47,8 @@ from .utils.cell_type_utils import (load_canonical_cell_types,
                                     filter_available_types)
 
 from .utils import mosaic_overlay
-from .utils.mosaic_overlay import plot_stim_with_mosaic
+from .utils.mosaic_overlay import (plot_stim_with_mosaic,
+                                   electrode_positions_canvas_px)
 
 # `parse_data` pulls scipy.signal (~1s). It isn't used at module level — load it
 # lazily via `from retinanalysis.utils import parse_data` when actually needed.
