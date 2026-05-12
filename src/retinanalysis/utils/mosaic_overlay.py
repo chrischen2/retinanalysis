@@ -32,15 +32,22 @@ def electrode_positions_canvas_px(
     mea_center_canvas_px: Optional[Tuple[float, float]] = None,
     microns_per_pixel: Optional[float] = None,
     flip_y: bool = True,
+    rotation_deg: Optional[float] = None,
 ) -> np.ndarray:
     """Convert MEA electrode positions (microns) to canvas-pixel coords.
 
     The Litke 512-electrode array stores electrode locations in MEA chip
     microns, centered at ``(0, 0)`` (typical extent: x ∈ [-945, 945],
-    y ∈ [-450, 450]). To put them on the same axes as the cell mosaic
-    and stimulus frame, we map MEA µm → canvas pixels assuming standard
-    rig co-registration: the MEA is centered on the display canvas and
-    uses the same physical scale (``microns_per_pixel``).
+    y ∈ [-450, 450]; long axis along chip x). To put them on the same
+    axes as the cell mosaic and stimulus frame, we map MEA µm → canvas
+    pixels assuming the MEA is centered on the display canvas and uses
+    the same physical scale (``microns_per_pixel``).
+
+    The chip's intrinsic axes do NOT always match the display's axes —
+    on some rigs the chip is physically mounted rotated relative to the
+    monitor. Use ``rotation_deg`` to rotate the chip coordinates before
+    translating to canvas. Set it empirically by checking that matched
+    cells' RF centers fall on or near their recording electrodes.
 
     Parameters
     ----------
@@ -52,8 +59,16 @@ def electrode_positions_canvas_px(
     microns_per_pixel : float, optional
         Display scale. Defaults to ``analysis_chunk.microns_per_pixel``.
     flip_y : bool
-        MEA chip uses math-up y; canvas uses image-down y. Negate y when
-        True (default).
+        MEA chip uses math-up y; canvas uses image-down y. Negate y
+        (after rotation) when True (default).
+    rotation_deg : float, optional
+        Rotation of MEA chip axes relative to canvas axes, in degrees
+        CCW. ``0`` means chip x → canvas x (Field/Chichilnisky default).
+        ``90`` rotates the chip so its long axis runs along canvas y.
+        When ``None`` (default) the value is resolved from the rig
+        config via :func:`retinanalysis.utils.datajoint_utils.
+        get_display_params_by_exp` (key ``mea_rotation_deg``). For Rig
+        C this returns 90° (verified empirically on 20220823C/chunk5).
 
     Returns
     -------
@@ -66,11 +81,29 @@ def electrode_positions_canvas_px(
     if mea_center_canvas_px is None:
         canvas_w, canvas_h = analysis_chunk.canvas_size
         mea_center_canvas_px = (canvas_w / 2.0, canvas_h / 2.0)
+    if rotation_deg is None:
+        # Lazy import to avoid pulling datajoint at module load time.
+        from retinanalysis.utils.datajoint_utils import get_display_params_by_exp
+        try:
+            rotation_deg = float(get_display_params_by_exp(
+                analysis_chunk.exp_name, verbose=False).get('mea_rotation_deg', 0.0))
+        except Exception:
+            rotation_deg = 0.0
+
+    # Rotate chip coords by rotation_deg CCW (still in chip µm, centered on 0).
+    if rotation_deg % 360 != 0:
+        theta = np.deg2rad(rotation_deg)
+        c, s = np.cos(theta), np.sin(theta)
+        x_rot = em_um[:, 0] * c - em_um[:, 1] * s
+        y_rot = em_um[:, 0] * s + em_um[:, 1] * c
+    else:
+        x_rot = em_um[:, 0]
+        y_rot = em_um[:, 1]
 
     cx, cy = mea_center_canvas_px
     em_canvas = np.empty_like(em_um, dtype=float)
-    em_canvas[:, 0] = cx + em_um[:, 0] / microns_per_pixel
-    em_canvas[:, 1] = cy + (-em_um[:, 1] if flip_y else em_um[:, 1]) / microns_per_pixel
+    em_canvas[:, 0] = cx + x_rot / microns_per_pixel
+    em_canvas[:, 1] = cy + (-y_rot if flip_y else y_rot) / microns_per_pixel
     return em_canvas
 
 
@@ -124,6 +157,7 @@ def plot_stim_with_mosaic(
     electrode_kwargs: Optional[dict] = None,
     mea_center_canvas_px: Optional[Tuple[float, float]] = None,
     flip_electrode_y: bool = True,
+    electrode_rotation_deg: Optional[float] = None,
     **imshow_kwargs,
 ) -> Axes:
     """Overlay the cell-type mosaic on a stimulus frame.
@@ -175,6 +209,11 @@ def plot_stim_with_mosaic(
         Flip electrode y when overlaying (MEA chip uses math-up y, canvas
         uses image-down y). Default True. Set False if your rig stores
         electrode positions already in image-down y.
+    electrode_rotation_deg : float, optional
+        Rotation of the MEA chip axes relative to the display axes, in
+        degrees CCW. When ``None`` (default) the value is resolved per
+        rig via :func:`get_display_params_by_exp` (e.g. Rig C → 90°,
+        verified empirically). Pass an explicit number to override.
     **imshow_kwargs : dict
         Forwarded to ``ax.imshow`` (e.g. ``vmin``, ``vmax``).
     """
@@ -241,6 +280,7 @@ def plot_stim_with_mosaic(
             analysis_chunk,
             mea_center_canvas_px=mea_center_canvas_px,
             flip_y=flip_electrode_y,
+            rotation_deg=electrode_rotation_deg,
         )
         defaults = dict(s=4, c='white', edgecolors='black',
                         linewidths=0.3, alpha=0.6, zorder=5)

@@ -489,6 +489,14 @@ def get_stage_frame_rate_by_exp(exp_name: str):
 
 
 def get_display_params_by_exp(exp_name: str, verbose: bool = True):
+    # Per-rig MEA-chip rotation (degrees CCW) relative to display axes.
+    # The Litke chip's intrinsic x-axis is its long edge (1890 µm). Some rigs
+    # mount the chip rotated so the long edge runs along canvas y rather than
+    # canvas x. Verified empirically on a given rig by checking that matched
+    # cells' STA centers sit closest to electrodes at this rotation; see
+    # mosaic_overlay.electrode_positions_canvas_px for usage.
+    mea_rotation_deg = 0.0  # default when rig orientation is unknown
+
     # Rig H
     if 'H' in exp_name:
         raise NotImplementedError('LCR display params not defined for Rig H yet.')
@@ -505,12 +513,16 @@ def get_display_params_by_exp(exp_name: str, verbose: bool = True):
         else:
             disp_type = 'LCR'
             # As saved in sta_analysis.py. Rig Config indicates 3.37 so not sure what's best...
-            # I figure sta_analysis.py value is better as that's used to generate STAs 
+            # I figure sta_analysis.py value is better as that's used to generate STAs
             # and will be useful to convert regen stim from pixel to stixel space.
-            mu_per_pixel = 3.34 
+            mu_per_pixel = 3.34
             n_ht = 1140
             n_wt = 1824
             mean_frame_rate = 59.941548817817917
+        # Verified on 20220823C/chunk5: matched cells' STA centers drop from
+        # median ~38 µm (no rotation) to ~30 µm (= one electrode pitch) when
+        # the chip is rotated 90° CCW.
+        mea_rotation_deg = 90.0
     # Rig E (Fred confocal)
     elif 'E' in exp_name:
         if verbose:
@@ -520,6 +532,8 @@ def get_display_params_by_exp(exp_name: str, verbose: bool = True):
         n_ht = 1140
         n_wt = 1824
         mean_frame_rate = 59.9422
+        # Unverified for Rig E — adjust if matched-cell-nearest-electrode
+        # distance is much larger than ~half-pitch.
     else:
         raise ValueError(f'Unexpected Rig identified in MEA experiment name {exp_name} !')
 
@@ -532,6 +546,7 @@ def get_display_params_by_exp(exp_name: str, verbose: bool = True):
         'n_wt': n_wt,
         'mean_frame_rate': mean_frame_rate,
         'stage_frame_rate': stage_frame_rate,
+        'mea_rotation_deg': mea_rotation_deg,
     }
     if verbose:
         print(d_display)
