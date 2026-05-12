@@ -181,3 +181,122 @@ def regen(stim_block: Any, verbose: bool = True,
 
 
 register(PROTOCOL_NAME, regen)
+
+
+def render_displayed_canvas(
+    stim_ds: xr.Dataset,
+    epoch: int,
+    frame: Optional[int] = None,
+) -> np.ndarray:
+    """Render the actual canvas-pixel frame as displayed on the monitor.
+
+    Composites the per-epoch natural image (scaled by
+    ``vh_um_per_pixel/microns_per_pixel`` to canvas pixels), centered at
+    ``currentP0`` translated to canvas, optionally shifted by the eye
+    trajectory at ``frame``. Pixels outside the image extent are filled
+    with ``backgroundIntensity``. The result is clipped to the rig's
+    ``canvasSize`` — i.e. exactly what was visible to the retina.
+
+    Parameters
+    ----------
+    stim_ds : xr.Dataset
+        Output of :func:`regen` for this protocol. Must include
+        ``base_images`` in attrs (i.e. the turner-package resources were
+        found).
+    epoch : int
+        Index along the ``epoch`` dimension.
+    frame : int, optional
+        Frame index along ``time``. ``None`` (default) returns the
+        pre-trajectory frame (image at ``currentP0`` only). For an
+        actual frame use ``frame=k`` to apply ``xTraj_um[k]``,
+        ``yTraj_um[k]`` (in microns) as the eye-position shift.
+
+    Returns
+    -------
+    np.ndarray
+        ``(canvas_h, canvas_w)`` uint8 array. Plug this into
+        :func:`plot_stim_with_mosaic` with the default ``frame_extent``.
+    """
+    base_images = stim_ds.attrs.get('base_images') or {}
+    if not base_images:
+        raise ValueError(
+            'render_displayed_canvas: stim_ds has no base_images — the '
+            'protocol repo or .iml files were not findable at regen time.'
+        )
+
+    canvas_size = stim_ds.attrs.get('canvas_size_pix')
+    mu_per_pix = stim_ds.attrs.get('microns_per_pixel')
+    vh_um_per_pix = stim_ds.attrs.get('vh_um_per_pixel', VH_UM_PER_PIXEL)
+    if canvas_size is None or mu_per_pix is None:
+        raise ValueError(
+            'render_displayed_canvas: stim_ds attrs missing canvas_size_pix '
+            'or microns_per_pixel; regen() must have been called against a '
+            'StimBlock built on a known rig.'
+        )
+    canvas_w, canvas_h = int(round(canvas_size[0])), int(round(canvas_size[1]))
+    scale = float(vh_um_per_pix) / float(mu_per_pix)  # canvas pix per VH pix
+
+    img_name = str(stim_ds.image_name.values[epoch])
+    img = base_images[img_name]
+    img_h, img_w = img.shape
+    img_h_canvas = img_h * scale
+    img_w_canvas = img_w * scale
+
+    # Image-center in canvas pixels. Mirrors the MATLAB createPresentation
+    # logic (lines 150-160): center on canvas/2 then shift by the
+    # P0-relative-to-image-center offset, with x sign-flipped to match
+    # the protocol's "scene right ⇒ position left" convention.
+    p0x = float(stim_ds.currentP0_x_vhpix.values[epoch])
+    p0y = float(stim_ds.currentP0_y_vhpix.values[epoch])
+    cx_base = canvas_w / 2.0 - (p0x - img_w / 2.0) * scale
+    cy_base = canvas_h / 2.0 + (p0y - img_h / 2.0) * scale
+
+    # Apply eye-movement shift if a frame index is given. xTraj_um is in
+    # microns; convert to canvas pixels (negate to match the protocol's
+    # "scene right ⇒ position left" — see line 124 of the .m).
+    if frame is not None:
+        dx_canvas = -float(stim_ds.xTraj_um.values[epoch, int(frame)]) / float(mu_per_pix)
+        dy_canvas = -float(stim_ds.yTraj_um.values[epoch, int(frame)]) / float(mu_per_pix)
+    else:
+        dx_canvas = 0.0
+        dy_canvas = 0.0
+
+    cx = cx_base + dx_canvas
+    cy = cy_base + dy_canvas
+
+    # Scale the source image to canvas resolution via NEAREST/BILINEAR. We
+    # prefer scipy.ndimage.zoom to avoid a hard OpenCV dep here.
+    from scipy.ndimage import zoom
+    img_scaled = zoom(img.astype(np.float32), zoom=scale, order=1)
+    # zoom() rounding may produce a slightly-off shape; reconcile.
+    new_h, new_w = img_scaled.shape
+
+    # Background fill = backgroundIntensity * 255, clipped to [0,255].
+    bg_intensity = float(stim_ds.backgroundIntensity.values[epoch])
+    bg_uint8 = int(np.clip(round(255.0 * bg_intensity), 0, 255))
+
+    canvas = np.full((canvas_h, canvas_w), bg_uint8, dtype=np.uint8)
+
+    # Place the scaled image with its center at (cx, cy). Compute source
+    # and destination slices that lie within both arrays.
+    img_left = cx - new_w / 2.0
+    img_top = cy - new_h / 2.0
+
+    src_left = int(max(0, np.floor(-img_left)))
+    src_top = int(max(0, np.floor(-img_top)))
+    src_right = int(min(new_w, np.ceil(canvas_w - img_left)))
+    src_bottom = int(min(new_h, np.ceil(canvas_h - img_top)))
+
+    if src_right > src_left and src_bottom > src_top:
+        dst_left = int(max(0, round(img_left)))
+        dst_top = int(max(0, round(img_top)))
+        dst_right = dst_left + (src_right - src_left)
+        dst_bottom = dst_top + (src_bottom - src_top)
+        # Clamp again in case rounding pushed past canvas edge.
+        dst_right = min(dst_right, canvas_w)
+        dst_bottom = min(dst_bottom, canvas_h)
+        sub = np.clip(img_scaled[src_top:src_top + (dst_bottom - dst_top),
+                                 src_left:src_left + (dst_right - dst_left)], 0, 255)
+        canvas[dst_top:dst_bottom, dst_left:dst_right] = sub.astype(np.uint8)
+
+    return canvas

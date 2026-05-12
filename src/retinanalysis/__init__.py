@@ -81,6 +81,7 @@ from .classes.qc import MEAQC
 # classes so registry side-effects can reference StimBlock-style objects.
 from . import regen as _regen_pkg
 from .regen import regen_stimulus, available_protocols
+from .regen.eye_movement_alt_bg import render_displayed_canvas
 
 # Pipeline must be imported last as it references the above pieces.
 from .classes import mea_pipeline
