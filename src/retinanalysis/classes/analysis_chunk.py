@@ -28,6 +28,7 @@ except:
     import importlib_resources as ir # type: ignore
 
 from retinanalysis.utils.datajoint_utils import get_noise_name_by_exp
+from retinanalysis.utils.cell_type_utils import map_cell_type
 
 class AnalysisChunk:
     """
@@ -287,32 +288,26 @@ class AnalysisChunk:
 
         cell_types_list_path = str(ir.files(retinanalysis) / "assets/cell_types.csv")
         cell_types_list = pd.read_csv(cell_types_list_path)
-        cell_types = cell_types_list['cell_types'].values
+        cell_types = list(cell_types_list['cell_types'].values)
 
         for idx, typing_file in enumerate(self.typing_files):
             file_path = find_path('analysis', self.exp_name, self.chunk_name, self.ss_version, typing_file)
             d_result = dict()
-            
+
             with open(file_path, 'r') as file:
                for line in file:
                     # Split each line into key and value using the specified delimiter
                     key, value = map(str.strip, line.split(' ', 1))
-                    sub_values = value.split('/')
-                    
+                    sub_values = [p for p in value.split('/') if p]
+
                     # Add key-value pair to the dictionary
-                    d_result[int(key)] = sub_values[:-1]
+                    d_result[int(key)] = sub_values
 
             for cell in self.cell_ids:
                 if cell in d_result.keys():
-
-                    for type in cell_types:
-                        if type in d_result[cell]:
-                            d_result[cell] = type
-                            break
+                    canon = map_cell_type(d_result[cell], canonical_types=cell_types)
+                    d_result[cell] = canon if canon is not None else 'Unknown'
                 else:
-                    d_result[cell] = 'Unknown'
-                
-                if 'All' in d_result[cell]:
                     d_result[cell] = 'Unknown'
                 
             
