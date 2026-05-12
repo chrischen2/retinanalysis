@@ -199,9 +199,15 @@ class AnalysisChunk:
         self.data_files = [os.path.basename(path) for path in noise_data_dirs]
 
         # Pull typing files directly from available Analysis Directory... avoids issues with datajoint
-        # not updating typing files on existing experiments
+        # not updating typing files on existing experiments. Filter out dotfiles —
+        # macOS leaves AppleDouble resource-fork siblings like
+        # `._kilosort2.classification.txt` (4 KB binary) which fail to UTF-8 decode
+        # when the parser tries to read them as text in get_df().
         typing_file_dir = find_path('analysis', self.exp_name, self.chunk_name, self.ss_version)
-        self.typing_files = [file for file in os.listdir(typing_file_dir) if 'txt' in os.path.splitext(file)[1]]
+        self.typing_files = [
+            file for file in os.listdir(typing_file_dir)
+            if 'txt' in os.path.splitext(file)[1] and not file.startswith('.')
+        ]
 
         # typing_files = schema.CellTypeFile() & {'chunk_id' : self.chunk_id, 'algorithm': self.ss_version}
         # self.typing_files = [file_name for file_name in typing_files.fetch('file_name')] 
