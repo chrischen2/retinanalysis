@@ -709,7 +709,7 @@ def get_epoch_data_from_exp(exp_name: str, block_id: int, b_LED: Optional[bool]=
     ex_q = schema.Experiment() & f'exp_name="{exp_name}"'
     is_mea = (ex_q.fetch1('is_mea') == 1)
     eg_q = schema.EpochGroup() * ex_q.proj('exp_name', experiment_id='id')
-    eg_q = eg_q.proj('exp_name', group_label='label', group_id='id')
+    eg_q = eg_q.proj('exp_name', 'experiment_id', group_label='label', group_id='id')
     
     ls_eb_cols = ['protocol_id']
     if is_mea:
