@@ -14,7 +14,9 @@ from .config.settings import (ANALYSIS_DIR,
                               TAGS_DIR,
                               QUERY_DIR,
                               OUTPUT_DIR,
-                              USER)
+                              USER,
+                              PROTOCOL_REPOS_ROOT,
+                              find_protocol_repo)
 
 # Utilities imported first. They should NEVER reference the classes for anything
 # other than type hints, which should be done using the TYPE_CHECKING and 
@@ -70,6 +72,11 @@ from .classes.response import (ResponseBlock,
 from .classes import qc
 from .classes.qc import MEAQC
 
+
+# Stimulus regeneration (depends on classes for type hints only). Import after
+# classes so registry side-effects can reference StimBlock-style objects.
+from . import regen as _regen_pkg
+from .regen import regen_stimulus, available_protocols
 
 # Pipeline must be imported last as it references the above pieces.
 from .classes import mea_pipeline

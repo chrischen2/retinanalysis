@@ -30,29 +30,25 @@ def load_config(config_path):
         DEFAULT_config = configfile['WINDOWS_DEFAULT']
         SECONDARY_config = configfile['WINDOWS_SECONDARY']
     
+    def _row(cfg):
+        # protocol_repos_root is optional; fall back to '' if absent
+        return {'data' : cfg['data'], 'raw': cfg['raw'], 'analysis': cfg['analysis'],
+                'h5': cfg['h5'], 'meta': cfg['meta'], 'tags': cfg['tags'],
+                'query': cfg['query'], 'user': cfg['user'],
+                'protocol_repos_root': cfg.get('protocol_repos_root', '')}
+
     mea_config = dict()
     if os.path.exists(os.path.abspath(DEFAULT_config['data'])):
-        use_config = DEFAULT_config
-        mea_config['primary'] = {'data' : use_config['data'], 'raw': use_config['raw'], 'analysis': use_config['analysis'],
-                    'h5': use_config['h5'], 'meta': use_config['meta'], 'tags': use_config['tags'],
-                    'query': use_config['query'], 'user': use_config['user']}
+        mea_config['primary'] = _row(DEFAULT_config)
     if os.path.exists(os.path.abspath(SECONDARY_config['data'])):
-        use_config = SECONDARY_config
-        mea_config['secondary'] = {'data' : use_config['data'], 'raw': use_config['raw'], 'analysis': use_config['analysis'],
-                    'h5': use_config['h5'], 'meta': use_config['meta'], 'tags': use_config['tags'],
-                    'query': use_config['query'], 'user': use_config['user']}
+        mea_config['secondary'] = _row(SECONDARY_config)
 
-    if os.path.exists(os.path.abspath(TERTIARY_config['data'])):
-        use_config = TERTIARY_config
-        mea_config['tertiary'] = {'data' : use_config['data'], 'raw': use_config['raw'], 'analysis': use_config['analysis'],
-                    'h5': use_config['h5'], 'meta': use_config['meta'], 'tags': use_config['tags'],
-                    'query': use_config['query'], 'user': use_config['user']}
-        
+    if platform.system() == 'Darwin' and os.path.exists(os.path.abspath(TERTIARY_config['data'])):
+        mea_config['tertiary'] = _row(TERTIARY_config)
+
     if not mea_config:
-        use_config = {'data': '', 'raw': '', 'analysis': '', 'h5': '', 'meta': '', 'tags': '', 'query': '', 'user': ''}
-        mea_config['primary'] = {'data' : use_config['data'], 'raw': use_config['raw'], 'analysis': use_config['analysis'],
-                    'h5': use_config['h5'], 'meta': use_config['meta'], 'tags': use_config['tags'],
-                    'query': use_config['query'], 'user': use_config['user']}
+        mea_config['primary'] = {'data': '', 'raw': '', 'analysis': '', 'h5': '', 'meta': '',
+                                 'tags': '', 'query': '', 'user': '', 'protocol_repos_root': ''}
         print("No NAS or SSD paths found, check that one of them is connected")
 
     return mea_config
@@ -112,6 +108,31 @@ META_DIR = _top['meta']
 TAGS_DIR = _top['tags']
 QUERY_DIR = _top['query']
 USER = _top['user']
+
+# Root directory holding locally-cloned protocol packages (turner-package, manookin-package,
+# riekelab-package-master, ...). Used by retinanalysis.regen to find resource files (.iml,
+# .mat libraries) and protocol source code. Empty string if not configured / not present.
+PROTOCOL_REPOS_ROOT = next(
+    (mea_config[tier]['protocol_repos_root']
+     for tier in _TIER_PRIORITY
+     if tier in mea_config
+     and mea_config[tier].get('protocol_repos_root')
+     and os.path.isdir(mea_config[tier]['protocol_repos_root'])),
+    '',
+)
+
+
+def find_protocol_repo(repo_name):
+    """Return absolute path to a cloned protocol repo, or None if not found.
+
+    Looks under PROTOCOL_REPOS_ROOT for a directory matching ``repo_name``. Common
+    Riekelab/Manookin packages live under conventional names: ``turner-package``,
+    ``manookin-package``, ``riekelab-package-master``, ``chris-package``, etc.
+    """
+    if not PROTOCOL_REPOS_ROOT:
+        return None
+    candidate = os.path.join(PROTOCOL_REPOS_ROOT, repo_name)
+    return candidate if os.path.isdir(candidate) else None
 
 
 def find_path(kind, *parts):
