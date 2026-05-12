@@ -68,5 +68,7 @@ def regen_stimulus(stim_block: Any, verbose: bool = True, **kwargs):
 
 # Side-effect imports register their protocols in _REGISTRY.
 from . import eye_movement_alt_bg  # noqa: F401,E402
+from . import variable_mean_spatial_noise  # noqa: F401,E402
+from . import mea_variable_mean_noise_cone  # noqa: F401,E402
 
 __all__ = ['regen_stimulus', 'register', 'available_protocols']
