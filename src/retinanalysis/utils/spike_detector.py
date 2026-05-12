@@ -1,10 +1,10 @@
 import numpy as np
-from sklearn.cluster import KMeans
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # Import for 3D plotting
 import os
 
 def fit_kmeans(data, n_clusters):
+    from sklearn.cluster import KMeans   # heavy import, deferred to use site
     # KMeans
     # Fix non-spike cluster index to k-1, and spike cluster indices to k-2
     spike_cluster_indices = np.arange(n_clusters - 1)  # k-1 clusters for spikes

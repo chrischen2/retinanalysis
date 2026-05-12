@@ -44,7 +44,8 @@ from .utils.cell_type_utils import (load_canonical_cell_types,
                                     map_cell_type,
                                     filter_available_types)
 
-from .utils import parse_data
+# `parse_data` pulls scipy.signal (~1s). It isn't used at module level — load it
+# lazily via `from retinanalysis.utils import parse_data` when actually needed.
 
 # Import classes last
 from . import classes

@@ -11,7 +11,6 @@ from matplotlib.lines import Line2D
 import copy
 from typing import Union
 import pandas as pd
-from matplotlib_venn import venn3
 
 def generate_extended_pairings(pairs: set):
     '''
@@ -75,6 +74,7 @@ def compare_ei_methods(block: Union[AnalysisChunk,MEAResponseBlock], ei_threshol
     fig.colorbar(im1, ax=axs[0,1], orientation='vertical', fraction=0.02, pad=0.04)
     fig.colorbar(im2, ax=axs[0,2], orientation='vertical', fraction=0.02, pad=0.04)
 
+    from matplotlib_venn import venn3   # heavy import, deferred to use site
     venn3([set(ei_full_pairs), set(ei_space_pairs), set(ei_power_pairs)], set_labels = methods, ax=axs[0,3])
     fig.suptitle('High EI Correlation Pairs by Method', fontsize=16)
     for i in range(3):
