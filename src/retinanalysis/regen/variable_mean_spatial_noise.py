@@ -189,6 +189,12 @@ def regen(stim_block: Any, verbose: bool = True,
     n_y, n_x = int(ny_arr[0]), int(nx_arr[0])
     total_frames = int(total_frames_arr[0])
 
+    # Pull display-side params (constant within a block — pick from epoch 0).
+    first_params = df['epoch_parameters'].iloc[0] if n_epochs else {}
+    canvas_size = first_params.get('canvasSize', None)
+    microns_per_pixel = first_params.get('micronsPerPixel', None)
+    grid_size_um = first_params.get('gridSize', block_params.get('gridSize', None))
+
     # Resolve engine choice. For .rand() both numpy and matlab are byte-exact,
     # so 'auto' is allowed to silently use numpy here — the option is exposed
     # for callers who want one consistent source of truth or who don't trust
@@ -262,8 +268,94 @@ def regen(stim_block: Any, verbose: bool = True,
         'n_y_stixels': n_y,
         'n_x_stixels': n_x,
         'rng_engine': resolved_engine,
+        'canvas_size_pix': canvas_size,
+        'microns_per_pixel': microns_per_pixel,
+        'grid_size_um': grid_size_um,
+        # MATLAB computes ``gridSizePix = um2pix(gridSize) = round(gridSize/µpp)``
+        # and ``stixelSizePix = gridSizePix * stepsPerStixel``. Each stixel covers
+        # ``stixelSizePix × stixelSizePix`` canvas pixels via GL.NEAREST sampling.
+        'grid_size_pix': (round(grid_size_um / microns_per_pixel)
+                          if (grid_size_um and microns_per_pixel) else None),
     })
     return ds
+
+
+def render_displayed_canvas(stim_ds: xr.Dataset, epoch: int, frame: int) -> np.ndarray:
+    """Render the actual canvas-pixel frame as displayed on the monitor.
+
+    Upscales the stixel grid (``intensity[epoch, frame]``) by
+    ``stixelSizePix = grid_size_pix * steps_per_stixel`` via nearest-neighbor
+    (matching ``GL.NEAREST`` in the protocol), centers the grid on
+    ``canvasSize/2`` plus this frame's positional jitter, fills any margin
+    with ``255 * mean_sequence[epoch, frame]``, and clips to
+    ``canvasSize``. The result is what the retina actually saw.
+
+    Parameters
+    ----------
+    stim_ds : xr.Dataset
+        Output of :func:`regen` for this protocol.
+    epoch, frame : int
+        Indices along the ``epoch`` and ``frame`` dimensions.
+
+    Returns
+    -------
+    np.ndarray
+        ``(canvas_h, canvas_w)`` uint8 array.
+    """
+    canvas_size = stim_ds.attrs.get('canvas_size_pix')
+    grid_size_pix = stim_ds.attrs.get('grid_size_pix')
+    if canvas_size is None or grid_size_pix is None:
+        raise ValueError(
+            'render_displayed_canvas: stim_ds.attrs missing canvas_size_pix or '
+            'grid_size_pix; regen() must have been called against a StimBlock '
+            'built on a known rig.'
+        )
+    canvas_w = int(round(canvas_size[0]))
+    canvas_h = int(round(canvas_size[1]))
+
+    steps = int(stim_ds.steps_per_stixel.values[epoch])
+    stixel_size_pix = int(grid_size_pix * steps)
+
+    # 1. Upscale the stixel grid via nearest-neighbor (matches GL.NEAREST).
+    stixels = stim_ds.intensity.values[epoch, frame]  # (n_y, n_x) uint8
+    grid_canvas = np.repeat(np.repeat(stixels, stixel_size_pix, axis=0),
+                            stixel_size_pix, axis=1)
+    grid_h, grid_w = grid_canvas.shape
+
+    # 2. Per-frame jitter, if any. ``position_jitter_stixels`` is in
+    #    *grid-step* units (integer in [0, steps-1]); MATLAB multiplies by
+    #    ``stixelShiftPix = stixelSizePix / stepsPerStixel = grid_size_pix``
+    #    to get canvas-pixel offset.
+    if 'position_jitter_stixels' in stim_ds.data_vars:
+        jx, jy = stim_ds.position_jitter_stixels.values[epoch, frame] * grid_size_pix
+    else:
+        jx, jy = 0.0, 0.0
+
+    # 3. Compose on a canvas-sized buffer filled with the current mean.
+    bg_intensity = float(stim_ds.mean_sequence.values[epoch, frame])
+    bg_uint8 = int(np.clip(round(255.0 * bg_intensity), 0, 255))
+    canvas = np.full((canvas_h, canvas_w), bg_uint8, dtype=np.uint8)
+
+    # Grid centered on (canvas_w/2 + jx, canvas_h/2 + jy)
+    grid_left = canvas_w / 2.0 - grid_w / 2.0 + jx
+    grid_top = canvas_h / 2.0 - grid_h / 2.0 + jy
+
+    src_left = int(max(0, np.floor(-grid_left)))
+    src_top = int(max(0, np.floor(-grid_top)))
+    src_right = int(min(grid_w, np.ceil(canvas_w - grid_left)))
+    src_bottom = int(min(grid_h, np.ceil(canvas_h - grid_top)))
+
+    if src_right > src_left and src_bottom > src_top:
+        dst_left = int(max(0, round(grid_left)))
+        dst_top = int(max(0, round(grid_top)))
+        dst_right = min(canvas_w, dst_left + (src_right - src_left))
+        dst_bottom = min(canvas_h, dst_top + (src_bottom - src_top))
+        canvas[dst_top:dst_bottom, dst_left:dst_right] = grid_canvas[
+            src_top:src_top + (dst_bottom - dst_top),
+            src_left:src_left + (dst_right - dst_left),
+        ]
+
+    return canvas
 
 
 register(PROTOCOL_NAME, regen)
