@@ -39,6 +39,11 @@ from .utils.regen import *
 from .utils import vision_utils
 from .utils.vision_utils import *
 
+from .utils import cell_type_utils
+from .utils.cell_type_utils import (load_canonical_cell_types,
+                                    map_cell_type,
+                                    filter_available_types)
+
 from .utils import parse_data
 
 # Import classes last
