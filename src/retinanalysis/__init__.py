@@ -13,6 +13,7 @@ from .config.settings import (ANALYSIS_DIR,
                               META_DIR,
                               TAGS_DIR,
                               QUERY_DIR,
+                              OUTPUT_DIR,
                               USER)
 
 # Utilities imported first. They should NEVER reference the classes for anything

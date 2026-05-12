@@ -4,7 +4,7 @@ from retinanalysis.utils.datajoint_utils import (get_epochblock_amp_data,
                                                  get_block_id_from_datafile,
                                                  get_exp_summary)
 
-from retinanalysis.config.settings import ANALYSIS_DIR
+from retinanalysis.config.settings import ANALYSIS_DIR, find_path
 from retinanalysis.utils.vision_utils import (get_protocol_vcd,
                                               cluster_match)
 
@@ -445,7 +445,7 @@ class MEAResponseBlock(ResponseBlock):
 
 
         # Pull types from classification file
-        file_path = os.path.join(ANALYSIS_DIR, self.exp_name, noise_chunk, self.ss_version, typing_file)
+        file_path = find_path('analysis', self.exp_name, noise_chunk, self.ss_version, typing_file)
 
         d_result = dict()
         with open(file_path, 'r') as file:
@@ -731,7 +731,7 @@ class MEAResponseGroup:
 
 
         # Pull types from classification file
-        file_path = os.path.join(ANALYSIS_DIR, self.exp_name, noise_chunk, self.ss_version, typing_file)
+        file_path = find_path('analysis', self.exp_name, noise_chunk, self.ss_version, typing_file)
 
         d_result = dict()
         with open(file_path, 'r') as file:

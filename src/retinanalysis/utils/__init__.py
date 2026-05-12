@@ -5,6 +5,7 @@ from retinanalysis.config.settings import (ANALYSIS_DIR,
                                            META_DIR,
                                            TAGS_DIR,
                                            QUERY_DIR,
+                                           OUTPUT_DIR,
                                            USER)
 
 import retinanalysis.config.schema as schema

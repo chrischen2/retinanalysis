@@ -2,7 +2,8 @@ import retinanalysis
 import retinanalysis.config.schema as schema
 import os
 from retinanalysis.config.settings import (ANALYSIS_DIR,
-                                           DATA_DIR)
+                                           DATA_DIR,
+                                           find_path)
 import pandas as pd
 from retinanalysis.utils.vision_utils import (get_analysis_vcd,
                                               get_ells,
@@ -198,7 +199,7 @@ class AnalysisChunk:
 
         # Pull typing files directly from available Analysis Directory... avoids issues with datajoint
         # not updating typing files on existing experiments
-        typing_file_dir = os.path.join(ANALYSIS_DIR, self.exp_name, self.chunk_name, self.ss_version)
+        typing_file_dir = find_path('analysis', self.exp_name, self.chunk_name, self.ss_version)
         self.typing_files = [file for file in os.listdir(typing_file_dir) if 'txt' in os.path.splitext(file)[1]]
 
         # typing_files = schema.CellTypeFile() & {'chunk_id' : self.chunk_id, 'algorithm': self.ss_version}
@@ -289,7 +290,7 @@ class AnalysisChunk:
         cell_types = cell_types_list['cell_types'].values
 
         for idx, typing_file in enumerate(self.typing_files):
-            file_path = os.path.join(ANALYSIS_DIR, self.exp_name, self.chunk_name, self.ss_version, typing_file)
+            file_path = find_path('analysis', self.exp_name, self.chunk_name, self.ss_version, typing_file)
             d_result = dict()
             
             with open(file_path, 'r') as file:
@@ -322,12 +323,12 @@ class AnalysisChunk:
         self.df_cell_params = pd.DataFrame(df_dict)
 
     def get_spatial_maps(self, ls_channels=[0,2]):
-        # By default load red and blue channel spatial maps. 
-        mat_file = os.path.join(DATA_DIR, self.exp_name, self.chunk_name, self.ss_version, f'{self.ss_version}_params.mat')
+        # By default load red and blue channel spatial maps.
+        mat_file = find_path('data', self.exp_name, self.chunk_name, self.ss_version, f'{self.ss_version}_params.mat')
 
         # If _params.mat file doesn't exist in data dir, look in analysis dir instead
         if not os.path.exists(mat_file):
-            mat_file = os.path.join(ANALYSIS_DIR, self.exp_name, self.chunk_name, self.ss_version,f'{self.ss_version}_params.mat')
+            mat_file = find_path('analysis', self.exp_name, self.chunk_name, self.ss_version, f'{self.ss_version}_params.mat')
         
         # if no _params.mat file found at all, print a warning and return
         if not os.path.exists(mat_file):
@@ -782,7 +783,7 @@ class AnalysisChunk:
                     available_types = sorted(filtered_df[f'typing_file_{typing_file_idx}'].unique()) 
 
         # Pull STAs and organize by cell id alone, or nested inside a dictionary organized by cell id
-        sta_reader = vl.STAReader(os.path.join(ANALYSIS_DIR, self.exp_name, self.chunk_name, self.ss_version), self.ss_version)
+        sta_reader = vl.STAReader(find_path('analysis', self.exp_name, self.chunk_name, self.ss_version), self.ss_version)
 
         if available_types is None:
             id_dict = dict()

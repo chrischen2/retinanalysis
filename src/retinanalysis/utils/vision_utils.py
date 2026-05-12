@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 from retinanalysis.utils import (DATA_DIR,
                                  ANALYSIS_DIR,
                                  get_exp_summary)
+from retinanalysis.config.settings import find_path
 
 import os
 import numpy as np
@@ -29,7 +30,7 @@ def get_analysis_vcd(exp_name: str, chunk_name: str, ss_version: str,
                     include_ei: bool = True, include_neurons: bool = True,
                     verbose: bool = True) -> VisionCellDataTable:
 
-        data_path = os.path.join(ANALYSIS_DIR, exp_name, chunk_name, ss_version)
+        data_path = find_path('analysis', exp_name, chunk_name, ss_version)
         
         if verbose:
             print(f'Loading VCD from {data_path} ...')
@@ -46,8 +47,8 @@ def get_analysis_vcd(exp_name: str, chunk_name: str, ss_version: str,
 
 def get_protocol_vcd(exp_name: str, datafile_name: str, ss_version: str,
                      include_ei: bool=True, verbose: bool = True) -> VisionCellDataTable:
-        
-        data_path = os.path.join(DATA_DIR, exp_name, datafile_name, ss_version)
+
+        data_path = find_path('data', exp_name, datafile_name, ss_version)
         
         if verbose:
             print(f'Loading VCD from {data_path} ...')
