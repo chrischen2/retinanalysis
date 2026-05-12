@@ -212,21 +212,23 @@ class AnalysisChunk:
     def get_rf_params(self):
         """
         Method for pulling the receptive field parameters stored in the vision cell data table (VCD).
-        
+
         This method also corrects for Y-flipping and any crop discrepancies between the size of the
-        spatial noise and the size of the STA.
+        spatial noise and the size of the STA. Vision fits the STA in math-up-y coords; we mirror
+        ``y`` to image-down-y (matplotlib ``imshow(origin='upper')``), so the rotation must also
+        flip sign (CCW about the original y-up axis becomes CW about the y-down axis).
         """
         self.rf_params = dict()
         broken_ids = []
         for id in self.cell_ids:
-            try: 
+            try:
                 center_x = self.vcd.main_datatable[id]['x0']
                 center_y = self.vcd.main_datatable[id]['y0']
                 self.rf_params[id] = {'center_x' : center_x + self.deltaXChecks,
                                     'center_y' : (self.staYChecks - center_y) + self.deltaYChecks,
                                     'std_x' : self.vcd.main_datatable[id]['SigmaX'],
                                     'std_y' : self.vcd.main_datatable[id]['SigmaY'],
-                                    'rot' : self.vcd.main_datatable[id]['Theta']}
+                                    'rot' : -self.vcd.main_datatable[id]['Theta']}
             except:
                 print(f"Issue with id {id}...\nWill remove from cell_ids list.")
                 broken_ids.append(id)
