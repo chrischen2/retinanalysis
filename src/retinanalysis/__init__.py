@@ -67,6 +67,11 @@ from .utils import visual_qc as _visual_qc_mod
 from .utils.visual_qc import (browse_cells_qc, load_visual_qc,
                               visual_qc_csv_path, select_good_cells)
 
+from .utils import cell_match as _cell_match_mod
+from .utils.cell_match import (compute_ei_stats, build_cell_match_table,
+                               save_cell_match, load_cell_match,
+                               cell_match_csv_path)
+
 # Per-protocol analyzers live under retinanalysis.protocols; import the
 # package but don't pull every module at top level (loaded on demand).
 from . import protocols

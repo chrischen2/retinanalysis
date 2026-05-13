@@ -32,6 +32,7 @@ from .utils import rig_calibration as rc
 from .utils.cell_plot_archive import (
     experiment_root, save_experiment_mosaic, save_per_cell_plots,
 )
+from .utils.cell_match import save_cell_match
 
 
 __all__ = ['analyze_experiment', 'analyze_experiments']
@@ -263,7 +264,19 @@ def analyze_experiment(
     if verbose:
         print(f'  QC: {n_pass}/{len(qc)} cells pass ({100*qc["passes"].mean():.0f}%)')
 
-    # 6. Save mosaic + per-cell PNGs
+    # 6. Persist the noise↔protocol match table + per-cell EI stats.
+    # Cheap; safe to redo on every run since it just snapshots the live
+    # pipeline. Lives next to index.csv at <exp>/<protocol>/cell_match.csv.
+    try:
+        cm_path = save_cell_match(pipeline, output_root=output_root,
+                                  qc_pass_only=qc)
+        if verbose:
+            print(f'  cell_match → {cm_path}')
+    except Exception as exc:
+        if verbose:
+            print(f'  cell_match: skipped ({exc!r})')
+
+    # 7. Save mosaic + per-cell PNGs
     ndf = _extract_ndf(stim_block)
     idx = save_per_cell_plots(
         analysis_chunk, response_block,
