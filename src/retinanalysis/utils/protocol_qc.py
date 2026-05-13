@@ -37,12 +37,14 @@ thresholds; callers can override any threshold per-protocol.
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict, field
+from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 
 from .psth import epoch_spikes_to_psth
+from ..config.settings import OUTPUT_DIR
 
 
 __all__ = [
@@ -51,7 +53,79 @@ __all__ = [
     'cell_qc_metrics',
     'block_qc_metrics',
     'filter_cells_by_qc',
+    'save_protocol_qc',
+    'load_protocol_qc',
+    'protocol_qc_csv_path',
 ]
+
+
+def protocol_qc_csv_path(exp_name: str, protocol: str,
+                         output_root: Optional[str] = None) -> Path:
+    """Return ``<OUTPUT_DIR>/<exp>/<protocol>/qc.csv``."""
+    root = Path(output_root) if output_root else Path(OUTPUT_DIR)
+    return root / exp_name / protocol / 'qc.csv'
+
+
+def save_protocol_qc(
+    qc_df: pd.DataFrame,
+    exp_name: str,
+    protocol: str = 'eye_movement_alt_bg',
+    output_root: Optional[str] = None,
+) -> Path:
+    """Persist per-cell protocol QC results to disk.
+
+    Writes the full ``filter_cells_by_qc(...)`` DataFrame (metrics +
+    ``passes`` column) so downstream tools can filter by the same
+    automated criteria the archive used, without re-running the QC.
+
+    Parameters
+    ----------
+    qc_df : pandas.DataFrame
+        Output of :func:`filter_cells_by_qc`.
+    exp_name : str
+    protocol : str
+        Short protocol name. Default ``'eye_movement_alt_bg'``.
+    output_root : str, optional
+        Override ``OUTPUT_DIR``.
+
+    Returns
+    -------
+    pathlib.Path
+        The CSV path written.
+    """
+    path = protocol_qc_csv_path(exp_name, protocol, output_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df = qc_df.copy()
+    if 'exp_name' not in df.columns:
+        df.insert(0, 'exp_name', exp_name)
+    df.to_csv(path, index=False)
+    return path
+
+
+def load_protocol_qc(
+    exp_names: Optional[List[str]] = None,
+    output_root: Optional[str] = None,
+    protocol: str = 'eye_movement_alt_bg',
+) -> pd.DataFrame:
+    """Concat per-experiment ``qc.csv`` into one DataFrame.
+
+    Empty DataFrame when nothing is found.
+    """
+    root = Path(output_root) if output_root else Path(OUTPUT_DIR)
+    if exp_names is None:
+        if not root.is_dir():
+            return pd.DataFrame()
+        exp_names = [p.name for p in sorted(root.iterdir()) if p.is_dir()]
+    dfs = []
+    for exp in exp_names:
+        path = root / exp / protocol / 'qc.csv'
+        if not path.exists():
+            continue
+        df = pd.read_csv(path)
+        if 'exp_name' not in df.columns:
+            df['exp_name'] = exp
+        dfs.append(df)
+    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
 
 @dataclass

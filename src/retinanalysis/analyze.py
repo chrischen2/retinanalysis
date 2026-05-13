@@ -27,6 +27,7 @@ from .utils.cell_type_utils import map_cell_type, filter_available_types
 from .utils.style import MAIN_CELL_TYPES
 from .utils.protocol_qc import (
     QCThresholds, block_qc_metrics, filter_cells_by_qc,
+    save_protocol_qc,
 )
 from .utils import rig_calibration as rc
 from .utils.cell_plot_archive import (
@@ -142,6 +143,7 @@ def analyze_experiment(
     psth_ncols: int = 1,
     n_jobs: int = -1,
     cell_ids: Optional[Sequence[int]] = None,
+    respect_visual_qc: bool = True,
     verbose: bool = True,
 ) -> Dict:
     """Run the full archive pipeline for one experiment date.
@@ -180,6 +182,13 @@ def analyze_experiment(
         the QC-pass set). When ``None`` (default) every QC-passing cell
         is rendered. Use this to re-archive against a visual-QC ``good``
         subset; ``cell_match.csv`` is unaffected and stays comprehensive.
+    respect_visual_qc : bool
+        When ``True`` (default) and no explicit ``cell_ids`` is passed,
+        look for ``<OUTPUT_DIR>/<exp>/<protocol>/visual_qc.csv`` and
+        restrict the archive to cells tagged ``'good'``. When no such
+        file exists, every QC-passing cell is rendered (first-pass
+        default). Set ``False`` to ignore visual QC and always render
+        the full QC-pass set.
 
     Returns
     -------
@@ -269,6 +278,46 @@ def analyze_experiment(
     n_pass = int(qc['passes'].sum())
     if verbose:
         print(f'  QC: {n_pass}/{len(qc)} cells pass ({100*qc["passes"].mean():.0f}%)')
+
+    # 5b. Persist QC results so downstream tools can filter without
+    # re-running the metrics. Lives at <exp>/<protocol>/qc.csv next to
+    # index.csv / cell_match.csv / visual_qc.csv.
+    try:
+        from .utils.cell_plot_archive import protocol_short_name
+        _proto_short = protocol_short_name(response_block.protocol_name)
+        _qc_path = save_protocol_qc(
+            qc, exp_name, protocol=_proto_short, output_root=output_root,
+        )
+        if verbose:
+            print(f'  qc → {_qc_path}')
+    except Exception as exc:
+        if verbose:
+            print(f'  qc save: skipped ({exc!r})')
+
+    # 5c. Visual QC integration: when caller hasn't pinned cell_ids,
+    # see if a tagged visual_qc.csv exists and prefer those tags. This
+    # makes the batch driver inherit the same behavior as the single-
+    # date archive cell, with no extra plumbing per date.
+    if cell_ids is None and respect_visual_qc:
+        try:
+            from .utils.visual_qc import visual_qc_csv_path
+            import pandas as _pd
+            _vqc_path = visual_qc_csv_path(
+                exp_name, _proto_short, output_root=output_root,
+            )
+            if _vqc_path.exists():
+                _vqc = _pd.read_csv(_vqc_path)
+                _good = (_vqc.loc[_vqc['tag'] == 'good', 'cell_id']
+                              .astype(int).tolist())
+                _n_bad = int((_vqc['tag'] == 'bad').sum())
+                cell_ids = _good
+                if verbose:
+                    print(f'  visual_qc → {len(_vqc)} tags '
+                          f'({len(_good)} good, {_n_bad} bad); '
+                          f'archive restricted to good set')
+        except Exception as exc:
+            if verbose:
+                print(f'  visual_qc check: skipped ({exc!r})')
 
     # 6. Persist the noise↔protocol match table + per-cell EI stats.
     # Cheap; safe to redo on every run since it just snapshots the live

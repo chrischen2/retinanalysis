@@ -73,6 +73,10 @@ from .utils.cell_match import (compute_ei_stats, build_cell_match_table,
                                save_cell_match, load_cell_match,
                                cell_match_csv_path)
 
+from .utils import protocol_qc as _protocol_qc_mod
+from .utils.protocol_qc import (save_protocol_qc, load_protocol_qc,
+                                protocol_qc_csv_path)
+
 # Per-protocol analyzers live under retinanalysis.protocols; import the
 # package but don't pull every module at top level (loaded on demand).
 from . import protocols
