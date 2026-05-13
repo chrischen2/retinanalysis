@@ -47,7 +47,7 @@ from .utils.cell_type_utils import (load_canonical_cell_types,
                                     filter_available_types)
 
 from .utils import mosaic_overlay
-from .utils.mosaic_overlay import (plot_stim_with_mosaic,
+from .utils.mosaic_overlay import (plot_stim_with_mosaic, cells_inside_array,
                                    electrode_positions_canvas_px)
 
 from .utils import psth as _psth_mod

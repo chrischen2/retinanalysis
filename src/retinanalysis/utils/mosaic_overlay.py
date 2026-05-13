@@ -127,6 +127,67 @@ def electrode_positions_canvas_px(
     return em_canvas
 
 
+def cells_inside_array(
+    analysis_chunk,
+    max_dist_to_array_um: float = 60.0,
+    *,
+    use_calibration: bool = True,
+    recompute_alignment: bool = False,
+) -> List[int]:
+    """Cell IDs whose RF center is within ``max_dist_to_array_um`` of the chip.
+
+    Useful for restricting a mosaic plot to cells the array could have
+    actually recorded — many STAs in a typing file are noisy or
+    misclassified and have RF centers far off-array. Their inclusion
+    makes the mosaic look spatially much larger than the electrode
+    footprint even though the calibration is correct.
+
+    Parameters
+    ----------
+    analysis_chunk : AnalysisChunk
+    max_dist_to_array_um : float
+        A cell is kept when its RF center sits within this distance (in
+        µm on the chip) of any electrode. Default ~one electrode pitch.
+    use_calibration, recompute_alignment :
+        Forwarded to :func:`electrode_positions_canvas_px` so the
+        on-array footprint reflects the same geometry the mosaic plot
+        uses.
+    """
+    em_canvas = electrode_positions_canvas_px(
+        analysis_chunk,
+        use_calibration=use_calibration,
+        recompute_alignment=recompute_alignment,
+    )
+    # Convert the µm threshold to canvas px so we can do all distance
+    # math in one coord system. The calibrated electrode footprint
+    # encodes µm → canvas-px scale already.
+    if use_calibration or recompute_alignment:
+        from retinanalysis.utils import rig_calibration as _rc
+        calib = (_rc.load_rig_calibration(analysis_chunk.exp_name)
+                 if not recompute_alignment
+                 else _rc.fit_calibration_for_chunk(analysis_chunk))
+        scale_px_per_um = calib.scale_px_per_um if calib is not None else (
+            1.0 / analysis_chunk.microns_per_pixel)
+    else:
+        scale_px_per_um = 1.0 / analysis_chunk.microns_per_pixel
+    cutoff_px = max_dist_to_array_um * scale_px_per_um
+
+    pps = analysis_chunk.pixels_per_stixel
+    keep: List[int] = []
+    for cid in analysis_chunk.cell_ids:
+        p = analysis_chunk.rf_params.get(int(cid))
+        if p is None:
+            continue
+        cx = float(p['center_x']) * pps
+        cy = float(p['center_y']) * pps
+        if not (np.isfinite(cx) and np.isfinite(cy)):
+            continue
+        d = np.sqrt(((em_canvas - np.array([cx, cy])) ** 2).sum(axis=1)).min()
+        if d <= cutoff_px:
+            keep.append(int(cid))
+    return keep
+
+
 def _select_cells_by_type(analysis_chunk,
                           cell_types: Optional[Iterable[str]],
                           minimum_n: int,
@@ -181,6 +242,9 @@ def plot_stim_with_mosaic(
     use_calibration: bool = True,
     recompute_alignment: bool = False,
     save_recomputed: bool = False,
+    restrict_to_array_um: Optional[float] = None,
+    zoom_to_array: bool = False,
+    zoom_pad_um: float = 120.0,
     **imshow_kwargs,
 ) -> Axes:
     """Overlay the cell-type mosaic on a stimulus frame.
@@ -254,6 +318,24 @@ def plot_stim_with_mosaic(
     d_by_type, present_types = _select_cells_by_type(
         analysis_chunk, cell_types, minimum_n, typing_file,
     )
+
+    # Optional: drop cells whose RF center isn't near any electrode.
+    # Many typed cells have noisy STAs that put their RF far off-array;
+    # plotting them makes the mosaic look much larger than the chip
+    # footprint even though the geometry is correct.
+    if restrict_to_array_um is not None and d_by_type:
+        keep_ids = set(cells_inside_array(
+            analysis_chunk,
+            max_dist_to_array_um=restrict_to_array_um,
+            use_calibration=use_calibration,
+            recompute_alignment=recompute_alignment,
+        ))
+        d_by_type = {ct: [c for c in ids if c in keep_ids]
+                     for ct, ids in d_by_type.items()}
+        d_by_type = {ct: ids for ct, ids in d_by_type.items()
+                     if len(ids) >= minimum_n}
+        present_types = sorted(d_by_type.keys())
+
     if not d_by_type:
         if cell_types:
             print(f'[plot_stim_with_mosaic] no cells matched cell_types={cell_types} '
@@ -326,8 +408,30 @@ def plot_stim_with_mosaic(
         ax.scatter(em_canvas[:, 0], em_canvas[:, 1], **defaults)
 
     # --- Limits / labels
-    ax.set_xlim(0, canvas_w)
-    ax.set_ylim(canvas_h, 0)
+    if zoom_to_array:
+        # Crop axes to the electrode footprint + pad. Useful when the
+        # array covers only part of the canvas (typical) and the rest is
+        # empty background pulling the plot scale away from the cells.
+        em_z = electrode_positions_canvas_px(
+            analysis_chunk,
+            mea_center_canvas_px=mea_center_canvas_px,
+            flip_y=flip_electrode_y,
+            rotation_deg=electrode_rotation_deg,
+            use_calibration=use_calibration,
+            recompute_alignment=recompute_alignment,
+            save_recomputed=False,
+        )
+        # Convert µm padding → canvas px using the rig scale.
+        pad_px = float(zoom_pad_um) / float(analysis_chunk.microns_per_pixel)
+        x0 = max(0.0, em_z[:, 0].min() - pad_px)
+        x1 = min(float(canvas_w), em_z[:, 0].max() + pad_px)
+        y0 = max(0.0, em_z[:, 1].min() - pad_px)
+        y1 = min(float(canvas_h), em_z[:, 1].max() + pad_px)
+        ax.set_xlim(x0, x1)
+        ax.set_ylim(y1, y0)
+    else:
+        ax.set_xlim(0, canvas_w)
+        ax.set_ylim(canvas_h, 0)
     ax.set_aspect('equal')
     ax.set_xlabel('canvas x (pix)')
     ax.set_ylabel('canvas y (pix)')
