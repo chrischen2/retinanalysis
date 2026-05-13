@@ -141,6 +141,7 @@ def analyze_experiment(
     overwrite: bool = False,
     psth_ncols: int = 1,
     n_jobs: int = -1,
+    cell_ids: Optional[Sequence[int]] = None,
     verbose: bool = True,
 ) -> Dict:
     """Run the full archive pipeline for one experiment date.
@@ -174,6 +175,11 @@ def analyze_experiment(
         Re-render all per-cell PNGs and the mosaic.
     psth_ncols : int
         Column count for the per-cell PSTH grid (default 1 = vertical stack).
+    cell_ids : sequence[int], optional
+        Restrict the per-cell PNG step to these cells (intersected with
+        the QC-pass set). When ``None`` (default) every QC-passing cell
+        is rendered. Use this to re-archive against a visual-QC ``good``
+        subset; ``cell_match.csv`` is unaffected and stays comprehensive.
 
     Returns
     -------
@@ -283,6 +289,7 @@ def analyze_experiment(
         stim_block=stim_block,
         protocol_name=response_block.protocol_name,
         cell_types=cell_types_used,
+        cell_ids=list(cell_ids) if cell_ids is not None else None,
         qc_pass_only=qc,
         condition_keys=condition_keys,
         main_types=MAIN_CELL_TYPES,
