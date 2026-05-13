@@ -1,0 +1,20 @@
+{
+  "exp_name": "20221123C",
+  "rig_id": "C",
+  "scale_px_per_um": 0.16213274575211564,
+  "rotation_deg": -166.95922044179514,
+  "tx_px": 289.1562509885207,
+  "ty_px": 377.87501740434107,
+  "flip_y": true,
+  "residual_um_rms": 803.5165599927828,
+  "n_cells": 565,
+  "n_recordings": 1,
+  "contributing": [
+    {
+      "exp_name": "20221123C",
+      "chunk_name": "chunk4",
+      "n_cells": 575
+    }
+  ],
+  "updated_utc": "2026-05-13T06:11:33Z"
+}

@@ -3,17 +3,198 @@
 A raster shows one row per ``(cell, epoch)`` pair: spike times as vertical
 ticks. The PSTH below is the mean instantaneous firing rate across all
 rows (epochs averaged per cell, then averaged across cells).
+
+Both the cell-stacked raster here and the per-cell raster in
+:mod:`cell_plot_archive` accept a ``groupby_conditions`` argument — a dict
+``{key: per_epoch_values}`` (analogous to a MATLAB cell array of names
+plus their per-epoch values). Rows get reordered hierarchically by the
+keys in insertion order, colored by the last key, and visually separated
+at each transition of the first key (so groups are easy to read).
 """
 
 from __future__ import annotations
 
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
+from matplotlib.collections import LineCollection
 
 from .psth import epoch_spikes_to_psth, psth_time_axis
+from .style import color_for_celltype, colors_for_conditions, NEUTRAL_GRAY
+
+
+def _stable_key_for_sort(v):
+    """Sort key that works for mixed str / numeric values."""
+    return (isinstance(v, str), v)
+
+
+def grouped_row_order(
+    groupby_conditions: Dict[str, Sequence],
+    epoch_indices: Optional[Sequence[int]] = None,
+) -> Tuple[List[int], List[Tuple[int, Tuple]], Dict, List[str]]:
+    """Sort epochs by the condition keys in insertion order.
+
+    Parameters
+    ----------
+    groupby_conditions : dict {key: per-epoch sequence}
+        Each value is a sequence of length ``n_epochs``. Keys are sorted
+        in the order they appear in the dict — the first key is the
+        outer group (image), the last is the innermost color split (bg
+        scale).
+    epoch_indices : sequence[int], optional
+        Restrict to a subset of epochs (default: every epoch).
+
+    Returns
+    -------
+    order : list[int]
+        Reordered epoch indices.
+    groups : list[(orig_idx, value_tuple)]
+        Same length as ``order``; each entry carries the original epoch
+        index and the tuple of condition values in key order.
+    color_map : dict
+        ``{last_key_value: hex}`` for coloring rows by the innermost key.
+    keys : list[str]
+        Insertion-ordered keys (same as ``list(groupby_conditions)``).
+    """
+    keys = list(groupby_conditions.keys())
+    n_full = len(next(iter(groupby_conditions.values())))
+    if epoch_indices is None:
+        epoch_indices = range(n_full)
+    items = []
+    for i in epoch_indices:
+        tup = tuple(groupby_conditions[k][i] for k in keys)
+        items.append((i, tup))
+    items.sort(key=lambda x: tuple(_stable_key_for_sort(v) for v in x[1]))
+    order = [i for i, _ in items]
+    last_key = keys[-1] if keys else None
+    if last_key is not None:
+        last_vals = sorted(
+            {groupby_conditions[last_key][i] for i in epoch_indices},
+            key=_stable_key_for_sort,
+        )
+        color_map = colors_for_conditions(last_vals)
+    else:
+        color_map = {}
+    return order, items, color_map, keys
+
+
+def plot_single_cell_raster(
+    spike_times_by_epoch: Sequence[np.ndarray],
+    t_start_ms: float = 0.0,
+    t_end_ms: Optional[float] = None,
+    groupby_conditions: Optional[Dict[str, Sequence]] = None,
+    ax: Optional[Axes] = None,
+    default_color: str = 'k',
+    pre_time_ms: Optional[float] = None,
+    stim_time_ms: Optional[float] = None,
+    group_separator_color: str = '#bbbbbb',
+    title: Optional[str] = None,
+) -> Axes:
+    """Single-cell raster (one row per epoch) with optional hierarchical grouping.
+
+    ``groupby_conditions`` is a dict (insertion-ordered) of per-epoch
+    condition values. Rows are sorted by the keys in order, colored by
+    the last key's value, and a thin separator line is drawn whenever the
+    *first* key's value changes (so image groups read as distinct blocks).
+    Without ``groupby_conditions``, rows stay in epoch order and use
+    ``default_color`` uniformly.
+
+    Returns the axis it drew into.
+    """
+    n_epochs = len(spike_times_by_epoch)
+
+    # Auto-pick t_end if not given
+    if t_end_ms is None:
+        max_t = 0.0
+        for arr in spike_times_by_epoch:
+            a = np.asarray(arr)
+            if a.size:
+                max_t = max(max_t, float(a.max()))
+        t_end_ms = max(max_t, t_start_ms + 1.0)
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(11, max(3.5, n_epochs * 0.08)))
+
+    # Row ordering + coloring
+    if groupby_conditions:
+        order, items, color_map, keys = grouped_row_order(groupby_conditions)
+        row_colors = [color_map.get(tup[-1], NEUTRAL_GRAY) for _, tup in items]
+        first_vals_in_row_order = [tup[0] for _, tup in items]
+    else:
+        order = list(range(n_epochs))
+        items = [(i, (i,)) for i in order]
+        keys = []
+        color_map = {}
+        row_colors = [default_color] * n_epochs
+        first_vals_in_row_order = list(range(n_epochs))
+
+    # Build LineCollection for all spikes
+    segs = []
+    cols = []
+    for row, orig_idx in enumerate(order):
+        a = np.asarray(spike_times_by_epoch[orig_idx], dtype=float)
+        if a.size == 0:
+            continue
+        m = (a >= t_start_ms) & (a <= t_end_ms)
+        if not m.any():
+            continue
+        sel = a[m]
+        ys_lo = np.full(sel.size, row + 0.05)
+        ys_hi = np.full(sel.size, row + 0.95)
+        seg = np.stack([
+            np.column_stack([sel, ys_lo]),
+            np.column_stack([sel, ys_hi]),
+        ], axis=1)
+        segs.append(seg)
+        cols.extend([row_colors[row]] * sel.size)
+    if segs:
+        lc = LineCollection(np.concatenate(segs), colors=cols, linewidths=0.6)
+        ax.add_collection(lc)
+
+    # Image-group separators (lines + side labels) at first-key transitions
+    if keys and len(keys) >= 1:
+        prev = object()
+        group_rows = []  # (row_start, value)
+        for row, v in enumerate(first_vals_in_row_order):
+            if v != prev:
+                group_rows.append((row, v))
+                prev = v
+        # Draw separator above each new group (except row 0)
+        for row, _v in group_rows[1:]:
+            ax.axhline(row, color=group_separator_color, lw=0.6, alpha=0.7)
+        # Group labels on the right margin
+        for j, (row_start, v) in enumerate(group_rows):
+            row_end = group_rows[j + 1][0] if j + 1 < len(group_rows) else len(order)
+            ax.text(
+                t_end_ms * 1.005, (row_start + row_end) / 2.0,
+                str(v), ha='left', va='center', fontsize=7,
+                color='#444444',
+            )
+
+    # Stim onset/offset
+    if pre_time_ms is not None and stim_time_ms is not None and stim_time_ms > 0:
+        for x in (pre_time_ms, pre_time_ms + stim_time_ms):
+            ax.axvline(x, color='red', lw=0.5, ls='--', alpha=0.6)
+
+    ax.set_xlim(t_start_ms, t_end_ms)
+    ax.set_ylim(len(order), 0)
+    ax.set_xlabel('time (ms)')
+    ax.set_ylabel('epoch (grouped)' if keys else 'epoch')
+    if title:
+        ax.set_title(title)
+
+    # Legend for innermost color split
+    if keys and color_map:
+        from matplotlib.lines import Line2D
+        handles = [
+            Line2D([0], [0], color=c, lw=2, label=f'{keys[-1]}={v}')
+            for v, c in color_map.items()
+        ]
+        ax.legend(handles=handles, loc='upper right',
+                  fontsize=7, framealpha=0.8)
+    return ax
 
 
 def _gather_cell_spike_times(
@@ -41,7 +222,7 @@ def plot_raster_with_psth(
     psth_sigma_ms: float = 10.0,
     sample_rate_hz: float = 1000.0,
     axes: Optional[Sequence[Axes]] = None,
-    raster_color: str = 'k',
+    raster_color: Optional[str] = None,
     psth_color: Optional[str] = None,
     pre_time_ms: Optional[float] = None,
     stim_time_ms: Optional[float] = None,
@@ -86,6 +267,9 @@ def plot_raster_with_psth(
     )
     if not ids:
         raise ValueError(f'No cells found for cell_type={cell_type!r}')
+
+    if raster_color is None:
+        raster_color = color_for_celltype(cell_type)
 
     # Default t_end_ms = max spike across all epochs across all cells
     if t_end_ms is None:

@@ -1,0 +1,20 @@
+{
+  "exp_name": "20220823C",
+  "rig_id": "C",
+  "scale_px_per_um": 0.26234942854360077,
+  "rotation_deg": -88.80005368808845,
+  "tx_px": 340.07122648106287,
+  "ty_px": 363.4616711194587,
+  "flip_y": true,
+  "residual_um_rms": 98.0228049124319,
+  "n_cells": 211,
+  "n_recordings": 1,
+  "contributing": [
+    {
+      "exp_name": "20220823C",
+      "chunk_name": "chunk5",
+      "n_cells": 234
+    }
+  ],
+  "updated_utc": "2026-05-13T06:11:32Z"
+}

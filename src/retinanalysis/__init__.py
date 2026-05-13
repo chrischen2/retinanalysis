@@ -114,6 +114,10 @@ from . import DJ_GUI
 
 # Standalone single-cell analysis utilities
 from . import SCutils
+
+# End-to-end experiment-archive driver (build pipeline + QC + per-cell PNGs).
+from . import analyze
+from .analyze import analyze_experiment, analyze_experiments
  
 
 

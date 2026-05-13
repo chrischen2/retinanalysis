@@ -25,6 +25,7 @@ from matplotlib.axes import Axes
 from matplotlib.patches import Ellipse
 
 from retinanalysis.utils.vision_utils import get_ells
+from retinanalysis.utils.style import colors_for_celltypes
 
 
 def electrode_positions_canvas_px(
@@ -33,42 +34,46 @@ def electrode_positions_canvas_px(
     microns_per_pixel: Optional[float] = None,
     flip_y: bool = True,
     rotation_deg: Optional[float] = None,
+    use_calibration: bool = True,
+    recompute_alignment: bool = False,
+    save_recomputed: bool = False,
 ) -> np.ndarray:
     """Convert MEA electrode positions (microns) to canvas-pixel coords.
 
-    The Litke 512-electrode array stores electrode locations in MEA chip
-    microns, centered at ``(0, 0)`` (typical extent: x ∈ [-945, 945],
-    y ∈ [-450, 450]; long axis along chip x). To put them on the same
-    axes as the cell mosaic and stimulus frame, we map MEA µm → canvas
-    pixels assuming the MEA is centered on the display canvas and uses
-    the same physical scale (``microns_per_pixel``).
+    Three modes, in priority order:
 
-    The chip's intrinsic axes do NOT always match the display's axes —
-    on some rigs the chip is physically mounted rotated relative to the
-    monitor. Use ``rotation_deg`` to rotate the chip coordinates before
-    translating to canvas. Set it empirically by checking that matched
-    cells' RF centers fall on or near their recording electrodes.
+    1. ``recompute_alignment=True`` — fit a fresh similarity transform from
+       this chunk's EI-soma electrode vs. STA-center pairs and use it
+       (optionally persisting the result with ``save_recomputed=True``).
+    2. ``use_calibration=True`` (default) — load a saved per-rig calibration
+       from ``rig_calibrations/rig_<rig_id>.json`` if one exists.
+    3. Geometric fallback — assume the chip is centered on the canvas and
+       map µm → px through ``microns_per_pixel``, applying ``rotation_deg``
+       (which itself defaults to ``mea_rotation_deg`` from the rig config).
 
     Parameters
     ----------
     analysis_chunk : AnalysisChunk
-        Source of ``vcd.get_electrode_map()``, ``canvas_size``, and
-        ``microns_per_pixel``.
+        Source of ``vcd.get_electrode_map()``, ``canvas_size``,
+        ``microns_per_pixel`` and (for calibration) the cells' EIs + RFs.
     mea_center_canvas_px : (x, y), optional
-        Canvas-pixel coords of the MEA center. Defaults to canvas center.
+        Canvas-pixel coords of the MEA center (geometric fallback only).
     microns_per_pixel : float, optional
-        Display scale. Defaults to ``analysis_chunk.microns_per_pixel``.
+        Display scale (geometric fallback only).
     flip_y : bool
-        MEA chip uses math-up y; canvas uses image-down y. Negate y
-        (after rotation) when True (default).
+        Geometric fallback only. Negate y after rotation (math-y-up →
+        image-y-down).
     rotation_deg : float, optional
-        Rotation of MEA chip axes relative to canvas axes, in degrees
-        CCW. ``0`` means chip x → canvas x (Field/Chichilnisky default).
-        ``90`` rotates the chip so its long axis runs along canvas y.
-        When ``None`` (default) the value is resolved from the rig
-        config via :func:`retinanalysis.utils.datajoint_utils.
-        get_display_params_by_exp` (key ``mea_rotation_deg``). For Rig
-        C this returns 90° (verified empirically on 20220823C/chunk5).
+        Geometric fallback only. Falls back further to ``mea_rotation_deg``
+        from the rig config when ``None``.
+    use_calibration : bool
+        Try to load and apply a saved per-rig calibration. When False,
+        the geometric fallback is used unconditionally.
+    recompute_alignment : bool
+        Override saved calibration with one fit from this chunk only.
+    save_recomputed : bool
+        When ``recompute_alignment=True``, persist the new fit to
+        ``rig_calibrations/`` (default False — preview without writing).
 
     Returns
     -------
@@ -76,6 +81,21 @@ def electrode_positions_canvas_px(
         ``(n_electrodes, 2)`` array of (x_canvas, y_canvas) coordinates.
     """
     em_um = analysis_chunk.vcd.get_electrode_map()  # (n, 2) in µm
+
+    # Mode 1 / 2: similarity transform via a learned calibration
+    if recompute_alignment or use_calibration:
+        from retinanalysis.utils import rig_calibration as _rc
+        calib = None
+        if recompute_alignment:
+            calib = _rc.fit_calibration_for_chunk(analysis_chunk)
+            if save_recomputed:
+                _rc.save_rig_calibration(calib)
+        else:
+            calib = _rc.load_rig_calibration(analysis_chunk.exp_name)
+        if calib is not None:
+            return _rc.apply_similarity_transform(em_um, calib)
+
+    # Mode 3: geometric fallback (centered chip + rig-config rotation)
     if microns_per_pixel is None:
         microns_per_pixel = analysis_chunk.microns_per_pixel
     if mea_center_canvas_px is None:
@@ -158,6 +178,9 @@ def plot_stim_with_mosaic(
     mea_center_canvas_px: Optional[Tuple[float, float]] = None,
     flip_electrode_y: bool = True,
     electrode_rotation_deg: Optional[float] = None,
+    use_calibration: bool = True,
+    recompute_alignment: bool = False,
+    save_recomputed: bool = False,
     **imshow_kwargs,
 ) -> Axes:
     """Overlay the cell-type mosaic on a stimulus frame.
@@ -210,10 +233,20 @@ def plot_stim_with_mosaic(
         uses image-down y). Default True. Set False if your rig stores
         electrode positions already in image-down y.
     electrode_rotation_deg : float, optional
-        Rotation of the MEA chip axes relative to the display axes, in
-        degrees CCW. When ``None`` (default) the value is resolved per
-        rig via :func:`get_display_params_by_exp` (e.g. Rig C → 90°,
-        verified empirically). Pass an explicit number to override.
+        Geometric-fallback rotation (degrees CCW). Only used when no
+        learned calibration is available. When ``None`` (default) the
+        value is resolved per rig via :func:`get_display_params_by_exp`.
+    use_calibration : bool
+        Try the learned per-rig calibration first
+        (``rig_calibrations/rig_<id>.json``). When False, always use the
+        geometric fallback. Default True.
+    recompute_alignment : bool
+        Fit a fresh per-chunk calibration from EI-soma vs. STA centers
+        and use it for this plot. Overrides any saved calibration.
+        Default False.
+    save_recomputed : bool
+        When ``recompute_alignment=True``, also persist the new fit to
+        ``rig_calibrations/``. Default False (preview only).
     **imshow_kwargs : dict
         Forwarded to ``ax.imshow`` (e.g. ``vmin``, ``vmax``).
     """
@@ -249,10 +282,11 @@ def plot_stim_with_mosaic(
 
     ax.imshow(stim_frame, extent=frame_extent, cmap=cmap, **imshow_kwargs)
 
-    # --- Overlay ellipses with per-type colors
+    # --- Overlay ellipses with per-type colors (Okabe-Ito canonical map)
+    type_color_map = colors_for_celltypes(present_types)
     legend_handles = []
     for idx, ct in enumerate(present_types):
-        color = f'C{idx}'
+        color = type_color_map[ct]
         for cell_id, ell in d_ells_by_type[ct].items():
             # get_ells returns one Ellipse per cell already configured with
             # facecolor=alpha. We re-style here so user-supplied alpha/lw
@@ -281,6 +315,9 @@ def plot_stim_with_mosaic(
             mea_center_canvas_px=mea_center_canvas_px,
             flip_y=flip_electrode_y,
             rotation_deg=electrode_rotation_deg,
+            use_calibration=use_calibration,
+            recompute_alignment=recompute_alignment,
+            save_recomputed=save_recomputed,
         )
         defaults = dict(s=4, c='white', edgecolors='black',
                         linewidths=0.3, alpha=0.6, zorder=5)
