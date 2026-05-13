@@ -173,17 +173,39 @@ class AnalysisChunk:
 
         numXChecks = np.array([epoch.fetch('parameters')[0]['numXChecks'] for epoch in epochs])
         numYChecks = np.array([epoch.fetch('parameters')[0]['numYChecks'] for epoch in epochs])
-        
-        if (not all(element == numXChecks[0] for element in numXChecks) and
+
+        if (not all(element == numXChecks[0] for element in numXChecks) or
             not all(element == numYChecks[0] for element in numYChecks)):
             print('WARNING: Not all epoch blocks used the same number of X and Y checks\n')
 
-            vision_micronsPerStixel = self.vcd.runtimemovie_params.micronsPerStixelX
-            gridSizes = np.array([epoch.fetch('parameters')[0]['gridSize'] for epoch in epochs])
-            
-            self.numXChecks = int(numXChecks[gridSizes == vision_micronsPerStixel])
-            self.numYChecks = int(numYChecks[gridSizes == vision_micronsPerStixel])
-
+            # Pick the block whose check count matches the STA's runtime movie.
+            # That's the block whose epochs were actually used to compute STAs.
+            # Older recordings don't store 'gridSize' in epoch params (only
+            # 'stixelSize'), so matching on check count works across versions.
+            mask = (numXChecks == self.staXChecks) & (numYChecks == self.staYChecks)
+            if mask.sum() == 1:
+                self.numXChecks = int(numXChecks[mask][0])
+                self.numYChecks = int(numYChecks[mask][0])
+            else:
+                # Fall back to stixelSize match against vision's micronsPerStixelX,
+                # then to the first block. Use .get so older params still work.
+                vision_micronsPerStixel = self.vcd.runtimemovie_params.micronsPerStixelX
+                stixel_sizes = np.array([
+                    ep.fetch('parameters')[0].get('stixelSize',
+                        ep.fetch('parameters')[0].get('gridSize', np.nan))
+                    for ep in epochs
+                ])
+                sxmask = stixel_sizes == vision_micronsPerStixel
+                if sxmask.sum() == 1:
+                    self.numXChecks = int(numXChecks[sxmask][0])
+                    self.numYChecks = int(numYChecks[sxmask][0])
+                else:
+                    print(f'WARNING: could not disambiguate noise epoch blocks '
+                          f'(STA={self.staXChecks}x{self.staYChecks}, '
+                          f'blocks={list(zip(numXChecks.tolist(), numYChecks.tolist()))}); '
+                          f'falling back to first block')
+                    self.numXChecks = int(numXChecks[0])
+                    self.numYChecks = int(numYChecks[0])
         else:
             self.numXChecks = int(numXChecks[0])
             self.numYChecks = int(numYChecks[0])

@@ -63,6 +63,10 @@ from .utils import cell_type_check
 from .utils.cell_type_check import (plot_cell_type_check,
                                     plot_cell_type_grid)
 
+from .utils import visual_qc as _visual_qc_mod
+from .utils.visual_qc import (browse_cells_qc, load_visual_qc,
+                              visual_qc_csv_path, select_good_cells)
+
 # Per-protocol analyzers live under retinanalysis.protocols; import the
 # package but don't pull every module at top level (loaded on demand).
 from . import protocols
