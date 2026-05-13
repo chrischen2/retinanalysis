@@ -77,6 +77,25 @@ experiment's `index.csv`).
 explicitly asks. Always wire downstream code through
 `select_good_cells()` so the visual-QC step remains optional.
 
+## Database write/delete verbs
+
+DataJoint ingest and deletion live in `utils/database_utils.py`,
+auto-exported on `ra.*`:
+
+- `ra.populate_database()` — append-only ingest from `H5_DIR` /
+  `META_DIR` / `TAGS_DIR`. Never deletes.
+- `ra.delete_experiments(['<exp>', ...])` — drop specific experiments.
+  Cascades through DataJoint to every downstream table. No confirmation
+  prompt.
+- `ra.reload_experiment_data('<exp>')` — drop one experiment then
+  re-ingest from H5. The right verb for "refresh this date".
+- `ra.purge_database(confirm='YES_DELETE_ALL')` — drop every experiment.
+  **Refuses to run without the literal sentinel** to prevent accidental
+  catastrophic deletion.
+
+Keep ingest and delete as separate calls — never collapse `populate_*`
+into a "refresh-then-insert" without an explicit user ask.
+
 ## Conventions
 
 - **Stick to in-place edits.** Don't create scratch notebooks /

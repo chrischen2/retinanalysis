@@ -27,10 +27,31 @@ def delete_experiments(exp_names: List[str]):
     for exp in exp_names:
         (schema.Experiment() & {'exp_name' : exp}).delete(prompt=False)
 
-def purge_database():
+PURGE_CONFIRM_TOKEN = 'YES_DELETE_ALL'
+
+
+def purge_database(confirm: str = ''):
+    """Delete EVERY experiment (cascades to all downstream tables).
+
+    This is irreversible. To run it you must pass the literal sentinel
+    ``confirm='YES_DELETE_ALL'`` — calling ``purge_database()`` with no
+    argument raises instead of wiping the DB. The sentinel exists so an
+    accidental call (auto-complete, copy/paste from a notebook,
+    refactoring that touches this module) cannot silently delete the
+    full table.
+    """
+    if confirm != PURGE_CONFIRM_TOKEN:
+        raise PermissionError(
+            "purge_database() refuses to run without explicit confirmation. "
+            f"Pass confirm='{PURGE_CONFIRM_TOKEN}' to actually delete every "
+            "experiment. This action is irreversible."
+        )
+
     all_experiments = schema.Experiment()
     all_exp_names = all_experiments.fetch('exp_name')
 
+    print(f'Purging {len(all_exp_names)} experiments from the database...')
     for exp in all_exp_names:
         (schema.Experiment() & {'exp_name' : exp}).delete(prompt=False)
+    print(f'Purge complete: {len(all_exp_names)} experiments dropped.')
 
