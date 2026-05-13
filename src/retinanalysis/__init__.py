@@ -50,6 +50,23 @@ from .utils import mosaic_overlay
 from .utils.mosaic_overlay import (plot_stim_with_mosaic,
                                    electrode_positions_canvas_px)
 
+from .utils import psth as _psth_mod
+from .utils.psth import (spike_times_to_psth,
+                         epoch_spikes_to_psth,
+                         psth_time_axis,
+                         gaussian_filter_1d)
+
+from .utils import raster as _raster_mod
+from .utils.raster import plot_raster_with_psth
+
+from .utils import cell_type_check
+from .utils.cell_type_check import (plot_cell_type_check,
+                                    plot_cell_type_grid)
+
+# Per-protocol analyzers live under retinanalysis.protocols; import the
+# package but don't pull every module at top level (loaded on demand).
+from . import protocols
+
 # `parse_data` pulls scipy.signal (~1s). It isn't used at module level — load it
 # lazily via `from retinanalysis.utils import parse_data` when actually needed.
 
