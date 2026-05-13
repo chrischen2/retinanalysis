@@ -127,32 +127,82 @@ def electrode_positions_canvas_px(
     return em_canvas
 
 
+def electrode_geometry(analysis_chunk) -> dict:
+    """Empirical recording-array geometry, derived from ``vcd.get_electrode_map()``.
+
+    The returned values come from the actual electrode positions Vision
+    stored — no per-array hardcoding (e.g. "60 µm pitch", "512 channels")
+    — so this works across array types and is the right primitive when
+    you need to express thresholds in physical units.
+
+    Returns
+    -------
+    dict
+        ``n_electrodes`` : int
+        ``pitch_um``     : float — median nearest-neighbor distance (µm)
+        ``width_um``     : float — chip span in x (µm)
+        ``height_um``    : float — chip span in y (µm)
+        ``center_x_um``, ``center_y_um`` : float — mean electrode position
+    """
+    em = analysis_chunk.vcd.get_electrode_map()
+    n = int(em.shape[0])
+    if n < 2:
+        pitch = float('nan')
+    else:
+        # Median nearest-neighbor distance — robust to chip edges and
+        # any row jitter, no scipy dependency.
+        diffs = em[:, None, :] - em[None, :, :]            # (n, n, 2)
+        d2 = (diffs ** 2).sum(axis=-1)
+        d2[np.eye(n, dtype=bool)] = np.inf
+        pitch = float(np.median(np.sqrt(d2.min(axis=1))))
+    return {
+        'n_electrodes': n,
+        'pitch_um': pitch,
+        'width_um': float(em[:, 0].max() - em[:, 0].min()),
+        'height_um': float(em[:, 1].max() - em[:, 1].min()),
+        'center_x_um': float(em[:, 0].mean()),
+        'center_y_um': float(em[:, 1].mean()),
+    }
+
+
 def cells_inside_array(
     analysis_chunk,
-    max_dist_to_array_um: float = 60.0,
+    max_dist_to_array_um: Optional[float] = None,
+    max_dist_pitch: float = 2.0,
     *,
     use_calibration: bool = True,
     recompute_alignment: bool = False,
 ) -> List[int]:
-    """Cell IDs whose RF center is within ``max_dist_to_array_um`` of the chip.
+    """Cell IDs whose RF center is within reach of the electrode array.
 
     Useful for restricting a mosaic plot to cells the array could have
     actually recorded — many STAs in a typing file are noisy or
-    misclassified and have RF centers far off-array. Their inclusion
-    makes the mosaic look spatially much larger than the electrode
-    footprint even though the calibration is correct.
+    misclassified and have RF centers far off-array, which makes the
+    mosaic *look* spatially much larger than the electrode footprint
+    even though the calibration is correct.
+
+    Threshold semantics: pass an absolute distance via
+    ``max_dist_to_array_um`` to override the pitch-based default. When
+    that's ``None`` (default), the cutoff is
+    ``max_dist_pitch × electrode_geometry(analysis_chunk)['pitch_um']``
+    so the same call works across array types without hardcoded pitch.
 
     Parameters
     ----------
     analysis_chunk : AnalysisChunk
-    max_dist_to_array_um : float
-        A cell is kept when its RF center sits within this distance (in
-        µm on the chip) of any electrode. Default ~one electrode pitch.
+    max_dist_to_array_um : float, optional
+        Absolute cutoff in µm. Default ``None`` → use ``max_dist_pitch``.
+    max_dist_pitch : float
+        Cutoff in multiples of the empirical electrode pitch.
+        Default 2.0.
     use_calibration, recompute_alignment :
         Forwarded to :func:`electrode_positions_canvas_px` so the
         on-array footprint reflects the same geometry the mosaic plot
         uses.
     """
+    if max_dist_to_array_um is None:
+        pitch = electrode_geometry(analysis_chunk)['pitch_um']
+        max_dist_to_array_um = max_dist_pitch * pitch
     em_canvas = electrode_positions_canvas_px(
         analysis_chunk,
         use_calibration=use_calibration,
@@ -243,8 +293,10 @@ def plot_stim_with_mosaic(
     recompute_alignment: bool = False,
     save_recomputed: bool = False,
     restrict_to_array_um: Optional[float] = None,
+    restrict_to_array_pitch: Optional[float] = None,
     zoom_to_array: bool = False,
-    zoom_pad_um: float = 120.0,
+    zoom_pad_um: Optional[float] = None,
+    zoom_pad_pitch: float = 2.0,
     **imshow_kwargs,
 ) -> Axes:
     """Overlay the cell-type mosaic on a stimulus frame.
@@ -323,10 +375,13 @@ def plot_stim_with_mosaic(
     # Many typed cells have noisy STAs that put their RF far off-array;
     # plotting them makes the mosaic look much larger than the chip
     # footprint even though the geometry is correct.
-    if restrict_to_array_um is not None and d_by_type:
+    if (restrict_to_array_um is not None or restrict_to_array_pitch is not None) and d_by_type:
         keep_ids = set(cells_inside_array(
             analysis_chunk,
             max_dist_to_array_um=restrict_to_array_um,
+            max_dist_pitch=(restrict_to_array_pitch
+                            if restrict_to_array_pitch is not None
+                            else 2.0),
             use_calibration=use_calibration,
             recompute_alignment=recompute_alignment,
         ))
@@ -422,6 +477,9 @@ def plot_stim_with_mosaic(
             save_recomputed=False,
         )
         # Convert µm padding → canvas px using the rig scale.
+        if zoom_pad_um is None:
+            zoom_pad_um = (zoom_pad_pitch
+                           * electrode_geometry(analysis_chunk)['pitch_um'])
         pad_px = float(zoom_pad_um) / float(analysis_chunk.microns_per_pixel)
         x0 = max(0.0, em_z[:, 0].min() - pad_px)
         x1 = min(float(canvas_w), em_z[:, 0].max() + pad_px)
