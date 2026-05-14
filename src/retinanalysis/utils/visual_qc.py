@@ -7,6 +7,21 @@ side-by-side in a Jupyter notebook and lets the user tag each cell
 ``<OUTPUT_DIR>/<exp>/<protocol>/visual_qc.csv`` so the GUI is resumable
 across sessions.
 
+**Run order in chrisMain.ipynb.** §16 (this GUI) sits *before* the
+archives in the notebook because it's conceptually a filter on top of
+them, but the first-time execution order has the archives run first:
+
+    §14 (QC)  →  §17/§18 (render PNGs)  →  §16 (tag)  →  §17/§18 again
+
+The second run of §17/§18 collapses the archive to the curated set;
+``analyze_experiment`` reads ``visual_qc.csv`` automatically when
+``respect_visual_qc=True`` (default).
+
+**`visual_qc.csv` is read-only outside this module.** ``_save_tag``
+below is the only writer. Re-running the archive does not overwrite
+manual tags — ``analyze_experiment``, ``save_per_cell_plots``,
+``save_cell_match`` and ``save_protocol_qc`` all leave it untouched.
+
 Downstream population analyses load the tags via
 :func:`load_visual_qc` to filter to visually-inspected cells.
 

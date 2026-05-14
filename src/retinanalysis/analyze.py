@@ -190,6 +190,13 @@ def analyze_experiment(
         default). Set ``False`` to ignore visual QC and always render
         the full QC-pass set.
 
+    Notes
+    -----
+    This function **reads** ``visual_qc.csv`` but never writes to it.
+    Manual tags from the GUI are preserved across re-runs; the only
+    writer is ``visual_qc._save_tag`` (invoked per click inside
+    ``browse_cells_qc``).
+
     Returns
     -------
     dict

@@ -53,6 +53,35 @@ new notebook rather than extending an existing one.
   user prefers this over auto-detect "does the PNG exist?" logic —
   don't reintroduce implicit skipping.
 
+## Standard workflow (chrisMain §14 → §18)
+
+Per-experiment archive + visual review is intentionally **iterative**.
+The notebook lays out the conceptual order (visual QC sits before
+archives because it's a *filter*), but the first-time execution order
+is:
+
+1. **§14** — compute protocol QC → writes `qc.csv`.
+2. **§17** (single date) or **§18** (batch) — render every QC-passing
+   cell → writes `mosaic.png`, `index.csv`, `cell_match.csv`, and
+   `cells/<type>/cell_<id>_{raster,psth}.png`. *No `visual_qc.csv` yet.*
+3. **§16** — `ra.browse_cells_qc(exp_name)` reads those PNGs and lets
+   the user tag good/bad → writes `visual_qc.csv` (one row per click).
+4. **§17 / §18 again** — `analyze_experiment` auto-detects
+   `visual_qc.csv` (`respect_visual_qc=True` default) and restricts the
+   per-cell PNG render to `tag == 'good'`. `cell_match.csv` and
+   `qc.csv` stay comprehensive.
+
+For a date that already has a saved archive, the user can jump straight
+to §16 to keep tagging, then re-run §17/§18 to collapse the archive to
+the curated set.
+
+**Manual tags are never overwritten by archiving.** The only writer of
+`visual_qc.csv` is `_save_tag()` inside the GUI; `analyze_experiment`,
+`save_per_cell_plots`, `save_cell_match`, and `save_protocol_qc` are
+all read-only with respect to that file. Documented in their
+docstrings and enforced by an audit-style smoke test in
+`tests/test_visual_qc_invariant.py`.
+
 ## Population-cell selection (§17 of chrisMain)
 
 The default pool for population/statistical analysis is **all cells
