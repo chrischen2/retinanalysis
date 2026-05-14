@@ -152,7 +152,8 @@ def browse_cells_qc(
     cells = _discover_cells(exp_root, protocol)
     if not cells:
         print(f'No cell PNGs found under {exp_root}/{protocol}/cells/. '
-              f'Run section 16 of chrisMain to generate the archive first.')
+              f'Run §17 (single-date archive) or §18 (batch) in chrisMain '
+              f'to generate the archive first, then come back here to tag.')
         return None
 
     csv_path = visual_qc_csv_path(exp_name, protocol, output_root)
