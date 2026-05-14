@@ -158,6 +158,12 @@ class QCThresholds:
     min_rate_hz: Optional[float] = 1.0
     min_frac_epochs_above_rate: Optional[float] = 0.8
 
+    # "Drop silent epochs, keep if ≥ 2/3 remain." We don't actually drop
+    # epochs from spike_times (that'd break per-condition PSTH plumbing
+    # downstream); instead require the cell to have at least this fraction
+    # of epochs with ≥1 spike.
+    min_frac_non_silent_epochs: Optional[float] = 2.0 / 3.0
+
     # Legacy absolute-count threshold (kept for back-compat; superseded by
     # the rate-based check above). Set to ``None`` to disable.
     min_mean_count: Optional[float] = None
@@ -283,6 +289,8 @@ def cell_qc_metrics(
     var = float(counts.var()) if n else 0.0
 
     silent_trial_frac = float((counts == 0).mean()) if n else float('nan')
+    frac_non_silent_epochs = (1.0 - silent_trial_frac) if n else float('nan')
+    n_non_silent_epochs = int((counts > 0).sum()) if n else 0
     silent_run_max = int(_longest_run_of_zeros(counts))
     drift = _drift_score(counts)
 
@@ -329,6 +337,8 @@ def cell_qc_metrics(
         'cv_count': float(std / mean) if mean > 0 else float('inf'),
         'fano': float(var / mean) if mean > 0 else float('inf'),
         'silent_trial_frac': silent_trial_frac,
+        'n_non_silent_epochs': n_non_silent_epochs,
+        'frac_non_silent_epochs': frac_non_silent_epochs,
         'silent_run_max': silent_run_max,
         'drift_score': drift,
         'reliability_r': reliability,
@@ -381,8 +391,9 @@ def block_qc_metrics(
     cols = ['cell_id', 'cell_type', 'n_epochs', 'epoch_duration_s',
             'mean_count', 'std_count', 'min_count_per_epoch',
             'mean_rate_hz', 'count_threshold', 'frac_epochs_above_rate',
-            'cv_count', 'fano', 'silent_trial_frac', 'silent_run_max',
-            'drift_score', 'reliability_r']
+            'cv_count', 'fano', 'silent_trial_frac',
+            'n_non_silent_epochs', 'frac_non_silent_epochs',
+            'silent_run_max', 'drift_score', 'reliability_r']
     out = pd.DataFrame(rows)
     if out.empty:
         return pd.DataFrame(columns=cols)
@@ -410,6 +421,7 @@ def filter_cells_by_qc(
     checks = [
         ('mean_count', th.min_mean_count, '>='),
         ('frac_epochs_above_rate', th.min_frac_epochs_above_rate, '>='),
+        ('frac_non_silent_epochs', th.min_frac_non_silent_epochs, '>='),
         ('cv_count', th.max_cv, '<='),
         ('fano', th.max_fano, '<='),
         ('silent_trial_frac', th.max_silent_trial_frac, '<='),
