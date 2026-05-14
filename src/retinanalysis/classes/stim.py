@@ -132,7 +132,18 @@ class MEAStimBlock(StimBlock):
 
     def __init__(self, exp_name: Optional[str]=None, datafile_name: Optional[str]=None,
                 ls_params: Optional[list]=None, b_LED: Optional[bool]=False,
-                verbose: bool = True, pkl_file: Optional[str]=None):
+                verbose: bool = True, pkl_file: Optional[str]=None,
+                analysis_chunk_name: Optional[str]=None):
+        """
+        Parameters
+        ----------
+        analysis_chunk_name : str, optional
+            Skip ``get_nearest_noise()`` and use this chunk directly. Use
+            when the auto-pick picks a chunk the experimenter doesn't want
+            (e.g. the closest-in-time chunk ran *after* the protocol, or
+            isn't on the local SSD). When ``None`` (default), the nearest
+            noise chunk is discovered as before.
+        """
         # If pkl_file is provided, block_id can be None.
         block_id = None
         if pkl_file is None:
@@ -142,19 +153,29 @@ class MEAStimBlock(StimBlock):
             else:
                 # If exp_name and datafile_name are provided, get block_id from datafile_name
                 block_id = get_block_id_from_datafile(exp_name, datafile_name)
-        
+
         super().__init__(
             exp_name=exp_name, block_id=block_id, b_LED=b_LED,
             ls_params=ls_params, verbose = verbose, pkl_file=pkl_file
             )
-        
+
         # If pkl_file, everything is already loaded in parent init.
         if pkl_file is not None:
             return
 
         self.datafile_name = datafile_name
         self.noise_protocol_name = get_noise_name_by_exp(self.exp_name)
-        self.nearest_noise_chunk = self.get_nearest_noise()
+        if analysis_chunk_name is not None:
+            # User-pinned chunk: skip the auto-pick entirely. Honors the
+            # experimenter's choice even when get_nearest_noise() would
+            # land on a different chunk (e.g. a closer-but-after-protocol
+            # one, or a chunk whose dir isn't on the local SSD).
+            self.nearest_noise_chunk = analysis_chunk_name
+            if self.verbose:
+                print(f"Using user-specified noise chunk for {self.datafile_name}: "
+                      f"{analysis_chunk_name}.\n")
+        else:
+            self.nearest_noise_chunk = self.get_nearest_noise()
     
     def get_nearest_noise(self):
         """

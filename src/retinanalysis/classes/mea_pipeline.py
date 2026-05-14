@@ -628,7 +628,11 @@ def create_mea_pipeline(
         r = create_mea_response_group(exp_name, datafile_name, ss_version = ss_version, b_LED=b_LED, b_load_fd = b_load_fd, verbose = verbose)
 
     elif isinstance(datafile_name, str):
-        s = MEAStimBlock(exp_name, datafile_name, b_LED=b_LED, ls_params = ls_params, verbose = verbose)
+        # Pin the user's chunk choice into MEAStimBlock so its constructor
+        # skips get_nearest_noise() entirely (which may pick the wrong chunk
+        # or crash when the auto-pick's analysis dir isn't on disk).
+        s = MEAStimBlock(exp_name, datafile_name, b_LED=b_LED, ls_params = ls_params,
+                          verbose = verbose, analysis_chunk_name = analysis_chunk_name)
         r = MEAResponseBlock(exp_name, datafile_name, ss_version, b_LED=b_LED, b_load_fd = b_load_fd, verbose = verbose)
 
     assert s is not None, 'Unable to create stim block or stim group for given parameters'
