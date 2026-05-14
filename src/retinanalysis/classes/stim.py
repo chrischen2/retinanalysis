@@ -208,15 +208,19 @@ class MEAStimBlock(StimBlock):
             nearest_noise_chunk = nearest_noise_chunk.reset_index(drop = True).loc[0, 'chunk_name']
 
             # Check if this chunk has a typing file
-
-            # New way to check for typing files... avoids missing typing files in database
-            ss_version = os.listdir(find_path('analysis', self.exp_name, nearest_noise_chunk))[0]
-            typing_file_path = find_path('analysis', self.exp_name, nearest_noise_chunk, ss_version)
-            typing_files = [file for file in os.listdir(typing_file_path) if '.txt' in file]
-
-            # noise_chunk_id = schema.SortingChunk() & {'experiment_id' : exp_id, 'chunk_name': nearest_noise_chunk}
-            # noise_chunk_id = noise_chunk_id.fetch('id')[0]
-            # typing_files = schema.CellTypeFile() & {'chunk_id' : noise_chunk_id}
+            # New way to check for typing files... avoids missing typing files in database.
+            # Wrap in try/except so a candidate chunk whose analysis dir isn't on the
+            # local SSD is treated as "no typing file", not a crash. Without this, an
+            # experiment with a closest-in-time chunk that hasn't been pulled locally
+            # makes MEAStimBlock unconstructable (which in turn blocks any explicit
+            # analysis_chunk_name override in create_mea_pipeline).
+            try:
+                chunk_analysis_dir = find_path('analysis', self.exp_name, nearest_noise_chunk)
+                ss_version = os.listdir(chunk_analysis_dir)[0]
+                typing_file_path = find_path('analysis', self.exp_name, nearest_noise_chunk, ss_version)
+                typing_files = [file for file in os.listdir(typing_file_path) if '.txt' in file]
+            except (FileNotFoundError, NotADirectoryError, OSError, IndexError):
+                typing_files = []
 
             # If there's no typing file, remove the minimum value and try again
             if len(typing_files) == 0:
