@@ -26,8 +26,16 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 
+from pathlib import Path
+
 from retinanalysis.utils.psth import epoch_spikes_to_psth, psth_time_axis
 from retinanalysis.utils.style import colors_for_conditions
+from retinanalysis.utils.victor_purpura import (
+    victor_purpura_distance,
+    victor_purpura_distance_matrix,
+    victor_purpura_cross_matrix,
+)
+from retinanalysis.config.settings import OUTPUT_DIR
 
 PROTOCOL_NAME = 'edu.washington.riekelab.turner.protocols.EyeMovementTrajectoryAlternatingBackground'
 
@@ -295,3 +303,809 @@ def plot_psth_by_condition(
         fig.tight_layout(rect=(0, 0, 0.95, 0.96))
         last_axes = ax_grid
     return last_axes
+
+
+# ===========================================================================
+# Offline-data analyses (operate on OfflineDataset, no DataJoint required)
+# ===========================================================================
+
+def _resolve_condition_keys_from_offline(offline, condition_keys):
+    """Use caller-provided keys, or fall back to ``offline.meta['condition_keys']``."""
+    if condition_keys is not None:
+        return list(condition_keys)
+    keys = offline.meta.get('condition_keys')
+    if keys is None:
+        return list(DEFAULT_CONDITION_KEYS)
+    if isinstance(keys, np.ndarray):
+        keys = keys.tolist()
+    return [str(k) for k in keys if k]
+
+
+def _epoch_indices_by_condition(offline, condition_keys):
+    """Return ``{condition_tuple: np.array(epoch_indices)}``."""
+    df = offline.epochs
+    out = {}
+    for cond, sub in df.groupby(list(condition_keys), sort=True):
+        if not isinstance(cond, tuple):
+            cond = (cond,)
+        cond = tuple(_clean_value(v) for v in cond)
+        out[cond] = sub['epoch_index'].astype(int).to_numpy()
+    return out
+
+
+def _clean_value(v):
+    """Strip the placeholder empty-string we use for missing condition values."""
+    if isinstance(v, bytes):
+        v = v.decode('utf-8')
+    if isinstance(v, str) and v == '':
+        return None
+    return v
+
+
+def analyze_offline(
+    offline,
+    cell_types: Optional[Iterable[str]] = None,
+    condition_keys: Optional[Sequence[str]] = None,
+    minimum_n: int = 3,
+) -> Dict:
+    """Offline equivalent of :func:`analyze` — works without DataJoint.
+
+    Pulls the pre-computed PSTHs that ``save_offline_data`` wrote, groups
+    by condition, and averages per (cell type, condition).
+
+    Parameters
+    ----------
+    offline : OfflineDataset
+    cell_types : iterable[str], optional
+        Restrict to these types. Default: every type with ≥ ``minimum_n``.
+    condition_keys : sequence[str], optional
+        Per-epoch columns to split conditions by. Default:
+        ``offline.meta['condition_keys']``.
+    minimum_n : int
+        Skip cell types with fewer than this many cells.
+
+    Returns
+    -------
+    dict
+        Same structure as :func:`analyze`: ``time_ms, condition_keys,
+        conditions, cell_types, psth, preTime_ms, stimTime_ms, tailTime_ms``.
+    """
+    keys = _resolve_condition_keys_from_offline(offline, condition_keys)
+    cond_to_epochs = _epoch_indices_by_condition(offline, keys)
+    conditions = sorted(cond_to_epochs.keys(),
+                        key=lambda c: tuple(str(x) for x in c))
+
+    df_cells = offline.cells
+    if cell_types is None:
+        type_counts = df_cells['cell_type'].value_counts()
+    else:
+        type_counts = (df_cells.loc[df_cells['cell_type'].isin(list(cell_types)),
+                                    'cell_type'].value_counts())
+    cell_types_kept = [t for t, n in type_counts.items() if n >= minimum_n]
+
+    time_ms = offline.psth_time_ms()
+    pre_ms = float(offline.timing.get('preTime_ms', 0))
+    stim_ms = float(offline.timing.get('stimTime_ms', 0))
+    tail_ms = float(offline.timing.get('tailTime_ms', 0))
+
+    psth_by_type: Dict[str, Dict[Tuple, np.ndarray]] = {}
+    for ct in cell_types_kept:
+        cids = df_cells.loc[df_cells['cell_type'] == ct, 'cell_id'].astype(int).tolist()
+        by_cond: Dict[Tuple, List[np.ndarray]] = {}
+        for cid in cids:
+            psth = offline.psth_matrix(cid)  # (n_epochs, n_bins)
+            for cond, ep_idx in cond_to_epochs.items():
+                in_range = ep_idx[ep_idx < psth.shape[0]]
+                if in_range.size == 0:
+                    continue
+                by_cond.setdefault(cond, []).append(psth[in_range].mean(axis=0))
+        psth_by_type[ct] = {c: np.stack(v) for c, v in by_cond.items() if v}
+
+    return {
+        'time_ms': time_ms,
+        'condition_keys': keys,
+        'conditions': conditions,
+        'cell_types': cell_types_kept,
+        'psth': psth_by_type,
+        'preTime_ms': pre_ms,
+        'stimTime_ms': stim_ms,
+        'tailTime_ms': tail_ms,
+        'condition_key': keys[-1],
+        'psth_sigma_ms': float(offline.timing.get('psth_sigma_ms', 10.0)),
+    }
+
+
+def _window_spikes_seconds(
+    spike_times_ms: np.ndarray,
+    t_start_ms: float,
+    t_end_ms: float,
+) -> np.ndarray:
+    """Slice + convert to seconds, rebased to the window start."""
+    arr = np.asarray(spike_times_ms, dtype=float)
+    sel = arr[(arr >= t_start_ms) & (arr < t_end_ms)]
+    return (sel - t_start_ms) / 1000.0
+
+
+def spike_distance_analysis(
+    offline,
+    *,
+    condition_keys: Optional[Sequence[str]] = None,
+    pair_within: Optional[Sequence[str]] = ('currentImageName',),
+    pair_across: Optional[Sequence[str]] = None,
+    window_sec: float = 5.0,
+    window_offset_ms: Optional[float] = None,
+    cost_per_sec: float = 4.0,
+    n_trials_cap: Optional[int] = None,
+    cell_types: Optional[Iterable[str]] = None,
+    minimum_n: int = 3,
+    rng_seed: int = 0,
+) -> pd.DataFrame:
+    """Within-condition vs across-condition Victor–Purpura distance per cell.
+
+    For each cell, take a single time window from each trial's spike
+    train (default: the first ``window_sec`` seconds after preTime),
+    then compute pairwise VP distances. By default we pair *across*
+    ``currentBackgroundScale`` while *holding* ``currentImageName``
+    fixed — i.e. the asked-for "compare low vs high backgroundScale
+    for each image" pattern.
+
+    A *positive* ``d_diff`` means trials inside a condition are more
+    similar to each other than to trials of the other condition — i.e.
+    the across-axis (backgroundScale) modulates the response.
+
+    Parameters
+    ----------
+    offline : OfflineDataset
+    pair_within : sequence[str], optional
+        Condition keys held *constant* when picking pairs (default
+        ``('currentImageName',)``). Within-condition baselines and
+        across pairings are computed inside each unique combination of
+        these keys. Set ``None`` or ``[]`` to compare every condition
+        pair (the old behavior).
+    pair_across : sequence[str], optional
+        Condition keys allowed to differ when picking across pairs.
+        Default = remaining keys (``condition_keys`` minus
+        ``pair_within``).
+    window_sec : float
+        Window duration in seconds. Default 5 s.
+    window_offset_ms : float, optional
+        Window start in ms from epoch onset. Default: ``preTime_ms``.
+    cost_per_sec : float
+        VP cost (reciprocal is the metric's timescale). ``cost=4`` ≈
+        250 ms — appropriate for RGC response structure.
+    n_trials_cap : int, optional
+        Subsample to at most this many trials per condition before
+        computing pairs.
+    cell_types : iterable, optional
+        Restrict to these types.
+    minimum_n : int
+        Skip cell types with fewer than this many cells.
+    rng_seed : int
+        Deterministic subsampling.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per (cell × condition-pair).
+    """
+    keys = _resolve_condition_keys_from_offline(offline, condition_keys)
+    cond_to_epochs = _epoch_indices_by_condition(offline, keys)
+
+    # Resolve pair_within / pair_across
+    pair_within = [k for k in (pair_within or []) if k in keys]
+    if pair_across is None:
+        pair_across = [k for k in keys if k not in pair_within]
+    else:
+        pair_across = [k for k in pair_across if k in keys]
+
+    # Pick which axis indices of the condition tuple are "within" vs "across"
+    within_idx = [keys.index(k) for k in pair_within]
+    across_idx = [keys.index(k) for k in pair_across]
+
+    def _key_within(cond):  # the "image" group key
+        return tuple(cond[i] for i in within_idx)
+
+    def _key_across(cond):  # the "backgroundScale" group key
+        return tuple(cond[i] for i in across_idx)
+
+    # Group conditions by the "within" key, then compute pairings inside each group.
+    groups: Dict[Tuple, List[Tuple]] = {}
+    for cond in cond_to_epochs:
+        groups.setdefault(_key_within(cond), []).append(cond)
+    # Stable ordering of conditions within each group (e.g. low → high scale).
+    for g in groups.values():
+        g.sort(key=_key_across)
+
+    pre_ms = float(offline.timing.get('preTime_ms', 0))
+    if window_offset_ms is None:
+        window_offset_ms = pre_ms
+    t_start = float(window_offset_ms)
+    t_end = t_start + window_sec * 1000.0
+
+    df_cells = offline.cells
+    if cell_types is not None:
+        df_cells = df_cells.loc[df_cells['cell_type'].isin(list(cell_types))]
+    counts = df_cells['cell_type'].value_counts()
+    keep_types = set(counts.index[counts >= minimum_n])
+    df_cells = df_cells.loc[df_cells['cell_type'].isin(keep_types)]
+
+    rng = np.random.RandomState(rng_seed)
+
+    rows = []
+    for _, cell_row in df_cells.iterrows():
+        cid = int(cell_row['cell_id'])
+        ct = cell_row.get('cell_type', '')
+        sts_list = offline.spike_times(cid)
+
+        # Build per-condition lists of windowed trains (in seconds, rebased to 0).
+        trains_by_cond: Dict[Tuple, List[np.ndarray]] = {}
+        for cond, ep_idx in cond_to_epochs.items():
+            sel = ep_idx[ep_idx < len(sts_list)]
+            if sel.size == 0:
+                continue
+            trains = [_window_spikes_seconds(sts_list[i], t_start, t_end)
+                      for i in sel]
+            if n_trials_cap is not None and len(trains) > n_trials_cap:
+                idx = rng.choice(len(trains), n_trials_cap, replace=False)
+                trains = [trains[i] for i in sorted(idx)]
+            trains_by_cond[cond] = trains
+
+        # Within-condition baseline (mean of upper-triangle entries of the C matrix).
+        d_within: Dict[Tuple, float] = {}
+        n_within: Dict[Tuple, int] = {}
+        for cond, trains in trains_by_cond.items():
+            if len(trains) < 2:
+                d_within[cond], n_within[cond] = float('nan'), 0
+                continue
+            D = victor_purpura_distance_matrix(trains, cost_per_sec)
+            iu = np.triu_indices(len(trains), k=1)
+            d_within[cond] = float(D[iu].mean())
+            n_within[cond] = int(iu[0].size)
+
+        # Across pairs: only inside the same "within" group (e.g. same image).
+        for group_key, conds in groups.items():
+            for i in range(len(conds)):
+                ci = conds[i]
+                if ci not in trains_by_cond:
+                    continue
+                for j in range(i + 1, len(conds)):
+                    cj = conds[j]
+                    if cj not in trains_by_cond:
+                        continue
+                    Xc = victor_purpura_cross_matrix(
+                        trains_by_cond[ci], trains_by_cond[cj], cost_per_sec)
+                    d_cross = float(Xc.mean()) if Xc.size else float('nan')
+                    n_cross = int(Xc.size)
+                    within_avg = 0.5 * (d_within[ci] + d_within[cj])
+                    rows.append({
+                        'exp_name': offline.exp_name,
+                        'cell_id': cid,
+                        'cell_type': ct,
+                        'group_key': group_key,
+                        'cond_i': ci,
+                        'cond_j': cj,
+                        'd_within_i': d_within[ci],
+                        'd_within_j': d_within[cj],
+                        'd_within_avg': within_avg,
+                        'd_across': d_cross,
+                        'd_diff': d_cross - within_avg,
+                        'n_pairs_within_i': n_within[ci],
+                        'n_pairs_within_j': n_within[cj],
+                        'n_pairs_across': n_cross,
+                        'window_sec': window_sec,
+                        'window_offset_ms': window_offset_ms,
+                        'cost_per_sec': cost_per_sec,
+                    })
+
+    cols = ['exp_name', 'cell_id', 'cell_type', 'group_key', 'cond_i', 'cond_j',
+            'd_within_i', 'd_within_j', 'd_within_avg', 'd_across', 'd_diff',
+            'n_pairs_within_i', 'n_pairs_within_j', 'n_pairs_across',
+            'window_sec', 'window_offset_ms', 'cost_per_sec']
+    return pd.DataFrame(rows, columns=cols)
+
+
+# ---------------------------------------------------------------------------
+# Movie-repeat (cycle 1 vs cycle 2)
+# ---------------------------------------------------------------------------
+
+def movie_repeat_analysis(
+    offline,
+    *,
+    cycle_sec: float = 15.0,
+    drop_first_sec: float = 1.0,
+    condition_keys: Optional[Sequence[str]] = None,
+    cell_types: Optional[Iterable[str]] = None,
+    minimum_n: int = 3,
+    cost_per_sec: float = 4.0,
+    compute_vp: bool = False,
+) -> pd.DataFrame:
+    """Compare cycle-1 vs cycle-2 response (movie shown twice).
+
+    Protocol: ``preTime + stimTime`` where ``stimTime = 2 × cycle_sec``.
+    For each cell × condition, build the per-trial PSTH over cycle 1
+    and cycle 2 (each ``cycle_sec - drop_first_sec`` long), then report:
+
+    - ``corr``       — Pearson correlation between mean cycle-1 and cycle-2 PSTHs.
+    - ``rmse``       — RMS deviation between mean cycle-1 and cycle-2 PSTHs (Hz).
+    - ``rate_ratio`` — mean rate cycle-2 / mean rate cycle-1 (adaptation index).
+    - ``vp_distance``— per-trial average VP distance(cycle-1, cycle-2). Picks
+                       up trial-by-trial timing differences invisible to
+                       trial-averaged correlation.
+    - ``n_trials``   — number of trials averaged.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per (cell, condition).
+    """
+    keys = _resolve_condition_keys_from_offline(offline, condition_keys)
+    cond_to_epochs = _epoch_indices_by_condition(offline, keys)
+
+    pre_ms = float(offline.timing.get('preTime_ms', 0))
+    stim_ms = float(offline.timing.get('stimTime_ms', 0))
+    cycle_ms = cycle_sec * 1000.0
+    drop_ms = drop_first_sec * 1000.0
+
+    if stim_ms + 1e-6 < 2 * cycle_ms:
+        raise ValueError(
+            f'movie_repeat_analysis: stim_ms={stim_ms} but cycle_sec={cycle_sec}'
+            f' implies a 2× cycle of {2*cycle_ms} ms — protocol mismatch.'
+        )
+
+    df_cells = offline.cells
+    if cell_types is not None:
+        df_cells = df_cells.loc[df_cells['cell_type'].isin(list(cell_types))]
+    counts = df_cells['cell_type'].value_counts()
+    keep_types = set(counts.index[counts >= minimum_n])
+    df_cells = df_cells.loc[df_cells['cell_type'].isin(keep_types)]
+
+    # Slice indices into the saved PSTH
+    time_ms = offline.psth_time_ms()
+    bin_ms = float(time_ms[1] - time_ms[0]) if len(time_ms) > 1 else 1.0
+
+    c1_start = int(round((pre_ms + drop_ms) / bin_ms))
+    c1_end = int(round((pre_ms + cycle_ms) / bin_ms))
+    c2_start = int(round((pre_ms + cycle_ms + drop_ms) / bin_ms))
+    c2_end = int(round((pre_ms + 2 * cycle_ms) / bin_ms))
+    nb = min(c1_end - c1_start, c2_end - c2_start)
+    if nb <= 1:
+        raise ValueError('movie_repeat_analysis: window too short for current PSTH bin width.')
+    c1_end = c1_start + nb
+    c2_end = c2_start + nb
+
+    # Same windows in ms for VP
+    c1_ms = (pre_ms + drop_ms, pre_ms + cycle_ms)
+    c2_ms = (pre_ms + cycle_ms + drop_ms, pre_ms + 2 * cycle_ms)
+
+    rows = []
+    for _, cell_row in df_cells.iterrows():
+        cid = int(cell_row['cell_id'])
+        ct = cell_row.get('cell_type', '')
+        psth = offline.psth_matrix(cid)  # (n_epochs, n_bins)
+        sts_list = offline.spike_times(cid)
+
+        for cond, ep_idx in cond_to_epochs.items():
+            sel = ep_idx[ep_idx < psth.shape[0]]
+            if sel.size == 0:
+                continue
+
+            c1 = psth[sel, c1_start:c1_end]   # (n_trials, nb)
+            c2 = psth[sel, c2_start:c2_end]
+
+            mean_c1 = c1.mean(axis=0)
+            mean_c2 = c2.mean(axis=0)
+            if mean_c1.std() < 1e-9 or mean_c2.std() < 1e-9:
+                corr = np.nan
+            else:
+                corr = float(np.corrcoef(mean_c1, mean_c2)[0, 1])
+            rmse = float(np.sqrt(np.mean((mean_c1 - mean_c2) ** 2)))
+            r1 = float(mean_c1.mean())
+            r2 = float(mean_c2.mean())
+            rate_ratio = (r2 / r1) if r1 > 1e-9 else float('nan')
+
+            # Per-trial VP cycle-1 vs cycle-2 (optional — slow over 15-s windows)
+            if compute_vp:
+                vp_vals = []
+                for i in sel:
+                    t1 = _window_spikes_seconds(sts_list[i], *c1_ms)
+                    t2 = _window_spikes_seconds(sts_list[i], *c2_ms)
+                    vp_vals.append(victor_purpura_distance(t1, t2, cost_per_sec))
+                vp_mean = float(np.mean(vp_vals)) if vp_vals else float('nan')
+            else:
+                vp_mean = float('nan')
+
+            rows.append({
+                'exp_name': offline.exp_name,
+                'cell_id': cid,
+                'cell_type': ct,
+                'condition': cond,
+                'n_trials': int(sel.size),
+                'rate_cycle1_hz': r1,
+                'rate_cycle2_hz': r2,
+                'rate_ratio': rate_ratio,
+                'corr_cycle12': corr,
+                'rmse_cycle12_hz': rmse,
+                'vp_cycle12': vp_mean,
+                'cycle_sec': cycle_sec,
+                'drop_first_sec': drop_first_sec,
+            })
+
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Population-level time-scale metrics
+# ---------------------------------------------------------------------------
+
+def population_time_scale_metrics(
+    offline,
+    *,
+    primary_key: str = 'currentBackgroundScale',
+    cell_types: Optional[Iterable[str]] = None,
+    minimum_n: int = 3,
+    smooth_ms: float = 50.0,
+) -> Dict:
+    """Time-resolved population metrics comparing the two-level primary key.
+
+    For each cell type, the response of cell ``c`` at time ``t`` under
+    primary condition ``p`` is a single rate value (Hz); the population
+    response is the vector across cells at that time. We then compare
+    the two conditions at each time bin:
+
+    - **Cohen's d** (per cell, then averaged across cells): ``(μ_p1 -
+      μ_p2) / pooled_sd``. Time-resolved discriminability.
+    - **Population Euclidean distance**: ``‖μ_p1(t) - μ_p2(t)‖`` over
+      cells.
+    - **Population cosine distance**: ``1 - cos(μ_p1(t), μ_p2(t))``.
+    - **Cumulative response divergence**: cumulative integral of the
+      mean absolute rate difference over time — turns small persistent
+      effects into a monotonically growing signal.
+    - **Trial-by-trial decoder score**: per time bin, the AUC of a
+      one-feature classifier using a single cell's rate to distinguish
+      conditions (best across cells, averaged across cells).
+
+    Parameters
+    ----------
+    primary_key : str
+        Condition column to compare (default ``currentBackgroundScale``).
+        Currently expects exactly two unique values.
+    smooth_ms : float
+        Width of a uniform-kernel smoothing applied to the time-series
+        metrics for plotting. Set to 0 to skip.
+
+    Returns
+    -------
+    dict
+        ``time_ms``, ``cell_types``, ``primary_values``, plus per
+        cell-type sub-dicts with the metrics above as ``(n_time_bins,)``
+        arrays.
+    """
+    df = offline.epochs
+    if primary_key not in df.columns:
+        raise KeyError(f'{primary_key!r} not in offline.epochs columns: {list(df.columns)}')
+    primary_vals = sorted([v for v in df[primary_key].unique()
+                           if not (isinstance(v, str) and v == '')])
+    if len(primary_vals) < 2:
+        raise ValueError(f'Need 2 levels of {primary_key!r}; got {primary_vals}')
+    if len(primary_vals) > 2:
+        primary_vals = primary_vals[:2]
+    p1, p2 = primary_vals[0], primary_vals[1]
+    e1 = df.loc[df[primary_key] == p1, 'epoch_index'].astype(int).to_numpy()
+    e2 = df.loc[df[primary_key] == p2, 'epoch_index'].astype(int).to_numpy()
+
+    df_cells = offline.cells
+    if cell_types is not None:
+        df_cells = df_cells.loc[df_cells['cell_type'].isin(list(cell_types))]
+    counts = df_cells['cell_type'].value_counts()
+    keep_types = [t for t, n in counts.items() if n >= minimum_n]
+
+    time_ms = offline.psth_time_ms()
+
+    out: Dict = {
+        'time_ms': time_ms,
+        'cell_types': keep_types,
+        'primary_key': primary_key,
+        'primary_values': [p1, p2],
+        'smooth_ms': smooth_ms,
+    }
+
+    for ct in keep_types:
+        cids = df_cells.loc[df_cells['cell_type'] == ct, 'cell_id'].astype(int).tolist()
+        if not cids:
+            continue
+        # Stack: (n_cells, n_bins) means per primary value
+        mu1 = []
+        mu2 = []
+        cohens_d_per_cell = []
+        auc_per_cell = []
+        for cid in cids:
+            psth = offline.psth_matrix(cid)  # (n_epochs, n_bins)
+            e1_in = e1[e1 < psth.shape[0]]
+            e2_in = e2[e2 < psth.shape[0]]
+            if e1_in.size == 0 or e2_in.size == 0:
+                continue
+            m1 = psth[e1_in].mean(axis=0)
+            m2 = psth[e2_in].mean(axis=0)
+            s1 = psth[e1_in].std(axis=0)
+            s2 = psth[e2_in].std(axis=0)
+            pooled = np.sqrt(0.5 * (s1 ** 2 + s2 ** 2)) + 1e-6
+            mu1.append(m1)
+            mu2.append(m2)
+            cohens_d_per_cell.append((m1 - m2) / pooled)
+            auc_per_cell.append(_per_bin_auc(psth[e1_in], psth[e2_in]))
+
+        if not mu1:
+            continue
+        mu1 = np.stack(mu1)
+        mu2 = np.stack(mu2)
+        cohens_d = np.stack(cohens_d_per_cell)
+        auc = np.stack(auc_per_cell)
+
+        # Population vector distance / cosine
+        diff = mu1 - mu2                          # (n_cells, n_bins)
+        euclid = np.sqrt((diff ** 2).sum(axis=0))  # (n_bins,)
+        num = (mu1 * mu2).sum(axis=0)
+        denom = (np.linalg.norm(mu1, axis=0)
+                 * np.linalg.norm(mu2, axis=0) + 1e-12)
+        cosine_sim = num / denom
+        cosine_dist = 1.0 - cosine_sim
+
+        # Cumulative absolute difference (sum over cells, cumulative over time)
+        bin_sec = (time_ms[1] - time_ms[0]) / 1000.0 if len(time_ms) > 1 else 1.0
+        cum_div = np.cumsum(np.abs(diff).sum(axis=0)) * bin_sec
+
+        # Smoothing for plot-ready curves
+        s = _box_smooth(smooth_ms, time_ms)
+        smooth = lambda y: (np.convolve(y, s, mode='same') if s.size > 1 else y)
+
+        out[ct] = {
+            'n_cells': int(mu1.shape[0]),
+            'mu_p1': mu1, 'mu_p2': mu2,
+            'cohens_d_mean': smooth(cohens_d.mean(axis=0)),
+            'cohens_d_abs_mean': smooth(np.abs(cohens_d).mean(axis=0)),
+            'pop_euclid_dist': smooth(euclid),
+            'pop_cosine_dist': smooth(cosine_dist),
+            'cum_abs_divergence': cum_div,
+            'auc_mean': smooth(auc.mean(axis=0)),
+            'auc_max': smooth(auc.max(axis=0)),
+        }
+    return out
+
+
+def _box_smooth(width_ms: float, time_ms: np.ndarray) -> np.ndarray:
+    """Unit-area boxcar of width ``width_ms``."""
+    if width_ms <= 0 or len(time_ms) < 2:
+        return np.array([1.0])
+    bin_ms = float(time_ms[1] - time_ms[0])
+    n = max(1, int(round(width_ms / bin_ms)))
+    return np.ones(n) / n
+
+
+def _per_bin_auc(x1: np.ndarray, x2: np.ndarray) -> np.ndarray:
+    """Per-time-bin Mann-Whitney AUC distinguishing two trial sets.
+
+    Vectorized via rank statistics. ``x1`` is ``(n1, n_bins)``, ``x2``
+    is ``(n2, n_bins)``. Returns ``(n_bins,)`` with AUC in [0, 1].
+    """
+    n1, nb = x1.shape
+    n2 = x2.shape[0]
+    if n1 == 0 or n2 == 0:
+        return np.full(nb, np.nan)
+    combined = np.concatenate([x1, x2], axis=0)  # (n1+n2, nb)
+    # Rank along axis 0 per bin
+    ranks = np.argsort(np.argsort(combined, axis=0), axis=0) + 1
+    rank_sum_1 = ranks[:n1].sum(axis=0)
+    u1 = rank_sum_1 - n1 * (n1 + 1) / 2.0
+    auc = u1 / (n1 * n2)
+    return auc
+
+
+# ---------------------------------------------------------------------------
+# Cross-date aggregation helpers
+# ---------------------------------------------------------------------------
+
+def aggregate_psth_across_dates(
+    offline_by_date: Dict[str, 'OfflineDataset'],
+    *,
+    cell_types: Optional[Iterable[str]] = None,
+    condition_keys: Optional[Sequence[str]] = None,
+    minimum_n: int = 3,
+) -> Dict:
+    """Pool per-cell mean PSTHs across dates for a population analysis.
+
+    Returns dict shaped like :func:`analyze_offline` but pooling each
+    cell type's (n_cells, n_bins) matrix across every date that has
+    matching PSTH bin widths.
+
+    Notes
+    -----
+    Requires every date's offline file to share the same ``time_ms``
+    grid (same preTime/stimTime/tailTime and sample rate). Mismatched
+    dates are dropped with a warning.
+    """
+    if not offline_by_date:
+        return {'cell_types': [], 'psth': {}, 'conditions': []}
+
+    # Pick the first date's time grid as canonical
+    ref_exp, ref = next(iter(offline_by_date.items()))
+    ref_time = ref.psth_time_ms()
+    nb_ref = ref_time.size
+
+    # Pool PSTHs per (type, condition)
+    per_date_results = {}
+    for exp, ds in offline_by_date.items():
+        if ds.psth_time_ms().size != nb_ref:
+            print(f'[aggregate_psth_across_dates] {exp}: PSTH grid mismatch — skipping')
+            continue
+        per_date_results[exp] = analyze_offline(
+            ds, cell_types=cell_types, condition_keys=condition_keys,
+            minimum_n=1,  # individual-date filter is too strict for pooling
+        )
+
+    # Discover the union of types / conditions
+    all_types: List[str] = []
+    all_conditions: List[Tuple] = []
+    for r in per_date_results.values():
+        for t in r['cell_types']:
+            if t not in all_types:
+                all_types.append(t)
+        for c in r['conditions']:
+            if c not in all_conditions:
+                all_conditions.append(c)
+
+    pooled: Dict[str, Dict[Tuple, np.ndarray]] = {ct: {} for ct in all_types}
+    for ct in all_types:
+        for cond in all_conditions:
+            chunks = [r['psth'][ct][cond] for r in per_date_results.values()
+                      if ct in r['psth'] and cond in r['psth'][ct]]
+            if not chunks:
+                continue
+            pooled[ct][cond] = np.concatenate(chunks, axis=0)
+        # Drop types failing the global cell-count threshold
+        n_total = max((m.shape[0] for m in pooled[ct].values()), default=0)
+        if n_total < minimum_n:
+            pooled.pop(ct)
+
+    kept_types = list(pooled.keys())
+
+    return {
+        'time_ms': ref_time,
+        'condition_keys': per_date_results[ref_exp]['condition_keys'],
+        'conditions': all_conditions,
+        'cell_types': kept_types,
+        'psth': pooled,
+        'preTime_ms': per_date_results[ref_exp]['preTime_ms'],
+        'stimTime_ms': per_date_results[ref_exp]['stimTime_ms'],
+        'tailTime_ms': per_date_results[ref_exp]['tailTime_ms'],
+        'condition_key': per_date_results[ref_exp]['condition_keys'][-1],
+        'n_dates': len(per_date_results),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Per-date analysis-results persistence (so we don't redo the heavy lifting)
+# ---------------------------------------------------------------------------
+
+# CSV filenames live next to offline.h5 at <OUTPUT>/<exp>/<protocol>/
+_SPIKE_DIST_CSV = 'spike_distance.csv'
+_MOVIE_REPEAT_CSV = 'movie_repeat.csv'
+
+
+def _analysis_dir(exp_name: str, protocol: str = 'eye_movement_alt_bg',
+                  output_root: Optional[str] = None) -> Path:
+    root = Path(output_root) if output_root else Path(OUTPUT_DIR)
+    return root / exp_name / protocol
+
+
+def save_spike_distance(df: pd.DataFrame, exp_name: str,
+                        protocol: str = 'eye_movement_alt_bg',
+                        output_root: Optional[str] = None) -> Path:
+    """Persist :func:`spike_distance_analysis` output as CSV."""
+    path = _analysis_dir(exp_name, protocol, output_root) / _SPIKE_DIST_CSV
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df = df.copy()
+    df['cond_i'] = df['cond_i'].apply(_tuple_to_str)
+    df['cond_j'] = df['cond_j'].apply(_tuple_to_str)
+    if 'group_key' in df.columns:
+        df['group_key'] = df['group_key'].apply(_tuple_to_str)
+    df.to_csv(path, index=False)
+    return path
+
+
+def save_movie_repeat(df: pd.DataFrame, exp_name: str,
+                      protocol: str = 'eye_movement_alt_bg',
+                      output_root: Optional[str] = None) -> Path:
+    """Persist :func:`movie_repeat_analysis` output as CSV."""
+    path = _analysis_dir(exp_name, protocol, output_root) / _MOVIE_REPEAT_CSV
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df = df.copy()
+    df['condition'] = df['condition'].apply(_tuple_to_str)
+    df.to_csv(path, index=False)
+    return path
+
+
+def _tuple_to_str(t) -> str:
+    if isinstance(t, tuple):
+        return '|'.join('' if v is None else str(v) for v in t)
+    return str(t)
+
+
+def load_spike_distance_many(
+    exp_names: Optional[Iterable[str]] = None,
+    *,
+    protocol: str = 'eye_movement_alt_bg',
+    output_root: Optional[str] = None,
+) -> pd.DataFrame:
+    """Concat every available ``spike_distance.csv`` into a long DataFrame."""
+    return _load_csv_many(exp_names, _SPIKE_DIST_CSV, protocol, output_root)
+
+
+def load_movie_repeat_many(
+    exp_names: Optional[Iterable[str]] = None,
+    *,
+    protocol: str = 'eye_movement_alt_bg',
+    output_root: Optional[str] = None,
+) -> pd.DataFrame:
+    """Concat every available ``movie_repeat.csv`` into a long DataFrame."""
+    return _load_csv_many(exp_names, _MOVIE_REPEAT_CSV, protocol, output_root)
+
+
+def _load_csv_many(exp_names, basename, protocol, output_root):
+    root = Path(output_root) if output_root else Path(OUTPUT_DIR)
+    if exp_names is None:
+        if not root.is_dir():
+            return pd.DataFrame()
+        exp_names = [p.name for p in sorted(root.iterdir()) if p.is_dir()]
+    dfs = []
+    for exp in exp_names:
+        p = root / exp / protocol / basename
+        if p.exists():
+            df = pd.read_csv(p)
+            if 'exp_name' not in df.columns:
+                df['exp_name'] = exp
+            dfs.append(df)
+    if not dfs:
+        return pd.DataFrame()
+    return pd.concat(dfs, ignore_index=True)
+
+
+def run_protocol_analyses(
+    offline,
+    *,
+    protocol: str = 'eye_movement_alt_bg',
+    output_root: Optional[str] = None,
+    save: bool = True,
+    spike_distance_kwargs: Optional[Dict] = None,
+    movie_repeat_kwargs: Optional[Dict] = None,
+    verbose: bool = True,
+) -> Dict:
+    """Run VP + movie-repeat per date and (optionally) save CSVs.
+
+    Returns
+    -------
+    dict
+        ``{'spike_distance': DataFrame, 'movie_repeat': DataFrame}``.
+        When ``save=True``, also writes the CSVs next to ``offline.h5``.
+    """
+    sd_kw = dict(spike_distance_kwargs or {})
+    mr_kw = dict(movie_repeat_kwargs or {})
+
+    if verbose:
+        print(f'[{offline.exp_name}] spike_distance_analysis…')
+    sd = spike_distance_analysis(offline, **sd_kw)
+    if verbose:
+        print(f'  → {len(sd)} cell × condition-pair rows')
+
+    if verbose:
+        print(f'[{offline.exp_name}] movie_repeat_analysis…')
+    mr = movie_repeat_analysis(offline, **mr_kw)
+    if verbose:
+        print(f'  → {len(mr)} cell × condition rows')
+
+    if save:
+        sd_path = save_spike_distance(sd, offline.exp_name, protocol, output_root)
+        mr_path = save_movie_repeat(mr, offline.exp_name, protocol, output_root)
+        if verbose:
+            print(f'  saved: {sd_path}\n         {mr_path}')
+
+    return {'spike_distance': sd, 'movie_repeat': mr}

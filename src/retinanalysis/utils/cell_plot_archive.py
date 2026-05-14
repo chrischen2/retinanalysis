@@ -118,6 +118,46 @@ def _safe_celltype(s) -> str:
     return str(s).replace('/', '_').replace(' ', '_')
 
 
+# Matches cells/<celltype>/cell_<id>_<suffix>.png (raster | psth | …)
+_CELL_PNG_RE = re.compile(r'^cell_(\d+)_[A-Za-z0-9]+\.png$')
+
+
+def _prune_stale_cell_pngs(cells_root: str, kept_ids: set) -> int:
+    """Delete per-cell PNGs whose ``cell_id`` is not in ``kept_ids``.
+
+    Walks ``cells/<celltype>/cell_<id>_*.png`` and removes any file
+    whose id is now outside the kept set. Returns the count removed.
+    Also drops empty cell-type directories. Skips anything that doesn't
+    match the canonical filename pattern, so a stray user file in the
+    archive won't be touched.
+    """
+    if not os.path.isdir(cells_root):
+        return 0
+    n_removed = 0
+    for ct_name in os.listdir(cells_root):
+        ct_dir = os.path.join(cells_root, ct_name)
+        if not os.path.isdir(ct_dir):
+            continue
+        for fname in os.listdir(ct_dir):
+            m = _CELL_PNG_RE.match(fname)
+            if m is None:
+                continue
+            cid = int(m.group(1))
+            if cid not in kept_ids:
+                try:
+                    os.remove(os.path.join(ct_dir, fname))
+                    n_removed += 1
+                except OSError:
+                    pass
+        # Drop the celltype dir if it ended up empty
+        try:
+            if not os.listdir(ct_dir):
+                os.rmdir(ct_dir)
+        except OSError:
+            pass
+    return n_removed
+
+
 # ---------------------------------------------------------------------------
 # Manifest
 # ---------------------------------------------------------------------------
@@ -900,6 +940,7 @@ def save_per_cell_plots(
     n_jobs: int = -1,
     verbose: bool = True,
     ndf: Optional[float] = None,
+    prune_stale: bool = True,
 ) -> pd.DataFrame:
     """Write the per-cell archive for one protocol into the experiment tree.
 
@@ -921,6 +962,14 @@ def save_per_cell_plots(
         per-cell mosaic panels follow the same restriction).
     ndf : float, optional
         Annotate the manifest entry with the day's NDF setting.
+    prune_stale : bool
+        When ``True`` (default), delete any pre-existing PNG under
+        ``cells/<celltype>/cell_<id>_*.png`` whose ``cell_id`` is *not*
+        in the kept set (i.e. cells filtered out by ``cell_ids`` or
+        ``qc_pass_only``). This is how §17/§18 collapses the archive
+        to the visual-QC ``good`` subset on re-run — without it, stale
+        PNGs from cells later tagged ``bad`` linger on disk. Set
+        ``False`` to leave existing PNGs untouched.
 
     Returns the index DataFrame (``cell_id, cell_type, png_path, rendered``).
     """
@@ -970,6 +1019,16 @@ def save_per_cell_plots(
     if qc_pass_only is not None:
         passing = set(qc_pass_only.loc[qc_pass_only['passes'], 'cell_id'].astype(int))
         df = df[df['cell_id'].isin(passing)]
+
+    # --- Prune stale PNGs from prior runs (cells now outside the kept set)
+    if prune_stale:
+        kept_ids = set(int(c) for c in df['cell_id'].tolist())
+        n_pruned = _prune_stale_cell_pngs(
+            os.path.join(proto_root, 'cells'), kept_ids,
+        )
+        if verbose and n_pruned:
+            print(f'[cell_plot_archive] pruned {n_pruned} stale per-cell PNG(s) '
+                  f'(cells now outside kept set)')
 
     # --- Stim timing + condition mapping
     timing = getattr(response_block, 'd_timing', {}) or {}

@@ -82,6 +82,14 @@ all read-only with respect to that file. Documented in their
 docstrings and enforced by an audit-style smoke test in
 `tests/test_visual_qc_invariant.py`.
 
+**Re-archive prunes stale per-cell PNGs.** `save_per_cell_plots` and
+the `analyze_experiment` driver default to `prune_stale=True`: any
+existing `cells/<celltype>/cell_<id>_*.png` whose `cell_id` is outside
+the kept set (QC pass ∩ visual-QC `good`) is deleted. So after tagging
+cells `bad` in §16 and re-running §17/§18, those cells' PNGs disappear
+from disk. Stray non-canonical files in the cells dir (e.g. a README)
+are not touched. Set `prune_stale=False` to keep stale PNGs.
+
 ## Population-cell selection (§17 of chrisMain)
 
 The default pool for population/statistical analysis is **all cells
@@ -105,6 +113,40 @@ experiment's `index.csv`).
 **Default flow: don't require manual review** unless the user
 explicitly asks. Always wire downstream code through
 `select_good_cells()` so the visual-QC step remains optional.
+
+## Offline data store (§20 of chrisMain)
+
+Once a date has been through automated + visual QC, the *interesting*
+data for downstream analysis is small (spike times + condition table +
+STA/EI summaries). `ra.load_or_build_offline(exp, protocol_search=...)`
+packages that subset into a single HDF5 at
+`<OUTPUT_DIR>/<exp>/<protocol>/offline.h5` so future sessions skip
+DataJoint and the SSD pipeline.
+
+- **First call**: builds pipeline → runs QC → intersects with
+  `visual_qc.csv` (good cells only) → writes HDF5. ~1–2 min/date.
+- **Reload**: `ra.load_offline_data(exp)` → `OfflineDataset` in <1 s.
+- **Cross-date**: `ra.load_offline_many()` returns
+  `{exp_name: OfflineDataset}` for every date with `offline.h5`.
+
+Per-protocol analyses live under
+`retinanalysis.protocols.eye_movement_alt_bg`:
+
+- `analyze_offline(ds)` — per-(cell-type × condition) mean PSTHs.
+- `spike_distance_analysis(ds, window_sec=5)` — Victor-Purpura within
+  vs across condition (port of `spkd_with_scr.m`).
+- `movie_repeat_analysis(ds, cycle_sec=15, drop_first_sec=1)` — cycle-1
+  vs cycle-2 correlation, RMSE, adaptation index; `compute_vp=True`
+  adds per-trial VP timing distance (slow).
+- `population_time_scale_metrics(ds)` — time-resolved population
+  divergence (Cohen's d, Euclidean/cosine distance, cumulative
+  |Δrate|, per-bin Mann-Whitney AUC) between the two
+  `currentBackgroundScale` levels per cell type.
+- `aggregate_psth_across_dates(offlines)` — pool per-cell mean PSTHs.
+
+Per-date analysis CSVs (`spike_distance.csv`, `movie_repeat.csv`) are
+written next to `offline.h5`; `load_spike_distance_many()` /
+`load_movie_repeat_many()` concat them across dates.
 
 ## Database write/delete verbs
 

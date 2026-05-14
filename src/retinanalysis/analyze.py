@@ -144,6 +144,7 @@ def analyze_experiment(
     n_jobs: int = -1,
     cell_ids: Optional[Sequence[int]] = None,
     respect_visual_qc: bool = True,
+    prune_stale: bool = True,
     verbose: bool = True,
 ) -> Dict:
     """Run the full archive pipeline for one experiment date.
@@ -189,6 +190,12 @@ def analyze_experiment(
         file exists, every QC-passing cell is rendered (first-pass
         default). Set ``False`` to ignore visual QC and always render
         the full QC-pass set.
+    prune_stale : bool
+        When ``True`` (default), delete per-cell PNGs left over from a
+        prior run whose ``cell_id`` is no longer in the kept set. This
+        is the standard §17/§18 re-archive flow: tag cells ``bad`` in
+        §16, re-run §17/§18, and the bad cells' PNGs disappear from
+        ``cells/<celltype>/``. Set ``False`` to keep stale PNGs.
 
     Notes
     -----
@@ -358,6 +365,7 @@ def analyze_experiment(
         n_jobs=n_jobs,
         verbose=verbose,
         ndf=ndf,
+        prune_stale=prune_stale,
     )
 
     return {

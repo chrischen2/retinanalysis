@@ -1,0 +1,5 @@
+# Compiled on first import by victor_purpura._build_ext.
+libspkd.so
+libspkd.dylib
+libspkd.dll
+*.o

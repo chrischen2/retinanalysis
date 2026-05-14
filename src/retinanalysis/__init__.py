@@ -77,6 +77,14 @@ from .utils import protocol_qc as _protocol_qc_mod
 from .utils.protocol_qc import (save_protocol_qc, load_protocol_qc,
                                 protocol_qc_csv_path)
 
+from .utils import offline_store as _offline_store_mod
+from .utils.offline_store import (OfflineDataset,
+                                  save_offline_data,
+                                  load_offline_data,
+                                  load_or_build_offline,
+                                  load_offline_many,
+                                  offline_h5_path)
+
 # Per-protocol analyzers live under retinanalysis.protocols; import the
 # package but don't pull every module at top level (loaded on demand).
 from . import protocols
