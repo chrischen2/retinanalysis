@@ -57,15 +57,15 @@ def sample_sorting_qc_cells(
     n_cells_per_type: int = 3,
     rate_col: str = 'mean_rate_hz',
     require_visual_qc_good: bool = True,
+    sample_strategy: str = 'random',
+    random_seed: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Pick top-firing cells per type for sorting QC.
+    """Pick ``n_cells_per_type`` cells per type for sorting QC.
 
     Reads ``<OUTPUT>/<exp>/<protocol_subdir>/qc.csv`` and (when present)
     ``visual_qc.csv`` written by ``analyze_experiment``. Builds the
     candidate pool as **QC-pass ∩ visual-QC ``'good'``** (or just
-    QC-pass when visual_qc.csv is absent), then returns the top
-    ``n_cells_per_type`` cells per requested cell type, sorted by
-    descending ``rate_col``.
+    QC-pass when visual_qc.csv is absent), then samples per cell type.
 
     Parameters
     ----------
@@ -73,6 +73,17 @@ def sample_sorting_qc_cells(
         Which cell types to sample. Default ``('OnP', 'OnM')``.
     n_cells_per_type : int
         Number of cells to keep per type.
+    sample_strategy : ``'random'`` (default) or ``'top_rate'``
+        - ``'random'``: uniform sample from the candidate pool (recommended
+          for sorting QC — top-firing cells are systematically biased
+          toward easy-to-sort high-amp units and tell you less about
+          the marginal cases).
+        - ``'top_rate'``: top ``n_cells_per_type`` by ``rate_col``
+          descending (reproducible without a seed; useful for digging
+          into the most-active cells specifically).
+    random_seed : int, optional
+        Seed for ``random`` strategy. ``None`` (default) draws a fresh
+        sample every call. Set an integer for reproducible runs.
 
     Returns
     -------
@@ -111,17 +122,35 @@ def sample_sorting_qc_cells(
     if 'cell_type' in pool.columns and cell_types:
         pool = pool.loc[pool['cell_type'].isin(list(cell_types))]
 
-    if rate_col in pool.columns:
-        pool = pool.sort_values(rate_col, ascending=False)
+    if sample_strategy not in ('random', 'top_rate'):
+        raise ValueError(
+            f'sample_strategy must be "random" or "top_rate", got {sample_strategy!r}')
 
-    # Take top-N per cell type (in the cell_types order so output is grouped).
+    # Sample per cell type (in the cell_types order so output is grouped).
+    rng = np.random.default_rng(random_seed)
     if cell_types and 'cell_type' in pool.columns:
         keep_rows = []
         for ct in cell_types:
-            keep_rows.append(pool.loc[pool['cell_type'] == ct].head(n_cells_per_type))
+            sub = pool.loc[pool['cell_type'] == ct]
+            if sub.empty:
+                continue
+            n = min(n_cells_per_type, len(sub))
+            if sample_strategy == 'top_rate' and rate_col in sub.columns:
+                picked = sub.sort_values(rate_col, ascending=False).head(n)
+            else:
+                # Random: numpy choice over the row indices for determinism
+                # when random_seed is provided.
+                idx = rng.choice(len(sub), size=n, replace=False)
+                picked = sub.iloc[np.sort(idx)]
+            keep_rows.append(picked)
         sample = pd.concat(keep_rows, ignore_index=True) if keep_rows else pool.head(0)
     else:
-        sample = pool.head(n_cells_per_type)
+        n = min(n_cells_per_type, len(pool))
+        if sample_strategy == 'top_rate' and rate_col in pool.columns:
+            sample = pool.sort_values(rate_col, ascending=False).head(n)
+        else:
+            idx = rng.choice(len(pool), size=n, replace=False) if n > 0 else []
+            sample = pool.iloc[np.sort(idx)] if n > 0 else pool.head(0)
 
     keep = [c for c in ('cell_id', 'cell_type', rate_col, 'n_epochs')
             if c in sample.columns]
@@ -255,6 +284,8 @@ def sample_and_plot_sorting_qc(
     n_cells_per_type: int = 3,
     n_epochs: int = 4,
     require_visual_qc_good: bool = True,
+    sample_strategy: str = 'random',
+    random_seed: Optional[int] = None,
     save_dir: Optional[str] = None,
     dpi: int = 250,
     overwrite: bool = True,
@@ -281,10 +312,16 @@ def sample_and_plot_sorting_qc(
     cell_types : sequence[str]
         Cell types to sample (default ``('OnP', 'OnM')``).
     n_cells_per_type : int
-        Number of cells to sample per type (top firing rate).
+        Number of cells to sample per type.
     n_epochs : int
         Number of epochs to plot per cell (always the first
         ``n_epochs`` epochs). Each epoch is one row in the figure.
+    sample_strategy : ``'random'`` (default) or ``'top_rate'``
+        How to pick cells from the candidate pool. Random avoids the
+        bias toward easy-to-sort high-amplitude units; ``top_rate``
+        gives a reproducible "best firers" subset.
+    random_seed : int, optional
+        Seed for random sampling. ``None`` = fresh sample each call.
     save_dir : str, optional
         Override the default save directory.
     dpi : int
@@ -310,6 +347,8 @@ def sample_and_plot_sorting_qc(
         cell_types=cell_types,
         n_cells_per_type=n_cells_per_type,
         require_visual_qc_good=require_visual_qc_good,
+        sample_strategy=sample_strategy,
+        random_seed=random_seed,
     )
     if verbose:
         print(f'sampled {len(sample_df)} cells:')
