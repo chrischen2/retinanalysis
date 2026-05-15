@@ -1,4 +1,19 @@
 import logging
+import warnings
+
+# Suppress the "No datajoint.json found. Using defaults and environment
+# variables." UserWarning emitted by datajoint/settings.py:_create_config
+# at import time. We set every config field below explicitly, so the
+# warning is informational only. Without this filter, every joblib
+# worker re-imports datajoint and re-emits the warning, spamming the
+# notebook output of any parallel cell (§17/§18 archive runs).
+warnings.filterwarnings(
+    'ignore',
+    message=r'No datajoint\.json found.*',
+    category=UserWarning,
+    module=r'datajoint\..*',
+)
+
 import datajoint as dj
 
 dj.config['database.host'] = '127.0.0.1'
