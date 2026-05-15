@@ -53,23 +53,32 @@ def sample_sorting_qc_cells(
     protocol_subdir: Optional[str] = None,
     append_datafile_to_subdir: bool = False,
     output_root: Optional[str] = None,
-    n_cells: int = 4,
-    per_cell_types: bool = True,
+    cell_types: Sequence[str] = ('OnP', 'OnM'),
+    n_cells_per_type: int = 3,
     rate_col: str = 'mean_rate_hz',
     require_visual_qc_good: bool = True,
 ) -> pd.DataFrame:
-    """Pick ``n_cells`` for sorting QC.
+    """Pick top-firing cells per type for sorting QC.
 
     Reads ``<OUTPUT>/<exp>/<protocol_subdir>/qc.csv`` and (when present)
     ``visual_qc.csv`` written by ``analyze_experiment``. Builds the
     candidate pool as **QC-pass ∩ visual-QC ``'good'``** (or just
-    QC-pass if no visual QC has been done and ``require_visual_qc_good``
-    is False), sorts by ``rate_col`` descending, and returns the top
-    ``n_cells`` — one per ``cell_type`` when ``per_cell_types=True``,
-    otherwise top-N across all types.
+    QC-pass when visual_qc.csv is absent), then returns the top
+    ``n_cells_per_type`` cells per requested cell type, sorted by
+    descending ``rate_col``.
 
-    Returns a DataFrame with at least ``cell_id, cell_type, mean_rate_hz``.
-    Empty when nothing passes the filters.
+    Parameters
+    ----------
+    cell_types : sequence[str]
+        Which cell types to sample. Default ``('OnP', 'OnM')``.
+    n_cells_per_type : int
+        Number of cells to keep per type.
+
+    Returns
+    -------
+    pandas.DataFrame
+        At least ``cell_id, cell_type, mean_rate_hz``. Empty when
+        nothing passes the filters.
     """
     exp = exp_name or getattr(response_block, 'exp_name', None)
     if exp is None:
@@ -99,17 +108,86 @@ def sample_sorting_qc_cells(
         # visual_qc.csv is optional; missing one is fine on first-time runs.
         pass
 
+    if 'cell_type' in pool.columns and cell_types:
+        pool = pool.loc[pool['cell_type'].isin(list(cell_types))]
+
     if rate_col in pool.columns:
         pool = pool.sort_values(rate_col, ascending=False)
 
-    if per_cell_types and 'cell_type' in pool.columns:
-        sample = pool.groupby('cell_type', as_index=False).head(1).head(n_cells)
+    # Take top-N per cell type (in the cell_types order so output is grouped).
+    if cell_types and 'cell_type' in pool.columns:
+        keep_rows = []
+        for ct in cell_types:
+            keep_rows.append(pool.loc[pool['cell_type'] == ct].head(n_cells_per_type))
+        sample = pd.concat(keep_rows, ignore_index=True) if keep_rows else pool.head(0)
     else:
-        sample = pool.head(n_cells)
+        sample = pool.head(n_cells_per_type)
 
     keep = [c for c in ('cell_id', 'cell_type', rate_col, 'n_epochs')
             if c in sample.columns]
     return sample[keep].reset_index(drop=True)
+
+
+def _plot_epoch_trace_with_raster(
+    rt,
+    rb,
+    cell_id: int,
+    epoch_idx: int,
+    ax_trace: plt.Axes,
+    ax_raster: plt.Axes,
+    target_color: str = 'tab:red',
+) -> None:
+    """Render one (raster + trace) row for one cell × one epoch.
+
+    Top axis: thin raster strip with vertical ticks at the cell's spike
+    times for this epoch.  Bottom axis: raw voltage on the cell's
+    primary electrode with red dots at the spike samples.
+    """
+    from ..classes.raw import primary_electrode_of_cell
+
+    if rt.epoch_idx != epoch_idx:
+        rt.load_epoch_index(epoch_idx, verbose=False)
+
+    electrode_idx = primary_electrode_of_cell(rb, cell_id)
+    raw_ts = rt.data[electrode_idx, :]
+    time_s = np.arange(len(raw_ts)) / rt.sample_rate
+
+    # Pull this cell's spike times for this epoch (ms → s)
+    df_st = rb.df_spike_times
+    cell_idx = df_st.index[df_st['cell_id'] == int(cell_id)]
+    if len(cell_idx) == 0:
+        sts_ms = np.array([])
+    else:
+        sts_ms = np.asarray(df_st.at[cell_idx[0], 'spike_times'][epoch_idx])
+    sts_s = sts_ms / 1000.0
+
+    # --- raster strip (top): thin row of vertical lines per spike
+    ax_raster.vlines(sts_s, 0.05, 0.95, color=target_color, lw=0.7)
+    ax_raster.set_xlim(time_s[0], time_s[-1])
+    ax_raster.set_ylim(0, 1)
+    ax_raster.set_yticks([])
+    ax_raster.set_xticks([])
+    for spine in ('top', 'right', 'left', 'bottom'):
+        ax_raster.spines[spine].set_visible(False)
+    n_spikes = int(sts_s.size)
+    ax_raster.set_ylabel(f'cell {cell_id}\n({n_spikes} sp)',
+                         fontsize=8, rotation=0, ha='right', va='center')
+
+    # --- raw trace (bottom)
+    ax_trace.plot(time_s, raw_ts, color='0.25', lw=0.4, zorder=1)
+    # Mark spikes on the trace (clip to in-range to be safe)
+    if sts_s.size:
+        sample_idx = np.round(sts_s * rt.sample_rate).astype(int)
+        sample_idx = sample_idx[(sample_idx >= 0) & (sample_idx < raw_ts.size)]
+        ax_trace.scatter(sample_idx / rt.sample_rate, raw_ts[sample_idx],
+                         color=target_color, s=8, zorder=3)
+    ax_trace.set_xlim(time_s[0], time_s[-1])
+    ax_trace.set_ylabel('raw (mV·)', fontsize=8)
+    ax_trace.set_title(
+        f'epoch {epoch_idx} · electrode {electrode_idx}',
+        fontsize=8, loc='left', pad=2,
+    )
+    ax_trace.tick_params(axis='both', labelsize=7)
 
 
 def sample_and_plot_sorting_qc(
@@ -119,81 +197,74 @@ def sample_and_plot_sorting_qc(
     protocol_subdir: Optional[str] = None,
     append_datafile_to_subdir: bool = False,
     output_root: Optional[str] = None,
-    n_cells: int = 4,
-    n_epochs: int = 2,
-    per_cell_types: bool = True,
-    max_other_cells: int = 6,
+    cell_types: Sequence[str] = ('OnP', 'OnM'),
+    n_cells_per_type: int = 3,
+    n_epochs: int = 4,
     require_visual_qc_good: bool = True,
-    figsize_per_epoch: Tuple[float, float] = (6.5, 2.8),
+    save_dir: Optional[str] = None,
+    dpi: int = 250,
+    overwrite: bool = True,
+    figsize_per_epoch: Tuple[float, float] = (12.0, 1.7),
     verbose: bool = True,
-) -> Tuple[pd.DataFrame, List[plt.Figure]]:
-    """Sample top-firing cells and plot full-epoch raw traces for each.
+) -> Tuple[pd.DataFrame, List[Path]]:
+    """Sample top-firing cells per type and write full-epoch sorting-QC PNGs.
 
-    One figure per cell; one subplot per epoch (full duration of that
-    epoch — no time-window slicing). The cell's spikes appear as red
-    asterisks at the top; spikes of other cells whose primary electrode
-    matches appear as color-coded asterisks slightly below. The
-    neighbor search is restricted to the QC-pass set so noise units
-    don't clutter the panel.
+    One **figure per cell**; inside the figure, each requested epoch
+    is a full-width row containing two stacked panels (sharing the
+    epoch's time axis):
+
+    - **Raster strip** (thin): vertical ticks at every spike assigned
+      to the cell for that epoch.
+    - **Raw trace**: voltage on the cell's primary electrode for the
+      whole epoch, with red dots at the spike samples — so you can
+      eyeball whether each assigned spike has a real waveform.
+
+    Saved as high-DPI PNGs in
+    ``<OUTPUT>/<exp>/<protocol_subdir>/sorting_qc/`` (one per cell).
 
     Parameters
     ----------
-    response_block : MEAResponseBlock
-        Built by ``ra.create_mea_pipeline`` (cell §3).
-    exp_name : str, optional
-        Defaults to ``response_block.exp_name``.
-    protocol_subdir : str, optional
-        Subdir under ``<OUTPUT>/<exp>/`` where qc.csv / visual_qc.csv
-        live. Defaults to the protocol short-name (so the resolution
-        matches ``analyze_experiment``). Override to disambiguate when
-        the date has multiple datafiles of the same protocol.
-    append_datafile_to_subdir : bool
-        If True and ``protocol_subdir is None``, auto-append the
-        datafile name (matches the §17 flag of the same name).
-    n_cells : int
-        Cells to sample. Top by ``mean_rate_hz``.
+    cell_types : sequence[str]
+        Cell types to sample (default ``('OnP', 'OnM')``).
+    n_cells_per_type : int
+        Number of cells to sample per type (top firing rate).
     n_epochs : int
-        Epochs to show per cell. Always the first ``n_epochs``.
-    per_cell_types : bool
-        True (default): top-1 firing rate per cell type, up to n_cells.
-        False: top-N across all types.
-    max_other_cells : int
-        Cap on neighbor cells annotated per panel.
-    require_visual_qc_good : bool
-        When True (default) and visual_qc.csv exists, restrict to cells
-        tagged 'good'. When False, the visual-QC filter is skipped
-        even if the file exists.
+        Number of epochs to plot per cell (always the first
+        ``n_epochs`` epochs). Each epoch is one row in the figure.
+    save_dir : str, optional
+        Override the default save directory.
+    dpi : int
+        PNG resolution. 200-300 is appropriate for visual inspection.
+    overwrite : bool
+        Re-render existing PNGs (default True).
     figsize_per_epoch : (w, h)
-        Per-subplot figure size; passed to plt.subplots.
+        Per-row figure size in inches.
 
     Returns
     -------
-    (sample_df, figures)
-        ``sample_df`` is the DataFrame of cells chosen.
-        ``figures`` is a list of matplotlib Figures (one per cell).
+    (sample_df, png_paths)
+        DataFrame of cells chosen + list of PNG paths written.
     """
-    from ..classes.raw import RawTraces, plot_sorting_qc
-    from .style import apply_publication_style
-
-    apply_publication_style()
+    from ..classes.raw import RawTraces
 
     # 1. Pick cells
     sample_df = sample_sorting_qc_cells(
         response_block,
         exp_name=exp_name, protocol_subdir=protocol_subdir,
         append_datafile_to_subdir=append_datafile_to_subdir,
-        output_root=output_root, n_cells=n_cells,
-        per_cell_types=per_cell_types,
+        output_root=output_root,
+        cell_types=cell_types,
+        n_cells_per_type=n_cells_per_type,
         require_visual_qc_good=require_visual_qc_good,
     )
     if verbose:
         print(f'sampled {len(sample_df)} cells:')
-        print(sample_df.to_string(index=False))
+        if not sample_df.empty:
+            print(sample_df.to_string(index=False))
     if sample_df.empty:
         return sample_df, []
 
-    # 2. Resolve candidate pool for neighbor lookup (all QC-passing cells —
-    # so the neighbor list isn't polluted by noise units).
+    # 2. Resolve save directory
     exp = exp_name or response_block.exp_name
     short = _resolve_protocol_subdir(
         response_block, protocol_subdir,
@@ -201,49 +272,73 @@ def sample_and_plot_sorting_qc(
         append_datafile_to_subdir,
     )
     root = Path(output_root) if output_root else Path(OUTPUT_DIR)
-    qc_df = pd.read_csv(root / exp / short / 'qc.csv')
-    candidate_pool = qc_df.loc[qc_df['passes'], 'cell_id'].astype(int).tolist()
+    save_root = (Path(save_dir) if save_dir is not None
+                 else root / exp / short / 'sorting_qc')
+    save_root.mkdir(parents=True, exist_ok=True)
+    if verbose:
+        print(f'save dir: {save_root}')
 
-    # 3. Build raw-trace loader.
+    # 3. Build the raw-trace loader (caches one epoch's worth at a time).
     rt = RawTraces(response_block)
 
-    # 4. Build figures. Outer loop on epochs so each epoch's raw block
-    # is loaded exactly once and reused across all sampled cells.
     n_ep = min(n_epochs, response_block.n_epochs)
     epoch_idxs = list(range(n_ep))
-    # Cell-major layout: one figure per cell with n_epochs columns.
-    figures: List[plt.Figure] = []
-    cell_ids = sample_df['cell_id'].astype(int).tolist()
-    cell_types = sample_df['cell_type'].tolist() if 'cell_type' in sample_df.columns \
-                 else [''] * len(cell_ids)
 
-    for cid, ctype in zip(cell_ids, cell_types):
-        fig, axes = plt.subplots(
-            1, len(epoch_idxs),
-            figsize=(figsize_per_epoch[0] * len(epoch_idxs), figsize_per_epoch[1]),
-            squeeze=False,
+    cell_ids = sample_df['cell_id'].astype(int).tolist()
+    cell_type_list = (sample_df['cell_type'].tolist()
+                      if 'cell_type' in sample_df.columns
+                      else [''] * len(cell_ids))
+
+    png_paths: List[Path] = []
+
+    # 4. Plot. We iterate over CELLS outer because each plot only shows
+    # the target cell — we still load each epoch from disk per cell,
+    # but each load is amortized over the raster + trace render. (If
+    # disk I/O dominates, flipping this loop and saving figures across
+    # cells is the future optimization.)
+    for cid, ctype in zip(cell_ids, cell_type_list):
+        png_path = save_root / f'cell_{cid:04d}_{ctype}_sorting_qc.png'
+        if png_path.exists() and not overwrite:
+            if verbose:
+                print(f'  skip (exists): {png_path}')
+            png_paths.append(png_path)
+            continue
+
+        # Per cell: n_epochs rows × 2 sub-rows (raster strip + trace).
+        # GridSpec gives us the thin raster strip above each trace.
+        fig = plt.figure(
+            figsize=(figsize_per_epoch[0], figsize_per_epoch[1] * n_ep),
+        )
+        gs = fig.add_gridspec(
+            n_ep * 2, 1,
+            height_ratios=[0.18, 1.0] * n_ep,
+            hspace=0.32,
         )
         for j, ep in enumerate(epoch_idxs):
-            ax = axes[0, j]
+            ax_raster = fig.add_subplot(gs[j * 2])
+            ax_trace = fig.add_subplot(gs[j * 2 + 1], sharex=ax_raster)
             try:
-                plot_sorting_qc(
+                _plot_epoch_trace_with_raster(
                     rt, response_block, cid, ep,
-                    start_time=0.0,
-                    end_time=None,             # → full epoch
-                    candidate_cell_ids=candidate_pool,
-                    max_other_cells=max_other_cells,
-                    ax=ax,
-                    show_legend=(j == 0),
+                    ax_trace=ax_trace, ax_raster=ax_raster,
                 )
             except Exception as exc:
-                ax.set_title(f'cell {cid}, epoch {ep}: {exc!r}', fontsize=8)
-                ax.axis('off')
+                ax_trace.set_title(f'cell {cid}, epoch {ep}: {exc!r}', fontsize=7)
+                ax_trace.axis('off')
+                ax_raster.axis('off')
+            if j == n_ep - 1:
+                ax_trace.set_xlabel('time (s)', fontsize=9)
+
         fig.suptitle(
             f'{exp} / {getattr(response_block, "datafile_name", "?")} — '
             f'cell {cid} ({ctype}): sorting QC',
-            fontsize=10, y=1.001,
+            fontsize=10, y=0.995,
         )
-        fig.tight_layout()
-        figures.append(fig)
+        fig.tight_layout(rect=(0, 0, 1, 0.985))
+        fig.savefig(png_path, dpi=dpi, bbox_inches='tight')
+        plt.close(fig)
+        png_paths.append(png_path)
+        if verbose:
+            print(f'  wrote: {png_path}')
 
-    return sample_df, figures
+    return sample_df, png_paths
