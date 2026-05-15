@@ -56,7 +56,10 @@ class MEAPipeline:
     def __init__(self, stim: Optional[MEAStimBlock | MEAStimGroup] = None,
                  resp: Optional[MEAResponseBlock | MEAResponseGroup] = None,
                  analysis_chunk: Optional[AnalysisChunk] = None, typing_file: Optional[str] = None,
-                 verbose: bool = True, pkl_file: Optional[str] = None):
+                 verbose: bool = True, pkl_file: Optional[str] = None,
+                 ei_corr_cutoff: float = 0.8, ei_match_method: str = 'all',
+                 ei_use_isi: bool = False, ei_use_timecourse: bool = False,
+                 ei_n_removed_channels: int = 1):
         
         self.verbose = verbose
 
@@ -85,6 +88,16 @@ class MEAPipeline:
         self.analysis_chunk = analysis_chunk
         self.typing_file = typing_file
 
+        # Cache match-config so downstream code (and re-runs of cluster_match)
+        # can see what was used.
+        self.ei_match_config = {
+            'corr_cutoff': float(ei_corr_cutoff),
+            'method': ei_match_method,
+            'use_isi': bool(ei_use_isi),
+            'use_timecourse': bool(ei_use_timecourse),
+            'n_removed_channels': int(ei_n_removed_channels),
+        }
+
         # If datafile/datafiles in resp are all part of the same chunk as analysis_chunk, skip cluster match
         if isinstance(self.resp, MEAResponseBlock):
             if self.resp.datafile_name in self.analysis_chunk.data_files:
@@ -92,14 +105,20 @@ class MEAPipeline:
                 self.match_dict = {id : id for id in self.analysis_chunk.cell_ids}
                 self.corr_dict = {id : 1.0 for id in self.analysis_chunk.cell_ids}
             else:
-                self.match_dict, self.corr_dict = cluster_match(self.analysis_chunk, self.resp, verbose = self.verbose)
+                self.match_dict, self.corr_dict = cluster_match(
+                    self.analysis_chunk, self.resp,
+                    verbose = self.verbose, **self.ei_match_config,
+                )
         elif isinstance(self.resp, MEAResponseGroup):
             if all(r in self.analysis_chunk.data_files for r in self.resp.datafile_names):
                 print('Response Group is part of the same sorting chunk, skipping cluster matching...')
                 self.match_dict = {id : id for id in self.analysis_chunk.cell_ids}
                 self.corr_dict = {id : 1.0 for id in self.analysis_chunk.cell_ids}
             else:
-                self.match_dict, self.corr_dict = cluster_match(self.analysis_chunk, self.resp, verbose = self.verbose)
+                self.match_dict, self.corr_dict = cluster_match(
+                    self.analysis_chunk, self.resp,
+                    verbose = self.verbose, **self.ei_match_config,
+                )
         
         # Add noise_ids from match dict to response block df_spike_times dataframe
         self.add_matches_to_protocol()
@@ -589,8 +608,11 @@ class MEAPipeline:
 def create_mea_pipeline(
         exp_name: str, datafile_name: str | List[str], analysis_chunk_name: Optional[str] = None,
         typing_file: Optional[str] = None, ss_version: str = 'kilosort2.5',
-        ls_params: Optional[list] = None, b_load_fd: bool = False, 
-        b_LED: bool = False, verbose: bool = True
+        ls_params: Optional[list] = None, b_load_fd: bool = False,
+        b_LED: bool = False, verbose: bool = True,
+        ei_corr_cutoff: float = 0.8, ei_match_method: str = 'all',
+        ei_use_isi: bool = False, ei_use_timecourse: bool = False,
+        ei_n_removed_channels: int = 1,
     ):
     """
     Helper function for initializing an MEAPipeline from metadata.
@@ -611,6 +633,17 @@ def create_mea_pipeline(
         ls_params (List): List of epoch parameters to pull into their own column in the MEAStimBlock.df_epochs
         DataFrame. By default parameters that change with each epoch are already pulled, but additional params
         can be specified in this list.
+
+        EI cluster-match knobs (forwarded to ``cluster_match`` in vision_utils):
+            ei_corr_cutoff (float): minimum max-correlation for a match to be kept. Default 0.8.
+                Lower (e.g. 0.6) keeps more matches at the cost of precision; raise toward 0.9 for stricter.
+            ei_match_method (str): which EI correlation to use — 'all' (default; max of full/space/power),
+                'full' (full spatiotemporal flatten), 'space' (peak |EI| per electrode), or 'power'
+                (mean EI² per electrode). See ``vision_utils.ei_corr``.
+            ei_use_isi (bool): also require the ISI correlation to be ≥ 0.3 between the matched pair.
+            ei_use_timecourse (bool): also require the RGB-timecourse correlation to be ≥ 0.3.
+            ei_n_removed_channels (int): drop this many top-amplitude electrodes from each EI before
+                correlation, so a dominant soma electrode doesn't drive the match. Default 1.
 
     Returns:
         MEAPipeline object that contains the MEAStimBlock and MEAResponse block for the given datafile, and
@@ -644,5 +677,12 @@ def create_mea_pipeline(
             print(f'Using {analysis_chunk_name} for AnalysisChunk\n')
 
     ac = AnalysisChunk(exp_name, analysis_chunk_name, ss_version, verbose = verbose)
-    pipeline = MEAPipeline(stim = s, resp = r, analysis_chunk = ac, typing_file = typing_file, verbose = verbose)
+    pipeline = MEAPipeline(
+        stim = s, resp = r, analysis_chunk = ac, typing_file = typing_file, verbose = verbose,
+        ei_corr_cutoff = ei_corr_cutoff,
+        ei_match_method = ei_match_method,
+        ei_use_isi = ei_use_isi,
+        ei_use_timecourse = ei_use_timecourse,
+        ei_n_removed_channels = ei_n_removed_channels,
+    )
     return pipeline
