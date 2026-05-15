@@ -209,11 +209,20 @@ def save_cell_match(
     cell_types: Optional[List[str]] = None,
     qc_pass_only: Optional[pd.DataFrame] = None,
     active_thresh_frac: float = 0.2,
+    protocol_subdir: Optional[str] = None,
 ) -> Path:
-    """Build the cell-match table and write it to disk; return the CSV path."""
+    """Build the cell-match table and write it to disk; return the CSV path.
+
+    Parameters
+    ----------
+    protocol_subdir : str, optional
+        Subdir name under ``<OUTPUT_DIR>/<exp>/``. Default (``None``) is
+        ``protocol_short_name(protocol_name)``. Override to disambiguate
+        when multiple datafiles of the same protocol live on one date.
+    """
     from .cell_plot_archive import experiment_root, protocol_short_name
 
-    short = protocol_short_name(pipeline.resp.protocol_name)
+    short = protocol_subdir or protocol_short_name(pipeline.resp.protocol_name)
     exp_root = Path(experiment_root(pipeline.resp.exp_name, output_root=output_root))
     csv_path = exp_root / short / 'cell_match.csv'
     csv_path.parent.mkdir(parents=True, exist_ok=True)

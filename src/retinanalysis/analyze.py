@@ -145,6 +145,8 @@ def analyze_experiment(
     cell_ids: Optional[Sequence[int]] = None,
     respect_visual_qc: bool = True,
     prune_stale: bool = True,
+    protocol_subdir: Optional[str] = None,
+    append_datafile_to_subdir: bool = False,
     verbose: bool = True,
 ) -> Dict:
     """Run the full archive pipeline for one experiment date.
@@ -196,6 +198,21 @@ def analyze_experiment(
         is the standard §17/§18 re-archive flow: tag cells ``bad`` in
         §16, re-run §17/§18, and the bad cells' PNGs disappear from
         ``cells/<celltype>/``. Set ``False`` to keep stale PNGs.
+    protocol_subdir : str, optional
+        Override the per-protocol subdirectory name under
+        ``<OUTPUT_DIR>/<exp_name>/``. Default (``None``) uses
+        ``protocol_short_name(protocol_name)``, e.g.
+        ``eye_movement_alt_bg``. Set when the experiment has multiple
+        datafiles of the **same protocol** in the same chunk — each
+        would otherwise write to the same subdir and overwrite the
+        previous run. For example, pass
+        ``protocol_subdir='eye_movement_alt_bg_data032'`` for the
+        second datafile.
+    append_datafile_to_subdir : bool
+        Convenience shortcut: when ``True`` and ``protocol_subdir``
+        is ``None``, set the subdir to ``{protocol_short}_{datafile}``
+        automatically. Pairs well with batch runs over many datafiles
+        of one protocol.
 
     Notes
     -----
@@ -293,12 +310,25 @@ def analyze_experiment(
     if verbose:
         print(f'  QC: {n_pass}/{len(qc)} cells pass ({100*qc["passes"].mean():.0f}%)')
 
-    # 5b. Persist QC results so downstream tools can filter without
-    # re-running the metrics. Lives at <exp>/<protocol>/qc.csv next to
+    # 5b. Resolve protocol subdir. By default we use the protocol short
+    # name. When multiple datafiles share the same protocol on one date
+    # they would otherwise collide in <exp>/<protocol_short>/, so callers
+    # can override via protocol_subdir= or the
+    # append_datafile_to_subdir=True shortcut to get
+    # <protocol_short>_<datafile_name>/.
+    from .utils.cell_plot_archive import protocol_short_name
+    _proto_short = protocol_short_name(response_block.protocol_name)
+    if protocol_subdir is not None:
+        _proto_short = protocol_subdir
+    elif append_datafile_to_subdir:
+        _proto_short = f'{_proto_short}_{datafile_name}'
+    if verbose and _proto_short != protocol_short_name(response_block.protocol_name):
+        print(f'  protocol_subdir → {_proto_short!r}')
+
+    # Persist QC results so downstream tools can filter without re-running
+    # the metrics. Lives at <exp>/<_proto_short>/qc.csv next to
     # index.csv / cell_match.csv / visual_qc.csv.
     try:
-        from .utils.cell_plot_archive import protocol_short_name
-        _proto_short = protocol_short_name(response_block.protocol_name)
         _qc_path = save_protocol_qc(
             qc, exp_name, protocol=_proto_short, output_root=output_root,
         )
@@ -338,7 +368,8 @@ def analyze_experiment(
     # pipeline. Lives next to index.csv at <exp>/<protocol>/cell_match.csv.
     try:
         cm_path = save_cell_match(pipeline, output_root=output_root,
-                                  qc_pass_only=qc)
+                                  qc_pass_only=qc,
+                                  protocol_subdir=_proto_short)
         if verbose:
             print(f'  cell_match → {cm_path}')
     except Exception as exc:
@@ -351,6 +382,7 @@ def analyze_experiment(
         analysis_chunk, response_block,
         stim_block=stim_block,
         protocol_name=response_block.protocol_name,
+        protocol_short_name_=_proto_short,
         cell_types=cell_types_used,
         cell_ids=list(cell_ids) if cell_ids is not None else None,
         qc_pass_only=qc,
