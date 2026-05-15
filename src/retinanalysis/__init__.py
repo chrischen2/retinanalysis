@@ -85,6 +85,16 @@ from .utils.offline_store import (OfflineDataset,
                                   load_offline_many,
                                   offline_h5_path)
 
+# Raw-trace sorting QC. Imported lazily inside its own module to keep
+# bin2py off the critical-path import (it's only needed when this code is
+# actually invoked).
+from .classes.raw import (RawTraces,
+                          plot_sts_over_trace,
+                          plot_sorting_qc,
+                          plot_sorting_qc_grid,
+                          primary_electrode_of_cell,
+                          cells_sharing_electrode)
+
 # Per-protocol analyzers live under retinanalysis.protocols; import the
 # package but don't pull every module at top level (loaded on demand).
 from . import protocols
