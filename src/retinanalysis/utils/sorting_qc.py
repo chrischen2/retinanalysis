@@ -318,16 +318,24 @@ def sample_and_plot_sorting_qc(
     if sample_df.empty:
         return sample_df, []
 
-    # 2. Resolve save directory
+    # 2. Resolve save directory. The folder name *always* stamps the
+    # protocol short name + datafile so PNGs from different datafiles on
+    # the same date can't collide — independent of whatever
+    # protocol_subdir / append_datafile_to_subdir §17 used for qc.csv.
     exp = exp_name or response_block.exp_name
     short = _resolve_protocol_subdir(
         response_block, protocol_subdir,
         getattr(response_block, 'datafile_name', None),
         append_datafile_to_subdir,
     )
+    from .cell_plot_archive import protocol_short_name as _ps
+    proto_short = _ps(response_block.protocol_name)
+    datafile = getattr(response_block, 'datafile_name', None) or 'unknown'
+    qc_folder_name = f'sorting_qc_{proto_short}_{datafile}'
+
     root = Path(output_root) if output_root else Path(OUTPUT_DIR)
     save_root = (Path(save_dir) if save_dir is not None
-                 else root / exp / short / 'sorting_qc')
+                 else root / exp / short / qc_folder_name)
     save_root.mkdir(parents=True, exist_ok=True)
     if verbose:
         print(f'save dir: {save_root}')
