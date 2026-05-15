@@ -128,41 +128,80 @@ def sample_sorting_qc_cells(
     return sample[keep].reset_index(drop=True)
 
 
+def _hp_filter(x: np.ndarray, fs: float, cutoff_hz: float = 300.0,
+               order: int = 3) -> np.ndarray:
+    """Zero-phase Butterworth high-pass — what the sorter sees during sorting.
+
+    Without this, the raw trace's low-frequency drift moves the apparent
+    spike "height" around and the spike-time markers can look like
+    they're stuck at the drift level instead of at the spike trough.
+    """
+    from scipy.signal import butter, sosfiltfilt
+    sos = butter(order, cutoff_hz, btype='highpass', fs=fs, output='sos')
+    return sosfiltfilt(sos, x).astype(np.float32)
+
+
 def _plot_epoch_trace_with_raster(
     rt,
     rb,
-    cell_id: int,
+    protocol_cell_id: int,
     epoch_idx: int,
     ax_trace: plt.Axes,
     ax_raster: plt.Axes,
+    *,
     target_color: str = 'tab:red',
+    hp_cutoff_hz: float = 300.0,
+    spike_marker_size: int = 4,
 ) -> None:
     """Render one (raster + trace) row for one cell × one epoch.
 
+    Uses the **protocol** cell_id (not the noise/chunk one) to pull both
+    the spike times and the EI peak electrode — they live in
+    ``rb.vcd`` (protocol VCD) and ``rb.df_spike_times`` respectively,
+    keyed by protocol_cell_id. The noise_cell_id is shown in the
+    raster label for clarity.
+
     Top axis: thin raster strip with vertical ticks at the cell's spike
-    times for this epoch.  Bottom axis: raw voltage on the cell's
-    primary electrode with red dots at the spike samples.
+    times for this epoch.  Bottom axis: 300 Hz high-pass-filtered
+    trace on the cell's primary electrode with small red dots at the
+    spike samples — filter removes drift so the dot heights line up
+    with the spike troughs the way the sorter saw them.
     """
     from ..classes.raw import primary_electrode_of_cell
 
     if rt.epoch_idx != epoch_idx:
         rt.load_epoch_index(epoch_idx, verbose=False)
 
-    electrode_idx = primary_electrode_of_cell(rb, cell_id)
-    raw_ts = rt.data[electrode_idx, :]
-    time_s = np.arange(len(raw_ts)) / rt.sample_rate
+    electrode_idx = primary_electrode_of_cell(rb, protocol_cell_id)
+    raw_ts = rt.data[electrode_idx, :].astype(np.float32)
+    # High-pass filter for display so the spike marks line up with the
+    # actual spike waveform (not the low-frequency baseline drift).
+    try:
+        trace = _hp_filter(raw_ts, fs=float(rt.sample_rate),
+                            cutoff_hz=hp_cutoff_hz)
+        filt_label = f'{int(hp_cutoff_hz)} Hz HP'
+    except Exception:
+        trace = raw_ts
+        filt_label = 'raw'
+    time_s = np.arange(len(trace)) / rt.sample_rate
 
-    # Pull this cell's spike times for this epoch (ms → s)
+    # Pull this cell's spike times for this epoch (ms → s). The
+    # protocol_cell_id is the key in df_spike_times['cell_id'].
     df_st = rb.df_spike_times
-    cell_idx = df_st.index[df_st['cell_id'] == int(cell_id)]
-    if len(cell_idx) == 0:
+    cell_row = df_st.index[df_st['cell_id'] == int(protocol_cell_id)]
+    if len(cell_row) == 0:
         sts_ms = np.array([])
+        noise_cell_id = None
     else:
-        sts_ms = np.asarray(df_st.at[cell_idx[0], 'spike_times'][epoch_idx])
+        sts_ms = np.asarray(df_st.at[cell_row[0], 'spike_times'][epoch_idx])
+        noise_cell_id = (int(df_st.at[cell_row[0], 'noise_id'])
+                          if 'noise_id' in df_st.columns
+                             and not pd.isna(df_st.at[cell_row[0], 'noise_id'])
+                          else None)
     sts_s = sts_ms / 1000.0
 
     # --- raster strip (top): thin row of vertical lines per spike
-    ax_raster.vlines(sts_s, 0.05, 0.95, color=target_color, lw=0.7)
+    ax_raster.vlines(sts_s, 0.05, 0.95, color=target_color, lw=0.6)
     ax_raster.set_xlim(time_s[0], time_s[-1])
     ax_raster.set_ylim(0, 1)
     ax_raster.set_yticks([])
@@ -170,19 +209,34 @@ def _plot_epoch_trace_with_raster(
     for spine in ('top', 'right', 'left', 'bottom'):
         ax_raster.spines[spine].set_visible(False)
     n_spikes = int(sts_s.size)
-    ax_raster.set_ylabel(f'cell {cell_id}\n({n_spikes} sp)',
-                         fontsize=8, rotation=0, ha='right', va='center')
+    noise_label = f', noise#{noise_cell_id}' if noise_cell_id is not None else ''
+    ax_raster.set_ylabel(
+        f'proto#{protocol_cell_id}{noise_label}\n({n_spikes} sp)',
+        fontsize=7, rotation=0, ha='right', va='center',
+    )
 
-    # --- raw trace (bottom)
-    ax_trace.plot(time_s, raw_ts, color='0.25', lw=0.4, zorder=1)
-    # Mark spikes on the trace (clip to in-range to be safe)
+    # --- raw trace (bottom): high-pass filtered for display
+    ax_trace.plot(time_s, trace, color='0.25', lw=0.4, zorder=1)
+    # Mark spikes on the trace. The "spike time" reported by Vision/Kilosort
+    # may be the threshold-crossing or the template-peak sample, which can
+    # be a couple of samples off from the local trough of the raw waveform.
+    # Snap each marker to the local minimum in ±2 ms so the dots sit on
+    # the visible spike, not slightly above it.
     if sts_s.size:
         sample_idx = np.round(sts_s * rt.sample_rate).astype(int)
-        sample_idx = sample_idx[(sample_idx >= 0) & (sample_idx < raw_ts.size)]
-        ax_trace.scatter(sample_idx / rt.sample_rate, raw_ts[sample_idx],
-                         color=target_color, s=8, zorder=3)
+        sample_idx = sample_idx[(sample_idx >= 0) & (sample_idx < trace.size)]
+        snap_w = int(0.002 * rt.sample_rate)  # ±2 ms
+        snapped = []
+        for s in sample_idx:
+            lo = max(0, s - snap_w)
+            hi = min(trace.size, s + snap_w + 1)
+            snapped.append(lo + int(np.argmin(trace[lo:hi])))
+        snapped = np.asarray(snapped, dtype=int)
+        ax_trace.scatter(snapped / rt.sample_rate, trace[snapped],
+                         color=target_color, s=spike_marker_size, zorder=3,
+                         linewidths=0)
     ax_trace.set_xlim(time_s[0], time_s[-1])
-    ax_trace.set_ylabel('raw (mV·)', fontsize=8)
+    ax_trace.set_ylabel(f'{filt_label}', fontsize=8)
     ax_trace.set_title(
         f'epoch {epoch_idx} · electrode {electrode_idx}',
         fontsize=8, loc='left', pad=2,
@@ -284,20 +338,31 @@ def sample_and_plot_sorting_qc(
     n_ep = min(n_epochs, response_block.n_epochs)
     epoch_idxs = list(range(n_ep))
 
+    # Protocol cell IDs (what qc.csv stores and what we use throughout).
     cell_ids = sample_df['cell_id'].astype(int).tolist()
     cell_type_list = (sample_df['cell_type'].tolist()
                       if 'cell_type' in sample_df.columns
                       else [''] * len(cell_ids))
 
+    # Look up the matched noise/chunk cell_id for each protocol cell so the
+    # title can show both — the user is allowed to confuse them otherwise.
+    df_st = response_block.df_spike_times
+    noise_id_lookup = {}
+    if 'noise_id' in df_st.columns:
+        for _, r in df_st.iterrows():
+            try:
+                noise_id_lookup[int(r['cell_id'])] = int(r['noise_id'])
+            except (ValueError, TypeError):
+                pass
+
     png_paths: List[Path] = []
 
-    # 4. Plot. We iterate over CELLS outer because each plot only shows
-    # the target cell — we still load each epoch from disk per cell,
-    # but each load is amortized over the raster + trace render. (If
-    # disk I/O dominates, flipping this loop and saving figures across
-    # cells is the future optimization.)
-    for cid, ctype in zip(cell_ids, cell_type_list):
-        png_path = save_root / f'cell_{cid:04d}_{ctype}_sorting_qc.png'
+    # Plot. Outer loop on cells; per cell we re-load each epoch's raw
+    # data once and reuse it across the (raster + trace) pair.
+    for proto_cid, ctype in zip(cell_ids, cell_type_list):
+        noise_cid = noise_id_lookup.get(int(proto_cid))
+        noise_tag = f'_noise{noise_cid}' if noise_cid is not None else ''
+        png_path = save_root / f'cell_proto{proto_cid:04d}{noise_tag}_{ctype}_sorting_qc.png'
         if png_path.exists() and not overwrite:
             if verbose:
                 print(f'  skip (exists): {png_path}')
@@ -305,7 +370,6 @@ def sample_and_plot_sorting_qc(
             continue
 
         # Per cell: n_epochs rows × 2 sub-rows (raster strip + trace).
-        # GridSpec gives us the thin raster strip above each trace.
         fig = plt.figure(
             figsize=(figsize_per_epoch[0], figsize_per_epoch[1] * n_ep),
         )
@@ -319,19 +383,21 @@ def sample_and_plot_sorting_qc(
             ax_trace = fig.add_subplot(gs[j * 2 + 1], sharex=ax_raster)
             try:
                 _plot_epoch_trace_with_raster(
-                    rt, response_block, cid, ep,
+                    rt, response_block, proto_cid, ep,
                     ax_trace=ax_trace, ax_raster=ax_raster,
                 )
             except Exception as exc:
-                ax_trace.set_title(f'cell {cid}, epoch {ep}: {exc!r}', fontsize=7)
+                ax_trace.set_title(
+                    f'proto#{proto_cid}, epoch {ep}: {exc!r}', fontsize=7)
                 ax_trace.axis('off')
                 ax_raster.axis('off')
             if j == n_ep - 1:
                 ax_trace.set_xlabel('time (s)', fontsize=9)
 
+        noise_text = f'  ·  noise#{noise_cid}' if noise_cid is not None else ''
         fig.suptitle(
-            f'{exp} / {getattr(response_block, "datafile_name", "?")} — '
-            f'cell {cid} ({ctype}): sorting QC',
+            f'{exp} / {getattr(response_block, "datafile_name", "?")}  —  '
+            f'protocol#{proto_cid}{noise_text}  ({ctype}) :  sorting QC',
             fontsize=10, y=0.995,
         )
         fig.tight_layout(rect=(0, 0, 1, 0.985))
