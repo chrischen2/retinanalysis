@@ -25,7 +25,7 @@ from typing import Optional, Tuple
 
 
 __all__ = ['victor_purpura_distance', 'victor_purpura_distance_matrix',
-           'victor_purpura_cross_matrix']
+           'victor_purpura_cross_matrix', 'victor_purpura_batch_pairs']
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +43,9 @@ def _build_ext(verbose: bool = False) -> Optional[Path]:
     src = _EXT_DIR / 'spkd.c'
     if not src.exists():
         return None
-    cmd = ['cc', '-O3', '-ffast-math', '-shared', '-fPIC',
+    # -pthread enables POSIX threads in the bulk pairwise kernels —
+    # spkd.c uses pthread_create/join to fan VP pairs across cores.
+    cmd = ['cc', '-O3', '-ffast-math', '-pthread', '-shared', '-fPIC',
            '-o', str(_LIB_PATH), str(src)]
     try:
         subprocess.check_output(cmd, stderr=subprocess.STDOUT)
@@ -54,6 +56,15 @@ def _build_ext(verbose: bool = False) -> Optional[Path]:
         if verbose:
             print(f'[victor_purpura] C build failed ({exc!r}); using pure-Python fallback')
         return None
+
+
+def _force_rebuild(verbose: bool = True) -> Optional[Path]:
+    """Delete cached lib and rebuild. Call after editing spkd.c."""
+    global _LIB
+    _LIB = None
+    if _LIB_PATH.exists():
+        _LIB_PATH.unlink()
+    return _build_ext(verbose=verbose)
 
 
 def _load_lib():
@@ -82,6 +93,13 @@ def _load_lib():
     lib.vp_self_pairwise.restype = None
     lib.vp_self_pairwise.argtypes = [
         ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_int), ctypes.c_int,
+        ctypes.c_double, ctypes.POINTER(ctypes.c_double),
+    ]
+    # vp_batch_pairs(times, lens, n_trains, pair_a, pair_b, n_pairs, cost, out)
+    lib.vp_batch_pairs.restype = None
+    lib.vp_batch_pairs.argtypes = [
+        ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_int), ctypes.c_int,
+        ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int), ctypes.c_int,
         ctypes.c_double, ctypes.POINTER(ctypes.c_double),
     ]
     _LIB = lib
@@ -193,6 +211,69 @@ def victor_purpura_cross_matrix(
         b_times.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
         b_lens.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
         ctypes.c_int(len(trains_b)),
+        ctypes.c_double(cost),
+        out.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+    )
+    return out
+
+
+def victor_purpura_batch_pairs(
+    trains: list,
+    pair_idx: np.ndarray,
+    cost: float,
+) -> np.ndarray:
+    """Compute VP distances for an arbitrary list of (i, j) train pairs.
+
+    Built for callers that have *many small* sub-matrices to compute
+    over the same big set of trains — they should aggregate all pairs
+    into one call, instead of looping over many ``vp_pairwise`` calls
+    that each have only a handful of pairs. The pthread thread-pool
+    setup is then amortized over the whole workload.
+
+    Parameters
+    ----------
+    trains : list of 1-D arrays
+        All spike trains involved, indexed by `pair_idx`.
+    pair_idx : ndarray of shape (n_pairs, 2), int
+        ``pair_idx[k] = (i, j)`` ⇒ compute ``d(trains[i], trains[j])``.
+        ``i`` and ``j`` may repeat across rows and may equal each other
+        (the latter yields 0).
+    cost : float
+        VP cost-per-second.
+
+    Returns
+    -------
+    ndarray of shape (n_pairs,)
+        Distances in the same order as ``pair_idx``.
+    """
+    pair_idx = np.ascontiguousarray(pair_idx, dtype=np.int32)
+    n_pairs = int(pair_idx.shape[0])
+    if n_pairs == 0:
+        return np.zeros(0, dtype=np.float64)
+    n_trains = len(trains)
+    if pair_idx.max() >= n_trains or pair_idx.min() < 0:
+        raise IndexError('pair_idx out of range')
+
+    lib = _load_lib()
+    times, lens = _flatten(trains)
+    pair_a = np.ascontiguousarray(pair_idx[:, 0], dtype=np.int32)
+    pair_b = np.ascontiguousarray(pair_idx[:, 1], dtype=np.int32)
+    out = np.zeros(n_pairs, dtype=np.float64)
+
+    if lib is None:
+        # Pure-Python fallback: just loop over the single-pair routine.
+        for k in range(n_pairs):
+            i = int(pair_a[k]); j = int(pair_b[k])
+            out[k] = victor_purpura_distance(trains[i], trains[j], cost)
+        return out
+
+    lib.vp_batch_pairs(
+        times.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+        lens.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        ctypes.c_int(n_trains),
+        pair_a.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        pair_b.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        ctypes.c_int(n_pairs),
         ctypes.c_double(cost),
         out.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
     )

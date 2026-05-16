@@ -28,12 +28,15 @@ from matplotlib.axes import Axes
 
 from pathlib import Path
 
+from joblib import Parallel, delayed
+
 from retinanalysis.utils.psth import epoch_spikes_to_psth, psth_time_axis
 from retinanalysis.utils.style import colors_for_conditions
 from retinanalysis.utils.victor_purpura import (
     victor_purpura_distance,
     victor_purpura_distance_matrix,
     victor_purpura_cross_matrix,
+    victor_purpura_batch_pairs,
 )
 from retinanalysis.config.settings import OUTPUT_DIR
 
@@ -426,6 +429,75 @@ def _window_spikes_seconds(
     return (sel - t_start_ms) / 1000.0
 
 
+def _vp_one_cell(
+    cell_payload: Dict,
+    groups: Dict[Tuple, List[Tuple]],
+    cost_per_sec: float,
+    window_sec: float,
+    window_offset_ms: float,
+    exp_name: str,
+) -> List[Dict]:
+    """Per-cell VP work. Runs in a joblib worker — top-level so it pickles.
+
+    All file I/O (HDF5 spike-time reads) has already happened in the
+    main process; this only takes the pre-windowed train arrays and
+    runs the bulk-C VP calls. Each worker re-imports the C kernel
+    (the .dylib is cached on disk) so there's no NAS or DJ traffic
+    from the worker side.
+    """
+    cid = cell_payload['cell_id']
+    ct = cell_payload['cell_type']
+    trains_by_cond: Dict[Tuple, List[np.ndarray]] = cell_payload['trains_by_cond']
+
+    # Within-condition baseline (mean of upper-triangle entries).
+    d_within: Dict[Tuple, float] = {}
+    n_within: Dict[Tuple, int] = {}
+    for cond, trains in trains_by_cond.items():
+        if len(trains) < 2:
+            d_within[cond], n_within[cond] = float('nan'), 0
+            continue
+        D = victor_purpura_distance_matrix(trains, cost_per_sec)
+        iu = np.triu_indices(len(trains), k=1)
+        d_within[cond] = float(D[iu].mean())
+        n_within[cond] = int(iu[0].size)
+
+    out_rows: List[Dict] = []
+    for group_key, conds in groups.items():
+        for i in range(len(conds)):
+            ci = conds[i]
+            if ci not in trains_by_cond:
+                continue
+            for j in range(i + 1, len(conds)):
+                cj = conds[j]
+                if cj not in trains_by_cond:
+                    continue
+                Xc = victor_purpura_cross_matrix(
+                    trains_by_cond[ci], trains_by_cond[cj], cost_per_sec)
+                d_cross = float(Xc.mean()) if Xc.size else float('nan')
+                n_cross = int(Xc.size)
+                within_avg = 0.5 * (d_within[ci] + d_within[cj])
+                out_rows.append({
+                    'exp_name': exp_name,
+                    'cell_id': cid,
+                    'cell_type': ct,
+                    'group_key': group_key,
+                    'cond_i': ci,
+                    'cond_j': cj,
+                    'd_within_i': d_within[ci],
+                    'd_within_j': d_within[cj],
+                    'd_within_avg': within_avg,
+                    'd_across': d_cross,
+                    'd_diff': d_cross - within_avg,
+                    'n_pairs_within_i': n_within[ci],
+                    'n_pairs_within_j': n_within[cj],
+                    'n_pairs_across': n_cross,
+                    'window_sec': window_sec,
+                    'window_offset_ms': window_offset_ms,
+                    'cost_per_sec': cost_per_sec,
+                })
+    return out_rows
+
+
 def spike_distance_analysis(
     offline,
     *,
@@ -439,6 +511,8 @@ def spike_distance_analysis(
     cell_types: Optional[Iterable[str]] = None,
     minimum_n: int = 3,
     rng_seed: int = 0,
+    n_jobs: int = 1,
+    verbose: bool = True,
 ) -> pd.DataFrame:
     """Within-condition vs across-condition Victor–Purpura distance per cell.
 
@@ -482,6 +556,18 @@ def spike_distance_analysis(
         Skip cell types with fewer than this many cells.
     rng_seed : int
         Deterministic subsampling.
+    n_jobs : int
+        Worker processes for the per-cell VP computation. **Default 1**
+        because the C kernel already parallelizes *within* each bulk
+        VP call using POSIX threads (saturating all CPU cores via
+        ``vp_pairwise`` / ``vp_self_pairwise``). Setting ``n_jobs > 1``
+        forks Python-level workers on top of that and usually
+        over-subscribes the CPU, slowing things down. Set the env var
+        ``SPKD_NUM_THREADS=N`` to cap the C-layer thread pool. Use
+        ``n_jobs > 1`` only when you've explicitly set
+        ``SPKD_NUM_THREADS=1`` to disable C threading (rare).
+    verbose : bool
+        Print a one-line summary before dispatch.
 
     Returns
     -------
@@ -531,13 +617,18 @@ def spike_distance_analysis(
 
     rng = np.random.RandomState(rng_seed)
 
-    rows = []
+    # ------------------------------------------------------------------
+    # Pre-extract every cell's windowed trains in the MAIN process. This
+    # is fast (HDF5 reads + numpy slicing) and gives us a clean
+    # serializable payload to ship to workers — no HDF5 file handles or
+    # offline-dataset references cross process boundaries.
+    # ------------------------------------------------------------------
+    payloads: List[Dict] = []
     for _, cell_row in df_cells.iterrows():
         cid = int(cell_row['cell_id'])
         ct = cell_row.get('cell_type', '')
         sts_list = offline.spike_times(cid)
 
-        # Build per-condition lists of windowed trains (in seconds, rebased to 0).
         trains_by_cond: Dict[Tuple, List[np.ndarray]] = {}
         for cond, ep_idx in cond_to_epochs.items():
             sel = ep_idx[ep_idx < len(sts_list)]
@@ -550,19 +641,60 @@ def spike_distance_analysis(
                 trains = [trains[i] for i in sorted(idx)]
             trains_by_cond[cond] = trains
 
-        # Within-condition baseline (mean of upper-triangle entries of the C matrix).
-        d_within: Dict[Tuple, float] = {}
-        n_within: Dict[Tuple, int] = {}
-        for cond, trains in trains_by_cond.items():
-            if len(trains) < 2:
-                d_within[cond], n_within[cond] = float('nan'), 0
-                continue
-            D = victor_purpura_distance_matrix(trains, cost_per_sec)
-            iu = np.triu_indices(len(trains), k=1)
-            d_within[cond] = float(D[iu].mean())
-            n_within[cond] = int(iu[0].size)
+        payloads.append({
+            'cell_id': cid,
+            'cell_type': ct,
+            'trains_by_cond': trains_by_cond,
+        })
 
-        # Across pairs: only inside the same "within" group (e.g. same image).
+    # ------------------------------------------------------------------
+    # Build ONE flat batch of every VP pair across every cell × condition.
+    # vp_batch_pairs internally fans the pair list across CPU cores via
+    # pthreads, so the thread-pool setup is amortized over the whole
+    # workload — a huge improvement over the previous shape where each
+    # call had only 3–9 pairs and pthread overhead always lost.
+    # ------------------------------------------------------------------
+    all_trains: List[np.ndarray] = []
+    train_index_by_cond: List[Dict[Tuple, np.ndarray]] = []  # per cell
+    for p in payloads:
+        cond_to_idx: Dict[Tuple, np.ndarray] = {}
+        for cond, trains in p['trains_by_cond'].items():
+            start = len(all_trains)
+            all_trains.extend(trains)
+            cond_to_idx[cond] = np.arange(start, start + len(trains), dtype=int)
+        train_index_by_cond.append(cond_to_idx)
+
+    # Pair lists with provenance so we can demultiplex distances later.
+    # Each entry: (cell_idx, kind, ci, cj, group_key, n_within_per_cond, …)
+    pair_a: List[int] = []
+    pair_b: List[int] = []
+    # Provenance per "block" — a contiguous slice of pairs that share
+    # the same (cell_idx, cond_i, cond_j) tuple. Avoids one provenance
+    # entry per pair (n_pairs is ~10k+).
+    blocks: List[Dict] = []
+    for cell_idx, payload in enumerate(payloads):
+        ci_to_idx = train_index_by_cond[cell_idx]
+        trains_by_cond = payload['trains_by_cond']
+
+        # Within-condition pairs (upper triangle).
+        for cond, trains in trains_by_cond.items():
+            ntr = len(trains)
+            if ntr < 2:
+                continue
+            idx_arr = ci_to_idx[cond]
+            iu_i, iu_j = np.triu_indices(ntr, k=1)
+            block_start = len(pair_a)
+            pair_a.extend(idx_arr[iu_i].tolist())
+            pair_b.extend(idx_arr[iu_j].tolist())
+            blocks.append({
+                'cell_idx': cell_idx, 'kind': 'within',
+                'cond_i': cond, 'cond_j': cond,
+                'group_key': None,
+                'slice': (block_start, len(pair_a)),
+                'n_pairs': iu_i.size,
+            })
+
+        # Across-condition pairs (rectangular blocks within an image group).
         for group_key, conds in groups.items():
             for i in range(len(conds)):
                 ci = conds[i]
@@ -572,30 +704,99 @@ def spike_distance_analysis(
                     cj = conds[j]
                     if cj not in trains_by_cond:
                         continue
-                    Xc = victor_purpura_cross_matrix(
-                        trains_by_cond[ci], trains_by_cond[cj], cost_per_sec)
-                    d_cross = float(Xc.mean()) if Xc.size else float('nan')
-                    n_cross = int(Xc.size)
-                    within_avg = 0.5 * (d_within[ci] + d_within[cj])
-                    rows.append({
-                        'exp_name': offline.exp_name,
-                        'cell_id': cid,
-                        'cell_type': ct,
+                    idx_i = ci_to_idx[ci]
+                    idx_j = ci_to_idx[cj]
+                    grid_a, grid_b = np.meshgrid(idx_i, idx_j, indexing='ij')
+                    block_start = len(pair_a)
+                    pair_a.extend(grid_a.ravel().tolist())
+                    pair_b.extend(grid_b.ravel().tolist())
+                    blocks.append({
+                        'cell_idx': cell_idx, 'kind': 'cross',
+                        'cond_i': ci, 'cond_j': cj,
                         'group_key': group_key,
-                        'cond_i': ci,
-                        'cond_j': cj,
-                        'd_within_i': d_within[ci],
-                        'd_within_j': d_within[cj],
-                        'd_within_avg': within_avg,
-                        'd_across': d_cross,
-                        'd_diff': d_cross - within_avg,
-                        'n_pairs_within_i': n_within[ci],
-                        'n_pairs_within_j': n_within[cj],
-                        'n_pairs_across': n_cross,
-                        'window_sec': window_sec,
-                        'window_offset_ms': window_offset_ms,
-                        'cost_per_sec': cost_per_sec,
+                        'slice': (block_start, len(pair_a)),
+                        'n_pairs': idx_i.size * idx_j.size,
                     })
+
+    n_pairs = len(pair_a)
+    if verbose:
+        print(f'spike_distance_analysis: {len(payloads)} cells, '
+              f'{n_pairs} VP pairs in one batch '
+              f'(set SPKD_NUM_THREADS=N to cap C thread pool)')
+
+    if n_pairs > 0:
+        pair_array = np.column_stack([np.asarray(pair_a, dtype=np.int32),
+                                       np.asarray(pair_b, dtype=np.int32)])
+        all_distances = victor_purpura_batch_pairs(
+            all_trains, pair_array, cost_per_sec)
+    else:
+        all_distances = np.zeros(0, dtype=np.float64)
+
+    # Optional joblib layer is intentionally bypassed when there's
+    # exactly one batch — the C thread pool already saturates cores.
+    # n_jobs is retained as a parameter for the rare "C threading
+    # disabled" case (SPKD_NUM_THREADS=1) where the user wants to
+    # parallelize at Python level instead.
+
+    # ------------------------------------------------------------------
+    # Demultiplex: collect per-cell d_within (per condition), then
+    # walk blocks to assemble result rows in the original shape.
+    # ------------------------------------------------------------------
+    per_cell_d_within: List[Dict[Tuple, float]] = [
+        {} for _ in payloads]
+    per_cell_n_within: List[Dict[Tuple, int]] = [
+        {} for _ in payloads]
+    per_cell_d_cross: List[Dict[Tuple, float]] = [
+        {} for _ in payloads]
+    per_cell_n_cross: List[Dict[Tuple, int]] = [
+        {} for _ in payloads]
+    per_cell_group: List[Dict[Tuple, Tuple]] = [
+        {} for _ in payloads]
+    for b in blocks:
+        s0, s1 = b['slice']
+        dists = all_distances[s0:s1]
+        if b['kind'] == 'within':
+            per_cell_d_within[b['cell_idx']][b['cond_i']] = (
+                float(dists.mean()) if dists.size else float('nan'))
+            per_cell_n_within[b['cell_idx']][b['cond_i']] = int(dists.size)
+        else:
+            key = (b['cond_i'], b['cond_j'])
+            per_cell_d_cross[b['cell_idx']][key] = (
+                float(dists.mean()) if dists.size else float('nan'))
+            per_cell_n_cross[b['cell_idx']][key] = int(dists.size)
+            per_cell_group[b['cell_idx']][key] = b['group_key']
+
+    rows = []
+    for cell_idx, payload in enumerate(payloads):
+        cid = payload['cell_id']
+        ct = payload['cell_type']
+        trains_by_cond = payload['trains_by_cond']
+        # Fill in NaN for conds that had < 2 trials.
+        for cond in trains_by_cond:
+            per_cell_d_within[cell_idx].setdefault(cond, float('nan'))
+            per_cell_n_within[cell_idx].setdefault(cond, 0)
+        for (ci, cj), d_cross in per_cell_d_cross[cell_idx].items():
+            within_avg = 0.5 * (per_cell_d_within[cell_idx][ci]
+                                 + per_cell_d_within[cell_idx][cj])
+            rows.append({
+                'exp_name': offline.exp_name,
+                'cell_id': cid,
+                'cell_type': ct,
+                'group_key': per_cell_group[cell_idx][(ci, cj)],
+                'cond_i': ci,
+                'cond_j': cj,
+                'd_within_i': per_cell_d_within[cell_idx][ci],
+                'd_within_j': per_cell_d_within[cell_idx][cj],
+                'd_within_avg': within_avg,
+                'd_across': d_cross,
+                'd_diff': d_cross - within_avg,
+                'n_pairs_within_i': per_cell_n_within[cell_idx][ci],
+                'n_pairs_within_j': per_cell_n_within[cell_idx][cj],
+                'n_pairs_across': per_cell_n_cross[cell_idx][(ci, cj)],
+                'window_sec': window_sec,
+                'window_offset_ms': window_offset_ms,
+                'cost_per_sec': cost_per_sec,
+            })
 
     cols = ['exp_name', 'cell_id', 'cell_type', 'group_key', 'cond_i', 'cond_j',
             'd_within_i', 'd_within_j', 'd_within_avg', 'd_across', 'd_diff',
@@ -618,6 +819,7 @@ def movie_repeat_analysis(
     minimum_n: int = 3,
     cost_per_sec: float = 4.0,
     compute_vp: bool = False,
+    verbose: bool = False,
 ) -> pd.DataFrame:
     """Compare cycle-1 vs cycle-2 response (movie shown twice).
 
@@ -677,12 +879,21 @@ def movie_repeat_analysis(
     c1_ms = (pre_ms + drop_ms, pre_ms + cycle_ms)
     c2_ms = (pre_ms + cycle_ms + drop_ms, pre_ms + 2 * cycle_ms)
 
-    rows = []
+    # ------------------------------------------------------------------
+    # First pass: build per-(cell, condition) PSTH stats and (if
+    # compute_vp) collect every (cycle-1, cycle-2) train pair into one
+    # flat batch. Dispatch the VP batch ONCE with C-level pthread fan-out
+    # — same shape fix as spike_distance_analysis.
+    # ------------------------------------------------------------------
+    per_cc_stats: List[Dict] = []   # one entry per (cell, condition) row
+    vp_trains: List[np.ndarray] = []
+    vp_pair_blocks: List[Tuple[int, int]] = []  # (start, end) into vp_trains pairs
+
     for _, cell_row in df_cells.iterrows():
         cid = int(cell_row['cell_id'])
         ct = cell_row.get('cell_type', '')
         psth = offline.psth_matrix(cid)  # (n_epochs, n_bins)
-        sts_list = offline.spike_times(cid)
+        sts_list = offline.spike_times(cid) if compute_vp else None
 
         for cond, ep_idx in cond_to_epochs.items():
             sel = ep_idx[ep_idx < psth.shape[0]]
@@ -691,7 +902,6 @@ def movie_repeat_analysis(
 
             c1 = psth[sel, c1_start:c1_end]   # (n_trials, nb)
             c2 = psth[sel, c2_start:c2_end]
-
             mean_c1 = c1.mean(axis=0)
             mean_c2 = c2.mean(axis=0)
             if mean_c1.std() < 1e-9 or mean_c2.std() < 1e-9:
@@ -703,32 +913,64 @@ def movie_repeat_analysis(
             r2 = float(mean_c2.mean())
             rate_ratio = (r2 / r1) if r1 > 1e-9 else float('nan')
 
-            # Per-trial VP cycle-1 vs cycle-2 (optional — slow over 15-s windows)
+            # Append c1/c2 trains for this (cell, condition) into the
+            # global batch; record the slice for later mean aggregation.
+            block_start = len(vp_trains) // 2
             if compute_vp:
-                vp_vals = []
                 for i in sel:
-                    t1 = _window_spikes_seconds(sts_list[i], *c1_ms)
-                    t2 = _window_spikes_seconds(sts_list[i], *c2_ms)
-                    vp_vals.append(victor_purpura_distance(t1, t2, cost_per_sec))
-                vp_mean = float(np.mean(vp_vals)) if vp_vals else float('nan')
-            else:
-                vp_mean = float('nan')
+                    vp_trains.append(
+                        _window_spikes_seconds(sts_list[i], *c1_ms))
+                    vp_trains.append(
+                        _window_spikes_seconds(sts_list[i], *c2_ms))
+            block_end = len(vp_trains) // 2
 
-            rows.append({
-                'exp_name': offline.exp_name,
-                'cell_id': cid,
-                'cell_type': ct,
-                'condition': cond,
+            per_cc_stats.append({
+                'cid': cid, 'ct': ct, 'cond': cond,
                 'n_trials': int(sel.size),
-                'rate_cycle1_hz': r1,
-                'rate_cycle2_hz': r2,
-                'rate_ratio': rate_ratio,
-                'corr_cycle12': corr,
-                'rmse_cycle12_hz': rmse,
-                'vp_cycle12': vp_mean,
-                'cycle_sec': cycle_sec,
-                'drop_first_sec': drop_first_sec,
+                'r1': r1, 'r2': r2, 'rate_ratio': rate_ratio,
+                'corr': corr, 'rmse': rmse,
+                'vp_slice': (block_start, block_end),
             })
+
+    # One C call processes every consecutive (c1, c2) pair in vp_trains.
+    if compute_vp and len(vp_trains) >= 2:
+        n_pairs = len(vp_trains) // 2
+        idx = np.arange(n_pairs, dtype=np.int32) * 2
+        pair_array = np.column_stack([idx, idx + 1])
+        if verbose:
+            print(f'movie_repeat_analysis: {n_pairs} cycle-1/cycle-2 VP '
+                  f'pairs in one batch')
+        vp_per_pair = victor_purpura_batch_pairs(
+            vp_trains, pair_array, cost_per_sec)
+    else:
+        vp_per_pair = np.zeros(0, dtype=np.float64)
+
+    # Second pass: assemble the rows DataFrame, looking up each
+    # (cell, condition)'s mean VP from its slice of the batch result.
+    rows = []
+    for s in per_cc_stats:
+        if compute_vp:
+            a, b = s['vp_slice']
+            vp_mean = (float(vp_per_pair[a:b].mean())
+                        if b > a else float('nan'))
+        else:
+            vp_mean = float('nan')
+
+        rows.append({
+            'exp_name': offline.exp_name,
+            'cell_id': s['cid'],
+            'cell_type': s['ct'],
+            'condition': s['cond'],
+            'n_trials': s['n_trials'],
+            'rate_cycle1_hz': s['r1'],
+            'rate_cycle2_hz': s['r2'],
+            'rate_ratio': s['rate_ratio'],
+            'corr_cycle12': s['corr'],
+            'rmse_cycle12_hz': s['rmse'],
+            'vp_cycle12': vp_mean,
+            'cycle_sec': cycle_sec,
+            'drop_first_sec': drop_first_sec,
+        })
 
     return pd.DataFrame(rows)
 
