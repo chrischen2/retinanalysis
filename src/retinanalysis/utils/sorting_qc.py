@@ -703,8 +703,6 @@ def sorting_qc_gui(
         readout_format='.0f',
         layout=widgets.Layout(width='460px'),
     )
-    w_svg = widgets.Checkbox(value=True, description='vector (SVG)',
-                              layout=widgets.Layout(width='160px'))
     w_figw = widgets.FloatSlider(
         value=11.0, min=6.0, max=20.0, step=0.5, description='fig width (in):',
         continuous_update=False,
@@ -714,7 +712,7 @@ def sorting_qc_gui(
         widgets.HBox([w_trace_color, w_trace_lw]),
         widgets.HBox([w_spike_color, w_spike_size]),
         widgets.HBox([w_hp, w_yauto, w_yrange]),
-        widgets.HBox([w_svg, w_figw]),
+        widgets.HBox([w_figw]),
     ])
     w_appearance = widgets.Accordion(children=[appearance_box])
     w_appearance.set_title(0, 'Appearance · line, marker, filter, y-axis')
@@ -872,19 +870,14 @@ def sorting_qc_gui(
             )
             fig.tight_layout(rect=(0, 0, 1, 0.96))
 
-            if w_svg.value:
-                # Vector SVG: stays sharp under any browser zoom. The
-                # downside is no built-in pan/zoom toolbar — that needs
-                # ipympl (see the hint at the bottom of the GUI).
-                buf = BytesIO()
-                fig.savefig(buf, format='svg', bbox_inches='tight')
-                plt.close(fig)
-                display(SVG(buf.getvalue()))
-            else:
-                plt.show()
-                # Close after show so pyplot doesn't keep a reference and
-                # let figures accumulate across renders.
-                plt.close(fig)
+            # Always vector SVG — stays sharp under any browser zoom.
+            # Native pan/zoom-rectangle inside the figure needs ipympl;
+            # see the hint at the bottom of the GUI. The View row of
+            # buttons below provides zoom-in/out and pan as a fallback.
+            buf = BytesIO()
+            fig.savefig(buf, format='svg', bbox_inches='tight')
+            plt.close(fig)
+            display(SVG(buf.getvalue()))
 
     def _extract_and_render(cid: int, ep: int, s0: float, s1: float,
                              electrode_idx: int, elec_rank: int,
@@ -893,10 +886,19 @@ def sorting_qc_gui(
 
         Doesn't touch the file. ``bytes_read_mb`` is only used for the
         status line — 0 means "served from cache". We stash the *raw*
-        (unfiltered) electrode so that subsequent style changes (HP
-        cutoff, line color, …) can re-render without re-fetching.
+        (unfiltered) electrode for the requested view range so that
+        subsequent style changes (HP cutoff, line color, …) re-render
+        without re-fetching. When the requested ``[s0, s1]`` view is a
+        *sub-range* of the loaded data (e.g. after a zoom-in), we slice
+        ``rt.data`` accordingly — zoom-in costs zero bytes.
         """
-        raw_electrode = rt.data[electrode_idx, :].astype(np.float32)
+        # Convert view range to sample indices into rt.data, which spans
+        # [rt.window_start_s, rt.window_start_s + n_samples / fs).
+        loaded_s0 = float(rt.window_start_s)
+        idx0 = max(0, int(round((s0 - loaded_s0) * sample_rate)))
+        idx1 = min(rt.data.shape[1],
+                   int(round((s1 - loaded_s0) * sample_rate)))
+        raw_electrode = rt.data[electrode_idx, idx0:idx1].astype(np.float32)
         time_s = s0 + np.arange(raw_electrode.size) / sample_rate
 
         row_idx = df_st.index[df_st['cell_id'] == int(cid)]
@@ -924,14 +926,19 @@ def sorting_qc_gui(
         _render()
 
     def _window_matches_cache(ep: int, s0: float, s1: float) -> bool:
-        """True iff rt.data already holds exactly this (epoch, window)."""
+        """True iff ``[s0, s1]`` is a sub-range of what rt.data holds.
+
+        Generalized from exact match → sub-range coverage so that zoom-in
+        and small pans inside the loaded window are served from memory
+        (zero NAS bytes). A 1 ms tolerance absorbs rounding when the
+        slider snaps to the slider step.
+        """
         if rt.data is None or rt.epoch_idx != ep:
             return False
-        if not np.isclose(rt.window_start_s, s0):
-            return False
-        # End is start + n_samples / fs
-        loaded_end = rt.window_start_s + rt.data.shape[1] / sample_rate
-        return np.isclose(loaded_end, s1)
+        loaded_s0 = float(rt.window_start_s)
+        loaded_s1 = loaded_s0 + rt.data.shape[1] / sample_rate
+        tol = 1e-3
+        return (s0 + tol) >= loaded_s0 and (s1 - tol) <= loaded_s1
 
     def _on_load(_):
         cid = int(w_cell.value)
@@ -988,30 +995,105 @@ def sorting_qc_gui(
     # All appearance/filter changes re-render from the *cached* raw
     # electrode — zero file I/O. Safe to tweak freely over a NAS link.
     for w in (w_trace_color, w_trace_lw, w_spike_color, w_spike_size,
-              w_hp, w_yauto, w_yrange, w_svg, w_figw):
+              w_hp, w_yauto, w_yrange, w_figw):
         w.observe(lambda c: _render(), names='value')
 
-    # ipympl hint — surfaces a one-liner if it's not installed. SVG
-    # already gives crisp zoom via the browser, but ipympl adds a real
-    # pan/zoom toolbar inside the figure.
+    # ---- View buttons (zoom + pan)
+    # All four trigger _on_load(None) at the end. _on_load goes through
+    # the cache: zoom-in within the loaded window costs zero bytes; pan
+    # past the cache boundary re-fetches the new range.
+    w_zoom_in = widgets.Button(
+        description='⊕ zoom in', tooltip='halve the window width (centered)',
+        layout=widgets.Layout(width='130px'))
+    w_zoom_out = widgets.Button(
+        description='⊖ zoom out', tooltip='double the window width (centered)',
+        layout=widgets.Layout(width='130px'))
+    w_pan_left = widgets.Button(
+        description='◀ pan',
+        tooltip='shift left by half the current window width',
+        layout=widgets.Layout(width='110px'))
+    w_pan_right = widgets.Button(
+        description='pan ▶',
+        tooltip='shift right by half the current window width',
+        layout=widgets.Layout(width='110px'))
+    w_view_note = widgets.HTML(value=(
+        '<span style="color:#888;font-size:11px">'
+        'zoom-in within the loaded window is free; pan past it re-fetches.'
+        '</span>'
+    ))
+
+    def _set_view_and_reload(new_s0: float, new_s1: float) -> None:
+        """Clamp to the current epoch and trigger a Load."""
+        dur = float(w_window.max)
+        # Preserve width on clamp so the user doesn't get a squashed view
+        # at the boundaries.
+        width = max(0.01, new_s1 - new_s0)
+        if new_s0 < 0:
+            new_s0 = 0.0
+            new_s1 = min(dur, width)
+        if new_s1 > dur:
+            new_s1 = dur
+            new_s0 = max(0.0, dur - width)
+        # Setting w_window.value cascades to w_t0/w_t1 via the existing
+        # sync observers, so the type-in boxes track the buttons.
+        w_window.value = (float(new_s0), float(new_s1))
+        _on_load(None)
+
+    def _on_zoom_in(_):
+        s0, s1 = w_window.value
+        center = 0.5 * (s0 + s1)
+        new_width = (s1 - s0) * 0.5
+        _set_view_and_reload(center - 0.5 * new_width,
+                             center + 0.5 * new_width)
+
+    def _on_zoom_out(_):
+        s0, s1 = w_window.value
+        center = 0.5 * (s0 + s1)
+        new_width = (s1 - s0) * 2.0
+        _set_view_and_reload(center - 0.5 * new_width,
+                             center + 0.5 * new_width)
+
+    def _on_pan_left(_):
+        s0, s1 = w_window.value
+        shift = (s1 - s0) * 0.5
+        _set_view_and_reload(s0 - shift, s1 - shift)
+
+    def _on_pan_right(_):
+        s0, s1 = w_window.value
+        shift = (s1 - s0) * 0.5
+        _set_view_and_reload(s0 + shift, s1 + shift)
+
+    w_zoom_in.on_click(_on_zoom_in)
+    w_zoom_out.on_click(_on_zoom_out)
+    w_pan_left.on_click(_on_pan_left)
+    w_pan_right.on_click(_on_pan_right)
+
+    # ipympl hint — only shown when not installed. SVG output is always
+    # vector (browser pinch / Ctrl-+ stays crisp), and the View buttons
+    # below give you zoom-in / zoom-out / pan without any install.
+    # ipympl adds a *native* pan / zoom-rectangle toolbar inside the
+    # figure for users who want it.
     try:
         import ipympl  # noqa: F401
         ipympl_hint = ''
     except ImportError:
         ipympl_hint = (
             '<span style="color:#888;font-size:11px">'
-            'Tip: for pan/zoom-rectangle inside the figure, '
-            '<code>pip install ipympl</code> then add '
+            'Tip: for a native pan / zoom-rectangle toolbar inside the '
+            'figure, <code>pip install ipympl</code> then add '
             '<code>%matplotlib widget</code> at the top of the notebook. '
-            'Until then, SVG output is vector — pinch / Ctrl-+ in the '
-            'browser stays sharp.</span>'
+            'Until then, use the View buttons above or browser zoom — '
+            'plots are always vector SVG.</span>'
         )
 
     row1 = widgets.HBox([w_cell, w_epoch, w_elec_rank])
     row2a = widgets.HBox([w_window, w_size_note])
     row2b = widgets.HBox([w_t0, w_t1])
+    row_view = widgets.HBox([w_zoom_in, w_zoom_out,
+                              w_pan_left, w_pan_right,
+                              w_view_note])
     row3 = widgets.HBox([w_load, w_overlay, w_status])
     row4 = widgets.HBox([w_meter, w_reset_meter])
     hint = widgets.HTML(value=ipympl_hint)
     return widgets.VBox([row1, row2a, row2b, w_appearance,
-                          row3, row4, w_out, hint])
+                          row_view, row3, row4, w_out, hint])
