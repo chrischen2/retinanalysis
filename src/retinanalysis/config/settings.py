@@ -83,11 +83,36 @@ def reset_config(config_path):
 config_path = ir.files(retinanalysis) / os.path.join("config", "config.ini")
 mea_config = load_config(config_path)
 
-# Read priority: prefer the lab server (/Volumes/data, "tertiary") when connected,
-# fall back to the local SSDs ("secondary" = ChrisProSSD, "primary" = ChrisNewSSD).
-# The server is the canonical source of truth for shared data; local SSDs act as
-# caches when the server is offline (or when an experiment hasn't been synced yet).
-_TIER_PRIORITY = ['tertiary', 'secondary', 'primary']
+# ---------------------------------------------------------------------------
+# Local file cache (highest-priority tier)
+#
+# When the user is working off a remote NAS mount, the per-experiment Vision
+# files (.ei, .neurons, .params, .classification.txt, …) get pulled over the
+# wire every time the pipeline is rebuilt — hundreds of MB per kernel restart.
+# `ra.mirror_to_local_cache(...)` copies those files into this directory once,
+# and `find_path()` then transparently returns the local copy. To disable,
+# just delete the directory or unset RA_LOCAL_CACHE_ROOT.
+# ---------------------------------------------------------------------------
+LOCAL_CACHE_ROOT = os.environ.get(
+    'RA_LOCAL_CACHE_ROOT',
+    os.path.expanduser('~/.cache/retinanalysis'),
+)
+mea_config['local_cache'] = {
+    'data':     os.path.join(LOCAL_CACHE_ROOT, 'data'),
+    'raw':      os.path.join(LOCAL_CACHE_ROOT, 'raw'),
+    'analysis': os.path.join(LOCAL_CACHE_ROOT, 'analysis'),
+    # Other kinds are not cached locally — leave blank so find_path()
+    # falls through to the real tiers for h5/meta/tags/query.
+    'h5': '', 'meta': '', 'tags': '', 'query': '', 'user': '',
+    'protocol_repos_root': '',
+}
+
+# Read priority: local file cache first (free, when populated), then the lab
+# server (/Volumes/data, "tertiary") when connected, then local SSDs
+# ("secondary" = ChrisProSSD, "primary" = ChrisNewSSD). The server is the
+# canonical source of truth; local SSDs act as warm caches when the server
+# is offline (or when an experiment hasn't been synced yet).
+_TIER_PRIORITY = ['local_cache', 'tertiary', 'secondary', 'primary']
 
 # Module-level constants point to the highest-priority tier whose root path exists.
 # This preserves backward compatibility for code that does `os.path.join(DATA_DIR, ...)`.
@@ -152,7 +177,13 @@ def find_path(kind, *parts):
     for tier in _TIER_PRIORITY:
         if tier not in mea_config:
             continue
-        candidate = os.path.join(mea_config[tier][kind], *parts)
+        root = mea_config[tier].get(kind, '')
+        # Skip tiers that don't own this kind (e.g. the local-cache tier
+        # leaves h5/meta/tags blank). Without this guard the cache tier
+        # would generate spurious relative-path fallbacks on first miss.
+        if not root:
+            continue
+        candidate = os.path.join(root, *parts)
         if fallback is None:
             fallback = candidate
         if os.path.exists(candidate):

@@ -100,6 +100,12 @@ from .utils.sorting_qc import (sample_sorting_qc_cells,
                                sample_and_plot_sorting_qc,
                                sorting_qc_gui)
 
+from .utils import local_cache as _local_cache_mod
+from .utils.local_cache import (mirror_to_local_cache,
+                                 local_cache_status,
+                                 clear_local_cache,
+                                 LOCAL_CACHE_ROOT)
+
 # Per-protocol analyzers live under retinanalysis.protocols; import the
 # package but don't pull every module at top level (loaded on demand).
 from . import protocols
