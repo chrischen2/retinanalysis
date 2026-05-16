@@ -668,7 +668,13 @@ def sorting_qc_gui(
     w_reset_meter = widgets.Button(
         description='reset meter', layout=widgets.Layout(width='110px'),
     )
-    w_out = widgets.Output()
+    # Use an HTML widget — not Output — as the plot surface. Setting
+    # `w_out.value = …` atomically REPLACES the widget content; there is
+    # no "outputs list" to clear and no possibility of stacking. Earlier
+    # attempts with widgets.Output + clear_output(wait=True) intermittently
+    # produced duplicates depending on the Jupyter front-end, so switch
+    # to HTML for guaranteed single-figure replacement.
+    w_out = widgets.HTML(value='', layout=widgets.Layout(width='100%'))
 
     # ---- Appearance controls (line / marker / filter / y-range)
     _COLOR_CHOICES = ['0.25', 'black', 'tab:blue', 'tab:orange', 'tab:green',
@@ -806,20 +812,15 @@ def sorting_qc_gui(
 
     def _render():
         from io import BytesIO
-        from IPython.display import display, SVG
 
         if state.get('raw_electrode') is None:
-            # Just clear and stop — nothing to draw yet.
-            w_out.clear_output()
+            # Nothing to draw yet → atomic blank.
+            w_out.value = ''
             return
 
-        # Build the figure entirely OUTSIDE the `with w_out:` context so
-        # nothing in the matplotlib inline-backend hook chain can leak a
-        # display into the widget before we explicitly call display(SVG).
-        # That leakage was the root cause of figures stacking on repeated
-        # Load clicks — the auto-display fired *inside* w_out before
-        # plt.close(fig) ran, so each click added one figure that
-        # clear_output then failed to evict.
+        # Build the figure, render to an SVG string, then assign to
+        # w_out.value. The HTML widget atomically replaces its content
+        # on assignment — no clear step, no risk of stacking.
         try:
             trace = _hp_filter(state['raw_electrode'],
                                fs=sample_rate,
@@ -880,19 +881,25 @@ def sorting_qc_gui(
         )
         fig.tight_layout(rect=(0, 0, 1, 0.96))
 
-        # Always vector SVG. Render to bytes BEFORE closing & displaying
+        # Always vector SVG. Render to bytes BEFORE closing the figure
         # so the inline backend can't see a live figure object.
         buf = BytesIO()
         fig.savefig(buf, format='svg', bbox_inches='tight')
         plt.close(fig)
 
-        # Two-step replace: clear the widget, then push the SVG. The
-        # widget-level clear_output (not the IPython.display one) is the
-        # only call here that touches the Output widget, so there's no
-        # mixed-API risk.
-        w_out.clear_output(wait=True)
-        with w_out:
-            display(SVG(buf.getvalue()))
+        # Atomic replace via the HTML widget. Strip any leading
+        # XML declaration so the SVG embeds cleanly into the HTML
+        # document (most browsers tolerate it, but stripping is safer).
+        svg_str = buf.getvalue().decode('utf-8')
+        if svg_str.lstrip().startswith('<?xml'):
+            svg_str = svg_str.split('?>', 1)[1].lstrip()
+        # Wrap in a scroll container so very tall figures don't push the
+        # rest of the GUI off-screen.
+        w_out.value = (
+            '<div style="max-width:100%;overflow:auto;">'
+            + svg_str
+            + '</div>'
+        )
 
     def _extract_and_render(cid: int, ep: int, s0: float, s1: float,
                              electrode_idx: int, elec_rank: int,
