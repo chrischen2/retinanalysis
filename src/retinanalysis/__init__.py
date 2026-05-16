@@ -97,7 +97,8 @@ from .classes.raw import (RawTraces,
 
 from .utils import sorting_qc as _sorting_qc_mod
 from .utils.sorting_qc import (sample_sorting_qc_cells,
-                               sample_and_plot_sorting_qc)
+                               sample_and_plot_sorting_qc,
+                               sorting_qc_gui)
 
 # Per-protocol analyzers live under retinanalysis.protocols; import the
 # package but don't pull every module at top level (loaded on demand).

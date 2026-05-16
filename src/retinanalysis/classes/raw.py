@@ -11,6 +11,33 @@ from typing import Iterable, List, Optional, Tuple
 RW_BLOCKSIZE = 100000  # Block size for reading data
 TTL_THRESHOLD = 1000
 SAMPLE_RATE = 20000 # Hz
+_NETWORK_FSTYPES = {'smbfs', 'cifs', 'nfs', 'nfs4', 'afpfs', 'webdav',
+                     'fuse.sshfs', 'sshfs', 'ftpfs'}
+
+
+def _classify_mount(path: str) -> Tuple[bool, str, str]:
+    """Return (is_network, fstype, mountpoint) for the filesystem holding ``path``.
+
+    Falls back to ``(False, 'unknown', '')`` if detection fails (still safe
+    — the bandwidth counter will keep working, just labelled 'unknown').
+    """
+    try:
+        import psutil
+        ap = os.path.abspath(path)
+        best = None
+        for part in psutil.disk_partitions(all=True):
+            mp = part.mountpoint
+            if ap == mp or ap.startswith(mp.rstrip('/') + '/'):
+                if best is None or len(mp) > len(best.mountpoint):
+                    best = part
+        if best is not None:
+            fst = (best.fstype or '').lower()
+            return (fst in _NETWORK_FSTYPES, fst or 'unknown', best.mountpoint)
+    except Exception:
+        pass
+    return (False, 'unknown', '')
+
+
 class RawTraces:
     def __init__(self, rb: MEAResponseBlock):
         self.binpath = os.path.join(RAW_DIR, rb.exp_name, rb.datafile_name)
@@ -21,6 +48,21 @@ class RawTraces:
         self.ttl_samples = None
         self.sample_rate = SAMPLE_RATE  # Hz
         self.epoch_idx = None
+        # Absolute time (s) of the first sample in `self.data` relative to
+        # the start of the loaded epoch — non-zero when load_window was used.
+        self.window_start_s: float = 0.0
+        self._bytes_per_sample: Optional[int] = None  # cached for size estimates
+
+        # Source classification (local SSD vs network mount). Done once;
+        # cheap. Note: macOS page-cache means our byte counter is an
+        # *upper bound* on actual wire traffic — repeated reads of the
+        # same SMB block may be served from cache.
+        self.is_network, self.fstype, self.mountpoint = _classify_mount(self.binpath)
+        # Bandwidth tally — bytes counted at the boundary of get_data
+        # calls into bin2py. Cache hits in load_window short-circuit
+        # *before* this, so they correctly don't increment.
+        self._bytes_read_total: int = 0
+        self._n_reads: int = 0
 
     def load_bin_data(self, start_sample=0, end_sample=None, verbose=False):
         """
@@ -92,12 +134,105 @@ class RawTraces:
         self.data = data
         self.ttl_times = ttl_times
         self.ttl_samples = ttl_samples
-        
+        # Tally bytes that were requested from the file. Computed exactly
+        # from sample count × bytes/sample (bin2py's get_data reads this
+        # many bytes per call). True wire bytes may be lower when the OS
+        # already had the block cached.
+        try:
+            bps = pbfr.decoder._N_BYTES_PER_SAMPLE
+        except Exception:
+            bps = self._bps() if self._bytes_per_sample else 0
+        self._bytes_read_total += int(bps) * int(query_samples)
+        self._n_reads += 1
+
+    def bandwidth_summary(self) -> dict:
+        """Per-RawTraces tally of file bytes requested so far.
+
+        Returns a dict with ``bytes_read``, ``n_reads``, ``is_network``,
+        ``fstype``, ``mountpoint``. Read counts include every call to
+        ``load_bin_data`` (window or full epoch) but *exclude* cache-hit
+        no-ops in ``load_window``. On network mounts, the OS may have
+        cached blocks locally → the count is an upper bound on wire
+        traffic.
+        """
+        return {
+            'bytes_read': int(self._bytes_read_total),
+            'n_reads': int(self._n_reads),
+            'is_network': bool(self.is_network),
+            'fstype': str(self.fstype),
+            'mountpoint': str(self.mountpoint),
+        }
+
+    def reset_bandwidth_counter(self) -> None:
+        self._bytes_read_total = 0
+        self._n_reads = 0
+
     def load_epoch_index(self, epoch_idx, verbose=True):
         epoch_start = self.d_timing['epochStarts'][epoch_idx]
         epoch_end = self.d_timing['epochEnds'][epoch_idx]
         self.load_bin_data(start_sample=epoch_start, end_sample=epoch_end, verbose=verbose)
         self.epoch_idx = epoch_idx
+        self.window_start_s = 0.0
+
+    # ------------------------------------------------------------------
+    # Bandwidth-aware partial loaders
+    # ------------------------------------------------------------------
+    def _bps(self) -> int:
+        """Bytes/sample for this datafile (all electrodes, 12-bit packed)."""
+        if self._bytes_per_sample is None:
+            with bin2py.PyBinFileReader(self.binpath, chunk_samples=RW_BLOCKSIZE,
+                                         is_row_major=True) as pbfr:
+                self._bytes_per_sample = int(pbfr.decoder._N_BYTES_PER_SAMPLE)
+        return self._bytes_per_sample
+
+    def estimate_window_mb(self, start_s: float, end_s: float) -> float:
+        """Estimate megabytes that will be read from disk/NAS for this window.
+
+        bin2py packs every electrode's 12-bit sample into the same byte
+        stream, so the wire cost depends only on the time span (not on
+        which electrode you ultimately plot).
+        """
+        dur_s = max(0.0, float(end_s) - float(start_s))
+        n_samples = int(round(dur_s * self.sample_rate))
+        return self._bps() * n_samples / 1e6
+
+    def load_window(self, epoch_idx: int, start_s: float = 0.0,
+                    end_s: float = 2.0, verbose: bool = False) -> None:
+        """Load only a sub-window ``[start_s, end_s]`` of one epoch.
+
+        Sets ``self.data`` to the window (all electrodes, but only the
+        requested samples), ``self.epoch_idx = epoch_idx``, and
+        ``self.window_start_s = start_s`` so plotting code can recover
+        absolute epoch time. Designed for remote-NAS use where loading
+        a full ~60-s epoch (~1 GB) is wasteful.
+        """
+        epoch_start = int(self.d_timing['epochStarts'][epoch_idx])
+        epoch_end = int(self.d_timing['epochEnds'][epoch_idx])
+        epoch_len_s = (epoch_end - epoch_start) / self.sample_rate
+        if start_s < 0 or end_s > epoch_len_s or start_s >= end_s:
+            raise ValueError(
+                f'Invalid window [{start_s}, {end_s}] s for epoch '
+                f'{epoch_idx} of length {epoch_len_s:.3f} s.')
+        s0 = epoch_start + int(round(start_s * self.sample_rate))
+        s1 = epoch_start + int(round(end_s * self.sample_rate))
+        # Idempotent: if this exact window is already in self.data, skip
+        # the file I/O entirely (matters over remote NAS where every
+        # repeated read is paid in bandwidth).
+        if (self.data is not None
+                and self.epoch_idx == epoch_idx
+                and np.isclose(self.window_start_s, float(start_s))
+                and self.data.shape[1] == (s1 - s0)):
+            if verbose:
+                print(f'load_window: cache hit — epoch {epoch_idx}, '
+                      f'[{start_s:.2f}, {end_s:.2f}] s already in memory')
+            return
+        if verbose:
+            mb = self.estimate_window_mb(start_s, end_s)
+            print(f'load_window: epoch {epoch_idx}, '
+                  f'[{start_s:.2f}, {end_s:.2f}] s, ~{mb:.1f} MB on wire')
+        self.load_bin_data(start_sample=s0, end_sample=s1, verbose=verbose)
+        self.epoch_idx = epoch_idx
+        self.window_start_s = float(start_s)
 
 def plot_sts_over_trace(rt: RawTraces, rb: MEAResponseBlock, 
                         cell_id, epoch_idx, start_time=0, end_time=None,

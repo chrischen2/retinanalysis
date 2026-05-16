@@ -29,7 +29,8 @@ import matplotlib.pyplot as plt
 from ..config.settings import OUTPUT_DIR
 
 
-__all__ = ['sample_sorting_qc_cells', 'sample_and_plot_sorting_qc']
+__all__ = ['sample_sorting_qc_cells', 'sample_and_plot_sorting_qc',
+           'sorting_qc_gui']
 
 
 def _resolve_protocol_subdir(response_block, protocol_subdir, datafile_name,
@@ -181,6 +182,7 @@ def _plot_epoch_trace_with_raster(
     target_color: str = 'tab:red',
     hp_cutoff_hz: float = 300.0,
     spike_marker_size: int = 4,
+    trace_lw: float = 0.4,
 ) -> None:
     """Render one (raster + trace) row for one cell × one epoch.
 
@@ -245,7 +247,7 @@ def _plot_epoch_trace_with_raster(
     )
 
     # --- raw trace (bottom): high-pass filtered for display
-    ax_trace.plot(time_s, trace, color='0.25', lw=0.4, zorder=1)
+    ax_trace.plot(time_s, trace, color='0.25', lw=trace_lw, zorder=1)
     # Mark spikes on the trace. The "spike time" reported by Vision/Kilosort
     # may be the threshold-crossing or the template-peak sample, which can
     # be a couple of samples off from the local trough of the raw waveform.
@@ -287,9 +289,11 @@ def sample_and_plot_sorting_qc(
     sample_strategy: str = 'random',
     random_seed: Optional[int] = None,
     save_dir: Optional[str] = None,
-    dpi: int = 250,
+    dpi: int = 800,
     overwrite: bool = True,
     figsize_per_epoch: Tuple[float, float] = (12.0, 1.7),
+    trace_lw: float = 0.25,
+    spike_marker_size: int = 3,
     verbose: bool = True,
 ) -> Tuple[pd.DataFrame, List[Path]]:
     """Sample top-firing cells per type and write full-epoch sorting-QC PNGs.
@@ -325,11 +329,19 @@ def sample_and_plot_sorting_qc(
     save_dir : str, optional
         Override the default save directory.
     dpi : int
-        PNG resolution. 200-300 is appropriate for visual inspection.
+        PNG resolution. Default 800 — at typical figure widths a 0.25 pt
+        trace line ends up roughly 1 px wide; bump to 1200+ if you still
+        need crisper spike marks. (Higher DPI also costs disk space.)
     overwrite : bool
         Re-render existing PNGs (default True).
     figsize_per_epoch : (w, h)
         Per-row figure size in inches.
+    trace_lw : float
+        Line width of the raw trace in points. Default 0.25 (very thin).
+        Drop to 0.15 if you need to see neighboring spikes through the
+        line; raise to 0.5 if the trace disappears.
+    spike_marker_size : int
+        Size of the red spike dots overlaid on the trace.
 
     Returns
     -------
@@ -432,6 +444,8 @@ def sample_and_plot_sorting_qc(
                 _plot_epoch_trace_with_raster(
                     rt, response_block, proto_cid, ep,
                     ax_trace=ax_trace, ax_raster=ax_raster,
+                    trace_lw=trace_lw,
+                    spike_marker_size=spike_marker_size,
                 )
             except Exception as exc:
                 ax_trace.set_title(
@@ -455,3 +469,540 @@ def sample_and_plot_sorting_qc(
             print(f'  wrote: {png_path}')
 
     return sample_df, png_paths
+
+
+# ---------------------------------------------------------------------------
+# Interactive sorting-QC GUI (notebook). Targets the remote-NAS use case:
+# only the requested time window is read from disk (no full-epoch loads), and
+# the user can see the estimated MB on the wire before clicking "Load".
+# ---------------------------------------------------------------------------
+def sorting_qc_gui(
+    response_block,
+    *,
+    exp_name: Optional[str] = None,
+    protocol_subdir: Optional[str] = None,
+    append_datafile_to_subdir: bool = False,
+    output_root: Optional[str] = None,
+    cell_types: Sequence[str] = ('OnP', 'OnM'),
+    require_visual_qc_good: bool = True,
+    default_window_s: Tuple[float, float] = (0.0, 2.0),
+    hp_cutoff_hz: float = 300.0,
+):
+    """Notebook GUI to inspect raw traces under detected spikes, one window at a time.
+
+    Designed for remote-NAS access where loading a full ~60 s epoch
+    (~900 MB at 20 kHz × 512-channel 12-bit) is wasteful. The GUI:
+
+    - Lists QC-pass (∩ visual-QC ``good``) cells of the requested types
+      in a cell dropdown, with ``cell_type`` + protocol cell id +
+      matched noise id shown.
+    - Lets the user pick an epoch and a time window (start, end) in
+      seconds within the epoch.
+    - Lets the user pick which of the **top-3 EI electrodes** for the
+      selected cell to plot (1st = primary, 2nd / 3rd = the next two
+      strongest). Note: choosing a different electrode does *not*
+      reduce on-wire bytes — bin2py packs all electrodes together per
+      sample — it only changes which row of the loaded matrix is drawn.
+    - Estimated **MB on the wire** for the chosen window is shown on
+      the Load button so you can decide before it fetches.
+    - "Load raw trace" reads *only* that window (high-pass filtered for
+      display) and draws it. "Overlay detected spikes" re-renders with
+      red dots snapped to spike troughs in ±2 ms.
+
+    Requires ``ipywidgets`` and a Jupyter front-end (the
+    ``retinanalysis`` conda env already has it).
+
+    Parameters
+    ----------
+    response_block : MEAResponseBlock
+        Same object you'd pass to ``sample_and_plot_sorting_qc``.
+    cell_types : sequence[str]
+        Cell types to include in the dropdown. Default ``('OnP', 'OnM')``.
+        Pass an empty tuple to skip the type filter.
+    default_window_s : (start, end)
+        Initial window in seconds within the epoch.
+    hp_cutoff_hz : float
+        High-pass cutoff for the display filter (matches the saved PNGs).
+
+    Returns
+    -------
+    ipywidgets.VBox
+        Display this in a notebook cell. Holds dropdowns, sliders, the
+        Load / Overlay-spikes buttons, and an output area for the plot.
+    """
+    import ipywidgets as widgets
+    from IPython.display import display
+    from ..classes.raw import RawTraces, primary_electrode_of_cell
+
+    # ---- pool of cells (same selection as sample_sorting_qc_cells, but
+    # without the random down-sample — the user picks).
+    exp = exp_name or getattr(response_block, 'exp_name', None)
+    if exp is None:
+        raise ValueError('Cannot resolve exp_name; pass it explicitly.')
+    short = _resolve_protocol_subdir(
+        response_block, protocol_subdir,
+        getattr(response_block, 'datafile_name', None),
+        append_datafile_to_subdir,
+    )
+    root = Path(output_root) if output_root else Path(OUTPUT_DIR)
+    proto_root = root / exp / short
+    qc_path = proto_root / 'qc.csv'
+    if not qc_path.exists():
+        raise FileNotFoundError(
+            f'No qc.csv at {qc_path}. Run §17 (analyze_experiment) first.')
+    qc_df = pd.read_csv(qc_path)
+    pool = qc_df.loc[qc_df['passes']].copy() if 'passes' in qc_df.columns else qc_df.copy()
+
+    vqc_path = proto_root / 'visual_qc.csv'
+    if vqc_path.exists():
+        vqc_df = pd.read_csv(vqc_path)
+        good = set(vqc_df.loc[vqc_df['tag'] == 'good', 'cell_id'].astype(int))
+        pool = pool.loc[pool['cell_id'].astype(int).isin(good)]
+    if 'cell_type' in pool.columns and cell_types:
+        pool = pool.loc[pool['cell_type'].isin(list(cell_types))]
+    if pool.empty:
+        raise ValueError('No candidate cells after qc.csv + visual_qc.csv filtering.')
+
+    # noise-id lookup (proto -> noise) for nicer labels
+    df_st = response_block.df_spike_times
+    noise_lookup = {}
+    if 'noise_id' in df_st.columns:
+        for _, r in df_st.iterrows():
+            try:
+                noise_lookup[int(r['cell_id'])] = int(r['noise_id'])
+            except (ValueError, TypeError):
+                pass
+
+    def _cell_label(row) -> str:
+        cid = int(row['cell_id'])
+        ct = str(row.get('cell_type', ''))
+        nid = noise_lookup.get(cid)
+        rate = row.get('mean_rate_hz', None)
+        rate_str = f' · {float(rate):.1f} Hz' if rate is not None and not pd.isna(rate) else ''
+        nid_str = f' · noise#{nid}' if nid is not None else ''
+        return f'{ct} · proto#{cid}{nid_str}{rate_str}'
+
+    cell_options = [(_cell_label(r), int(r['cell_id'])) for _, r in pool.iterrows()]
+
+    # ---- raw-trace loader (cached across button clicks)
+    rt = RawTraces(response_block)
+    n_epochs = int(response_block.n_epochs)
+    sample_rate = float(rt.sample_rate)
+
+    # epoch durations (s) → for slider bounds
+    starts = response_block.d_timing['epochStarts']
+    ends = response_block.d_timing['epochEnds']
+    epoch_durs_s = [(int(e) - int(s)) / sample_rate for s, e in zip(starts, ends)]
+
+    # ---- widgets
+    w_cell = widgets.Dropdown(options=cell_options, description='Cell:',
+                              layout=widgets.Layout(width='420px'))
+    w_epoch = widgets.Dropdown(
+        options=[(f'epoch {i}  ({epoch_durs_s[i]:.1f} s)', i)
+                 for i in range(n_epochs)],
+        description='Epoch:',
+        layout=widgets.Layout(width='260px'),
+    )
+    w_elec_rank = widgets.Dropdown(
+        options=[('1st (primary)', 0), ('2nd', 1), ('3rd', 2)],
+        value=0, description='Electrode:',
+        layout=widgets.Layout(width='220px'),
+    )
+    w_window = widgets.FloatRangeSlider(
+        value=list(default_window_s),
+        min=0.0, max=epoch_durs_s[0], step=0.1,
+        description='Window (s):', continuous_update=False,
+        layout=widgets.Layout(width='520px'),
+    )
+    # Type-in window controls — for precise selection (e.g. 12.345 → 12.890).
+    # Kept in sync with the slider via observers.
+    w_t0 = widgets.FloatText(
+        value=float(default_window_s[0]), step=0.01, description='start (s):',
+        layout=widgets.Layout(width='180px'),
+    )
+    w_t1 = widgets.FloatText(
+        value=float(default_window_s[1]), step=0.01, description='end (s):',
+        layout=widgets.Layout(width='180px'),
+    )
+    # Re-entrancy guard: slider→text and text→slider observers must not
+    # ping-pong. _syncing toggles to True while one direction is mid-flight.
+    _sync = {'busy': False}
+
+    def _sync_text_from_slider(_change):
+        if _sync['busy']:
+            return
+        _sync['busy'] = True
+        try:
+            s0, s1 = w_window.value
+            w_t0.value = float(s0)
+            w_t1.value = float(s1)
+        finally:
+            _sync['busy'] = False
+
+    def _sync_slider_from_text(_change):
+        if _sync['busy']:
+            return
+        _sync['busy'] = True
+        try:
+            # Clamp to slider bounds for the current epoch.
+            lo = max(0.0, min(float(w_t0.value), float(w_window.max) - 0.001))
+            hi = max(lo + 0.001, min(float(w_t1.value), float(w_window.max)))
+            w_t0.value = lo
+            w_t1.value = hi
+            w_window.value = (lo, hi)
+        finally:
+            _sync['busy'] = False
+    w_window.observe(_sync_text_from_slider, names='value')
+    w_t0.observe(_sync_slider_from_text, names='value')
+    w_t1.observe(_sync_slider_from_text, names='value')
+    w_load = widgets.Button(description='Load raw trace',
+                            button_style='primary',
+                            layout=widgets.Layout(width='260px'))
+    w_overlay = widgets.ToggleButton(
+        value=True, description='Overlay detected spikes',
+        layout=widgets.Layout(width='240px'),
+    )
+    w_size_note = widgets.HTML()
+    w_status = widgets.HTML()
+    w_meter = widgets.HTML()
+    w_reset_meter = widgets.Button(
+        description='reset meter', layout=widgets.Layout(width='110px'),
+    )
+    w_out = widgets.Output()
+
+    # ---- Appearance controls (line / marker / filter / y-range)
+    _COLOR_CHOICES = ['0.25', 'black', 'tab:blue', 'tab:orange', 'tab:green',
+                      'tab:red', 'tab:purple', 'tab:gray', 'C0', 'C1', 'C2']
+    w_trace_color = widgets.Dropdown(
+        options=_COLOR_CHOICES, value='0.25', description='trace color:',
+        layout=widgets.Layout(width='230px'),
+    )
+    w_trace_lw = widgets.FloatSlider(
+        value=0.5, min=0.05, max=2.0, step=0.05, description='trace lw:',
+        continuous_update=False, readout_format='.2f',
+        layout=widgets.Layout(width='320px'),
+    )
+    w_spike_color = widgets.Dropdown(
+        options=_COLOR_CHOICES, value='tab:red', description='spike color:',
+        layout=widgets.Layout(width='230px'),
+    )
+    w_spike_size = widgets.IntSlider(
+        value=12, min=1, max=60, step=1, description='spike size:',
+        continuous_update=False,
+        layout=widgets.Layout(width='320px'),
+    )
+    w_hp = widgets.FloatText(
+        value=float(hp_cutoff_hz), step=10, description='HP (Hz):',
+        layout=widgets.Layout(width='180px'),
+    )
+    w_yauto = widgets.Checkbox(value=True, description='y-axis auto',
+                                layout=widgets.Layout(width='160px'))
+    w_yrange = widgets.FloatRangeSlider(
+        value=(-200.0, 200.0), min=-2000.0, max=2000.0, step=10.0,
+        description='y range:', continuous_update=False,
+        readout_format='.0f',
+        layout=widgets.Layout(width='460px'),
+    )
+    w_svg = widgets.Checkbox(value=True, description='vector (SVG)',
+                              layout=widgets.Layout(width='160px'))
+    w_figw = widgets.FloatSlider(
+        value=11.0, min=6.0, max=20.0, step=0.5, description='fig width (in):',
+        continuous_update=False,
+        layout=widgets.Layout(width='320px'),
+    )
+    appearance_box = widgets.VBox([
+        widgets.HBox([w_trace_color, w_trace_lw]),
+        widgets.HBox([w_spike_color, w_spike_size]),
+        widgets.HBox([w_hp, w_yauto, w_yrange]),
+        widgets.HBox([w_svg, w_figw]),
+    ])
+    w_appearance = widgets.Accordion(children=[appearance_box])
+    w_appearance.set_title(0, 'Appearance · line, marker, filter, y-axis')
+    w_appearance.selected_index = None   # start collapsed
+
+    def _meter_html() -> str:
+        summary = rt.bandwidth_summary()
+        mb = summary['bytes_read'] / 1e6
+        n = summary['n_reads']
+        if summary['is_network']:
+            chip_bg = '#fff3cd'   # amber — network
+            chip_fg = '#664d03'
+            icon = '📡'
+            src = f'Network ({summary["fstype"] or "unknown"})'
+            note = '<span style="color:#888"> · upper bound; OS may cache</span>'
+        else:
+            chip_bg = '#d1e7dd'   # green — local
+            chip_fg = '#0a3622'
+            icon = '💾'
+            src = f'Local ({summary["fstype"] or "unknown"})'
+            note = ''
+        return (
+            f'<span style="background:{chip_bg};color:{chip_fg};'
+            f'padding:2px 8px;border-radius:8px;font-family:monospace;'
+            f'font-size:12px;">'
+            f'{icon} {src} · {mb:.1f} MB read · {n} reads</span>{note}'
+        )
+
+    def _refresh_meter():
+        w_meter.value = _meter_html()
+
+    def _on_reset_meter(_):
+        rt.reset_bandwidth_counter()
+        _refresh_meter()
+
+    w_reset_meter.on_click(_on_reset_meter)
+    _refresh_meter()
+
+    # Mutable plotting state (so style/overlay changes can re-render
+    # without re-loading from the NAS). We stash the *raw* electrode and
+    # re-filter at render time so the HP-cutoff slider is free.
+    state = {
+        'epoch_idx': None,
+        'window_s': None,
+        'electrode_idx': None,
+        'cell_id': None,
+        'raw_electrode': None,    # unfiltered, 1-D (n_samples,)
+        'time_s': None,           # absolute epoch-time axis
+        'spike_times_s': None,    # selected cell's spikes, clipped to window
+    }
+
+    def _refresh_size_note():
+        s0, s1 = w_window.value
+        mb = rt.estimate_window_mb(s0, s1)
+        w_size_note.value = (
+            f'<span style="color:#555">~{mb:.1f} MB on wire '
+            f'({s1 - s0:.2f} s × 15.4 MB/s)</span>'
+        )
+
+    def _on_epoch_change(change):
+        # Clamp / reset window bounds for the new epoch length
+        dur = epoch_durs_s[w_epoch.value]
+        w_window.max = dur
+        s0, s1 = w_window.value
+        s1 = min(s1, dur)
+        s0 = min(s0, max(0.0, s1 - 0.1))
+        w_window.value = (s0, s1)
+        _refresh_size_note()
+
+    def _on_window_change(change):
+        _refresh_size_note()
+
+    w_epoch.observe(_on_epoch_change, names='value')
+    w_window.observe(_on_window_change, names='value')
+    _refresh_size_note()
+
+    def _top_electrodes(cell_id: int, k: int = 3) -> List[int]:
+        """Top-``k`` raw-channel indices by |EI| peak amplitude."""
+        ei = response_block.vcd.get_ei_for_cell(int(cell_id)).ei
+        peak = np.max(np.abs(ei), axis=1)
+        order = np.argsort(-peak)
+        return [int(x) for x in order[:k]]
+
+    def _render():
+        from io import BytesIO
+        from IPython.display import display, SVG
+        with w_out:
+            w_out.clear_output(wait=True)
+            if state.get('raw_electrode') is None:
+                return
+            # Re-filter from cached raw electrode every render → HP-cutoff
+            # slider can change without re-fetching anything. Filtering a
+            # few seconds at 20 kHz is sub-100 ms.
+            try:
+                trace = _hp_filter(state['raw_electrode'],
+                                   fs=sample_rate,
+                                   cutoff_hz=float(w_hp.value))
+            except Exception:
+                trace = state['raw_electrode']
+            time_s = state['time_s']
+            sts_s = state['spike_times_s']
+
+            fig, (ax_r, ax_t) = plt.subplots(
+                2, 1, figsize=(float(w_figw.value), 3.2), sharex=True,
+                gridspec_kw={'height_ratios': [0.18, 1.0]},
+            )
+            ax_t.plot(time_s, trace,
+                      color=w_trace_color.value, lw=float(w_trace_lw.value),
+                      zorder=1)
+            if w_overlay.value and sts_s is not None and sts_s.size:
+                # Snap each spike to the local minimum in ±2 ms so dots
+                # land on the visible trough instead of the threshold
+                # crossing.
+                t0 = float(time_s[0])
+                fs = sample_rate
+                snap_w = int(0.002 * fs)
+                sample_idx = np.round((sts_s - t0) * fs).astype(int)
+                sample_idx = sample_idx[(sample_idx >= 0) & (sample_idx < trace.size)]
+                snapped = []
+                for s in sample_idx:
+                    lo = max(0, s - snap_w)
+                    hi = min(trace.size, s + snap_w + 1)
+                    snapped.append(lo + int(np.argmin(trace[lo:hi])))
+                snapped = np.asarray(snapped, dtype=int)
+                ax_t.scatter(time_s[snapped], trace[snapped],
+                             color=w_spike_color.value,
+                             s=int(w_spike_size.value),
+                             zorder=3, linewidths=0)
+                ax_r.vlines(sts_s, 0.05, 0.95,
+                            color=w_spike_color.value, lw=0.7)
+            ax_r.set_xlim(time_s[0], time_s[-1])
+            ax_r.set_ylim(0, 1); ax_r.set_yticks([]); ax_r.set_xticks([])
+            for spine in ('top', 'right', 'left', 'bottom'):
+                ax_r.spines[spine].set_visible(False)
+            n_sp = 0 if sts_s is None else int(sts_s.size)
+            ax_r.set_ylabel(f'{n_sp} sp', fontsize=8,
+                            rotation=0, ha='right', va='center')
+            ax_t.set_xlabel('time within epoch (s)')
+            ax_t.set_ylabel(f'{int(float(w_hp.value))} Hz HP')
+            if not w_yauto.value:
+                ax_t.set_ylim(*w_yrange.value)
+            ct = pool.loc[pool['cell_id'].astype(int) == int(state['cell_id'])]
+            ct_str = str(ct['cell_type'].iloc[0]) if 'cell_type' in ct.columns and not ct.empty else ''
+            fig.suptitle(
+                f'{exp} / {response_block.datafile_name}  —  '
+                f'proto#{state["cell_id"]} ({ct_str})  '
+                f'· epoch {state["epoch_idx"]} · electrode {state["electrode_idx"]}',
+                fontsize=10,
+            )
+            fig.tight_layout(rect=(0, 0, 1, 0.96))
+
+            if w_svg.value:
+                # Vector SVG: stays sharp under any browser zoom. The
+                # downside is no built-in pan/zoom toolbar — that needs
+                # ipympl (see the hint at the bottom of the GUI).
+                buf = BytesIO()
+                fig.savefig(buf, format='svg', bbox_inches='tight')
+                plt.close(fig)
+                display(SVG(buf.getvalue()))
+            else:
+                plt.show()
+
+    def _extract_and_render(cid: int, ep: int, s0: float, s1: float,
+                             electrode_idx: int, elec_rank: int,
+                             bytes_read_mb: float) -> None:
+        """Pull one electrode out of the cached window, stash, and draw.
+
+        Doesn't touch the file. ``bytes_read_mb`` is only used for the
+        status line — 0 means "served from cache". We stash the *raw*
+        (unfiltered) electrode so that subsequent style changes (HP
+        cutoff, line color, …) can re-render without re-fetching.
+        """
+        raw_electrode = rt.data[electrode_idx, :].astype(np.float32)
+        time_s = s0 + np.arange(raw_electrode.size) / sample_rate
+
+        row_idx = df_st.index[df_st['cell_id'] == int(cid)]
+        if len(row_idx):
+            sts_ms = np.asarray(df_st.at[row_idx[0], 'spike_times'][ep])
+            sts_s_all = sts_ms / 1000.0
+            sts_s = sts_s_all[(sts_s_all >= s0) & (sts_s_all <= s1)]
+        else:
+            sts_s = np.array([])
+
+        state.update(epoch_idx=ep, window_s=(s0, s1),
+                     electrode_idx=electrode_idx, cell_id=cid,
+                     raw_electrode=raw_electrode, time_s=time_s,
+                     spike_times_s=sts_s)
+        if bytes_read_mb > 0:
+            tag = f'<span style="color:#080">Loaded</span> {bytes_read_mb:.1f} MB'
+        else:
+            tag = '<span style="color:#080">Cached</span> (no I/O)'
+        w_status.value = (
+            f'{tag} · cell proto#{cid} · epoch {ep} · electrode '
+            f'{electrode_idx} (rank {elec_rank + 1}) · '
+            f'{sts_s.size} spikes in window'
+        )
+        _refresh_meter()
+        _render()
+
+    def _window_matches_cache(ep: int, s0: float, s1: float) -> bool:
+        """True iff rt.data already holds exactly this (epoch, window)."""
+        if rt.data is None or rt.epoch_idx != ep:
+            return False
+        if not np.isclose(rt.window_start_s, s0):
+            return False
+        # End is start + n_samples / fs
+        loaded_end = rt.window_start_s + rt.data.shape[1] / sample_rate
+        return np.isclose(loaded_end, s1)
+
+    def _on_load(_):
+        cid = int(w_cell.value)
+        ep = int(w_epoch.value)
+        s0, s1 = (float(x) for x in w_window.value)
+        elec_rank = int(w_elec_rank.value)
+        top = _top_electrodes(cid, k=3)
+        electrode_idx = top[elec_rank] if elec_rank < len(top) else top[0]
+
+        w_load.disabled = True
+        try:
+            cache_hit = _window_matches_cache(ep, s0, s1)
+            if cache_hit:
+                _extract_and_render(cid, ep, s0, s1,
+                                    electrode_idx, elec_rank, 0.0)
+            else:
+                est_mb = rt.estimate_window_mb(s0, s1)
+                w_status.value = (
+                    f'<b>Loading</b> [{s0:.2f}, {s1:.2f}] s of epoch {ep}'
+                    f' (~{est_mb:.1f} MB)…'
+                )
+                rt.load_window(ep, start_s=s0, end_s=s1, verbose=False)
+                _extract_and_render(cid, ep, s0, s1,
+                                    electrode_idx, elec_rank, est_mb)
+        except Exception as exc:
+            w_status.value = (
+                f'<span style="color:#c00">Load failed:</span> {exc!r}')
+        finally:
+            w_load.disabled = False
+
+    def _on_electrode_change(_change):
+        """Switch electrode without I/O when the window is already cached.
+
+        rt.data holds all 512 electrodes for the cached window, so picking
+        a different top-N rank is just a row index + a 300 Hz filter.
+        """
+        if state['cell_id'] is None:
+            return  # nothing loaded yet
+        cid = int(state['cell_id'])
+        ep = int(state['epoch_idx'])
+        s0, s1 = state['window_s']
+        if not _window_matches_cache(ep, s0, s1):
+            return  # the cached window no longer matches; user must click Load
+        elec_rank = int(w_elec_rank.value)
+        top = _top_electrodes(cid, k=3)
+        electrode_idx = top[elec_rank] if elec_rank < len(top) else top[0]
+        _extract_and_render(cid, ep, s0, s1, electrode_idx, elec_rank, 0.0)
+
+    w_load.on_click(_on_load)
+    w_elec_rank.observe(_on_electrode_change, names='value')
+    # Toggling "Overlay detected spikes" re-renders from the cached trace —
+    # no extra I/O, so this is safe to do over slow links.
+    w_overlay.observe(lambda c: _render(), names='value')
+    # All appearance/filter changes re-render from the *cached* raw
+    # electrode — zero file I/O. Safe to tweak freely over a NAS link.
+    for w in (w_trace_color, w_trace_lw, w_spike_color, w_spike_size,
+              w_hp, w_yauto, w_yrange, w_svg, w_figw):
+        w.observe(lambda c: _render(), names='value')
+
+    # ipympl hint — surfaces a one-liner if it's not installed. SVG
+    # already gives crisp zoom via the browser, but ipympl adds a real
+    # pan/zoom toolbar inside the figure.
+    try:
+        import ipympl  # noqa: F401
+        ipympl_hint = ''
+    except ImportError:
+        ipympl_hint = (
+            '<span style="color:#888;font-size:11px">'
+            'Tip: for pan/zoom-rectangle inside the figure, '
+            '<code>pip install ipympl</code> then add '
+            '<code>%matplotlib widget</code> at the top of the notebook. '
+            'Until then, SVG output is vector — pinch / Ctrl-+ in the '
+            'browser stays sharp.</span>'
+        )
+
+    row1 = widgets.HBox([w_cell, w_epoch, w_elec_rank])
+    row2a = widgets.HBox([w_window, w_size_note])
+    row2b = widgets.HBox([w_t0, w_t1])
+    row3 = widgets.HBox([w_load, w_overlay, w_status])
+    row4 = widgets.HBox([w_meter, w_reset_meter])
+    hint = widgets.HTML(value=ipympl_hint)
+    return widgets.VBox([row1, row2a, row2b, w_appearance,
+                          row3, row4, w_out, hint])
