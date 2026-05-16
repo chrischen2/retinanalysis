@@ -697,8 +697,11 @@ def sorting_qc_gui(
     )
     w_yauto = widgets.Checkbox(value=True, description='y-axis auto',
                                 layout=widgets.Layout(width='160px'))
+    # y range acts as a scrollbar for the y-axis: drag handles to resize,
+    # drag the bar between them to pan. The zoom-y / pan-y buttons in the
+    # View row drive this same widget programmatically.
     w_yrange = widgets.FloatRangeSlider(
-        value=(-200.0, 200.0), min=-2000.0, max=2000.0, step=10.0,
+        value=(-200.0, 200.0), min=-5000.0, max=5000.0, step=1.0,
         description='y range:', continuous_update=False,
         readout_format='.0f',
         layout=widgets.Layout(width='460px'),
@@ -708,11 +711,16 @@ def sorting_qc_gui(
         continuous_update=False,
         layout=widgets.Layout(width='320px'),
     )
+    w_figh = widgets.FloatSlider(
+        value=6.4, min=2.0, max=14.0, step=0.2, description='fig height (in):',
+        continuous_update=False,
+        layout=widgets.Layout(width='320px'),
+    )
     appearance_box = widgets.VBox([
         widgets.HBox([w_trace_color, w_trace_lw]),
         widgets.HBox([w_spike_color, w_spike_size]),
         widgets.HBox([w_hp, w_yauto, w_yrange]),
-        widgets.HBox([w_figw]),
+        widgets.HBox([w_figw, w_figh]),
     ])
     w_appearance = widgets.Accordion(children=[appearance_box])
     w_appearance.set_title(0, 'Appearance · line, marker, filter, y-axis')
@@ -798,85 +806,92 @@ def sorting_qc_gui(
 
     def _render():
         from io import BytesIO
-        from IPython.display import display, SVG, clear_output
-        # Clear the Output widget BEFORE redrawing so repeated Load /
-        # appearance-toggle clicks replace the figure instead of stacking
-        # it. Using IPython.display.clear_output inside the `with` block
-        # is the documented idiom for ipywidgets Output — mixing it with
-        # the widget's own clear_output() method (as the previous version
-        # did) was unreliable and caused multiple SVGs to pile up.
+        from IPython.display import display, SVG
+
+        if state.get('raw_electrode') is None:
+            # Just clear and stop — nothing to draw yet.
+            w_out.clear_output()
+            return
+
+        # Build the figure entirely OUTSIDE the `with w_out:` context so
+        # nothing in the matplotlib inline-backend hook chain can leak a
+        # display into the widget before we explicitly call display(SVG).
+        # That leakage was the root cause of figures stacking on repeated
+        # Load clicks — the auto-display fired *inside* w_out before
+        # plt.close(fig) ran, so each click added one figure that
+        # clear_output then failed to evict.
+        try:
+            trace = _hp_filter(state['raw_electrode'],
+                               fs=sample_rate,
+                               cutoff_hz=float(w_hp.value))
+        except Exception:
+            trace = state['raw_electrode']
+        time_s = state['time_s']
+        sts_s = state['spike_times_s']
+
+        fig, (ax_r, ax_t) = plt.subplots(
+            2, 1,
+            figsize=(float(w_figw.value), float(w_figh.value)),
+            sharex=True,
+            gridspec_kw={'height_ratios': [0.18, 1.0]},
+        )
+        ax_t.plot(time_s, trace,
+                  color=w_trace_color.value, lw=float(w_trace_lw.value),
+                  zorder=1)
+        if w_overlay.value and sts_s is not None and sts_s.size:
+            # Snap each spike to the local minimum in ±2 ms so dots
+            # land on the visible trough instead of the threshold
+            # crossing.
+            t0 = float(time_s[0])
+            fs = sample_rate
+            snap_w = int(0.002 * fs)
+            sample_idx = np.round((sts_s - t0) * fs).astype(int)
+            sample_idx = sample_idx[(sample_idx >= 0) & (sample_idx < trace.size)]
+            snapped = []
+            for s in sample_idx:
+                lo = max(0, s - snap_w)
+                hi = min(trace.size, s + snap_w + 1)
+                snapped.append(lo + int(np.argmin(trace[lo:hi])))
+            snapped = np.asarray(snapped, dtype=int)
+            ax_t.scatter(time_s[snapped], trace[snapped],
+                         color=w_spike_color.value,
+                         s=int(w_spike_size.value),
+                         zorder=3, linewidths=0)
+            ax_r.vlines(sts_s, 0.05, 0.95,
+                        color=w_spike_color.value, lw=0.7)
+        ax_r.set_xlim(time_s[0], time_s[-1])
+        ax_r.set_ylim(0, 1); ax_r.set_yticks([]); ax_r.set_xticks([])
+        for spine in ('top', 'right', 'left', 'bottom'):
+            ax_r.spines[spine].set_visible(False)
+        n_sp = 0 if sts_s is None else int(sts_s.size)
+        ax_r.set_ylabel(f'{n_sp} sp', fontsize=8,
+                        rotation=0, ha='right', va='center')
+        ax_t.set_xlabel('time within epoch (s)')
+        ax_t.set_ylabel(f'{int(float(w_hp.value))} Hz HP')
+        if not w_yauto.value:
+            ax_t.set_ylim(*w_yrange.value)
+        ct = pool.loc[pool['cell_id'].astype(int) == int(state['cell_id'])]
+        ct_str = str(ct['cell_type'].iloc[0]) if 'cell_type' in ct.columns and not ct.empty else ''
+        fig.suptitle(
+            f'{exp} / {response_block.datafile_name}  —  '
+            f'proto#{state["cell_id"]} ({ct_str})  '
+            f'· epoch {state["epoch_idx"]} · electrode {state["electrode_idx"]}',
+            fontsize=10,
+        )
+        fig.tight_layout(rect=(0, 0, 1, 0.96))
+
+        # Always vector SVG. Render to bytes BEFORE closing & displaying
+        # so the inline backend can't see a live figure object.
+        buf = BytesIO()
+        fig.savefig(buf, format='svg', bbox_inches='tight')
+        plt.close(fig)
+
+        # Two-step replace: clear the widget, then push the SVG. The
+        # widget-level clear_output (not the IPython.display one) is the
+        # only call here that touches the Output widget, so there's no
+        # mixed-API risk.
+        w_out.clear_output(wait=True)
         with w_out:
-            clear_output(wait=True)
-            if state.get('raw_electrode') is None:
-                return
-            # Re-filter from cached raw electrode every render → HP-cutoff
-            # slider can change without re-fetching anything. Filtering a
-            # few seconds at 20 kHz is sub-100 ms.
-            try:
-                trace = _hp_filter(state['raw_electrode'],
-                                   fs=sample_rate,
-                                   cutoff_hz=float(w_hp.value))
-            except Exception:
-                trace = state['raw_electrode']
-            time_s = state['time_s']
-            sts_s = state['spike_times_s']
-
-            fig, (ax_r, ax_t) = plt.subplots(
-                2, 1, figsize=(float(w_figw.value), 3.2), sharex=True,
-                gridspec_kw={'height_ratios': [0.18, 1.0]},
-            )
-            ax_t.plot(time_s, trace,
-                      color=w_trace_color.value, lw=float(w_trace_lw.value),
-                      zorder=1)
-            if w_overlay.value and sts_s is not None and sts_s.size:
-                # Snap each spike to the local minimum in ±2 ms so dots
-                # land on the visible trough instead of the threshold
-                # crossing.
-                t0 = float(time_s[0])
-                fs = sample_rate
-                snap_w = int(0.002 * fs)
-                sample_idx = np.round((sts_s - t0) * fs).astype(int)
-                sample_idx = sample_idx[(sample_idx >= 0) & (sample_idx < trace.size)]
-                snapped = []
-                for s in sample_idx:
-                    lo = max(0, s - snap_w)
-                    hi = min(trace.size, s + snap_w + 1)
-                    snapped.append(lo + int(np.argmin(trace[lo:hi])))
-                snapped = np.asarray(snapped, dtype=int)
-                ax_t.scatter(time_s[snapped], trace[snapped],
-                             color=w_spike_color.value,
-                             s=int(w_spike_size.value),
-                             zorder=3, linewidths=0)
-                ax_r.vlines(sts_s, 0.05, 0.95,
-                            color=w_spike_color.value, lw=0.7)
-            ax_r.set_xlim(time_s[0], time_s[-1])
-            ax_r.set_ylim(0, 1); ax_r.set_yticks([]); ax_r.set_xticks([])
-            for spine in ('top', 'right', 'left', 'bottom'):
-                ax_r.spines[spine].set_visible(False)
-            n_sp = 0 if sts_s is None else int(sts_s.size)
-            ax_r.set_ylabel(f'{n_sp} sp', fontsize=8,
-                            rotation=0, ha='right', va='center')
-            ax_t.set_xlabel('time within epoch (s)')
-            ax_t.set_ylabel(f'{int(float(w_hp.value))} Hz HP')
-            if not w_yauto.value:
-                ax_t.set_ylim(*w_yrange.value)
-            ct = pool.loc[pool['cell_id'].astype(int) == int(state['cell_id'])]
-            ct_str = str(ct['cell_type'].iloc[0]) if 'cell_type' in ct.columns and not ct.empty else ''
-            fig.suptitle(
-                f'{exp} / {response_block.datafile_name}  —  '
-                f'proto#{state["cell_id"]} ({ct_str})  '
-                f'· epoch {state["epoch_idx"]} · electrode {state["electrode_idx"]}',
-                fontsize=10,
-            )
-            fig.tight_layout(rect=(0, 0, 1, 0.96))
-
-            # Always vector SVG — stays sharp under any browser zoom.
-            # Native pan/zoom-rectangle inside the figure needs ipympl;
-            # see the hint at the bottom of the GUI. The View row of
-            # buttons below provides zoom-in/out and pan as a fallback.
-            buf = BytesIO()
-            fig.savefig(buf, format='svg', bbox_inches='tight')
-            plt.close(fig)
             display(SVG(buf.getvalue()))
 
     def _extract_and_render(cid: int, ep: int, s0: float, s1: float,
@@ -995,7 +1010,7 @@ def sorting_qc_gui(
     # All appearance/filter changes re-render from the *cached* raw
     # electrode — zero file I/O. Safe to tweak freely over a NAS link.
     for w in (w_trace_color, w_trace_lw, w_spike_color, w_spike_size,
-              w_hp, w_yauto, w_yrange, w_figw):
+              w_hp, w_yauto, w_yrange, w_figw, w_figh):
         w.observe(lambda c: _render(), names='value')
 
     # ---- View buttons (zoom + pan)
@@ -1019,6 +1034,31 @@ def sorting_qc_gui(
     w_view_note = widgets.HTML(value=(
         '<span style="color:#888;font-size:11px">'
         'zoom-in within the loaded window is free; pan past it re-fetches.'
+        '</span>'
+    ))
+    # Y-axis view buttons. These never touch the file — they only adjust
+    # w_yrange and re-render from the cached trace. Using them auto-
+    # disables the "y-axis auto" checkbox so the manual range takes effect.
+    w_zoom_y_in = widgets.Button(
+        description='⊕ zoom y', tooltip='halve the y range (center-preserving)',
+        layout=widgets.Layout(width='130px'))
+    w_zoom_y_out = widgets.Button(
+        description='⊖ zoom y', tooltip='double the y range (center-preserving)',
+        layout=widgets.Layout(width='130px'))
+    w_pan_y_up = widgets.Button(
+        description='▲ pan y',
+        tooltip='shift the y range up by half its height',
+        layout=widgets.Layout(width='110px'))
+    w_pan_y_down = widgets.Button(
+        description='pan y ▼',
+        tooltip='shift the y range down by half its height',
+        layout=widgets.Layout(width='110px'))
+    w_y_reset = widgets.Button(
+        description='y auto-fit', tooltip='re-enable y-auto and fit to trace',
+        layout=widgets.Layout(width='110px'))
+    w_view_y_note = widgets.HTML(value=(
+        '<span style="color:#888;font-size:11px">'
+        'y-axis view is free — purely a re-render from cached data.'
         '</span>'
     ))
 
@@ -1068,6 +1108,77 @@ def sorting_qc_gui(
     w_pan_left.on_click(_on_pan_left)
     w_pan_right.on_click(_on_pan_right)
 
+    # ---- Y-axis view handlers (zero I/O — render from cached trace)
+    def _current_y_view() -> Tuple[float, float]:
+        """The y range that's currently *visible*.
+
+        If y-auto is on, derive it from the cached filtered trace; if
+        no trace is loaded yet, fall back to the slider's current
+        value. Margin-pad by 5% so subsequent zoom-out is symmetric
+        around the data.
+        """
+        if not w_yauto.value:
+            return tuple(w_yrange.value)
+        if state.get('raw_electrode') is None:
+            return tuple(w_yrange.value)
+        try:
+            trace = _hp_filter(state['raw_electrode'],
+                               fs=sample_rate,
+                               cutoff_hz=float(w_hp.value))
+        except Exception:
+            trace = state['raw_electrode']
+        lo, hi = float(trace.min()), float(trace.max())
+        margin = 0.05 * max(hi - lo, 1e-9)
+        return (lo - margin, hi + margin)
+
+    def _set_yrange(lo: float, hi: float) -> None:
+        """Set w_yrange, clamping to its slider bounds + auto-disable y-auto.
+
+        Setting w_yrange.value fires the appearance observer which calls
+        _render — so we don't need an explicit render call here.
+        """
+        lo_clamped = max(float(w_yrange.min), float(lo))
+        hi_clamped = min(float(w_yrange.max), float(hi))
+        if hi_clamped <= lo_clamped:
+            hi_clamped = lo_clamped + float(w_yrange.step) * 2
+        # Disable auto FIRST so the new range takes effect on next render.
+        if w_yauto.value:
+            w_yauto.value = False
+        w_yrange.value = (lo_clamped, hi_clamped)
+
+    def _on_zoom_y_in(_):
+        lo, hi = _current_y_view()
+        c = 0.5 * (lo + hi)
+        half = 0.25 * (hi - lo)  # halve total → quarter from center
+        _set_yrange(c - half, c + half)
+
+    def _on_zoom_y_out(_):
+        lo, hi = _current_y_view()
+        c = 0.5 * (lo + hi)
+        half = (hi - lo)            # double total → full extent from center
+        _set_yrange(c - half, c + half)
+
+    def _on_pan_y_up(_):
+        lo, hi = _current_y_view()
+        shift = 0.5 * (hi - lo)
+        _set_yrange(lo + shift, hi + shift)
+
+    def _on_pan_y_down(_):
+        lo, hi = _current_y_view()
+        shift = 0.5 * (hi - lo)
+        _set_yrange(lo - shift, hi - shift)
+
+    def _on_y_reset(_):
+        # Flip y-auto back on. The observer fires _render which uses
+        # matplotlib's auto-fit for the y axis.
+        w_yauto.value = True
+
+    w_zoom_y_in.on_click(_on_zoom_y_in)
+    w_zoom_y_out.on_click(_on_zoom_y_out)
+    w_pan_y_up.on_click(_on_pan_y_up)
+    w_pan_y_down.on_click(_on_pan_y_down)
+    w_y_reset.on_click(_on_y_reset)
+
     # ipympl hint — only shown when not installed. SVG output is always
     # vector (browser pinch / Ctrl-+ stays crisp), and the View buttons
     # below give you zoom-in / zoom-out / pan without any install.
@@ -1092,8 +1203,12 @@ def sorting_qc_gui(
     row_view = widgets.HBox([w_zoom_in, w_zoom_out,
                               w_pan_left, w_pan_right,
                               w_view_note])
+    row_view_y = widgets.HBox([w_zoom_y_in, w_zoom_y_out,
+                                 w_pan_y_up, w_pan_y_down,
+                                 w_y_reset, w_view_y_note])
     row3 = widgets.HBox([w_load, w_overlay, w_status])
     row4 = widgets.HBox([w_meter, w_reset_meter])
     hint = widgets.HTML(value=ipympl_hint)
     return widgets.VBox([row1, row2a, row2b, w_appearance,
-                          row_view, row3, row4, w_out, hint])
+                          row_view, row_view_y,
+                          row3, row4, w_out, hint])
