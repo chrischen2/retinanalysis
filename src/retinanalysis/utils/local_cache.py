@@ -35,6 +35,9 @@ __all__ = [
     'mirror_to_local_cache',
     'local_cache_status',
     'clear_local_cache',
+    'create_mea_pipeline_cached',
+    'load_cached_pipeline',
+    'pipeline_cache_path',
     'LOCAL_CACHE_ROOT',
 ]
 
@@ -335,3 +338,207 @@ def clear_local_cache(
     return {'root': str(root),
             'removed_bytes': removed_bytes,
             'paths': removed_paths}
+
+
+# ---------------------------------------------------------------------------
+# Pipeline-object cache (one .pkl per build).
+#
+# Step 3a (mirror_to_local_cache) eliminates *bandwidth* — but every kernel
+# restart still re-runs DataJoint queries, cluster_match, and the per-cell
+# attribute pulls. This second-tier cache saves the built MEAPipeline
+# object itself, so a kernel restart turns into a single pickle.load().
+# ---------------------------------------------------------------------------
+import hashlib
+import json
+
+
+_PIPELINE_CACHE_KIND = 'pipelines'
+
+# These build-time knobs change the contents of the pipeline. Two builds
+# with the same key always produce the same object; changing any key
+# invalidates the cache. Keep this list in sync with create_mea_pipeline().
+_PIPELINE_CACHE_KEYS = (
+    'exp_name', 'datafile_name', 'ss_version',
+    'analysis_chunk_name', 'typing_file',
+    'ei_corr_cutoff', 'ei_match_method',
+    'ei_use_isi', 'ei_use_timecourse', 'ei_n_removed_channels',
+)
+
+
+def _normalize_kwargs(kwargs: Dict) -> Dict:
+    """Canonicalize for hashing — lists → tuples, ints/floats kept as-is."""
+    out: Dict = {}
+    for k in _PIPELINE_CACHE_KEYS:
+        v = kwargs.get(k, None)
+        if isinstance(v, list):
+            v = tuple(v)
+        out[k] = v
+    return out
+
+
+def pipeline_cache_path(
+    exp_name: str,
+    datafile_name,
+    *,
+    ss_version: str = 'kilosort2.5',
+    analysis_chunk_name: Optional[str] = None,
+    typing_file: Optional[str] = None,
+    ei_corr_cutoff: float = 0.8,
+    ei_match_method: str = 'all',
+    ei_use_isi: bool = False,
+    ei_use_timecourse: bool = False,
+    ei_n_removed_channels: int = 1,
+    cache_root: Optional[str] = None,
+) -> Path:
+    """Deterministic local path for the cached pipeline pkl.
+
+    Two builds with the same inputs map to the same file; changing any
+    of the EI-match knobs (cutoff, method, …) changes the hash, so the
+    user can never silently load a stale build.
+    """
+    kwargs = dict(
+        exp_name=exp_name, datafile_name=datafile_name,
+        ss_version=ss_version, analysis_chunk_name=analysis_chunk_name,
+        typing_file=typing_file,
+        ei_corr_cutoff=float(ei_corr_cutoff),
+        ei_match_method=ei_match_method,
+        ei_use_isi=bool(ei_use_isi),
+        ei_use_timecourse=bool(ei_use_timecourse),
+        ei_n_removed_channels=int(ei_n_removed_channels),
+    )
+    norm = _normalize_kwargs(kwargs)
+    payload = json.dumps(norm, sort_keys=True, default=str).encode()
+    short = hashlib.sha1(payload).hexdigest()[:10]
+
+    # Datafile in the filename for human readability; the hash absorbs
+    # all other knobs. Tolerate a list-of-datafiles (MEAStimGroup).
+    df_tag = datafile_name if isinstance(datafile_name, str) else 'multi'
+    fname = f'{exp_name}__{df_tag}__{ss_version}__{short}.pkl'
+
+    root = Path(cache_root) if cache_root else Path(LOCAL_CACHE_ROOT)
+    return root / _PIPELINE_CACHE_KIND / fname
+
+
+def load_cached_pipeline(
+    exp_name: str,
+    datafile_name,
+    *,
+    ss_version: str = 'kilosort2.5',
+    analysis_chunk_name: Optional[str] = None,
+    typing_file: Optional[str] = None,
+    ei_corr_cutoff: float = 0.8,
+    ei_match_method: str = 'all',
+    ei_use_isi: bool = False,
+    ei_use_timecourse: bool = False,
+    ei_n_removed_channels: int = 1,
+    cache_root: Optional[str] = None,
+    verbose: bool = True,
+):
+    """Return a cached ``MEAPipeline`` or ``None`` if not cached.
+
+    Reloads via the existing ``MEAPipeline(pkl_file=...)`` path, which
+    re-initialises the per-block ``vcd`` objects through
+    ``find_path()``. With the file-level mirror from
+    ``mirror_to_local_cache`` in place, those reads are local too.
+    """
+    from ..classes.mea_pipeline import MEAPipeline
+    path = pipeline_cache_path(
+        exp_name, datafile_name,
+        ss_version=ss_version,
+        analysis_chunk_name=analysis_chunk_name,
+        typing_file=typing_file,
+        ei_corr_cutoff=ei_corr_cutoff,
+        ei_match_method=ei_match_method,
+        ei_use_isi=ei_use_isi,
+        ei_use_timecourse=ei_use_timecourse,
+        ei_n_removed_channels=ei_n_removed_channels,
+        cache_root=cache_root,
+    )
+    if not path.exists():
+        if verbose:
+            print(f'No cached pipeline at {path}')
+        return None
+    if verbose:
+        size_mb = path.stat().st_size / 1e6
+        print(f'Loading cached pipeline ({size_mb:.1f} MB) from {path}')
+    t0 = time.time()
+    pipeline = MEAPipeline(pkl_file=str(path), verbose=verbose)
+    if verbose:
+        print(f'  loaded in {time.time() - t0:.1f} s')
+    return pipeline
+
+
+def create_mea_pipeline_cached(
+    exp_name: str,
+    datafile_name,
+    *,
+    overwrite: bool = False,
+    cache_root: Optional[str] = None,
+    verbose: bool = True,
+    ss_version: str = 'kilosort2.5',
+    analysis_chunk_name: Optional[str] = None,
+    typing_file: Optional[str] = None,
+    ei_corr_cutoff: float = 0.8,
+    ei_match_method: str = 'all',
+    ei_use_isi: bool = False,
+    ei_use_timecourse: bool = False,
+    ei_n_removed_channels: int = 1,
+    **extra_kwargs,
+):
+    """Drop-in for ``ra.create_mea_pipeline`` with a local pkl cache.
+
+    On first call: builds the pipeline normally, then pickles it under
+    ``<LOCAL_CACHE_ROOT>/pipelines/`` keyed by the build kwargs.
+    Subsequent calls with the same kwargs return the cached object.
+
+    The cache file is keyed on the EI-match knobs (cutoff, method,
+    use_isi, use_timecourse, n_removed_channels), so changing any of
+    them produces a fresh build — the user can never silently load a
+    pipeline that was built with different parameters.
+
+    Pass ``overwrite=True`` to rebuild + overwrite an existing cache.
+
+    Extra kwargs (e.g. ``ls_params``, ``b_LED``, ``b_load_fd``) are
+    forwarded to ``create_mea_pipeline`` but **not** part of the cache
+    key. If you change one, pass ``overwrite=True``.
+    """
+    from ..classes.mea_pipeline import create_mea_pipeline as _build
+
+    build_kwargs = dict(
+        ss_version=ss_version, analysis_chunk_name=analysis_chunk_name,
+        typing_file=typing_file,
+        ei_corr_cutoff=ei_corr_cutoff,
+        ei_match_method=ei_match_method,
+        ei_use_isi=ei_use_isi,
+        ei_use_timecourse=ei_use_timecourse,
+        ei_n_removed_channels=ei_n_removed_channels,
+    )
+    path = pipeline_cache_path(
+        exp_name, datafile_name, cache_root=cache_root, **build_kwargs)
+
+    if not overwrite and path.exists():
+        return load_cached_pipeline(
+            exp_name, datafile_name,
+            cache_root=cache_root, verbose=verbose, **build_kwargs)
+
+    if verbose:
+        print(f'Building pipeline (no cache hit at {path.name}) …')
+    t0 = time.time()
+    pipeline = _build(exp_name, datafile_name,
+                       verbose=verbose,
+                       **build_kwargs, **extra_kwargs)
+    if verbose:
+        print(f'  built in {time.time() - t0:.1f} s')
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pipeline.export_to_pkl(str(path))
+    # Sidecar JSON makes the cache contents human-inspectable.
+    sidecar = path.with_suffix('.json')
+    norm = _normalize_kwargs(dict(exp_name=exp_name,
+                                    datafile_name=datafile_name,
+                                    **build_kwargs))
+    sidecar.write_text(json.dumps(norm, indent=2, default=str))
+    if verbose:
+        sz = path.stat().st_size / 1e6
+        print(f'Cached pipeline → {path}  ({sz:.1f} MB)')
+    return pipeline

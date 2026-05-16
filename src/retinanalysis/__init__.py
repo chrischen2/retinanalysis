@@ -104,6 +104,9 @@ from .utils import local_cache as _local_cache_mod
 from .utils.local_cache import (mirror_to_local_cache,
                                  local_cache_status,
                                  clear_local_cache,
+                                 create_mea_pipeline_cached,
+                                 load_cached_pipeline,
+                                 pipeline_cache_path,
                                  LOCAL_CACHE_ROOT)
 
 # Per-protocol analyzers live under retinanalysis.protocols; import the
