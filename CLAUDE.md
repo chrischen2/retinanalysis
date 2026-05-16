@@ -35,14 +35,16 @@ Notebooks live under `demos/`. Convention: **one notebook per
 protocol** so each stays focused.
 
 - `demos/chrisMain.ipynb` — `EyeMovementTrajectoryAlternatingBackground`
-  (sections 1–17, including the per-experiment batch archive in §16
-  and the visual-QC GUI in §17).
+  (sections 1–12: setup §1–§3, QC §4, visual-QC GUI §5, single-date
+  archive §6, sorting-QC PNGs §7, interactive sorting-QC GUI §8,
+  batch archive §9, offline store §10, per-date analyses §11,
+  cross-date pooling §12).
 - `demos/variableMeanSpatialNoise.ipynb` — `VariableMeanSpatialNoise`.
 
 When the user asks to add analysis for a new protocol, default to a
 new notebook rather than extending an existing one.
 
-## Per-experiment batch archive (§16 of chrisMain)
+## Per-experiment batch archive (§9 of chrisMain)
 
 - Driver: `ra.analyze_experiments(dates, protocol_search=...)`. Runs
   end-to-end (build pipeline → calibration → QC → mosaic → per-cell
@@ -53,26 +55,26 @@ new notebook rather than extending an existing one.
   user prefers this over auto-detect "does the PNG exist?" logic —
   don't reintroduce implicit skipping.
 
-## Standard workflow (chrisMain §14 → §18)
+## Standard workflow (chrisMain §4 → §9)
 
 Per-experiment archive + visual review is intentionally **iterative**.
 The notebook lays out the conceptual order (visual QC sits before
 archives because it's a *filter*), but the first-time execution order
 is:
 
-1. **§14** — compute protocol QC → writes `qc.csv`.
-2. **§17** (single date) or **§18** (batch) — render every QC-passing
+1. **§4** — compute protocol QC → writes `qc.csv`.
+2. **§6** (single date) or **§9** (batch) — render every QC-passing
    cell → writes `mosaic.png`, `index.csv`, `cell_match.csv`, and
    `cells/<type>/cell_<id>_{raster,psth}.png`. *No `visual_qc.csv` yet.*
-3. **§16** — `ra.browse_cells_qc(exp_name)` reads those PNGs and lets
+3. **§5** — `ra.browse_cells_qc(exp_name)` reads those PNGs and lets
    the user tag good/bad → writes `visual_qc.csv` (one row per click).
-4. **§17 / §18 again** — `analyze_experiment` auto-detects
+4. **§6 / §9 again** — `analyze_experiment` auto-detects
    `visual_qc.csv` (`respect_visual_qc=True` default) and restricts the
    per-cell PNG render to `tag == 'good'`. `cell_match.csv` and
    `qc.csv` stay comprehensive.
 
 For a date that already has a saved archive, the user can jump straight
-to §16 to keep tagging, then re-run §17/§18 to collapse the archive to
+to §5 to keep tagging, then re-run §6/§9 to collapse the archive to
 the curated set.
 
 **Manual tags are never overwritten by archiving.** The only writer of
@@ -86,14 +88,14 @@ docstrings and enforced by an audit-style smoke test in
 the `analyze_experiment` driver default to `prune_stale=True`: any
 existing `cells/<celltype>/cell_<id>_*.png` whose `cell_id` is outside
 the kept set (QC pass ∩ visual-QC `good`) is deleted. So after tagging
-cells `bad` in §16 and re-running §17/§18, those cells' PNGs disappear
+cells `bad` in §5 and re-running §6/§9, those cells' PNGs disappear
 from disk. Stray non-canonical files in the cells dir (e.g. a README)
 are not touched. Set `prune_stale=False` to keep stale PNGs.
 
-## Population-cell selection (§17 of chrisMain)
+## Population-cell selection
 
 The default pool for population/statistical analysis is **all cells
-that passed the automated protocol QC in §16** — equivalently, every
+that passed the automated protocol QC in §4** — equivalently, every
 cell that has a rendered PNG pair under
 `<OUTPUT_DIR>/<exp>/<protocol>/cells/.../` (one row per cell in that
 experiment's `index.csv`).
@@ -114,7 +116,7 @@ experiment's `index.csv`).
 explicitly asks. Always wire downstream code through
 `select_good_cells()` so the visual-QC step remains optional.
 
-## Offline data store (§20 of chrisMain)
+## Offline data store (§10 of chrisMain)
 
 Once a date has been through automated + visual QC, the *interesting*
 data for downstream analysis is small (spike times + condition table +
