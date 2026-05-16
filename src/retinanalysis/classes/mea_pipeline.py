@@ -572,14 +572,19 @@ class MEAPipeline:
 
     def export_to_pkl(self, file_path: str):
         """
-        Export the MEAPipeline to a pickle file. The output of this method can be given to the 
+        Export the MEAPipeline to a pickle file. The output of this method can be given to the
         MEAPipeline initializer directly to reload a saved pipeline object with all its properties intact.
         """
         d_out = self.__dict__.copy()
-        # For StimBlock, ResponseBlock, and AnalysisChunk, get only the __dict__ attribute
-        d_out['stim_block'] = self.stim.__dict__
-        d_out['response_block'] = self.resp.__dict__
-        d_out['analysis_chunk'] = self.analysis_chunk.__dict__
+        # Shallow-copy each block's __dict__ so the .pop('vcd', None) below
+        # doesn't mutate the live block objects in this process. Without
+        # these copies, saving a freshly-built pipeline silently removes
+        # `vcd` from self.resp and self.analysis_chunk, breaking any
+        # downstream code that uses response_block.vcd / analysis_chunk.vcd
+        # in the same kernel session.
+        d_out['stim_block'] = dict(self.stim.__dict__)
+        d_out['response_block'] = dict(self.resp.__dict__)
+        d_out['analysis_chunk'] = dict(self.analysis_chunk.__dict__)
         # Pop out vcd from response_block and analysis_chunk
         d_out['response_block'].pop('vcd', None)
         d_out['analysis_chunk'].pop('vcd', None)
