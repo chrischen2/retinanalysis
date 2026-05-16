@@ -16,8 +16,13 @@ def load_config(config_path):
         configfile = ConfigParser()
         configfile.read(config_path)
     else:
-        print()
-        raise FileNotFoundError(f"No config file found at {config_path}.\nUse reset_config() and create_config() to make one.")
+        template = os.path.join(os.path.dirname(str(config_path)),
+                                'config.ini.example')
+        raise FileNotFoundError(
+            f"No config file found at {config_path}.\n"
+            f"Copy the template at {template} to that path "
+            f"and edit the absolute paths in each tier for your machine."
+        )
 
     if platform.system() == 'Darwin':
         DEFAULT_config = configfile['DEFAULT']
@@ -31,11 +36,15 @@ def load_config(config_path):
         SECONDARY_config = configfile['WINDOWS_SECONDARY']
     
     def _row(cfg):
-        # protocol_repos_root is optional; fall back to '' if absent
+        # protocol_repos_root / output / local_cache are optional — fall
+        # back to '' if absent. Keep the existing 8 read-keys required
+        # for backward compatibility with older config.ini files.
         return {'data' : cfg['data'], 'raw': cfg['raw'], 'analysis': cfg['analysis'],
                 'h5': cfg['h5'], 'meta': cfg['meta'], 'tags': cfg['tags'],
                 'query': cfg['query'], 'user': cfg['user'],
-                'protocol_repos_root': cfg.get('protocol_repos_root', '')}
+                'protocol_repos_root': cfg.get('protocol_repos_root', ''),
+                'output': cfg.get('output', ''),
+                'local_cache': cfg.get('local_cache', '')}
 
     mea_config = dict()
     if os.path.exists(os.path.abspath(DEFAULT_config['data'])):
@@ -90,12 +99,26 @@ mea_config = load_config(config_path)
 # files (.ei, .neurons, .params, .classification.txt, …) get pulled over the
 # wire every time the pipeline is rebuilt — hundreds of MB per kernel restart.
 # `ra.mirror_to_local_cache(...)` copies those files into this directory once,
-# and `find_path()` then transparently returns the local copy. To disable,
-# just delete the directory or unset RA_LOCAL_CACHE_ROOT.
+# and `find_path()` then transparently returns the local copy.
+#
+# Resolution order for the cache root:
+#   1. RA_LOCAL_CACHE_ROOT environment variable (per-shell override).
+#   2. First non-empty `local_cache` field across configured tiers.
+#   3. `~/.cache/retinanalysis` — portable default for anyone using the
+#      package out-of-the-box with no config edits.
 # ---------------------------------------------------------------------------
-LOCAL_CACHE_ROOT = os.environ.get(
-    'RA_LOCAL_CACHE_ROOT',
-    os.path.expanduser('~/.cache/retinanalysis'),
+def _first_nonempty_tier_value(key: str, _config: dict) -> str:
+    """Return the first non-empty value of `key` across tiers, or ''."""
+    for tier in ('primary', 'secondary', 'tertiary'):
+        if tier in _config and _config[tier].get(key):
+            return _config[tier][key]
+    return ''
+
+
+LOCAL_CACHE_ROOT = (
+    os.environ.get('RA_LOCAL_CACHE_ROOT', '')
+    or _first_nonempty_tier_value('local_cache', mea_config)
+    or os.path.join(os.path.expanduser('~'), '.cache', 'retinanalysis')
 )
 mea_config['local_cache'] = {
     'data':     os.path.join(LOCAL_CACHE_ROOT, 'data'),
@@ -104,22 +127,23 @@ mea_config['local_cache'] = {
     # Other kinds are not cached locally — leave blank so find_path()
     # falls through to the real tiers for h5/meta/tags/query.
     'h5': '', 'meta': '', 'tags': '', 'query': '', 'user': '',
-    'protocol_repos_root': '',
+    'protocol_repos_root': '', 'output': '', 'local_cache': '',
 }
 
-# Read priority: local file cache first (free, when populated), then the lab
-# server (/Volumes/data, "tertiary") when connected, then local SSDs
-# ("secondary" = ChrisProSSD, "primary" = ChrisNewSSD). The server is the
-# canonical source of truth; local SSDs act as warm caches when the server
-# is offline (or when an experiment hasn't been synced yet).
+# Read priority: local file cache first (free, when populated), then the
+# lab server tier ("tertiary"), then progressively more local SSD tiers.
+# config.ini owns the actual paths; this list controls their priority.
 _TIER_PRIORITY = ['local_cache', 'tertiary', 'secondary', 'primary']
 
-# Module-level constants point to the highest-priority tier whose root path exists.
-# This preserves backward compatibility for code that does `os.path.join(DATA_DIR, ...)`.
-# For per-experiment resolution that automatically falls back across volumes when an
-# experiment isn't on the server, use `find_path()` below.
+# Module-level constants point to the highest-priority *source* tier (not
+# the local cache) whose root exists. Callers that do `os.listdir(DATA_DIR)`
+# or similar need the canonical source — not the cache, which only holds
+# per-file copies of what `mirror_to_local_cache()` was asked to populate.
+# `find_path()` still walks the cache tier first for per-file lookups.
 def _pick_top_tier():
     for tier in _TIER_PRIORITY:
+        if tier == 'local_cache':
+            continue
         if tier in mea_config:
             return mea_config[tier]
     raise RuntimeError("No valid config paths found.")
@@ -191,12 +215,17 @@ def find_path(kind, *parts):
     return fallback
 
 
-# Write target for ad-hoc outputs (figures, processed dataframes, derived classification
-# files, etc.). Prefer the fast local SSD when mounted; otherwise drop into ~/Downloads
-# so writes never silently fail or land on a slow/shared volume.
-_CHRIS_SSD = '/Volumes/ChrisProSSD'
-if os.path.exists(_CHRIS_SSD):
-    OUTPUT_DIR = os.path.join(_CHRIS_SSD, 'retinanalysis_output')
-else:
-    OUTPUT_DIR = os.path.join(os.path.expanduser('~'), 'Downloads', 'retinanalysis_output')
+# Write target for ad-hoc outputs (figures, processed dataframes, derived
+# classification files, etc.). Resolution order:
+#   1. RA_OUTPUT_DIR environment variable (per-shell override).
+#   2. First non-empty `output` field across configured tiers — the
+#      tier walk prefers the most-local writeable tier (primary →
+#      secondary → tertiary), which avoids writing onto the read-only
+#      lab server unless the user explicitly set it there.
+#   3. `~/retinanalysis_output` — portable default.
+OUTPUT_DIR = (
+    os.environ.get('RA_OUTPUT_DIR', '')
+    or _first_nonempty_tier_value('output', mea_config)
+    or os.path.join(os.path.expanduser('~'), 'retinanalysis_output')
+)
 os.makedirs(OUTPUT_DIR, exist_ok=True)

@@ -1,0 +1,83 @@
+# Template per-machine path config.
+#
+# Setup:
+#   1. Copy this file to `config.ini` (in the same directory).
+#   2. Edit the paths in each tier to match where your data lives.
+#   3. Tiers whose `data` path doesn't exist on disk are skipped at
+#      import time — so it's safe to leave a tier you don't use with
+#      placeholder paths, as long as those placeholders don't accidentally
+#      point at a real directory.
+#
+# `config.ini` itself is gitignored — every machine keeps its own.
+# `settings.py` is a pure reader; no absolute paths live in source code.
+#
+# Tier semantics (declared in src/retinanalysis/config/settings.py):
+#   DEFAULT     →  "primary"   (lowest priority for READS; highest for WRITES)
+#   SECONDARY   →  "secondary" (warm local cache for reads; writeable)
+#   TERTIARY    →  "tertiary"  (lab server / NAS — highest priority for READS)
+#
+# Tier keys per section (all optional except `data`, which gates whether
+# the tier gets loaded at all):
+#   analysis            → Vision analysis dir per noise chunk
+#   data                → kilosort output per protocol datafile  ← presence gates the tier
+#   raw                 → raw .bin files (MEA only)
+#   h5, meta, tags      → DataJoint ingest dirs
+#   query               → cross-experiment query outputs
+#   user                → DataJoint username
+#   protocol_repos_root → directory holding locally-cloned protocol packages
+#                          (turner-package, manookin-package, …)
+#   output              → where ra.analyze_experiment / ra.save_per_cell_plots /
+#                          ra.load_or_build_offline write their per-experiment
+#                          archives (mosaic.png, per-cell PNGs, qc.csv,
+#                          visual_qc.csv, offline.h5). Walked highest-tier-first
+#                          → leave blank on read-only tiers (e.g. the NAS).
+#   local_cache         → where ra.mirror_to_local_cache and
+#                          ra.create_mea_pipeline_cached store local copies.
+#                          Should be on a fast writeable local disk.
+#                          Same value across tiers is fine.
+#
+# Environment overrides (no need to edit config.ini for one-off changes):
+#   RA_LOCAL_CACHE_ROOT — overrides every tier's `local_cache` for the
+#                         current shell.
+#   RA_OUTPUT_DIR       — overrides every tier's `output` for the current shell.
+
+[DEFAULT]
+analysis = /path/to/primary/analysis
+data = /path/to/primary/data/sorted
+raw = /path/to/primary/data/raw
+h5 = /path/to/primary/data/h5
+meta = /path/to/primary/datajoint_meta
+tags = /path/to/primary/datajoint_tags
+query = /path/to/primary/query
+user = your_dj_username
+protocol_repos_root = /path/to/your/cloned/protocol/repos
+output = /path/to/your/retinanalysis_output
+local_cache = /path/to/your/local/cache/retinanalysis
+
+[SECONDARY]
+analysis = /path/to/secondary/analysis
+data = /path/to/secondary/data/sorted
+raw = /path/to/secondary/data/raw
+h5 = /path/to/secondary/data/h5
+meta = /path/to/secondary/datajoint_meta
+tags = /path/to/secondary/datajoint_tags
+query = /path/to/secondary/query
+user = your_dj_username
+protocol_repos_root = /path/to/your/cloned/protocol/repos
+output = /path/to/your/retinanalysis_output
+local_cache = /path/to/your/local/cache/retinanalysis
+
+[TERTIARY]
+# Typically the lab server / NAS. Leave `output` blank so writes go to
+# one of the local SSD tiers above (NAS is usually slow + read-mostly).
+analysis = /path/to/server/analysis
+data = /path/to/server/data/sorted
+raw = /path/to/server/data/raw
+h5 = /path/to/server/data/h5
+meta = /path/to/server/datajoint_meta
+tags = /path/to/server/datajoint_tags
+query = /path/to/server/query
+user = your_dj_username
+protocol_repos_root = /path/to/your/cloned/protocol/repos
+output =
+local_cache = /path/to/your/local/cache/retinanalysis
