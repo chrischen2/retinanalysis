@@ -800,9 +800,15 @@ def sorting_qc_gui(
 
     def _render():
         from io import BytesIO
-        from IPython.display import display, SVG
+        from IPython.display import display, SVG, clear_output
+        # Clear the Output widget BEFORE redrawing so repeated Load /
+        # appearance-toggle clicks replace the figure instead of stacking
+        # it. Using IPython.display.clear_output inside the `with` block
+        # is the documented idiom for ipywidgets Output — mixing it with
+        # the widget's own clear_output() method (as the previous version
+        # did) was unreliable and caused multiple SVGs to pile up.
         with w_out:
-            w_out.clear_output(wait=True)
+            clear_output(wait=True)
             if state.get('raw_electrode') is None:
                 return
             # Re-filter from cached raw electrode every render → HP-cutoff
@@ -876,6 +882,9 @@ def sorting_qc_gui(
                 display(SVG(buf.getvalue()))
             else:
                 plt.show()
+                # Close after show so pyplot doesn't keep a reference and
+                # let figures accumulate across renders.
+                plt.close(fig)
 
     def _extract_and_render(cid: int, ep: int, s0: float, s1: float,
                              electrode_idx: int, elec_rank: int,
