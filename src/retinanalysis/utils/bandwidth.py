@@ -22,7 +22,8 @@ from ..config.settings import (
 )
 
 
-__all__ = ['print_network_gauge', 'network_bandwidth_gauge_widget']
+__all__ = ['print_network_gauge', 'network_bandwidth_gauge_widget',
+           'bandwidth_scope']
 
 
 def _human_mb(n_bytes: int) -> str:
@@ -51,6 +52,67 @@ def _gauge_summary() -> str:
 def print_network_gauge() -> None:
     """Print a one-line summary of the network-bandwidth gauge."""
     print(_gauge_summary())
+
+
+class bandwidth_scope:
+    """Context manager that prints a clear "from network: X MB" summary.
+
+    Wraps any block of code that may trigger ``find_path`` resolutions
+    (e.g. pipeline build, mirror, analysis run) so the user sees an
+    obvious one-line summary after the block exits, distinguishing:
+
+    - **💾 LOCAL / CACHE** when the block resolved 0 bytes from the
+      network — every file came from a local SSD tier or the local
+      cache.
+    - **📡 NETWORK** when ≥1 file was resolved from a network-mount
+      tier, showing total MB and the count of resolutions.
+
+    Usage::
+
+        with ra.bandwidth_scope('Pipeline build') as bw:
+            pipeline = ra.create_mea_pipeline_cached(...)
+        # Auto-prints: "📡 Pipeline build → ~31 MB from NETWORK (3 lookups)"
+        # … or: "💾 Pipeline build → 0 MB from network — served local/cache"
+
+        # bw.bytes_resolved / bw.resolutions are also available after exit.
+
+    Multiple scopes can nest; each tracks its own delta.
+    """
+
+    def __init__(self, label: str = '',
+                 also_print_total: bool = False,
+                 enabled: bool = True):
+        self.label = label
+        self.also_print_total = also_print_total
+        self.enabled = enabled
+        self.bytes_resolved = 0
+        self.resolutions = 0
+        self._b0 = 0
+        self._r0 = 0
+
+    def __enter__(self):
+        self._b0 = network_bytes_resolved()
+        self._r0 = network_resolutions_count()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.bytes_resolved = network_bytes_resolved() - self._b0
+        self.resolutions = network_resolutions_count() - self._r0
+        if not self.enabled:
+            return
+        label = self.label or 'block'
+        if self.bytes_resolved > 0:
+            print(f'📡 {label} → ~{_human_mb(self.bytes_resolved)} '
+                  f'from NETWORK ({self.resolutions} lookup'
+                  f'{"s" if self.resolutions != 1 else ""})')
+        else:
+            print(f'💾 {label} → 0 MB from network — '
+                  f'served local/cache')
+        if self.also_print_total:
+            print(f'   session total: '
+                  f'{_human_mb(network_bytes_resolved())} '
+                  f'across {network_resolutions_count()} lookup(s)')
+        return False  # never suppress exceptions
 
 
 def network_bandwidth_gauge_widget(initial_visible: bool = True):
@@ -100,4 +162,8 @@ def network_bandwidth_gauge_widget(initial_visible: bool = True):
 
     box = widgets.HBox([w_chip, w_refresh, w_reset])
     box.layout.display = 'flex' if initial_visible else 'none'
+    # Expose a programmatic refresh so embedders (e.g. the §8 sorting-QC
+    # GUI) can update the chip after each Load click without forcing the
+    # user to press the inline Refresh button.
+    box.refresh = _on_refresh  # type: ignore[attr-defined]
     return box

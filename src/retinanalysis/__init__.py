@@ -115,7 +115,8 @@ from .config.settings import (network_bytes_resolved,
                                 network_resolutions_count,
                                 reset_network_gauge)
 from .utils.bandwidth import (print_network_gauge,
-                                network_bandwidth_gauge_widget)
+                                network_bandwidth_gauge_widget,
+                                bandwidth_scope)
 
 # Per-protocol analyzers live under retinanalysis.protocols; import the
 # package but don't pull every module at top level (loaded on demand).

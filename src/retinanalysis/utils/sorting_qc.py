@@ -945,6 +945,15 @@ def sorting_qc_gui(
             f'{sts_s.size} spikes in window'
         )
         _refresh_meter()
+        # Tick the session-wide gauge chip too, so the user sees a
+        # single source of truth for network bytes across the whole
+        # session (this Load may or may not have charged it, depending
+        # on whether the .bin source mount is network or local — the
+        # gauge knows).
+        try:
+            w_global_gauge.refresh(None)
+        except Exception:
+            pass
         _render()
 
     def _window_matches_cache(ep: int, s0: float, s1: float) -> bool:
@@ -1214,8 +1223,17 @@ def sorting_qc_gui(
                                  w_pan_y_up, w_pan_y_down,
                                  w_y_reset, w_view_y_note])
     row3 = widgets.HBox([w_load, w_overlay, w_status])
+    # Per-RawTraces chip (raw .bin reads only) + global session-wide
+    # gauge (every find_path() resolution this session). The two live
+    # side by side so the user can tell whether bytes came from "the
+    # raw trace I'm looking at" vs "the wider pipeline build".
+    from .bandwidth import network_bandwidth_gauge_widget
+    w_global_gauge = network_bandwidth_gauge_widget()
     row4 = widgets.HBox([w_meter, w_reset_meter])
+    row5 = widgets.HBox([widgets.HTML(
+        value='<span style="font-size:11px;color:#666">session gauge:</span>'),
+        w_global_gauge])
     hint = widgets.HTML(value=ipympl_hint)
     return widgets.VBox([row1, row2a, row2b, w_appearance,
                           row_view, row_view_y,
-                          row3, row4, w_out, hint])
+                          row3, row4, row5, w_out, hint])
