@@ -129,9 +129,50 @@ def _save_tag(csv_path: Path, exp_name: str, cell_id: int, cell_type: str,
     df.to_csv(csv_path, index=False)
 
 
+def _resolve_subdir(exp_root: Path, protocol: str,
+                     datafile_name: Optional[str],
+                     protocol_subdir: Optional[str]) -> Optional[str]:
+    """Pick the protocol subdir under ``exp_root``.
+
+    Resolution order:
+    1. ``protocol_subdir`` — explicit user override wins.
+    2. ``f'{protocol}_{datafile_name}'`` — composed per-datafile dir
+       (the §6/§7/§10 default since append_datafile_to_subdir=True).
+       Wins over the bare-protocol dir when both exist on disk,
+       because the user passing ``datafile_name`` clearly wants the
+       per-datafile slice.
+    3. ``protocol`` itself, when ``<exp_root>/<protocol>/cells/`` exists
+       (legacy single-datafile layout).
+    4. Auto-discovery: scan for ``<exp_root>/<protocol>_*/cells/``
+       siblings. If exactly one, use it; if multiple, return None so
+       the caller can prompt the user to disambiguate.
+    """
+    if protocol_subdir is not None:
+        return protocol_subdir
+    if datafile_name:
+        composed = f'{protocol}_{datafile_name}'
+        if (exp_root / composed / 'cells').is_dir():
+            return composed
+    if (exp_root / protocol / 'cells').is_dir():
+        return protocol
+    if not exp_root.is_dir():
+        return None
+    siblings = sorted(p.name for p in exp_root.iterdir()
+                       if p.is_dir() and p.name.startswith(protocol + '_')
+                       and (p / 'cells').is_dir())
+    if len(siblings) == 1:
+        return siblings[0]
+    if len(siblings) > 1:
+        # Multiple — let caller print a useful diagnostic.
+        return None
+    return None
+
+
 def browse_cells_qc(
     exp_name: str,
     protocol: str = 'eye_movement_alt_bg',
+    datafile_name: Optional[str] = None,
+    protocol_subdir: Optional[str] = None,
     output_root: Optional[str] = None,
     inspector: Optional[str] = None,
     image_width: int = 600,
@@ -139,15 +180,23 @@ def browse_cells_qc(
     """Open the cell-by-cell QC GUI for one experiment.
 
     Loads previously-saved tags from
-    ``<output_root>/<exp_name>/<protocol>/visual_qc.csv`` and writes
-    each new tag back immediately on click.
+    ``<output_root>/<exp_name>/<resolved_subdir>/visual_qc.csv`` and
+    writes each new tag back immediately on click.
 
     Parameters
     ----------
     exp_name : str
         Experiment date string (e.g. ``'20220823C'``).
     protocol : str
-        Subdir name under the experiment root. Default ``'eye_movement_alt_bg'``.
+        Protocol short name. Default ``'eye_movement_alt_bg'``.
+    datafile_name : str, optional
+        Datafile (e.g. ``'data011'``). When the new per-datafile layout
+        is in use (see chrisMain §2 `append_datafile_to_subdir`), this
+        is appended to ``protocol`` to form the actual subdir.
+    protocol_subdir : str, optional
+        Explicit subdir override. Wins over both ``protocol`` and
+        ``datafile_name``. Use when neither convention matches your
+        on-disk layout.
     output_root : str, optional
         Override ``OUTPUT_DIR``.
     inspector : str, optional
@@ -164,12 +213,31 @@ def browse_cells_qc(
         inspector = os.environ.get('USER', 'unknown')
 
     exp_root = Path(output_root) / exp_name
-    cells = _discover_cells(exp_root, protocol)
+    resolved = _resolve_subdir(
+        exp_root, protocol, datafile_name, protocol_subdir)
+    if resolved is None:
+        # Surface what we DID find so the user can pick.
+        siblings = (sorted(p.name for p in exp_root.iterdir()
+                            if p.is_dir() and (p / 'cells').is_dir())
+                    if exp_root.is_dir() else [])
+        if siblings:
+            print(f'Multiple protocol subdirs under {exp_root}/. '
+                  f'Pass protocol_subdir=... to pick one:')
+            for s in siblings:
+                print(f'  - {s}')
+        else:
+            print(f'No archived cells under {exp_root}/. '
+                  f'Run §6 (single-date archive) or §9 (batch) first.')
+        return None
+    cells = _discover_cells(exp_root, resolved)
     if not cells:
-        print(f'No cell PNGs found under {exp_root}/{protocol}/cells/. '
-              f'Run §17 (single-date archive) or §18 (batch) in chrisMain '
+        print(f'No cell PNGs found under {exp_root}/{resolved}/cells/. '
+              f'Run §6 (single-date archive) or §9 (batch) in chrisMain '
               f'to generate the archive first, then come back here to tag.')
         return None
+    # Track the resolved subdir as the effective "protocol" name for
+    # the rest of the function (CSV path, tag writes).
+    protocol = resolved
 
     csv_path = visual_qc_csv_path(exp_name, protocol, output_root)
     tags = _load_tags(csv_path)
