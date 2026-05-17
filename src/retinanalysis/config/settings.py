@@ -130,10 +130,123 @@ mea_config['local_cache'] = {
     'protocol_repos_root': '', 'output': '', 'local_cache': '',
 }
 
-# Read priority: local file cache first (free, when populated), then the
-# lab server tier ("tertiary"), then progressively more local SSD tiers.
-# config.ini owns the actual paths; this list controls their priority.
-_TIER_PRIORITY = ['local_cache', 'tertiary', 'secondary', 'primary']
+# ---------------------------------------------------------------------------
+# Tier kind classification (local vs network) — auto-detected from the
+# mount fstype of each tier's `data` path. The user shouldn't have to
+# encode "this tier is the slow NAS" in config.ini labels; we just look
+# at what kind of filesystem the data root is on.
+#
+# Reads ALWAYS prefer local tiers over network tiers, regardless of how
+# the user labeled them ([DEFAULT] / [SECONDARY] / [TERTIARY]). Bandwidth
+# conservation: when both a local SSD and the NAS hold the same file,
+# always pay the local read.
+# ---------------------------------------------------------------------------
+_NETWORK_FSTYPES = frozenset({
+    'smbfs', 'cifs', 'nfs', 'nfs4', 'afpfs', 'webdav',
+    'fuse.sshfs', 'sshfs', 'ftpfs',
+})
+
+
+def _classify_tier(path: str) -> str:
+    """Return 'local' / 'network' / 'unknown' for the mount holding ``path``."""
+    if not path:
+        return 'unknown'
+    try:
+        import psutil
+        ap = os.path.abspath(path)
+        best = None
+        for part in psutil.disk_partitions(all=True):
+            mp = part.mountpoint
+            if ap == mp or ap.startswith(mp.rstrip('/') + '/'):
+                if best is None or len(mp) > len(best.mountpoint):
+                    best = part
+        if best is not None:
+            return ('network'
+                    if (best.fstype or '').lower() in _NETWORK_FSTYPES
+                    else 'local')
+    except Exception:
+        pass
+    return 'unknown'
+
+
+_TIER_KIND = {}
+for _tier in ('primary', 'secondary', 'tertiary'):
+    if _tier in mea_config:
+        _TIER_KIND[_tier] = _classify_tier(
+            mea_config[_tier].get('data', ''))
+
+# Compose priority: local cache → local source tiers → unknown → network.
+# Within each group, config order (primary → secondary → tertiary) is
+# preserved so users still have control over relative ordering of
+# same-kind tiers. The labels (DEFAULT/SECONDARY/TERTIARY) become a
+# *secondary* sort key behind local-vs-network.
+_local_first = [t for t in ('primary', 'secondary', 'tertiary')
+                if _TIER_KIND.get(t) == 'local']
+_unknown_tiers = [t for t in ('primary', 'secondary', 'tertiary')
+                   if _TIER_KIND.get(t) == 'unknown']
+_network_tiers = [t for t in ('primary', 'secondary', 'tertiary')
+                   if _TIER_KIND.get(t) == 'network']
+_TIER_PRIORITY = (['local_cache'] + _local_first
+                   + _unknown_tiers + _network_tiers)
+
+
+# ---------------------------------------------------------------------------
+# Network bandwidth gauge: tally bytes whose canonical resolution is on a
+# network mount. We instrument `find_path` (below): every time it returns
+# a file/dir on a network tier, we bump a counter by the size of the
+# resolved path. This is an *upper bound* on bytes actually transferred —
+# the kernel may cache reads, and the caller may only read part of a
+# resolved file — but it's a useful conservative estimate of "how much
+# would have flowed over the wire without any caching."
+#
+# Cache hits at the local_cache tier (i.e. after mirror_to_local_cache)
+# never touch this counter. So the gauge naturally drops to zero once
+# all your reads are served locally.
+# ---------------------------------------------------------------------------
+_NETWORK_BYTES_RESOLVED = 0
+_NETWORK_RESOLUTIONS = 0
+
+
+def _record_network_resolution(path: str) -> None:
+    """Increment the network gauge by the size of ``path`` (file or dir)."""
+    global _NETWORK_BYTES_RESOLVED, _NETWORK_RESOLUTIONS
+    try:
+        if os.path.isfile(path):
+            _NETWORK_BYTES_RESOLVED += os.path.getsize(path)
+        elif os.path.isdir(path):
+            # Walk one level deep first (typical vision-data dir layout
+            # is flat). Avoid scanning huge nested trees on slow mounts.
+            total = 0
+            for entry in os.scandir(path):
+                if entry.is_file(follow_symlinks=False):
+                    try:
+                        total += entry.stat().st_size
+                    except OSError:
+                        pass
+            _NETWORK_BYTES_RESOLVED += total
+        _NETWORK_RESOLUTIONS += 1
+    except OSError:
+        pass
+
+
+def network_bytes_resolved() -> int:
+    """Cumulative bytes of network-tier resolutions this session.
+
+    Upper bound on actual wire traffic — see module comment above.
+    """
+    return int(_NETWORK_BYTES_RESOLVED)
+
+
+def network_resolutions_count() -> int:
+    """How many times ``find_path`` resolved to a network tier this session."""
+    return int(_NETWORK_RESOLUTIONS)
+
+
+def reset_network_gauge() -> None:
+    """Zero the network-bytes gauge (useful when starting a fresh analysis)."""
+    global _NETWORK_BYTES_RESOLVED, _NETWORK_RESOLUTIONS
+    _NETWORK_BYTES_RESOLVED = 0
+    _NETWORK_RESOLUTIONS = 0
 
 # Module-level constants point to the highest-priority *source* tier (not
 # the local cache) whose root exists. Callers that do `os.listdir(DATA_DIR)`
@@ -211,6 +324,11 @@ def find_path(kind, *parts):
         if fallback is None:
             fallback = candidate
         if os.path.exists(candidate):
+            # Charge the network gauge when this lookup resolves to a
+            # network-mount tier. Local cache + local source tiers are
+            # free. See module-level _record_network_resolution doc.
+            if _TIER_KIND.get(tier) == 'network':
+                _record_network_resolution(candidate)
             return candidate
     return fallback
 
