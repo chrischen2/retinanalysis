@@ -237,7 +237,16 @@ class MEAStimBlock(StimBlock):
             # analysis_chunk_name override in create_mea_pipeline).
             try:
                 chunk_analysis_dir = find_path('analysis', self.exp_name, nearest_noise_chunk)
-                ss_version = os.listdir(chunk_analysis_dir)[0]
+                # Use the project-wide priority (kilosort2.5 > kilosort2 >
+                # kilosort4 > others) instead of os.listdir()[0] — older
+                # dates with multiple ss versions side-by-side would
+                # otherwise pick whichever sorted first alphabetically.
+                from retinanalysis.analyze import _pick_ss_version_from
+                ss_version = _pick_ss_version_from(
+                    os.listdir(chunk_analysis_dir))
+                if ss_version is None:
+                    raise FileNotFoundError(
+                        f'No kilosort* dir in {chunk_analysis_dir}')
                 typing_file_path = find_path('analysis', self.exp_name, nearest_noise_chunk, ss_version)
                 typing_files = [file for file in os.listdir(typing_file_path) if '.txt' in file]
             except (FileNotFoundError, NotADirectoryError, OSError, IndexError):

@@ -172,7 +172,8 @@ from . import SCutils
 
 # End-to-end experiment-archive driver (build pipeline + QC + per-cell PNGs).
 from . import analyze
-from .analyze import analyze_experiment, analyze_experiments
+from .analyze import (analyze_experiment, analyze_experiments,
+                       detect_ss_version, SS_VERSION_PRIORITY)
  
 
 

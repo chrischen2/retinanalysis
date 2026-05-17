@@ -43,20 +43,87 @@ __all__ = ['analyze_experiment', 'analyze_experiments']
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _detect_ss_version(exp_name: str, datafile_name: str) -> str:
-    """Prefer ``kilosort2.5`` when present, else fall back to ``kilosort2``.
+# Kilosort version priority, highest-preferred first. When more than one
+# version exists side-by-side (the lab's analysis tree sometimes carries
+# all three after a re-sort), 2.5 wins, then 2, then 4. The user picked
+# this order based on which sorter currently produces the cleanest output
+# for their array; revisit when that changes.
+SS_VERSION_PRIORITY = ('kilosort2.5', 'kilosort2', 'kilosort4')
 
-    Older recordings are sorted with kilosort2 only; newer ones get 2.5.
+
+def _pick_ss_version_from(candidates):
+    """Highest-priority match in ``candidates``, or the first item, or None."""
+    # macOS AppleDouble dotfiles are not real directories — strip them so
+    # they don't sneak into auto-selection.
+    candidates = [c for c in candidates
+                  if c.startswith('kilosort') and not c.startswith('.')]
+    for pref in SS_VERSION_PRIORITY:
+        if pref in candidates:
+            return pref
+    return candidates[0] if candidates else None
+
+
+def detect_ss_version(
+    exp_name: str,
+    datafile_name: Optional[str] = None,
+    *,
+    chunk_name: Optional[str] = None,
+    kind: str = 'data',
+) -> str:
+    """Pick the preferred kilosort version for a given (exp, datafile|chunk).
+
+    Priority: :data:`SS_VERSION_PRIORITY` (``kilosort2.5 → kilosort2 →
+    kilosort4``), then any other ``kilosort*`` dir alphabetically.
+
+    Parameters
+    ----------
+    exp_name : str
+    datafile_name : str, optional
+        Use with ``kind='data'`` (default) to inspect the protocol
+        datafile's kilosort output dirs under ``DATA_DIR``.
+    chunk_name : str, optional
+        Use with ``kind='analysis'`` to inspect the noise chunk's
+        kilosort output dirs under ``ANALYSIS_DIR``.
+    kind : ``'data'`` or ``'analysis'``
+        Which volume to look in.
+
+    Returns
+    -------
+    str
+        The preferred ``kilosort*`` subdir name.
+
+    Raises
+    ------
+    FileNotFoundError
+        Source directory doesn't exist, or contains no ``kilosort*``
+        subdirs.
     """
-    sort_dir = os.path.join(DATA_DIR, exp_name, datafile_name)
+    if kind == 'data':
+        if datafile_name is None:
+            raise ValueError("kind='data' requires datafile_name")
+        sort_dir = os.path.join(DATA_DIR, exp_name, datafile_name)
+        location_desc = f'{exp_name}/{datafile_name} (data)'
+    elif kind == 'analysis':
+        if chunk_name is None:
+            raise ValueError("kind='analysis' requires chunk_name")
+        from .config.settings import ANALYSIS_DIR as _ANALYSIS_DIR
+        sort_dir = os.path.join(_ANALYSIS_DIR, exp_name, chunk_name)
+        location_desc = f'{exp_name}/{chunk_name} (analysis)'
+    else:
+        raise ValueError(f"kind must be 'data' or 'analysis', got {kind!r}")
+
     if not os.path.isdir(sort_dir):
-        raise FileNotFoundError(f'No sort directory for {exp_name}/{datafile_name}: {sort_dir}')
-    candidates = [d for d in os.listdir(sort_dir) if d.startswith('kilosort')]
-    if 'kilosort2.5' in candidates:
-        return 'kilosort2.5'
-    if candidates:
-        return candidates[0]
-    raise FileNotFoundError(f'No kilosort sort output under {sort_dir}')
+        raise FileNotFoundError(
+            f'No sort directory for {location_desc}: {sort_dir}')
+    chosen = _pick_ss_version_from(os.listdir(sort_dir))
+    if chosen is None:
+        raise FileNotFoundError(f'No kilosort* subdirs under {sort_dir}')
+    return chosen
+
+
+# Backward-compat alias used internally.
+def _detect_ss_version(exp_name: str, datafile_name: str) -> str:
+    return detect_ss_version(exp_name, datafile_name, kind='data')
 
 
 def _pick_typing_file(
