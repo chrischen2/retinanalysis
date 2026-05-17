@@ -27,8 +27,34 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from ..config.settings import (
-    LOCAL_CACHE_ROOT, mea_config, find_path,
+    LOCAL_CACHE_ROOT, mea_config, find_path, _TIER_PRIORITY,
 )
+
+
+def _find_canonical_source(kind: str, *parts) -> str:
+    """Like ``find_path`` but **skips the local_cache tier**.
+
+    The cache is a destination, not a source. When a mirror needs to
+    pull fresh files, it must read from the real upstream tier — not
+    from a partially-populated cache (which would silently leave new
+    upstream files behind, e.g. a freshly-rerun ``.classification.txt``
+    that postdates the last mirror).
+    """
+    fallback = None
+    for tier in _TIER_PRIORITY:
+        if tier == 'local_cache':
+            continue
+        if tier not in mea_config:
+            continue
+        root = mea_config[tier].get(kind, '')
+        if not root:
+            continue
+        candidate = os.path.join(root, *parts)
+        if fallback is None:
+            fallback = candidate
+        if os.path.exists(candidate):
+            return candidate
+    return fallback
 
 
 __all__ = [
@@ -195,18 +221,22 @@ def mirror_to_local_cache(
     proto_report = None
     chunk_report = None
 
-    # Protocol datafile side (DATA_DIR).
+    # Protocol datafile side (DATA_DIR). Use _find_canonical_source so
+    # we don't read from the cache we're about to write into.
     if datafile_name is not None:
-        src = find_path('data', exp_name, datafile_name, ss_version)
+        src = _find_canonical_source(
+            'data', exp_name, datafile_name, ss_version)
         dst = os.path.join(mea_config['local_cache']['data'],
                            exp_name, datafile_name, ss_version)
         proto_report = _mirror_dir(src, dst, include_sta=include_sta,
                                      verbose=verbose,
                                      label=f'data/{datafile_name}')
 
-    # Noise/sorting chunk side (ANALYSIS_DIR).
+    # Noise/sorting chunk side (ANALYSIS_DIR). Same canonical-source
+    # rule applies.
     if chunk_name is not None:
-        src = find_path('analysis', exp_name, chunk_name, ss_version)
+        src = _find_canonical_source(
+            'analysis', exp_name, chunk_name, ss_version)
         dst = os.path.join(mea_config['local_cache']['analysis'],
                            exp_name, chunk_name, ss_version)
         chunk_report = _mirror_dir(src, dst, include_sta=include_sta,
