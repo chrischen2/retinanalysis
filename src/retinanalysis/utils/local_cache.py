@@ -59,6 +59,7 @@ def _find_canonical_source(kind: str, *parts) -> str:
 
 __all__ = [
     'mirror_to_local_cache',
+    'compare_cache_vs_source',
     'local_cache_status',
     'clear_local_cache',
     'create_mea_pipeline_cached',
@@ -169,6 +170,167 @@ def _mirror_dir(src_dir: str, dst_dir: str, include_sta: bool,
     }
 
 
+def _diff_one_dir(
+    src_dir: Optional[str],
+    cache_dir: str,
+    include_sta: bool,
+    label: str,
+    verbose: bool,
+) -> Dict:
+    """Compare one canonical-source dir against its cache counterpart.
+
+    Returns a per-dir report with four lists of basenames:
+
+    - ``in_sync``       : same size + mtime on both sides
+    - ``src_only``      : present on source but missing from cache
+    - ``cache_only``    : present in cache but no longer on source
+    - ``stale_in_cache``: present on both but source is newer or
+                          different size
+    """
+    cache_files: Dict[str, Tuple[int, float]] = {}
+    if os.path.isdir(cache_dir):
+        for name in os.listdir(cache_dir):
+            if name.startswith('.'):
+                continue
+            p = os.path.join(cache_dir, name)
+            try:
+                st = os.stat(p)
+                cache_files[name] = (st.st_size, st.st_mtime)
+            except OSError:
+                pass
+
+    src_files: Dict[str, Tuple[int, float]] = {}
+    if src_dir and os.path.isdir(src_dir):
+        for name in _vision_files_in(src_dir, include_sta=include_sta):
+            p = os.path.join(src_dir, name)
+            try:
+                st = os.stat(p)
+                src_files[name] = (st.st_size, st.st_mtime)
+            except OSError:
+                pass
+
+    in_sync: List[str] = []
+    src_only: List[str] = []
+    cache_only: List[str] = []
+    stale_in_cache: List[str] = []
+    bytes_to_copy = 0
+    for name, (sz, mt) in src_files.items():
+        if name not in cache_files:
+            src_only.append(name)
+            bytes_to_copy += sz
+        else:
+            cs_sz, cs_mt = cache_files[name]
+            if cs_sz == sz and cs_mt >= mt:
+                in_sync.append(name)
+            else:
+                stale_in_cache.append(name)
+                bytes_to_copy += sz
+    # Don't flag .sta / files outside the allowlist as cache_only — only
+    # files that look like Vision data we own but no longer have a
+    # canonical source.
+    for name in cache_files:
+        if name not in src_files:
+            if any(name.endswith(s) for s in _VISION_NEED_SUFFIXES):
+                cache_only.append(name)
+
+    if verbose:
+        print(f'  [{label}]')
+        print(f'    src   = {src_dir or "(missing)"}')
+        print(f'    cache = {cache_dir}')
+        print(f'    in-sync          : {len(in_sync)} files')
+        if src_only:
+            print(f'    missing-in-cache : {len(src_only)} files '
+                  f'(would copy {_human_mb(sum(src_files[n][0] for n in src_only))}):')
+            for n in sorted(src_only):
+                print(f'      + {n}  ({_human_mb(src_files[n][0])})')
+        if stale_in_cache:
+            print(f'    stale-in-cache   : {len(stale_in_cache)} files '
+                  f'(would refresh {_human_mb(sum(src_files[n][0] for n in stale_in_cache))}):')
+            for n in sorted(stale_in_cache):
+                print(f'      ~ {n}  ({_human_mb(src_files[n][0])})')
+        if cache_only:
+            print(f'    cache-only       : {len(cache_only)} files '
+                  '(source no longer has them; nothing to copy):')
+            for n in sorted(cache_only):
+                print(f'      ? {n}')
+    return {
+        'label': label,
+        'src_dir': src_dir, 'cache_dir': cache_dir,
+        'in_sync': in_sync,
+        'src_only': src_only,
+        'stale_in_cache': stale_in_cache,
+        'cache_only': cache_only,
+        'bytes_to_copy': bytes_to_copy,
+    }
+
+
+def compare_cache_vs_source(
+    exp_name: str,
+    datafile_name: Optional[str] = None,
+    chunk_name: Optional[str] = None,
+    ss_version: str = 'kilosort2.5',
+    *,
+    include_sta: bool = False,
+    verbose: bool = True,
+) -> Dict:
+    """Compare cache contents vs canonical-source contents — read-only.
+
+    Lists which files would be copied / refreshed if you ran
+    :func:`mirror_to_local_cache` with the same arguments — but doesn't
+    transfer anything. Useful for "is my cache fresh enough?" checks
+    before pulling fresh data over the wire.
+
+    The canonical source is resolved via :func:`_find_canonical_source`
+    (i.e. *skipping* the local_cache tier), so the comparison is always
+    cache-vs-upstream, never cache-vs-itself.
+
+    Parameters mirror those of :func:`mirror_to_local_cache`.
+
+    Returns
+    -------
+    dict
+        ``{'protocol', 'chunk', 'total_bytes_to_copy'}`` where each
+        side is a per-dir diff report from :func:`_diff_one_dir`
+        (or ``None`` if that side wasn't requested).
+    """
+    if datafile_name is None and chunk_name is None:
+        raise ValueError(
+            'Pass at least one of datafile_name / chunk_name to compare.')
+    if verbose:
+        print(f'Comparing cache vs canonical source for {exp_name}')
+
+    proto_diff = None
+    chunk_diff = None
+    if datafile_name is not None:
+        src = _find_canonical_source(
+            'data', exp_name, datafile_name, ss_version)
+        cache = os.path.join(mea_config['local_cache']['data'],
+                              exp_name, datafile_name, ss_version)
+        proto_diff = _diff_one_dir(src, cache, include_sta=include_sta,
+                                     label=f'data/{datafile_name}',
+                                     verbose=verbose)
+    if chunk_name is not None:
+        src = _find_canonical_source(
+            'analysis', exp_name, chunk_name, ss_version)
+        cache = os.path.join(mea_config['local_cache']['analysis'],
+                              exp_name, chunk_name, ss_version)
+        chunk_diff = _diff_one_dir(src, cache, include_sta=include_sta,
+                                     label=f'analysis/{chunk_name}',
+                                     verbose=verbose)
+    total = sum(r['bytes_to_copy'] for r in (proto_diff, chunk_diff)
+                 if r is not None)
+    if verbose:
+        if total > 0:
+            print(f'\n  → would transfer {_human_mb(total)} on a refresh.')
+        else:
+            print('\n  → cache is fully in sync; no transfer needed.')
+    return {
+        'protocol': proto_diff,
+        'chunk': chunk_diff,
+        'total_bytes_to_copy': total,
+    }
+
+
 def mirror_to_local_cache(
     exp_name: str,
     datafile_name: Optional[str] = None,
@@ -247,12 +409,22 @@ def mirror_to_local_cache(
                         if r is not None)
     bytes_total = sum(r['bytes_total'] for r in (proto_report, chunk_report)
                        if r is not None)
+    n_copied = sum(r['n_copied'] for r in (proto_report, chunk_report)
+                    if r is not None)
+    n_files = sum(r['n_files'] for r in (proto_report, chunk_report)
+                   if r is not None)
     seconds = sum(r['seconds'] for r in (proto_report, chunk_report)
                    if r is not None)
     if verbose:
-        print(f'Total: {_human_mb(bytes_copied)} copied, '
-              f'{_human_mb(bytes_total - bytes_copied)} already cached, '
-              f'in {seconds:.1f} s')
+        if n_copied == 0 and n_files > 0:
+            print(f'Total: ✅ cache is up-to-date '
+                  f'({n_files} files, {_human_mb(bytes_total)} on disk; '
+                  f'0 B transferred this run)')
+        else:
+            print(f'Total: {n_copied}/{n_files} files refreshed '
+                  f'({_human_mb(bytes_copied)} copied this run, '
+                  f'{_human_mb(bytes_total - bytes_copied)} already cached) '
+                  f'in {seconds:.1f} s')
     return {
         'exp_name': exp_name,
         'datafile_name': datafile_name,

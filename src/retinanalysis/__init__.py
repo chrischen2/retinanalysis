@@ -102,6 +102,7 @@ from .utils.sorting_qc import (sample_sorting_qc_cells,
 
 from .utils import local_cache as _local_cache_mod
 from .utils.local_cache import (mirror_to_local_cache,
+                                 compare_cache_vs_source,
                                  local_cache_status,
                                  clear_local_cache,
                                  create_mea_pipeline_cached,
