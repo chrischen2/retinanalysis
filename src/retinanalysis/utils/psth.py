@@ -91,3 +91,68 @@ def psth_time_axis(
     n_bins = int(round(dur_ms / 1000.0 * sample_rate_hz))
     bin_ms = 1000.0 / sample_rate_hz
     return t_start_ms + (np.arange(n_bins) + 0.5) * bin_ms
+
+
+def check_psth_timing(rb_or_pipeline, verbose: bool = True) -> dict:
+    """Diagnose PSTH alignment: TTL onset vs nominal preTime vs first stim frame.
+
+    Spike times in ``df_spike_times`` are stored relative to the TTL
+    trigger (sample 0 of each epoch). The PSTH plotted by
+    ``plot_psth_by_condition`` puts a dashed vertical line at
+    ``preTime_ms`` to mark stimulus onset. But the projector / stage
+    typically doesn't display the first stim frame *exactly* at
+    ``preTime`` — there's a 1-2 frame offset captured in
+    ``d_timing['actual_onset_times_ms']`` (the timestamp of frame
+    index ``floor(preTime * frameRate)`` in the rig's frame log).
+
+    This function reports the median per-epoch offset
+    ``actual_onset_ms - preTime_ms``. A small *positive* number
+    (~17-33 ms at 60 Hz) means the response peaks should appear
+    SLIGHTLY RIGHT of the dashed line — which is normal. A *negative*
+    or large positive offset is unusual and warrants checking the
+    rig clock / frame-monitor sample rate.
+
+    Returns ``{'pre_time_ms', 'actual_onset_ms_median',
+    'offset_ms_median', 'offset_frames', 'n_epochs',
+    'stage_frame_rate', 'note'}``.
+    """
+    if hasattr(rb_or_pipeline, 'resp'):
+        rb = rb_or_pipeline.resp
+    else:
+        rb = rb_or_pipeline
+    t = rb.d_timing
+    pre = float(t.get('pre_time_ms', 0.0))
+    actual = t.get('actual_onset_times_ms', None)
+    fr = t.get('stage_frame_rate', None)
+    if actual is None or len(actual) == 0:
+        if verbose:
+            print(f'check_psth_timing: no actual_onset_times_ms recorded '
+                  f'(frame-monitor data missing). preTime_ms={pre}.')
+        return {'pre_time_ms': pre, 'actual_onset_ms_median': None,
+                'offset_ms_median': None, 'offset_frames': None,
+                'n_epochs': 0, 'stage_frame_rate': fr,
+                'note': 'actual onsets missing'}
+    actual_arr = np.asarray(actual, dtype=float)
+    med = float(np.median(actual_arr))
+    offset = med - pre
+    offset_frames = (offset * fr / 1000.0) if (fr is not None and fr > 0) else None
+    if verbose:
+        print(f'PSTH alignment diagnostic:')
+        print(f'  Symphony preTime_ms          : {pre:.2f}')
+        print(f'  actual stim onset (median)   : {med:.2f} ms')
+        print(f'  offset (actual − preTime)    : {offset:+.2f} ms'
+              + (f'  (~{offset_frames:+.2f} frames @ {fr:.1f} Hz)'
+                  if offset_frames is not None else ''))
+        if abs(offset) < 50:
+            print(f'  → small projector pipeline delay, normal.')
+        elif offset > 0:
+            print(f'  → actual onset is > 50 ms LATER than preTime. '
+                  f'Check frame_times_ms and preTime decoding.')
+        else:
+            print(f'  → actual onset is BEFORE preTime — unusual. '
+                  f'Either preTime was incorrectly stored, or the '
+                  f'frame-monitor / TTL alignment is off.')
+    return {'pre_time_ms': pre, 'actual_onset_ms_median': med,
+            'offset_ms_median': offset, 'offset_frames': offset_frames,
+            'n_epochs': int(actual_arr.size), 'stage_frame_rate': fr,
+            'note': 'ok' if abs(offset) < 50 else 'large offset'}

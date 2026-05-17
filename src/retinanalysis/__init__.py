@@ -55,7 +55,13 @@ from .utils import psth as _psth_mod
 from .utils.psth import (spike_times_to_psth,
                          epoch_spikes_to_psth,
                          psth_time_axis,
-                         gaussian_filter_1d)
+                         gaussian_filter_1d,
+                         check_psth_timing)
+
+from .utils import dedup as _dedup_mod
+from .utils.dedup import (find_duplicate_groups,
+                            apply_dedup,
+                            dedup_pipeline)
 
 from .utils import raster as _raster_mod
 from .utils.raster import plot_raster_with_psth
