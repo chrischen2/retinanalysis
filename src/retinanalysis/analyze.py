@@ -214,6 +214,11 @@ def analyze_experiment(
     prune_stale: bool = True,
     protocol_subdir: Optional[str] = None,
     append_datafile_to_subdir: bool = False,
+    dedup: bool = True,
+    dedup_ei_threshold: float = 0.85,
+    dedup_skip_untyped: bool = True,
+    dedup_merge_strategy: str = 'union',
+    dedup_refractory_ms: float = 0.5,
     verbose: bool = True,
 ) -> Dict:
     """Run the full archive pipeline for one experiment date.
@@ -326,6 +331,29 @@ def analyze_experiment(
     response_block = pipeline.resp
     stim_block = pipeline.stim
     _normalize_cell_types(response_block)
+
+    # Dedup before QC: split clusters that are the same physical cell
+    # get their spike trains merged (union with refractory dedup) into
+    # one representative cell, so downstream QC + per-cell archive +
+    # offline analyses see each cell exactly once. Type-aware: an OnP
+    # never merges with an OffM. Same for ALL protocols using this
+    # driver — there's no protocol-specific logic.
+    if dedup:
+        from .utils.dedup import dedup_pipeline as _dedup_pipeline
+        n_before = len(response_block.df_spike_times)
+        _dedup_pipeline(
+            pipeline,
+            ei_threshold=dedup_ei_threshold,
+            skip_untyped=dedup_skip_untyped,
+            merge_strategy=dedup_merge_strategy,
+            refractory_ms=dedup_refractory_ms,
+            verbose=False,
+        )
+        n_after = len(response_block.df_spike_times)
+        if verbose and n_after < n_before:
+            print(f'  dedup: {n_before - n_after} duplicate '
+                  f'cell(s) merged into representatives '
+                  f'(EI≥{dedup_ei_threshold:.2f}, {dedup_merge_strategy})')
 
     # 3. Filter requested cell_types to those actually present with n >= minimum_n
     type_counts = response_block.df_spike_times['cell_type'].value_counts()

@@ -246,46 +246,116 @@ def _pick_representative(block, group: Tuple[int, ...],
     raise ValueError(f'unknown representative strategy: {strategy!r}')
 
 
+def _merge_spike_trains(
+    train_lists: List[List[np.ndarray]],
+    refractory_ms: float,
+) -> List[np.ndarray]:
+    """Per-epoch union of spike-time arrays, with refractory-window dedup.
+
+    ``train_lists`` is a list (one per cell) of lists (one per epoch)
+    of float-ms arrays. Returns a single list-per-epoch of merged
+    arrays. Within each epoch we concatenate every contributing cell's
+    spikes, sort ascending, then drop any event closer than
+    ``refractory_ms`` to its predecessor — both cells occasionally
+    claim the same physical action potential when their template
+    waveforms overlap, and unioning naively double-counts those.
+    """
+    if not train_lists:
+        return []
+    n_epochs = max(len(tl) for tl in train_lists)
+    merged: List[np.ndarray] = []
+    for ep in range(n_epochs):
+        parts = []
+        for tl in train_lists:
+            if ep < len(tl):
+                a = np.asarray(tl[ep], dtype=float).ravel()
+                if a.size:
+                    parts.append(a)
+        if not parts:
+            merged.append(np.array([], dtype=float))
+            continue
+        cat = np.sort(np.concatenate(parts))
+        if refractory_ms > 0 and cat.size > 1:
+            keep = np.concatenate([[True], np.diff(cat) > refractory_ms])
+            cat = cat[keep]
+        merged.append(cat.astype(float))
+    return merged
+
+
 def apply_dedup(
     pipeline_or_block,
     groups: List[Tuple[int, ...]],
     *,
     side: str = 'protocol',
     representative: str = 'highest_amplitude',
+    merge_strategy: str = 'union',
+    refractory_ms: float = 0.5,
     inplace: bool = True,
     verbose: bool = True,
 ) -> pd.DataFrame:
-    """Collapse each duplicate group to one representative cell.
+    """Collapse each duplicate group to a single cell.
 
-    For each group: pick a representative (default = highest EI peak
-    amplitude), drop the other cells' rows from ``df_spike_times`` and
-    from ``cell_ids``. ``d_EIs`` is left alone (not pruned) so downstream
-    EI diagnostics remain available; the dropped cells just don't appear
-    in any cell-by-cell iteration anymore.
+    Two ``merge_strategy`` options:
+
+    - **``'union'``** (default, biologically correct): the
+      representative's ``spike_times`` is replaced by the per-epoch
+      union of every group member's trains, with events within
+      ``refractory_ms`` of each other collapsed (since both clusters
+      sometimes claim the same physical AP when their template
+      waveforms overlap). Other members' rows are then dropped.
+      This recovers spikes that Kilosort split between two clusters.
+    - **``'drop'``** (conservative): keep only the representative's
+      original train; drop the other rows. Use this when you suspect
+      one cluster is actually a different cell (e.g. a neighbor with
+      a similar EI footprint) and you'd rather not pool its spikes.
+
+    For each group the representative is the typed cell with the
+    highest EI peak amplitude by default (see ``_pick_representative``).
+    The merged representative keeps its existing ``cell_type`` and
+    ``noise_id``; ``d_EIs[representative]`` is unchanged.
 
     Parameters
     ----------
+    merge_strategy : ``'union'`` (default) | ``'drop'``
+    refractory_ms : float
+        Window for refractory-period dedup in the unioned train.
+        Default 0.5 ms. Set to 0 to skip the dedup (raw union).
+        Only used when ``merge_strategy='union'``.
     representative : ``'highest_amplitude'`` | ``'most_spikes'`` | ``'first'``
     inplace : bool
-        Mutate the block in place. ``False`` leaves the block untouched
-        and only returns the merge log (useful for previewing).
+        Mutate the block in place. ``False`` previews without applying.
     verbose : bool
 
     Returns
     -------
     pandas.DataFrame
-        One row per group: ``group`` (tuple), ``representative`` (int),
-        ``dropped`` (tuple of int), ``representative_amp`` (float),
-        ``cell_type`` (str). Empty DataFrame when ``groups`` is empty.
+        One row per group with columns:
+        ``group, representative, dropped, representative_amp,
+        cell_type, n_spikes_rep_before, n_spikes_dropped_total,
+        n_spikes_rep_after, n_spikes_added_to_rep`` —
+        the spike-count columns let you audit how aggressive the merge was.
+        Empty when ``groups`` is empty.
     """
+    if merge_strategy not in ('union', 'drop'):
+        raise ValueError(
+            f"merge_strategy must be 'union' or 'drop', got {merge_strategy!r}")
+
     block = _resolve_block(pipeline_or_block, side)
     df = getattr(block, 'df_spike_times', None)
     if df is None and inplace:
         raise ValueError('Block has no df_spike_times to modify.')
 
     type_map = _build_type_map(block)
+    # Index df by cell_id once for O(1) lookups during the loop.
+    df_by_cid = df.set_index(df['cell_id'].astype(int), drop=False) \
+        if df is not None else None
+
     log_rows: List[Dict] = []
     drop_ids: set = set()
+    # Stash merged trains keyed by rep id so we can write them out at
+    # the end (avoids mutating the DataFrame mid-loop).
+    merged_trains: Dict[int, List[np.ndarray]] = {}
+
     for group in groups:
         rep = _pick_representative(block, group, representative)
         others = tuple(c for c in group if c != rep)
@@ -294,30 +364,89 @@ def apply_dedup(
             rep_amp = float(np.max(np.abs(block.d_EIs[int(rep)])))
         except (KeyError, AttributeError):
             rep_amp = float('nan')
+
+        # Spike-count accounting + (optionally) the union merge.
+        n_rep_before = 0
+        n_dropped_total = 0
+        n_rep_after = 0
+        if df_by_cid is not None:
+            try:
+                rep_sts = list(df_by_cid.at[int(rep), 'spike_times'])
+                n_rep_before = int(sum(len(s) for s in rep_sts))
+            except KeyError:
+                rep_sts = None
+                n_rep_before = 0
+            for cid in others:
+                try:
+                    sts = df_by_cid.at[int(cid), 'spike_times']
+                    n_dropped_total += int(sum(len(s) for s in sts))
+                except KeyError:
+                    pass
+
+            if merge_strategy == 'union' and rep_sts is not None:
+                trains: List[List[np.ndarray]] = [rep_sts]
+                for cid in others:
+                    try:
+                        trains.append(list(df_by_cid.at[int(cid), 'spike_times']))
+                    except KeyError:
+                        continue
+                merged = _merge_spike_trains(trains, refractory_ms=refractory_ms)
+                merged_trains[int(rep)] = merged
+                n_rep_after = int(sum(len(s) for s in merged))
+            else:
+                n_rep_after = n_rep_before
+
         log_rows.append({
             'group': group,
             'representative': int(rep),
             'dropped': others,
             'representative_amp': rep_amp,
             'cell_type': type_map.get(int(rep), ''),
+            'n_spikes_rep_before': n_rep_before,
+            'n_spikes_dropped_total': n_dropped_total,
+            'n_spikes_rep_after': n_rep_after,
+            'n_spikes_added_to_rep': max(0, n_rep_after - n_rep_before),
         })
 
-    if inplace and df is not None and drop_ids:
-        new_df = df[~df['cell_id'].astype(int).isin(drop_ids)].reset_index(drop=True)
-        block.df_spike_times = new_df
+    if inplace and df is not None:
+        if merged_trains:
+            # Write merged spike trains back to the representative rows.
+            # Use a copy to avoid SettingWithCopyWarning on the indexed view.
+            df = df.copy()
+            for rep_id, mt in merged_trains.items():
+                mask = df['cell_id'].astype(int) == int(rep_id)
+                # Assigning a list-of-arrays into a single cell of an
+                # object-dtype Series is fiddly; do it via .at on the
+                # matching row index.
+                idx = df.index[mask]
+                if len(idx) == 1:
+                    df.at[idx[0], 'spike_times'] = mt
+        if drop_ids:
+            df = df[~df['cell_id'].astype(int).isin(drop_ids)].reset_index(drop=True)
+        block.df_spike_times = df
         block.cell_ids = np.array(
-            [int(c) for c in new_df['cell_id']], dtype=int)
+            [int(c) for c in df['cell_id']], dtype=int)
 
     if verbose:
         kept = len(groups)
         dropped = len(drop_ids)
+        n_recovered = sum(r['n_spikes_added_to_rep'] for r in log_rows)
         suffix = '' if inplace else '  (preview — no changes applied)'
-        print(f'apply_dedup: kept {kept} representative(s), '
-              f'dropped {dropped} duplicate cell(s){suffix}')
+        if merge_strategy == 'union':
+            print(f'apply_dedup: kept {kept} representative(s), '
+                  f'dropped {dropped} duplicate cell(s); '
+                  f'recovered {n_recovered:,} spikes via union '
+                  f'({refractory_ms} ms refractory){suffix}')
+        else:
+            print(f'apply_dedup: kept {kept} representative(s), '
+                  f'dropped {dropped} duplicate cell(s){suffix}')
 
     return pd.DataFrame(log_rows, columns=[
         'group', 'representative', 'dropped',
-        'representative_amp', 'cell_type'])
+        'representative_amp', 'cell_type',
+        'n_spikes_rep_before', 'n_spikes_dropped_total',
+        'n_spikes_rep_after', 'n_spikes_added_to_rep',
+    ])
 
 
 def dedup_pipeline(
@@ -326,7 +455,10 @@ def dedup_pipeline(
     ei_threshold: float = 0.85,
     sta_threshold: Optional[float] = None,
     restrict_to_same_type: bool = True,
+    skip_untyped: bool = True,
     representative: str = 'highest_amplitude',
+    merge_strategy: str = 'union',
+    refractory_ms: float = 0.5,
     side: str = 'protocol',
     also_dedup_noise: bool = False,
     inplace: bool = True,
@@ -375,6 +507,7 @@ def dedup_pipeline(
         ei_threshold=ei_threshold,
         sta_threshold=None,           # protocol side has no STA
         restrict_to_same_type=restrict_to_same_type,
+        skip_untyped=skip_untyped,
         verbose=verbose,
     )
     if proto_groups:
@@ -382,6 +515,8 @@ def dedup_pipeline(
             pipeline, proto_groups,
             side='protocol',
             representative=representative,
+            merge_strategy=merge_strategy,
+            refractory_ms=refractory_ms,
             inplace=inplace, verbose=verbose,
         )
 
@@ -393,6 +528,7 @@ def dedup_pipeline(
             ei_threshold=ei_threshold,
             sta_threshold=sta_threshold,
             restrict_to_same_type=restrict_to_same_type,
+            skip_untyped=skip_untyped,
             verbose=verbose,
         )
         if noise_groups:
@@ -400,6 +536,8 @@ def dedup_pipeline(
                 pipeline, noise_groups,
                 side='noise',
                 representative=representative,
+                merge_strategy=merge_strategy,
+                refractory_ms=refractory_ms,
                 inplace=inplace, verbose=verbose,
             )
 
