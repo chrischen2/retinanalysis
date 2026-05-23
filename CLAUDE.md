@@ -39,7 +39,9 @@ protocol** so each stays focused.
   archive §6, sorting-QC PNGs §7, interactive sorting-QC GUI §8,
   batch archive §9, offline store §10, per-date analyses §11,
   cross-date pooling §12).
-- `demos/variableMeanSpatialNoise.ipynb` — `VariableMeanSpatialNoise`.
+- `demos/oneDNoise.ipynb` — `monitorVariableMeanNoiseEpochs` (1-D
+  temporal noise around alternating mean intensities; LN-model fits
+  via cascadegraph).
 
 When the user asks to add analysis for a new protocol, default to a
 new notebook rather than extending an existing one.

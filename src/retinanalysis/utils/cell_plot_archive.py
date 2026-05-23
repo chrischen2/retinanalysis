@@ -76,6 +76,10 @@ _PROTOCOL_SHORT_NAMES: Dict[str, str] = {
         'variable_mean_spatial_noise',
     'manookinlab.protocols.VariableMeanSpatialNoise':
         'variable_mean_spatial_noise',
+    'edu.washington.riekelab.chris.protocols.monitorVariableMeanNoiseEpochs':
+        'one_d_noise',
+    'edu.washington.riekelab.vyom.protocols.monitorVariableMeanNoiseEpochs':
+        'one_d_noise',
 }
 
 # Condition keys auto-detect per protocol (used when caller doesn't pass any).
@@ -85,6 +89,22 @@ _PROTOCOL_SHORT_NAMES: Dict[str, str] = {
 _PROTOCOL_DEFAULT_CONDITION_KEYS: Dict[str, List[str]] = {
     'edu.washington.riekelab.turner.protocols.EyeMovementTrajectoryAlternatingBackground':
         ['currentImageName', 'currentBackgroundScale'],
+    'edu.washington.riekelab.chris.protocols.monitorVariableMeanNoiseEpochs':
+        ['currentMean'],
+    'edu.washington.riekelab.vyom.protocols.monitorVariableMeanNoiseEpochs':
+        ['currentMean'],
+}
+
+# Per-epoch *array* parameters to additionally persist into offline.h5
+# (regular condition_keys are scalar per-epoch values that go into the
+# compound `epochs` table; arrays don't fit there and live under their
+# own `epoch_arrays/<key>` group). Used by `save_offline_data` to stash
+# things like the per-frame intensity trace for LN-model fitting.
+_PROTOCOL_EXTRA_EPOCH_ARRAYS: Dict[str, List[str]] = {
+    'edu.washington.riekelab.chris.protocols.monitorVariableMeanNoiseEpochs':
+        ['intensityOverFrame'],
+    'edu.washington.riekelab.vyom.protocols.monitorVariableMeanNoiseEpochs':
+        ['intensityOverFrame'],
 }
 
 

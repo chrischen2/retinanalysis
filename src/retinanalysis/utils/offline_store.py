@@ -26,6 +26,11 @@ Top-level groups:
                     ``epoch_index``.
 - ``epoch_block_params/`` — group of scalar/array attrs mirroring
                     ``stim_block.d_epoch_block_params``.
+- ``epoch_arrays/<key>`` — optional 2-D dataset(s) (n_epochs × max_len)
+                    holding per-epoch array params (e.g.
+                    ``intensityOverFrame``). Companion ``<key>_lengths``
+                    dataset records the true per-epoch length so ragged
+                    arrays survive the zero-padding.
 - ``cells/<cell_id>/`` — one group per cell that passes the saved-cells
                     filter. Attrs: ``cell_id, cell_type, noise_cell_id,
                     ei_corr`` + every column from ``cell_match.csv`` +
@@ -120,6 +125,16 @@ class OfflineDataset:
                     k: _decode(v) for k, v in ebp_grp.attrs.items()
                 }
 
+            # Per-epoch array params (e.g. intensityOverFrame) — lazy
+            # accessor. We only record the keys here; data is read on
+            # demand via :meth:`epoch_array`.
+            self._epoch_array_keys: List[str] = []
+            ea_grp = f.get('epoch_arrays')
+            if ea_grp is not None:
+                self._epoch_array_keys = sorted(
+                    k for k in ea_grp.keys() if not k.endswith('_lengths')
+                )
+
             # Per-cell attrs (eager) — assemble cells DataFrame
             cells_grp = f['cells']
             cell_rows = []
@@ -176,6 +191,36 @@ class OfflineDataset:
             # All cells share the same axis — read from the first one.
             cid = self._cell_ids[0] if cell_id is None else int(cell_id)
             return f[f'cells/{cid}/psth_time_ms'][:]
+
+    @property
+    def epoch_array_keys(self) -> List[str]:
+        """Names of per-epoch array params stashed under ``epoch_arrays/``."""
+        return list(self._epoch_array_keys)
+
+    def epoch_array(self, key: str, epoch_idx: Optional[int] = None):
+        """Per-epoch array values for ``key`` (e.g. ``'intensityOverFrame'``).
+
+        - ``epoch_idx=None`` → returns a list of 1-D arrays (one per
+          epoch), each trimmed to its true length via the companion
+          ``<key>_lengths`` dataset.
+        - ``epoch_idx=<int>`` → returns the single epoch's 1-D array.
+        """
+        with h5py.File(self.path, 'r') as f:
+            grp = f.get('epoch_arrays')
+            if grp is None or key not in grp:
+                raise KeyError(
+                    f'{key!r} not in offline.h5 (available: '
+                    f'{self._epoch_array_keys})')
+            data = grp[key][:]
+            lengths_key = f'{key}_lengths'
+            if lengths_key in grp:
+                lengths = grp[lengths_key][:].astype(int)
+            else:
+                lengths = np.full(data.shape[0], data.shape[1], dtype=int)
+        if epoch_idx is not None:
+            i = int(epoch_idx)
+            return data[i, :lengths[i]]
+        return [data[i, :lengths[i]] for i in range(data.shape[0])]
 
     def __repr__(self) -> str:
         return (f"OfflineDataset(exp={self.exp_name}, "
@@ -325,6 +370,7 @@ def save_offline_data(
     cell_ids: Optional[Sequence[int]] = None,
     cell_match_df: Optional[pd.DataFrame] = None,
     condition_keys: Optional[Sequence[str]] = None,
+    extra_epoch_array_keys: Optional[Sequence[str]] = None,
     psth_sigma_ms: float = 10.0,
     sample_rate_hz: float = 1000.0,
     output_root: Optional[str] = None,
@@ -354,6 +400,11 @@ def save_offline_data(
     condition_keys : sequence[str], optional
         Auto-detected for known protocols when ``None`` (e.g.
         EyeMovement → ``[currentImageName, currentBackgroundScale]``).
+    extra_epoch_array_keys : sequence[str], optional
+        Per-epoch array params (e.g. ``intensityOverFrame``) to stash
+        under ``epoch_arrays/``. Auto-detected for known protocols when
+        ``None`` (e.g. ``monitorVariableMeanNoiseEpochs`` →
+        ``['intensityOverFrame']``).
     psth_sigma_ms, sample_rate_hz : float
         Pre-compute and store the smoothed PSTH so reload is plot-ready.
     overwrite : bool
@@ -382,6 +433,13 @@ def save_offline_data(
         condition_keys = _PROTOCOL_DEFAULT_CONDITION_KEYS.get(
             rb.protocol_name, ['currentBackgroundScale'])
     condition_keys = list(condition_keys)
+
+    # --- Resolve per-epoch array keys (e.g. intensityOverFrame for 1D noise)
+    if extra_epoch_array_keys is None:
+        from .cell_plot_archive import _PROTOCOL_EXTRA_EPOCH_ARRAYS
+        extra_epoch_array_keys = _PROTOCOL_EXTRA_EPOCH_ARRAYS.get(
+            rb.protocol_name, [])
+    extra_epoch_array_keys = list(extra_epoch_array_keys)
 
     # --- Resolve cell list
     good_ids = _good_cell_ids(rb, qc, visual_qc_df, cell_ids)
@@ -455,6 +513,37 @@ def save_offline_data(
                     ebp.attrs[k] = json.dumps(_jsonify(v))
             except Exception:
                 continue
+
+        # Per-epoch array params (e.g. intensityOverFrame). Stored as a
+        # 2D dataset (n_epochs × max_len) zero-padded to the longest
+        # epoch, with a companion `<key>_lengths` dataset for ragged
+        # recovery. Epochs missing the key get a zero-length row.
+        if extra_epoch_array_keys:
+            n_ep = len(sb.df_epochs)
+            ea_grp = f.create_group('epoch_arrays')
+            for key in extra_epoch_array_keys:
+                per_epoch = [
+                    np.asarray(p.get(key, []), dtype=np.float64).ravel()
+                    for p in sb.df_epochs['epoch_parameters']
+                ]
+                lengths = np.array([a.size for a in per_epoch], dtype=np.int64)
+                if not lengths.any():
+                    if verbose:
+                        print(f'  offline → no per-epoch values for {key!r}; '
+                              'skipping')
+                    continue
+                max_len = int(lengths.max())
+                padded = np.zeros((n_ep, max_len), dtype=np.float64)
+                for i, a in enumerate(per_epoch):
+                    if a.size:
+                        padded[i, :a.size] = a
+                ea_grp.create_dataset(key, data=padded,
+                                       compression='gzip', compression_opts=4)
+                ea_grp.create_dataset(f'{key}_lengths', data=lengths)
+                if verbose:
+                    print(f'  offline → epoch_arrays/{key}: '
+                          f'({n_ep}, {max_len}) ({int(lengths.min())}'
+                          f'..{int(lengths.max())} samples/epoch)')
 
         # Per-cell groups
         cells_grp = f.create_group('cells')
