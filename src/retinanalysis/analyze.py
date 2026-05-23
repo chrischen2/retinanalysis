@@ -18,11 +18,11 @@ from __future__ import annotations
 
 import os
 import traceback
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .config.settings import ANALYSIS_DIR, DATA_DIR
+from .config.settings import ANALYSIS_DIR, DATA_DIR, find_path
 from .utils.cell_type_utils import map_cell_type, filter_available_types
 from .utils.style import MAIN_CELL_TYPES
 from .utils.protocol_qc import (
@@ -36,7 +36,10 @@ from .utils.cell_plot_archive import (
 from .utils.cell_match import save_cell_match
 
 
-__all__ = ['analyze_experiment', 'analyze_experiments']
+__all__ = ['analyze_experiment', 'analyze_experiments',
+           'detect_ss_version', 'pick_typing_file', 'resolve_noise_chunk',
+           'find_available_datasets', 'summarize_batch_results',
+           'SS_VERSION_PRIORITY']
 
 
 # ---------------------------------------------------------------------------
@@ -98,23 +101,26 @@ def detect_ss_version(
         Source directory doesn't exist, or contains no ``kilosort*``
         subdirs.
     """
+    # Walk all configured tiers — `find_path` tries local SSDs first, then
+    # the NAS. Dates whose sort output never made it onto the local mirror
+    # (e.g. 20250306C) still resolve here.
     if kind == 'data':
         if datafile_name is None:
             raise ValueError("kind='data' requires datafile_name")
-        sort_dir = os.path.join(DATA_DIR, exp_name, datafile_name)
+        sort_dir = find_path('data', exp_name, datafile_name)
         location_desc = f'{exp_name}/{datafile_name} (data)'
     elif kind == 'analysis':
         if chunk_name is None:
             raise ValueError("kind='analysis' requires chunk_name")
-        from .config.settings import ANALYSIS_DIR as _ANALYSIS_DIR
-        sort_dir = os.path.join(_ANALYSIS_DIR, exp_name, chunk_name)
+        sort_dir = find_path('analysis', exp_name, chunk_name)
         location_desc = f'{exp_name}/{chunk_name} (analysis)'
     else:
         raise ValueError(f"kind must be 'data' or 'analysis', got {kind!r}")
 
-    if not os.path.isdir(sort_dir):
+    if not sort_dir or not os.path.isdir(sort_dir):
         raise FileNotFoundError(
-            f'No sort directory for {location_desc}: {sort_dir}')
+            f'No sort directory for {location_desc} on any configured tier: '
+            f'{sort_dir}')
     chosen = _pick_ss_version_from(os.listdir(sort_dir))
     if chosen is None:
         raise FileNotFoundError(f'No kilosort* subdirs under {sort_dir}')
@@ -126,13 +132,38 @@ def _detect_ss_version(exp_name: str, datafile_name: str) -> str:
     return detect_ss_version(exp_name, datafile_name, kind='data')
 
 
-def _pick_typing_file(
+def pick_typing_file(
     exp_name: str, chunk_name: str, ss_version: str,
     preferred: Optional[str] = None,
+    *,
+    strict: bool = True,
 ) -> Optional[str]:
-    """Pick the first non-dotfile ``*.classification.txt`` in the chunk dir."""
-    chunk_dir = os.path.join(ANALYSIS_DIR, exp_name, chunk_name, ss_version)
-    if not os.path.isdir(chunk_dir):
+    """Pick a ``*.classification.txt`` from the analysis chunk directory.
+
+    Walks ``find_path('analysis', ...)`` (local-cache → SSD → NAS),
+    lists the chunk dir, and filters out macOS AppleDouble dotfiles
+    (``._*``). If ``preferred`` is provided and present, returns it;
+    otherwise returns the first remaining candidate.
+
+    Parameters
+    ----------
+    exp_name, chunk_name, ss_version : str
+        Identifies the analysis chunk directory.
+    preferred : str, optional
+        Preferred filename (must be one of the available candidates).
+    strict : bool, default True
+        When ``True``, raise ``FileNotFoundError`` if the chunk dir is
+        missing or no typing file is found. When ``False``, return
+        ``preferred`` (or ``None``) silently — the soft mode used by
+        :func:`analyze_experiment`'s fallback path.
+    """
+    chunk_dir = find_path('analysis', exp_name, chunk_name, ss_version)
+    if not chunk_dir or not os.path.isdir(chunk_dir):
+        if strict:
+            raise FileNotFoundError(
+                f'No analysis chunk dir for '
+                f'{exp_name}/{chunk_name}/{ss_version} on any configured '
+                f'tier (last tried: {chunk_dir!r}).')
         return preferred
     candidates = [
         f for f in os.listdir(chunk_dir)
@@ -140,7 +171,110 @@ def _pick_typing_file(
     ]
     if preferred and preferred in candidates:
         return preferred
-    return candidates[0] if candidates else None
+    if not candidates:
+        if strict:
+            raise FileNotFoundError(
+                f'No .classification.txt in {chunk_dir}. '
+                f'Pick a different chunk_name.')
+        return None
+    if preferred and preferred not in candidates:
+        if strict:
+            raise FileNotFoundError(
+                f'{preferred!r} not found in {chunk_dir}. '
+                f'Available: {candidates}')
+        return None
+    return candidates[0]
+
+
+def _pick_typing_file(
+    exp_name: str, chunk_name: str, ss_version: str,
+    preferred: Optional[str] = None,
+) -> Optional[str]:
+    """Soft wrapper around :func:`pick_typing_file` (returns None on miss)."""
+    return pick_typing_file(exp_name, chunk_name, ss_version,
+                              preferred=preferred, strict=False)
+
+
+def resolve_noise_chunk(
+    exp_name: str,
+    datafile_name: str,
+    override: Optional[str] = None,
+) -> Tuple[str, Optional[str], Optional[str]]:
+    """Resolve the noise chunk to use, with a DB-record sanity check.
+
+    Used by the notebook's §3b cell and by other callers that want to
+    pin a noise chunk while still flagging mismatches against what the
+    experimenter declared at the rig.
+
+    Parameters
+    ----------
+    exp_name, datafile_name : str
+    override : str, optional
+        When set, used as-is (no auto-pick). When ``None``, falls back
+        to ``MEAStimBlock.nearest_noise_chunk`` (closest in time).
+
+    Returns
+    -------
+    (chunk, db_chunk, warning) : tuple
+        ``chunk`` is the resolved chunk name. ``db_chunk`` is whatever
+        the database row carries (may be ``None``). ``warning`` is a
+        one-line message when the two differ, else ``None`` — let the
+        caller print it however they like.
+    """
+    # Lazy DJ import.
+    from .utils.datajoint_utils import get_exp_summary
+    from .classes.stim import MEAStimBlock
+
+    db_chunk: Optional[str] = None
+    try:
+        _exp_df = get_exp_summary(exp_name)
+        _row = _exp_df.query('datafile_name == @datafile_name')
+        if not _row.empty:
+            db_chunk = str(_row['chunk_name'].iloc[0])
+    except Exception:
+        db_chunk = None
+
+    if override is not None:
+        chunk = override
+    else:
+        chunk = MEAStimBlock(exp_name, datafile_name,
+                              verbose=False).nearest_noise_chunk
+
+    warning: Optional[str] = None
+    if db_chunk is not None and db_chunk != chunk:
+        warning = (
+            f'DB chunk {db_chunk!r} differs from chunk being used '
+            f'({chunk!r}). If the DB record is correct, pin '
+            f'noise_chunk_name={db_chunk!r}.'
+        )
+    return chunk, db_chunk, warning
+
+
+def find_available_datasets(protocol_search: str):
+    """Protocol-registry rows filtered to dates with sort output on disk.
+
+    Calls :func:`get_datasets_from_protocol_names` and intersects with
+    ``os.listdir(ANALYSIS_DIR)`` so registry rows whose Kilosort output
+    isn't local are silently dropped. One row per ``(exp_name,
+    datafile_name)``.
+    """
+    from .utils.datajoint_utils import get_datasets_from_protocol_names
+    df = get_datasets_from_protocol_names(protocol_search)
+    available = set(os.listdir(ANALYSIS_DIR))
+    return df[df['exp_name'].isin(available)].reset_index(drop=True)
+
+
+def summarize_batch_results(results):
+    """Compact summary DataFrame for a list of ``analyze_experiment`` dicts.
+
+    Keeps the columns most useful at the end of a batch run:
+    ``exp_name, datafile_name, chunk_name, n_cells_total,
+    n_cells_passed_qc, ndf, error``.
+    """
+    import pandas as pd  # local import keeps top-level cheap
+    cols = ['exp_name', 'datafile_name', 'chunk_name',
+            'n_cells_total', 'n_cells_passed_qc', 'ndf', 'error']
+    return pd.DataFrame([{k: r.get(k) for k in cols} for r in results])
 
 
 def _resolve_datafile(exp_name: str, protocol_search: Optional[str],

@@ -56,6 +56,8 @@ __all__ = [
     'save_protocol_qc',
     'load_protocol_qc',
     'protocol_qc_csv_path',
+    'resolve_protocol_subdir',
+    'load_or_compute_protocol_qc',
 ]
 
 
@@ -398,6 +400,121 @@ def block_qc_metrics(
     if out.empty:
         return pd.DataFrame(columns=cols)
     return out[cols]
+
+
+def resolve_protocol_subdir(
+    response_block,
+    *,
+    protocol_subdir: Optional[str] = None,
+    append_datafile_to_subdir: bool = False,
+    datafile_name: Optional[str] = None,
+) -> str:
+    """Return the per-protocol subdir name that §4/§6/§9 all share.
+
+    Default = protocol short name. Override via ``protocol_subdir`` or
+    ``append_datafile_to_subdir=True`` (which appends ``_<datafile>`` to
+    the short name; the datafile is pulled from ``response_block`` when
+    not passed explicitly). Centralized here so the notebook QC cell and
+    ``analyze_experiment`` resolve identical paths.
+    """
+    from .cell_plot_archive import protocol_short_name
+    short = protocol_short_name(response_block.protocol_name)
+    if protocol_subdir is not None:
+        return protocol_subdir
+    if append_datafile_to_subdir:
+        df = datafile_name or getattr(response_block, 'datafile_name', None)
+        if df:
+            return f'{short}_{df}'
+    return short
+
+
+def load_or_compute_protocol_qc(
+    response_block,
+    exp_name: str,
+    *,
+    protocol_subdir: Optional[str] = None,
+    append_datafile_to_subdir: bool = False,
+    datafile_name: Optional[str] = None,
+    overwrite: bool = False,
+    min_rate_hz: float = 1.0,
+    min_frac_epochs: float = 0.8,
+    min_frac_non_silent: float = 2.0 / 3.0,
+    output_root: Optional[str] = None,
+    verbose: bool = True,
+) -> pd.DataFrame:
+    """Load ``qc.csv`` if present, otherwise compute fresh and save.
+
+    Wraps the §4 notebook flow into a single call:
+
+    1. Resolve the per-protocol subdir under ``<OUTPUT_DIR>/<exp>/`` so
+       this matches §6/§9 exactly.
+    2. If ``qc.csv`` exists at that path and ``overwrite=False``, load it.
+    3. Otherwise compute :func:`block_qc_metrics` →
+       :func:`filter_cells_by_qc` over the full epoch window and persist
+       via :func:`save_protocol_qc`.
+    4. When ``verbose=True``, print the same summary the notebook used to:
+       per-cell-type pass rate, gate definitions, first failing cells.
+
+    Returns the (loaded or computed) QC DataFrame with the ``passes``
+    column.
+    """
+    subdir = resolve_protocol_subdir(
+        response_block,
+        protocol_subdir=protocol_subdir,
+        append_datafile_to_subdir=append_datafile_to_subdir,
+        datafile_name=datafile_name,
+    )
+    qc_path = protocol_qc_csv_path(exp_name, subdir, output_root=output_root)
+
+    if qc_path.exists() and not overwrite:
+        qc = pd.read_csv(qc_path)
+        if verbose:
+            print(f'Loaded qc.csv from {qc_path}  ({len(qc)} cells)')
+            print('Pass overwrite=True to recompute with current thresholds.')
+    else:
+        if verbose:
+            if qc_path.exists():
+                print(f'overwrite=True: recomputing and overwriting {qc_path}')
+            else:
+                print('No qc.csv on disk yet — computing fresh.')
+        t_total_ms = (
+            response_block.d_timing['pre_time_ms']
+            + response_block.d_timing['stim_time_ms']
+            + response_block.d_timing['tail_time_ms']
+        )
+        qc_metrics = block_qc_metrics(
+            response_block, t_start_ms=0, t_end_ms=t_total_ms,
+            min_rate_hz=min_rate_hz,
+        )
+        qc = filter_cells_by_qc(qc_metrics, thresholds=QCThresholds(
+            min_rate_hz=min_rate_hz,
+            min_frac_epochs_above_rate=min_frac_epochs,
+            min_frac_non_silent_epochs=min_frac_non_silent,
+        ))
+        saved = save_protocol_qc(qc, exp_name, protocol=subdir,
+                                  output_root=output_root)
+        if verbose:
+            print(f'qc.csv → {saved}')
+
+    if verbose and not qc.empty:
+        epoch_s = qc['epoch_duration_s'].iloc[0]
+        print(f'\nepoch window: {epoch_s:.1f} s')
+        print(f'  rate gate:        ≥ {min_rate_hz:.1f} Hz × {epoch_s:.1f} s = '
+              f'{min_rate_hz*epoch_s:.0f} spikes/epoch in '
+              f'≥{100*min_frac_epochs:.0f}% of epochs')
+        print(f'  silent-epoch gate: ≥ {100*min_frac_non_silent:.0f}% '
+              f'of epochs have ≥1 spike')
+        n_pass = int(qc['passes'].sum())
+        print(f'\nTotal cells: {len(qc)},  Passing QC: {n_pass} '
+              f'({100*n_pass/len(qc):.1f}%)')
+        print('\nPass rate by cell type:')
+        for ct, sub in qc.groupby('cell_type'):
+            rate = sub['mean_rate_hz'].median()
+            print(f'  {ct:<12}  {int(sub.passes.sum()):>4} / {len(sub):>4}  '
+                  f'({100*sub.passes.mean():3.0f}%)   '
+                  f'median rate: {rate:5.1f} Hz')
+
+    return qc
 
 
 def filter_cells_by_qc(

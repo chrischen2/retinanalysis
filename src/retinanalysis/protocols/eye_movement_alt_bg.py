@@ -1114,6 +1114,49 @@ def population_time_scale_metrics(
     return out
 
 
+def plot_population_time_scale(pm: Dict, offline, *,
+                                fig=None, figsize=(9, 7)):
+    """Three-panel time-resolved population plot for ``population_time_scale_metrics``.
+
+    Panels (top → bottom):
+
+    - Mean |Cohen's d| across cells.
+    - Population Euclidean distance between the two primary-key levels.
+    - Cumulative |Δrate| · dt.
+
+    Dashed red verticals mark stim onset / offset (from ``offline.timing``).
+    Returns the ``Figure``.
+    """
+    types = pm['cell_types']
+    t_ms = pm['time_ms']
+    pre = offline.timing['preTime_ms']
+    stim = offline.timing['stimTime_ms']
+
+    if fig is None:
+        fig, axes = plt.subplots(3, 1, figsize=figsize, sharex=True)
+    else:
+        axes = fig.subplots(3, 1, sharex=True)
+
+    for ct in types:
+        d = pm[ct]
+        axes[0].plot(t_ms, d['cohens_d_abs_mean'], label=f'{ct} (n={d["n_cells"]})')
+        axes[1].plot(t_ms, d['pop_euclid_dist'], label=ct)
+        axes[2].plot(t_ms, d['cum_abs_divergence'], label=ct)
+    for ax in axes:
+        ax.axvline(pre, color='r', lw=0.5, ls='--', alpha=0.5)
+        ax.axvline(pre + stim, color='r', lw=0.5, ls='--', alpha=0.5)
+    axes[0].set_ylabel("mean |Cohen's d|")
+    axes[1].set_ylabel('pop Euclid dist')
+    axes[2].set_ylabel('cum |Δrate|·dt (spikes·cells)')
+    axes[2].set_xlabel('time (ms)')
+    axes[0].legend(fontsize=8, loc='upper right')
+    fig.suptitle(f'{offline.exp_name}: '
+                 f'{pm["primary_key"]} {pm["primary_values"][0]} vs '
+                 f'{pm["primary_values"][1]}, time-resolved')
+    fig.tight_layout()
+    return fig
+
+
 def _box_smooth(width_ms: float, time_ms: np.ndarray) -> np.ndarray:
     """Unit-area boxcar of width ``width_ms``."""
     if width_ms <= 0 or len(time_ms) < 2:

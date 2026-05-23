@@ -261,15 +261,34 @@ def _pick_top_tier():
             return mea_config[tier]
     raise RuntimeError("No valid config paths found.")
 
+
+# Raw .bin files are the exception to "prefer local". They are ~30 GB per
+# experiment and are kept canonical on the NAS — local SSDs only mirror a
+# few recent dates. Resolving raw against the network tier first means a
+# connected NAS always wins, even if a partial SSD copy happens to be
+# present. Falls back to local tiers when NAS is not mounted so the few
+# dates that *are* on SSD still work.
+_RAW_TIER_PRIORITY = _network_tiers + _unknown_tiers + _local_first
+
+
+def _pick_raw_tier():
+    for tier in _RAW_TIER_PRIORITY:
+        if tier in mea_config and mea_config[tier].get('raw'):
+            return mea_config[tier]
+    return None
+
+
 _top = _pick_top_tier()
 DATA_DIR = _top['data']
-RAW_DIR = _top['raw']
 ANALYSIS_DIR = _top['analysis']
 H5_DIR = _top['h5']
 META_DIR = _top['meta']
 TAGS_DIR = _top['tags']
 QUERY_DIR = _top['query']
 USER = _top['user']
+
+_raw_top = _pick_raw_tier()
+RAW_DIR = _raw_top['raw'] if _raw_top is not None else ''
 
 # Root directory holding locally-cloned protocol packages (turner-package, manookin-package,
 # riekelab-package-master, ...). Used by retinanalysis.regen to find resource files (.iml,
@@ -295,6 +314,33 @@ def find_protocol_repo(repo_name):
         return None
     candidate = os.path.join(PROTOCOL_REPOS_ROOT, repo_name)
     return candidate if os.path.isdir(candidate) else None
+
+
+def find_raw_path(exp_name, datafile_name):
+    """Resolve a raw .bin folder by walking tiers network-first.
+
+    Raw .bin files live canonical on the NAS (~30 GB per experiment); local
+    SSDs only mirror a few recent dates. So unlike :func:`find_path` — which
+    prefers local tiers to conserve NAS bandwidth — this resolver tries the
+    network tier first and only falls back to local copies when the NAS
+    isn't mounted.
+
+    Returns the absolute path to ``<raw_root>/<exp>/<datafile>`` if it
+    exists on any configured tier, else ``None`` so the caller can raise
+    a clear error rather than fail deep inside ``bin2py``.
+    """
+    for tier in _RAW_TIER_PRIORITY:
+        if tier not in mea_config:
+            continue
+        root = mea_config[tier].get('raw', '')
+        if not root:
+            continue
+        candidate = os.path.join(root, exp_name, datafile_name)
+        if os.path.exists(candidate):
+            if _TIER_KIND.get(tier) == 'network':
+                _record_network_resolution(candidate)
+            return candidate
+    return None
 
 
 def find_path(kind, *parts):

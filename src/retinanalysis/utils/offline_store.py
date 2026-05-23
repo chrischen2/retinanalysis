@@ -617,6 +617,31 @@ def load_or_build_offline(
         verbose=False,
     )
 
+    # Dedup before QC: collapse Kilosort-split duplicates so QC, the
+    # offline store, and §11/§12 analyses each see every biological cell
+    # exactly once. Same defaults + knobs as analyze_experiment (§6/§9).
+    if build_kwargs.pop('dedup', True):
+        from .dedup import dedup_pipeline as _dedup_pipeline
+        n_before = len(pipeline.resp.df_spike_times)
+        _dedup_pipeline(
+            pipeline,
+            ei_threshold=build_kwargs.pop('dedup_ei_threshold', 0.85),
+            skip_untyped=build_kwargs.pop('dedup_skip_untyped', True),
+            merge_strategy=build_kwargs.pop('dedup_merge_strategy', 'union'),
+            refractory_ms=build_kwargs.pop('dedup_refractory_ms', 0.5),
+            verbose=False,
+        )
+        n_after = len(pipeline.resp.df_spike_times)
+        if verbose and n_after < n_before:
+            print(f'  dedup: {n_before - n_after} duplicate '
+                  f'cell(s) merged into representatives')
+    else:
+        # Pop the knobs even when dedup is off so they don't leak into
+        # save_offline_data's kwarg filter.
+        for _k in ('dedup_ei_threshold', 'dedup_skip_untyped',
+                   'dedup_merge_strategy', 'dedup_refractory_ms'):
+            build_kwargs.pop(_k, None)
+
     # QC
     timing = pipeline.resp.d_timing or {}
     t_total_ms = (float(timing.get('pre_time_ms', 0))

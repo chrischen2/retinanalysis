@@ -16,6 +16,8 @@ from .config.settings import (ANALYSIS_DIR,
                               OUTPUT_DIR,
                               USER,
                               PROTOCOL_REPOS_ROOT,
+                              find_path,
+                              find_raw_path,
                               find_protocol_repo)
 
 # Utilities imported first. They should NEVER reference the classes for anything
@@ -81,7 +83,9 @@ from .utils.cell_match import (compute_ei_stats, build_cell_match_table,
 
 from .utils import protocol_qc as _protocol_qc_mod
 from .utils.protocol_qc import (save_protocol_qc, load_protocol_qc,
-                                protocol_qc_csv_path)
+                                protocol_qc_csv_path,
+                                resolve_protocol_subdir,
+                                load_or_compute_protocol_qc)
 
 from .utils import offline_store as _offline_store_mod
 from .utils.offline_store import (OfflineDataset,
@@ -180,7 +184,9 @@ from . import SCutils
 # End-to-end experiment-archive driver (build pipeline + QC + per-cell PNGs).
 from . import analyze
 from .analyze import (analyze_experiment, analyze_experiments,
-                       detect_ss_version, SS_VERSION_PRIORITY)
+                       detect_ss_version, SS_VERSION_PRIORITY,
+                       pick_typing_file, resolve_noise_chunk,
+                       find_available_datasets, summarize_batch_results)
  
 
 

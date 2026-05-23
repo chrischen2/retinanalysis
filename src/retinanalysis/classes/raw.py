@@ -3,7 +3,7 @@ import numpy as np
 import os
 import matplotlib.pyplot as plt
 from retinanalysis.classes.response import MEAResponseBlock
-from retinanalysis.config.settings import RAW_DIR
+from retinanalysis.config.settings import find_raw_path
 from retinanalysis import ei_utils as eiu
 from typing import Iterable, List, Optional, Tuple
 
@@ -40,7 +40,20 @@ def _classify_mount(path: str) -> Tuple[bool, str, str]:
 
 class RawTraces:
     def __init__(self, rb: MEAResponseBlock):
-        self.binpath = os.path.join(RAW_DIR, rb.exp_name, rb.datafile_name)
+        # Raw .bin files live canonical on the NAS — find_raw_path walks
+        # tiers network-first so a connected NAS always wins, and falls
+        # back to local SSD copies for the few dates that happen to be
+        # mirrored there. None ⇒ neither tier had it.
+        binpath = find_raw_path(rb.exp_name, rb.datafile_name)
+        if binpath is None:
+            raise FileNotFoundError(
+                f"Raw .bin folder for {rb.exp_name}/{rb.datafile_name} not "
+                f"found on any configured tier. Raw files are canonical on "
+                f"the NAS (/Volumes/data) — mount it and retry. Cells §7/§8 "
+                f"of chrisMain.ipynb (sorting QC) are the only ones that "
+                f"need raw; the rest of the notebook works without it."
+            )
+        self.binpath = binpath
         self.d_timing = rb.d_timing
         self.sorted_electrodes = eiu.sort_electrode_map(rb.vcd.get_electrode_map())
         self.data = None
