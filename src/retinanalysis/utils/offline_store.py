@@ -668,7 +668,9 @@ def load_or_build_offline(
         Force a rebuild even if the file exists.
     **build_kwargs
         Forwarded to :func:`analyze_experiment` (e.g. ``datafile_name``,
-        ``ss_version``, ``cell_types``).
+        ``ss_version``, ``cell_types``). Pass ``analysis_chunk_name`` to
+        pin the noise chunk used for RF params / cell typing instead of
+        the nearest-in-time auto-pick.
 
     Returns
     -------
@@ -695,13 +697,20 @@ def load_or_build_offline(
     datafile_name = _resolve_datafile(exp_name, protocol_search, datafile_name)
     ss_version = build_kwargs.pop('ss_version', None) or _detect_ss_version(
         exp_name, datafile_name)
+    analysis_chunk_name = build_kwargs.pop('analysis_chunk_name', None)
     typing_file = build_kwargs.pop('typing_file', None)
     if typing_file is None:
-        tmp = MEAStimBlock(exp_name, datafile_name, verbose=False)
-        typing_file = _pick_typing_file(exp_name, tmp.nearest_noise_chunk, ss_version)
+        # Honor a pinned chunk for the typing-file lookup; else nearest.
+        if analysis_chunk_name is not None:
+            chunk_for_typing = analysis_chunk_name
+        else:
+            chunk_for_typing = MEAStimBlock(
+                exp_name, datafile_name, verbose=False).nearest_noise_chunk
+        typing_file = _pick_typing_file(exp_name, chunk_for_typing, ss_version)
 
     pipeline = create_mea_pipeline(
         exp_name, datafile_name,
+        analysis_chunk_name=analysis_chunk_name,
         ss_version=ss_version, typing_file=typing_file,
         verbose=False,
     )

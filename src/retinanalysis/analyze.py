@@ -330,6 +330,7 @@ def analyze_experiment(
     *,
     protocol_search: Optional[str] = None,
     ss_version: Optional[str] = None,
+    analysis_chunk_name: Optional[str] = None,
     typing_file: Optional[str] = None,
     cell_types: Sequence[str] = MAIN_CELL_TYPES,
     minimum_n: int = 3,
@@ -369,6 +370,13 @@ def analyze_experiment(
         — picks the first datafile of any matching protocol for this date.
     ss_version, typing_file : str, optional
         Auto-detected when not provided.
+    analysis_chunk_name : str, optional
+        Pin the noise chunk used for RF params / cell typing (and the
+        typing-file lookup when ``typing_file`` is not given). When
+        ``None`` (default), the nearest-in-time chunk is auto-picked.
+        Set this to the same value you pinned as ``noise_chunk_name``
+        in the notebook's §3b so the archive doesn't silently fall back
+        to a different chunk than the in-notebook pipeline.
     cell_types : sequence
         Restrict per-cell PNGs to these types (default = MAIN_CELL_TYPES).
     fit_calibration : bool
@@ -450,14 +458,20 @@ def analyze_experiment(
     from .classes.stim import MEAStimBlock
 
     if typing_file is None:
-        # Need the nearest noise chunk first to know where typing files live.
-        tmp = MEAStimBlock(exp_name, datafile_name, verbose=False)
-        typing_file = _pick_typing_file(exp_name, tmp.nearest_noise_chunk, ss_version)
+        # Need the noise chunk first to know where typing files live. Honor
+        # an explicit pin; otherwise fall back to the nearest-in-time chunk.
+        if analysis_chunk_name is not None:
+            chunk_for_typing = analysis_chunk_name
+        else:
+            chunk_for_typing = MEAStimBlock(
+                exp_name, datafile_name, verbose=False).nearest_noise_chunk
+        typing_file = _pick_typing_file(exp_name, chunk_for_typing, ss_version)
         if verbose:
             print(f'  typing_file={typing_file}')
 
     pipeline = create_mea_pipeline(
         exp_name, datafile_name,
+        analysis_chunk_name=analysis_chunk_name,
         ss_version=ss_version, typing_file=typing_file,
         verbose=False,
     )
