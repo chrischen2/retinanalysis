@@ -1,3 +1,20 @@
+"""retinanalysis.utils — lazy subpackage.
+
+The path constants (``DATA_DIR``, ...) load eagerly: they come from
+``config.settings``, which is cheap (stdlib only) and is imported by many
+modules via ``from retinanalysis.utils import DATA_DIR``. Keeping them eager
+means those imports never pull DataJoint.
+
+The DataJoint-backed names (``schema``, ``database_pop``, ``datajoint_utils``,
+``cell_type_utils`` and their re-exports) load on first access via PEP 562
+``__getattr__``. This is what lets a light utility — ``psth``, ``raster``,
+``offline_store``, ... — be imported without dragging in DataJoint, since
+importing any ``retinanalysis.utils`` submodule first runs this ``__init__``.
+"""
+from __future__ import annotations
+
+import importlib
+
 from retinanalysis.config.settings import (ANALYSIS_DIR,
                                            DATA_DIR,
                                            RAW_DIR,
@@ -8,11 +25,36 @@ from retinanalysis.config.settings import (ANALYSIS_DIR,
                                            OUTPUT_DIR,
                                            USER)
 
-import retinanalysis.config.schema as schema
-from . import database_pop
-from . import datajoint_utils
-from .datajoint_utils import get_exp_summary
-from . import cell_type_utils
-from .cell_type_utils import (load_canonical_cell_types,
-                              map_cell_type,
-                              filter_available_types)
+_SUBMODULES = {
+    'schema': 'retinanalysis.config.schema',
+    'database_pop': 'retinanalysis.utils.database_pop',
+    'datajoint_utils': 'retinanalysis.utils.datajoint_utils',
+    'cell_type_utils': 'retinanalysis.utils.cell_type_utils',
+}
+
+_ATTR_TO_MODULE = {
+    'get_exp_summary': 'retinanalysis.utils.datajoint_utils',
+    'load_canonical_cell_types': 'retinanalysis.utils.cell_type_utils',
+    'map_cell_type': 'retinanalysis.utils.cell_type_utils',
+    'filter_available_types': 'retinanalysis.utils.cell_type_utils',
+}
+
+
+def __getattr__(name):
+    target = _SUBMODULES.get(name)
+    if target is not None:
+        module = importlib.import_module(target)
+        globals()[name] = module
+        return module
+
+    target = _ATTR_TO_MODULE.get(name)
+    if target is not None:
+        value = getattr(importlib.import_module(target), name)
+        globals()[name] = value
+        return value
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_SUBMODULES) | set(_ATTR_TO_MODULE))
