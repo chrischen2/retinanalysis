@@ -736,12 +736,28 @@ def get_epoch_data_from_exp(exp_name: str, block_id: int, b_LED: Optional[bool]=
     eb_q = eg_q * eb_q
     eb_q = eb_q & f'block_id={block_id}'
 
+    # The block may not exist for this experiment (e.g. stale block_id after a
+    # DB repopulation), or the raw data / metadata may be missing. Fail with a
+    # clear, catchable error so a caller iterating over dates can skip this one.
+    if len(eb_q) == 0:
+        raise ValueError(
+            f'No EpochBlock found for experiment "{exp_name}" block {block_id}. '
+            f'The block may not exist for this experiment (e.g. a stale block_id) '
+            f'or its raw data may be missing/incomplete.'
+        )
+
     if is_mea:
         # Check num epoch ends matches num epoch starts
         eb_df = eb_q.fetch(format='frame').reset_index()
         d_data = eb_df.loc[0].to_dict()
-        epoch_starts = d_data['block_properties']['epochStarts']
-        epoch_ends = d_data['block_properties']['epochEnds']
+        block_properties = d_data['block_properties'] or {}
+        if 'epochStarts' not in block_properties or 'epochEnds' not in block_properties:
+            raise ValueError(
+                f'EpochBlock properties for experiment "{exp_name}" block {block_id} '
+                f'are missing epochStarts/epochEnds. The raw data appears incomplete.'
+            )
+        epoch_starts = block_properties['epochStarts']
+        epoch_ends = block_properties['epochEnds']
 
 
 
@@ -754,6 +770,15 @@ def get_epoch_data_from_exp(exp_name: str, block_id: int, b_LED: Optional[bool]=
 
     df = e_q.fetch(format='frame')
     df = df.reset_index()
+
+    # No epochs under this block => nothing to build. Raise a clear, catchable
+    # error rather than falling through to an opaque IndexError in
+    # find_varying_epoch_parameters (df.index[0] on an empty frame).
+    if len(df) == 0:
+        raise ValueError(
+            f'No epochs found for experiment "{exp_name}" block {block_id}. '
+            f'The block has no epoch data; its raw data may be missing/incomplete.'
+        )
 
     if is_mea:
         df['datafile_name'] = df['data_dir'].apply(lambda x: os.path.split(x)[-1])
