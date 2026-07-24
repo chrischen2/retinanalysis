@@ -72,7 +72,17 @@ class StimBlock:
         self.df_epochs = df_e
         self.parameter_names = list(df_e.at[0,'epoch_parameters'].keys())
 
-        self.d_display = get_display_params_by_exp(self.exp_name, verbose = self.verbose)
+        # Display params (MEA chip/display geometry) are only defined for MEA rigs.
+        # For single-cell / non-MEA experiments this raises; warn and continue with
+        # empty display params rather than failing StimBlock construction.
+        try:
+            self.d_display = get_display_params_by_exp(self.exp_name, verbose = self.verbose)
+        except Exception as e:
+            if self.verbose:
+                print(f"  Could not resolve display params for {self.exp_name} "
+                      f"({type(e).__name__}: {e}); continuing with empty display "
+                      f"params (expected for single-cell / non-MEA rigs).")
+            self.d_display = {}
 
     def regenerate_stimulus(self, ls_epochs: Optional[int | list]=None, **kwargs):
         """
