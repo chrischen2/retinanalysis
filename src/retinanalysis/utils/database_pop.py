@@ -538,6 +538,10 @@ def gen_meta_list(data_dir: str, meta_dir: str, tags_dir: str) -> list:
     while stack:
         current_dir = stack.pop()
         for item in os.listdir(current_dir):
+            # Skip macOS AppleDouble sibling files (e.g. ._2019-01-15_G.h5).
+            # These are not valid HDF5/JSON files; parse_data would choke on them.
+            if item.startswith('._'):
+                continue
             full_path = os.path.join(current_dir, item)
             if os.path.isdir(full_path):
                 stack.append(full_path)
@@ -557,6 +561,9 @@ def gen_meta_list(data_dir: str, meta_dir: str, tags_dir: str) -> list:
     
     # that should be all of the single cell. Now for MEA, we want to find dir in NAS_DATA_DIR
     for item in os.listdir(meta_dir):
+        # Skip macOS AppleDouble sibling files (e.g. ._2019-01-15_G.json).
+        if item.startswith('._'):
+            continue
         if item.endswith('.json') and item[:-5] + '.h5' not in os.listdir(data_dir):
             # check for tags
             tags_file = os.path.join(tags_dir, item[:-5] + '.json')
@@ -599,18 +606,26 @@ def append_data(data_dir: str, meta_dir: str, tags_dir: str, username: str, db_p
         
         print("Adding", meta, flush=True)
         # not in database, add to database
-        # with open(meta, 'r') as f:
-        #     meta_dict = json.load(f)
-        #     # To this:
-        print(f"Loading meta: {meta}")
-        with open(meta, 'r', encoding='latin-1') as f:
-            meta_dict = json.load(f)
-        print(f"Loading tags: {tags}")
-        with open(tags, 'r', encoding='latin-1') as f:
-            tags_dict = json.load(f)
-        # with open(tags, 'r') as f:
-        #     tags_dict = json.load(f)
-        append_experiment(meta, data, tags, meta_dict, user, tags_dict)
+        try:
+            print(f"Loading meta: {meta}")
+            with open(meta, 'r', encoding='latin-1') as f:
+                meta_dict = json.load(f)
+            print(f"Loading tags: {tags}")
+            with open(tags, 'r', encoding='latin-1') as f:
+                tags_dict = json.load(f)
+            append_experiment(meta, data, tags, meta_dict, user, tags_dict)
+        except Exception as e:
+            # One bad experiment (e.g. raw data with missing elements, such as a
+            # response missing its 'h5path') should not abort the whole populate.
+            # Log it, roll back any partial insert (Experiment delete cascades to
+            # all children), and move on to the next date.
+            print(f"ERROR adding experiment {exp_name}: {type(e).__name__}: {e}")
+            print(f"  Skipping {exp_name} and rolling back any partial insert.")
+            try:
+                (Experiment & {'exp_name': exp_name}).delete(prompt=False)
+            except Exception as del_e:
+                print(f"  Warning: rollback delete failed for {exp_name}: {del_e}")
+            continue
         records_added += 1
         ls_new_exp.append(exp_name)
     
