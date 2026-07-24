@@ -593,6 +593,7 @@ def append_data(data_dir: str, meta_dir: str, tags_dir: str, username: str, db_p
     meta_list = gen_meta_list(data_dir, meta_dir, tags_dir)
     records_added = 0
     ls_new_exp = []
+    ls_skipped = []  # (exp_name, reason) for experiments skipped due to errors
     for meta, data, tags in tqdm(meta_list, desc='Experiments'):
         exp_name = os.path.basename(data)[:-3]
 
@@ -619,16 +620,28 @@ def append_data(data_dir: str, meta_dir: str, tags_dir: str, username: str, db_p
             # response missing its 'h5path') should not abort the whole populate.
             # Log it, roll back any partial insert (Experiment delete cascades to
             # all children), and move on to the next date.
-            print(f"ERROR adding experiment {exp_name}: {type(e).__name__}: {e}")
+            reason = f"{type(e).__name__}: {e}"
+            print(f"ERROR adding experiment {exp_name}: {reason}")
             print(f"  Skipping {exp_name} and rolling back any partial insert.")
             try:
                 (Experiment & {'exp_name': exp_name}).delete(prompt=False)
             except Exception as del_e:
                 print(f"  Warning: rollback delete failed for {exp_name}: {del_e}")
+            ls_skipped.append((exp_name, reason))
             continue
         records_added += 1
         ls_new_exp.append(exp_name)
-    
+
+    # Summary of experiments skipped due to errors (e.g. malformed metadata /
+    # raw data with missing elements) so it's obvious exactly which dates did
+    # not make it into the database.
+    if ls_skipped:
+        print(f"\nSkipped {len(ls_skipped)} experiment(s) due to errors:")
+        for exp_name, reason in ls_skipped:
+            print(f"  - {exp_name}: {reason}")
+    else:
+        print("\nNo experiments skipped due to errors.")
+
     e_q = Experiment() & 'is_mea=1' & [f'exp_name="{exp_name}"' for exp_name in ls_new_exp]
     sc_q = SortingChunk() * e_q.proj(..., experiment_id='id')
     if len(sc_q) == 0:
