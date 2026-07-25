@@ -1,14 +1,15 @@
 """SCutils - Standalone single-cell analysis utilities.
 
 Provides pure-function implementations of Clarinet's builtinProcessors
-and builtinExtractors, independent of any GUI framework.
+and builtinExtractors, independent of any GUI framework, plus `explore`:
+read-only DataJoint queries and notebook table rendering for patch data.
 
-Submodules (`dataprocessor`, `protocols`) are loaded lazily on first access
-so that `import retinanalysis` stays fast for users who never touch the
-single-cell path.
+Submodules (`dataprocessor`, `protocols`, `explore`) are loaded lazily on
+first access so that `import retinanalysis` stays fast for users who never
+touch the single-cell path.
 """
 
-__all__ = ["dataprocessor", "protocols"]
+__all__ = ["dataprocessor", "protocols", "explore"]
 
 
 def __getattr__(name):

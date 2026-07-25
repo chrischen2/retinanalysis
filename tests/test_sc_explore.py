@@ -1,0 +1,106 @@
+"""Tests for retinanalysis.SCutils.explore.
+
+Only the pure display helpers are covered here: they need no database, and
+importing the module must not pull DataJoint (the query functions import it
+lazily). The DataJoint-backed functions are exercised by using the notebook.
+"""
+import re
+import sys
+
+import pandas as pd
+import pytest
+
+from retinanalysis.SCutils import explore as sc
+
+
+def test_import_does_not_pull_datajoint():
+    """explore is importable without a DB: schema is imported per-call."""
+    for mod in ('retinanalysis.SCutils.explore', 'datajoint'):
+        sys.modules.pop(mod, None)
+    import retinanalysis.SCutils.explore  # noqa: F401
+    assert 'datajoint' not in sys.modules
+
+
+@pytest.mark.parametrize('ids, expected', [
+    ([], ''),
+    ([7], '7'),
+    ([5, 6, 7], '5-7'),
+    ([5911, 5912, 5913, 5936, 5937], '5911-5913, 5936-5937'),
+    ([34286, 34281, 34285, 34284], '34281, 34284-34286'),  # unsorted input
+    ([1, 3, 5], '1, 3, 5'),
+])
+def test_compact_ids(ids, expected):
+    assert sc.compact_ids(ids) == expected
+
+
+def _tbody_rows(html):
+    body = html.split('<tbody>')[1]
+    return re.findall(r'<tr([^>]*)>(.*?)</tr>', body, re.S)
+
+
+def _cells(inner):
+    return [re.sub('<[^>]+>', '', c).strip()
+            for c in re.findall(r'<td[^>]*>(.*?)</td>', inner, re.S)]
+
+
+@pytest.fixture
+def tree_df():
+    return pd.DataFrame({
+        'cell': ['Cell1', 'Cell1', 'Cell2', 'Cell2'],
+        'recording': ['cell-attached', 'cell-attached', 'cell-attached', 'whole-cell'],
+        'protocol': ['ExpandingSpots', 'SingleSpot', 'ExpandingSpots', 'SingleSpot'],
+        'blocks': [2, 1, 3, 4],
+    })
+
+
+def test_tree_table_blanks_repeated_parents(tree_df):
+    html = sc.tree_table(tree_df, levels=['cell', 'recording', 'protocol'],
+                         show=False, num_cols=('blocks',))
+    rows = [_cells(inner) for _, inner in _tbody_rows(html)]
+    assert rows[0][:3] == ['Cell1', 'cell-attached', 'ExpandingSpots']
+    # second row repeats cell + recording, so both are blanked
+    assert rows[1][:3] == ['', '', 'SingleSpot']
+    # new cell re-prints both levels
+    assert rows[2][:3] == ['Cell2', 'cell-attached', 'ExpandingSpots']
+    # same cell, different recording: only the cell is blanked
+    assert rows[3][:3] == ['', 'whole-cell', 'SingleSpot']
+
+
+def test_tree_table_marks_group_starts(tree_df):
+    html = sc.tree_table(tree_df, levels=['cell', 'recording', 'protocol'], show=False)
+    attrs = [a for a, _ in _tbody_rows(html)]
+    # one separator per new top-level value after the first
+    assert [i for i, a in enumerate(attrs) if 'grp' in a] == [2]
+
+
+def test_tree_table_does_not_mutate_input(tree_df):
+    before = tree_df.copy()
+    sc.tree_table(tree_df, levels=['cell', 'recording'], show=False)
+    pd.testing.assert_frame_equal(tree_df, before)
+
+
+def test_scroll_table_summary_collapses(tree_df):
+    plain = sc.scroll_table(tree_df, show=False)
+    assert '<details>' not in plain
+    collapsed = sc.scroll_table(tree_df, summary='all 4 blocks', show=False)
+    assert '<details>' in collapsed and 'all 4 blocks' in collapsed
+
+
+def test_scroll_table_escapes_html():
+    df = pd.DataFrame({'protocol': ['<script>alert(1)</script>']})
+    html = sc.scroll_table(df, show=False)
+    assert '<script>' not in html
+    assert '&lt;script&gt;' in html
+
+
+def test_num_cols_right_aligned(tree_df):
+    html = sc.tree_table(tree_df, levels=['cell'], show=False, num_cols=('blocks',))
+    assert html.count('class="num"') == len(tree_df)
+
+
+def test_protocol_tree_rejects_mea_summary():
+    """An MEA summary has no cell_label/recording_technique -> clear error."""
+    mea = pd.DataFrame({'datafile_name': ['data001'], 'protocol_name': ['a.protocols.B'],
+                        'block_id': [1], 'duration_minutes': [1.0], 'group_label': ['x']})
+    with pytest.raises(ValueError, match='single-cell'):
+        sc.protocol_tree(mea, show=False)
