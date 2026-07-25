@@ -133,13 +133,21 @@ def detector(data_matrix, check_detection=False, sample_rate=1e4, refractory_per
             min_peak_amplitude, peak_amplitudes, peak_times, spike_index_logical, cluster_index, non_spike_cluster_index
         )
 
-        # check for no spikes trace
-        sigF = (np.mean(spike_amplitudes[tt]) - np.mean(non_spike_amplitudes)) / np.std(non_spike_amplitudes)
+        # check for no spikes trace. With no surviving spike or non-spike peaks
+        # (e.g. min_peak_amplitude rejected them all) sigF is undefined, and
+        # NaN < 5 would be False -- i.e. the trace would wrongly pass as spiking.
+        if len(spike_amplitudes[tt]) == 0 or len(non_spike_amplitudes) == 0:
+            sigF = -np.inf
+        else:
+            sigF = (np.mean(spike_amplitudes[tt]) - np.mean(non_spike_amplitudes)) / np.std(non_spike_amplitudes)
 
         if sigF < 5:  # no spikes
-            spike_times[tt] = np.array([])
+            # spike_times / refractory_violations are sample indices, so keep them
+            # integer even when empty -- a float64 empty array cannot index a trace
+            # (raw[spike_times[i]] raises IndexError on no-spike epochs).
+            spike_times[tt] = np.array([], dtype=int)
             spike_amplitudes[tt] = np.array([])
-            refractory_violations[tt] = np.array([])
+            refractory_violations[tt] = np.array([], dtype=int)
             print(f'Trial {tt + 1}: no spikes!')
             if check_detection:
                 plot_clustering_data(peak_amplitudes, rebound, cluster_index, spike_cluster_indices,
