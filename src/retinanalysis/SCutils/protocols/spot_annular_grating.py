@@ -424,6 +424,15 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
     """
     from retinanalysis.SCutils import explore as sc
 
+    needed = ['rig', 'light_setting', 'filter_wheel_ndf', 'grating_site',
+              'apertureDiameter', 'annulusInnerDiameter', 'annulusOuterDiameter']
+    missing = [c for c in needed if c not in df.columns]
+    if missing:
+        raise KeyError(
+            f'find_blocks() output is missing {missing}. This usually means the block '
+            f'table was built by an older version of this module still held in the '
+            f'kernel -- restart the kernel and re-run find_blocks().')
+
     if require_filter_wheel and 'has_filter_wheel' in df.columns:
         dropped = df[~df['has_filter_wheel']]
         if len(dropped):
