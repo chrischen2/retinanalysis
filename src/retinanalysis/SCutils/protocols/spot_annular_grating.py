@@ -38,6 +38,7 @@ DEFAULTS = dict(
     spike_th=3,            # thresholdSpikeFactor (SpikeDetectorNew)
     psth_sigma_ms=10.0,
     wc_offset=100,         # samples, whole-cell response window offset
+    smooth_ms=10.0,        # box-car width for whole-cell traces
     spike_offset=300,      # samples, spiking response window offset
     cone_i0=2000.0,        # Weber I0 (R*) for the cancellation prediction
 )
@@ -557,6 +558,7 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
                   spike_th: float = DEFAULTS['spike_th'],
                   spike_offset: int = DEFAULTS['spike_offset'],
                   wc_offset: int = DEFAULTS['wc_offset'],
+                  smooth_ms: float = DEFAULTS['smooth_ms'],
                   psth_sigma_ms: float = DEFAULTS['psth_sigma_ms'],
                   cone_i0: float = DEFAULTS['cone_i0'],
                   detector_kwargs: Optional[dict] = None,
@@ -569,8 +571,8 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
     tuning curve with the measured cancellation point and the cone prediction.
 
     Extracellular responses are spike counts in the stimulus window; whole-cell
-    responses are integrated charge (pA*s) with the sign flipped for 'exc' so
-    that larger always means a larger response.
+    responses are the mean smoothed current in pA (box-car of ``smooth_ms``),
+    with the sign flipped for 'exc' so larger always means a larger response.
     """
     import retinanalysis as ra
     from retinanalysis.utils.psth import psth_time_axis, spike_times_to_psth
@@ -613,18 +615,22 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
                                                       psth_sigma_ms, 1000.0))
             units = 'spike count'
         else:
-            # Smooth, subtract the pre-stim mean, then integrate the stimulus
-            # window. MATLAB divides by 1e4 (its 10 kHz rate); use the recorded
-            # sample rate so the units stay pA*s at any rate.
+            # Whole-cell: smooth with a smooth_ms box, subtract the pre-stim
+            # mean, and take the mean current over the stimulus window. This
+            # keeps the response in the recorded units (pA) rather than the
+            # MATLAB's integrated charge (it multiplied by the stimulus
+            # duration to get pA*s); the two differ only by that constant
+            # factor, so the tuning-curve shape and the crossing are the same.
             sign = -1.0 if mode == 'exc' else 1.0
-            data = uniform_filter1d(np.asarray(rb.amp_data, dtype=float), size=100, axis=1)
+            width = max(int(round(smooth_ms / 1e3 * sr)), 1)
+            data = uniform_filter1d(np.asarray(rb.amp_data, dtype=float), size=width, axis=1)
             data = data - data[:, :pre_pts].mean(axis=1, keepdims=True)
             lo, hi = pre_pts + wc_offset, min(pre_pts + stim_pts + wc_offset, data.shape[1])
             for i in keep:
-                resp_stim.append(sign * float(data[i, lo:hi].mean()) * stim_pts / sr)
-                resp_base.append(sign * float(data[i, :pre_pts].mean()) * stim_pts / sr)
+                resp_stim.append(sign * float(data[i, lo:hi].mean()))
+                resp_base.append(sign * float(data[i, :pre_pts].mean()))
                 traces_all.append(sign * data[i])
-            units = 'excitation (pA*s)' if mode == 'exc' else 'inhibition (pA*s)'
+            units = 'excitation (pA)' if mode == 'exc' else 'inhibition (pA)'
 
         dark.extend(_epoch_param(ep, 'currentDarkContrast')[keep])
         bright.extend(_epoch_param(ep, 'currentBrightContrast')[keep])
@@ -968,13 +974,18 @@ def plot_condition_examples(records: Optional[Dict[str, Dict]] = None,
                                                          'OFF-parasol / center'),
                             modes: Sequence[str] = ('extracellular', 'exc'),
                             i0: float = DEFAULTS['cone_i0'],
+                            prefer_calibrated: bool = True,
                             figsize: Tuple[float, float] = (9.5, 6.6)):
     """One example tuning curve per (condition, recording mode).
 
     Reads the stored records by default (:func:`load_records`), so it works in a
-    cold kernel with no DataJoint. Picks the recording with the most epochs in
-    each cell of the grid and draws its tuning curve, baseline, measured
-    crossing and the Weber prediction at that recording's own light level.
+    cold kernel with no DataJoint. Draws each example's tuning curve, baseline,
+    measured crossing and — where the light level has an R* — the Weber
+    prediction for that recording.
+
+    ``prefer_calibrated`` picks the recording with the most epochs *among those
+    with an R\\**, so the Weber line is shown wherever a calibration exists,
+    falling back to the most epochs overall when none is calibrated.
     """
     import matplotlib.pyplot as plt
     from retinanalysis.utils import style
@@ -1002,14 +1013,22 @@ def plot_condition_examples(records: Optional[Dict[str, Dict]] = None,
                 ax.set_xticks([]); ax.set_yticks([])
                 ax.set_title(f'{cond} — {mode}', fontsize=9)
                 continue
-            rec = max(pool, key=lambda r: float(r['n_epochs']))
+            calibrated = [r for r in pool if np.isfinite(float(r['rstar']))]
+            choose_from = calibrated if (prefer_calibrated and calibrated) else pool
+            rec = max(choose_from, key=lambda r: float(r['n_epochs']))
             ax.errorbar(rec['dark_contrasts'], rec['resp_mean'], yerr=rec['resp_sem'],
                         fmt='o-', ms=4, lw=1.4, color='#0072B2', ecolor='#0072B2',
                         capsize=3, label='response')
             ax.axhline(float(rec['baseline_mean']), color='#666666', ls='--', lw=1.1,
                        label='baseline')
             ax.axvline(float(rec['crossing_nearest']), color='#D55E00', ls=':', lw=1.4,
-                       label=f"crossing {float(rec['crossing_nearest']):.2f}")
+                       label=f"nearest {float(rec['crossing_nearest']):.2f}")
+            # The interpolated first crossing is steadier than "nearest to
+            # baseline" once the curve saturates at baseline, where many tested
+            # contrasts are equally close.
+            if np.isfinite(float(rec['crossing_interp'])):
+                ax.axvline(float(rec['crossing_interp']), color='#CC79A7', ls='--', lw=1.2,
+                           label=f"interp {float(rec['crossing_interp']):.2f}")
             pred = cone_predict_dark_contrast(float(rec['rstar']),
                                               float(rec['bright_bar_contrast']), i0)
             if np.isfinite(pred):
