@@ -53,6 +53,13 @@ RSTAR_TABLE: List[Tuple[float, float, float]] = [
     (0.5, 0.30, 8000.0),
 ]
 
+# Only these filter-wheel settings are calibrated / used for analysis. Anything
+# else -- including a missing reading -- is excluded by group_blocks().
+ALLOWED_FILTER_WHEEL = (0.0, 0.5, 1.0)
+
+# Cell types the analysis is currently restricted to; override per call.
+DEFAULT_CELL_TYPES = ('ON-parasol', 'OFF-parasol')
+
 # Epoch parameters that define a stimulus configuration / light level.
 CONFIG_KEYS = ['apertureDiameter', 'annulusInnerDiameter', 'annulusOuterDiameter',
                'backgroundIntensity', 'spotIntensity', 'NDF', 'onlineAnalysis',
@@ -203,6 +210,16 @@ def read_filter_wheel_ndf(exp_name: str, block_id: int) -> float:
     return np.nan
 
 
+def rig_of(exp_name: str) -> str:
+    """Rig letter from an experiment name: ``'2026-06-04_G'`` -> ``'G'``.
+
+    Handles the trailing-index form too (``'2026-01-02_E_2'`` -> ``'E'``).
+    """
+    import re
+    m = re.search(r'_([A-Za-z])(?:_\d+)?$', str(exp_name))
+    return m.group(1).upper() if m else '?'
+
+
 def grating_site(annulus_inner_diameter: float) -> str:
     """'center' when the grating mask starts at r=0, else 'surround'.
 
@@ -344,6 +361,7 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
 
     df['grating_site'] = df['annulusInnerDiameter'].apply(grating_site)
     df['cell_type_short'] = df['cell_type'].astype(str).str.split('\\').str[-1]
+    df['rig'] = df['exp_name'].apply(rig_of)
 
     # NDF here is background:FilterWheel:NDF, lifted from the h5 by the parser
     # (verified equal to read_filter_wheel_ndf on every sampled block). A rig
@@ -391,7 +409,8 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
 
 
 def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
-                 require_filter_wheel: bool = True) -> pd.DataFrame:
+                 require_filter_wheel: bool = True,
+                 allowed_filter_wheel: Sequence[float] = ALLOWED_FILTER_WHEEL) -> pd.DataFrame:
     """Collapse the block table to one row per recording group.
 
     A group is the MATLAB epoch-tree leaf: (experiment, cell, recording mode,
@@ -411,24 +430,61 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
             print(f'dropping {len(dropped)} block(s) with no filter-wheel NDF: '
                   f"{', '.join(sorted(dropped['exp_name'].unique()))}")
         df = df[df['has_filter_wheel']]
+        # Only calibrated wheel settings are analyzable.
+        off_list = df[~df['filter_wheel_ndf'].isin(list(allowed_filter_wheel))]
+        if len(off_list):
+            print(f'dropping {len(off_list)} block(s) whose filter wheel is not in '
+                  f'{list(allowed_filter_wheel)}: NDF '
+                  f"{sorted(off_list['filter_wheel_ndf'].dropna().unique().tolist())}")
+        df = df[df['filter_wheel_ndf'].isin(list(allowed_filter_wheel))]
 
-    keys = ['exp_name', 'cell_label', 'cell_type_short', 'onlineAnalysis',
+    keys = ['exp_name', 'rig', 'cell_label', 'cell_type_short', 'onlineAnalysis',
             'grating_site', 'filter_wheel_ndf', 'backgroundIntensity']
     g = (df.groupby(keys, dropna=False, sort=False)
            .agg(blocks=('block_id', 'size'), epochs=('n_epochs', 'sum'),
-                light_level=('light_level', 'first'), rstar=('rstar', 'first'),
                 light_setting=('light_setting', 'first'),
-                rstar_measured=('rstar_measured', 'first'),
+                aperture=('apertureDiameter', 'first'),
+                annulus_inner=('annulusInnerDiameter', 'first'),
+                annulus_outer=('annulusOuterDiameter', 'first'),
+                bright=('brightBarContrast', 'first'),
                 block_ids=('block_id', lambda s: ', '.join(str(int(b)) for b in sorted(s))))
            .reset_index())
     if show:
         print(f'{len(g)} recording groups '
               f'(experiment x cell x mode x grating site x filter wheel x background)')
-        sc.tree_table(g.sort_values(['cell_type_short', 'exp_name', 'cell_label']),
-                      levels=['cell_type_short', 'exp_name', 'cell_label'],
-                      height=height, num_cols=('blocks', 'epochs', 'filter_wheel_ndf',
-                                               'backgroundIntensity', 'rstar'))
+        cols = ['cell_type_short', 'rig', 'exp_name', 'cell_label', 'onlineAnalysis',
+                'grating_site', 'aperture', 'annulus_inner', 'annulus_outer',
+                'filter_wheel_ndf', 'backgroundIntensity', 'light_setting',
+                'blocks', 'epochs']
+        sc.tree_table(g.sort_values(['cell_type_short', 'exp_name', 'cell_label'])[cols],
+                      levels=['cell_type_short', 'rig', 'exp_name', 'cell_label'],
+                      height=height, num_cols=('aperture', 'annulus_inner', 'annulus_outer',
+                                               'filter_wheel_ndf', 'backgroundIntensity',
+                                               'blocks', 'epochs'))
     return g
+
+
+def select_cell_types(groups: pd.DataFrame,
+                      cell_types: Sequence[str] = DEFAULT_CELL_TYPES,
+                      show: bool = True) -> pd.DataFrame:
+    """Keep only the given cell types.
+
+    Set ``cell_types`` to whatever you want to analyze; the default restricts to
+    ON and OFF parasols. Unlike :func:`select_canonical` this does not also pin
+    the grating site, so a cell recorded with the grating on either side is kept
+    and ``grating_site`` stays a condition you can group on.
+    """
+    wanted = [str(c) for c in cell_types]
+    out = groups[groups['cell_type_short'].isin(wanted)].reset_index(drop=True)
+    if show:
+        missing = [c for c in wanted if c not in set(groups['cell_type_short'])]
+        print(f'{len(out)} of {len(groups)} groups are {", ".join(wanted)}')
+        if missing:
+            print(f'  no groups found for: {", ".join(missing)}')
+        import pandas as _pd
+        print(_pd.crosstab([out['cell_type_short'], out['grating_site']],
+                           [out['rig'], out['onlineAnalysis']]).to_string())
+    return out
 
 
 # The two configurations the experiment was designed around: the grating covers
@@ -454,9 +510,6 @@ def select_canonical(groups: pd.DataFrame, show: bool = True) -> pd.DataFrame:
               f'OFF-parasol/center')
         import pandas as _pd
         print(_pd.crosstab(out['condition'], out['onlineAnalysis']).to_string())
-        n_meas = int(out['rstar_measured'].sum()) if 'rstar_measured' in out else 0
-        print(f"  with a measured light level: {n_meas}; "
-              f"with any light level: {int(out['rstar'].notna().sum())}")
     return out.reset_index(drop=True)
 
 
@@ -878,6 +931,10 @@ def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
             rec = analyze_group(row['exp_name'], block_ids,
                                 online_analysis=row['onlineAnalysis'], verbose=verbose, **kwargs)
             records.append(rec)
+            if save:
+                # Save as we go: a batch this long should survive an
+                # interruption, and with skip_existing it can then resume.
+                save_records([rec], verbose=False)
             if plot:
                 plot_group(rec)
         except Exception as e:
@@ -890,8 +947,6 @@ def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
         print(f'{len(failures)} failed:')
         for exp, cell, msg in failures[:20]:
             print(f'  {exp} {cell}: {msg[:110]}')
-    if save and records:
-        save_records(records, verbose=False)
     return records
 
 
@@ -1127,3 +1182,88 @@ def describe_cell(cell: str, groups: pd.DataFrame, show: bool = True, **kwargs):
     """
     from retinanalysis.SCutils import explore as _sc
     return _sc.describe_cell(groups, cell, show=show, **kwargs)
+
+
+def plot_raw_epochs(exp_name: str, block_ids: Sequence[int],
+                    online_analysis: Optional[str] = None,
+                    max_contrasts: int = 6, max_epochs_per_contrast: int = 8,
+                    detector_kwargs: Optional[dict] = None,
+                    figsize: Tuple[float, float] = (10.0, 7.0)):
+    """Raw data behind one recording: traces overlaid, and a spike raster.
+
+    Loads the blocks again — this is the slow, inspect-it-yourself view, so the
+    notebook keeps it behind a flag. For a spiking recording the left column
+    overlays the raw amplifier traces per dark-bar contrast and the right column
+    is the raster across epochs, one row per epoch, with detected spikes marked
+    against the same time base. For whole-cell there is no raster, so the
+    smoothed traces are overlaid alone.
+
+    Epochs are grouped by ``currentDarkContrast`` and at most
+    ``max_contrasts`` of them are shown, spread across the tested range.
+    """
+    import matplotlib.pyplot as plt
+    import retinanalysis as ra
+    from retinanalysis.utils import style
+    from scipy.ndimage import uniform_filter1d
+
+    style.apply_publication_style()
+    traces, spikes, darks = [], [], []
+    pre_ms = stim_ms = sr = None
+    mode = None
+
+    for bid in block_ids:
+        sb = ra.StimBlock(exp_name, int(bid), verbose=False)
+        ep = sb.df_epochs
+        p0 = ep['epoch_parameters'].iloc[0]
+        mode = (online_analysis or p0.get('onlineAnalysis', 'extracellular')).lower()
+        spiking = mode == 'extracellular'
+        rb = ra.SCResponseBlock(exp_name, int(bid), b_spiking=spiking, verbose=False,
+                                **(detector_kwargs or {}))
+        sr = float(rb.amp_sample_rate)
+        pre_ms, stim_ms = float(p0['preTime']), float(p0['stimTime'])
+        data = np.asarray(rb.amp_data, dtype=float)
+        if not spiking:
+            width = max(int(round(DEFAULTS['smooth_ms'] / 1e3 * sr)), 1)
+            data = uniform_filter1d(data, size=width, axis=1)
+        for i in range(data.shape[0]):
+            traces.append(data[i])
+            spikes.append(np.asarray(rb.spike_times[i], float) / sr * 1e3 if spiking else None)
+        darks.extend(_epoch_param(ep, 'currentDarkContrast'))
+
+    darks = np.asarray(darks, dtype=float)
+    contrasts = np.unique(darks[~np.isnan(darks)])
+    if len(contrasts) > max_contrasts:                 # spread across the range
+        contrasts = contrasts[np.linspace(0, len(contrasts) - 1, max_contrasts).astype(int)]
+
+    spiking = spikes[0] is not None
+    n_col = 2 if spiking else 1
+    fig, axes = plt.subplots(len(contrasts), n_col, figsize=figsize, squeeze=False,
+                             sharex=True)
+    t_ms = np.arange(len(traces[0])) / sr * 1e3
+
+    for r, c in enumerate(contrasts):
+        idx = [i for i in np.flatnonzero(darks == c)][:max_epochs_per_contrast]
+        ax = axes[r][0]
+        for i in idx:
+            ax.plot(t_ms[:len(traces[i])], traces[i], lw=0.5, alpha=0.7, color='#333333')
+        ax.axvspan(pre_ms, pre_ms + stim_ms, color='#F0C000', alpha=0.15, lw=0, zorder=0)
+        ax.set_ylabel(f'{c:g}\n({len(idx)} ep)', fontsize=7)
+        if r == 0:
+            ax.set_title(f'raw traces — {exp_name} {mode}', fontsize=9)
+        if spiking:
+            ax_r = axes[r][1]
+            for k, i in enumerate(idx):
+                ax_r.eventplot(spikes[i], lineoffsets=k, linelengths=0.7, linewidths=0.8,
+                               colors='#222222')
+            ax_r.axvspan(pre_ms, pre_ms + stim_ms, color='#F0C000', alpha=0.15, lw=0, zorder=0)
+            ax_r.set_ylim(-0.6, max(len(idx) - 0.4, 0.6))
+            ax_r.invert_yaxis()
+            ax_r.set_yticks([])
+            if r == 0:
+                ax_r.set_title('spike raster across epochs', fontsize=9)
+    axes[-1][0].set_xlabel('Time (ms)')
+    if spiking:
+        axes[-1][1].set_xlabel('Time (ms)')
+    fig.supylabel('dark bar contrast', fontsize=9)
+    fig.tight_layout()
+    return fig

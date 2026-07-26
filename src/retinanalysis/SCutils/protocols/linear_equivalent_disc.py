@@ -721,6 +721,10 @@ def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
                                 [int(b) for b in str(row['block_ids']).split(',')],
                                 online_analysis=row['onlineAnalysis'], verbose=verbose, **kwargs)
             records.append(rec)
+            if save:
+                # Save as we go: a batch this long should survive an
+                # interruption, and with skip_existing it can then resume.
+                save_records([rec], verbose=False)
             if plot:
                 plot_group(rec)
         except Exception as e:
@@ -733,8 +737,6 @@ def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
         print(f'{len(failures)} failed:')
         for exp, cell, msg in failures[:20]:
             print(f'  {exp} {cell}: {msg[:110]}')
-    if save and records:
-        save_records(records, verbose=False)
     return records
 
 

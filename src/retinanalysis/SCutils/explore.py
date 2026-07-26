@@ -320,8 +320,9 @@ def summarize_experiment(exp_name: str, show: bool = True,
 # Columns that describe a recording condition, in the order they should be
 # shown. Protocol modules use different subsets, so only those present are used.
 CONDITION_COLUMNS = ('onlineAnalysis', 'grating_site', 'site', 'temporalFrequency',
-                     'protocols', 'bar_widths', 'light_setting', 'light_level',
-                     'filter_wheel_ndf', 'NDF', 'backgroundIntensity', 'weber')
+                     'protocols', 'bar_widths', 'aperture', 'annulus_inner',
+                     'annulus_outer', 'light_setting', 'filter_wheel_ndf', 'NDF',
+                     'backgroundIntensity', 'weber')
 
 
 def cell_id(exp_name: str, cell_label: str) -> str:
@@ -393,11 +394,12 @@ def describe_cell(groups: 'pd.DataFrame', cell: str, show: bool = True,
               f"{len(rows)} recording condition(s), {n_blocks} blocks, "
               f"{int(rows['epochs'].sum())} epochs")
         varying = [c for c in cols if rows[c].astype(str).nunique() > 1]
-        if varying:
-            print('  varies across conditions: '
-                  + '; '.join(f"{c} = {', '.join(sorted(rows[c].astype(str).unique()))}"
-                              for c in varying))
-        else:
+        # Name each condition, not just how many there are.
+        for n, (_, r) in enumerate(rows.iterrows()):
+            label = ' | '.join(f'{c}={r[c]}' for c in (varying or cols))
+            print(f'   [{n}] {label}  ({int(r.get("blocks", 1))} blocks, '
+                  f'{int(r["epochs"])} epochs)')
+        if not varying and len(rows) == 1:
             print('  a single condition — nothing varies across its recordings')
         scroll_table(rows[cols + ['blocks', 'epochs', 'block_ids']], height=height,
                      num_cols=('blocks', 'epochs'))
