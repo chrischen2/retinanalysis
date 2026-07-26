@@ -814,3 +814,63 @@ def inspect_cell(cell: str, groups: pd.DataFrame, plot: bool = True,
     from retinanalysis.SCutils import explore as _sc
     return _sc.inspect_cell(groups, cell, analyze=analyze_group,
                             plot=plot_group if plot else None, show=show, **kwargs)
+
+
+def animate_stimulus(params: Dict, dark_contrast: Optional[float] = None,
+                     duration_s: float = 1.5, fps: int = 30,
+                     figsize: Tuple[float, float] = (4.2, 4.4), embed: bool = True):
+    """A short movie of the reversing grating, for the notebook.
+
+    Steps between the two half-cycle frames on the protocol's own schedule —
+    ``sign(cos(2*pi*f*t))`` — so what you see is the square-wave reversal the
+    cell saw, at ``currentTemporalFrequency``.
+
+    Returns an ``IPython.display.HTML`` video by default (set ``embed=False``
+    to get the ``FuncAnimation`` itself, e.g. to save a file with
+    ``anim.save('crg.mp4')``).
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.animation import FuncAnimation
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    if dark_contrast is None:
+        dc = params.get('darkBarContrast', [-1.0])
+        dc = list(dc) if isinstance(dc, (list, tuple, np.ndarray)) else [dc]
+        dark_contrast = dc[-1]
+    bar = params.get('currentBarWidth', params['barWidth'])
+    bright = params.get('currentBrightContrast', params['brightBarContrast'])
+    freq = float(np.atleast_1d(params.get('currentTemporalFrequency',
+                                          params['temporalFrequency']))[0])
+
+    phase_a, phase_b, extent = stimulus_frames(
+        params['apertureDiameter'], params['annulusInnerDiameter'],
+        params['annulusOuterDiameter'], bar, params['backgroundIntensity'],
+        params['spotIntensity'], bright, dark_contrast)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    im = ax.imshow(phase_a, cmap='gray', vmin=0, vmax=1, origin='lower',
+                   extent=[-extent, extent, -extent, extent], interpolation='nearest')
+    ax.set_xlabel('µm')
+    ax.set_ylabel('µm')
+    title = ax.set_title('', fontsize=9)
+    fig.suptitle(f'{freq:g} Hz reversal | bar {bar:g} µm | '
+                 f'bright +{bright:g} / dark {dark_contrast:g}', fontsize=9)
+
+    n_frames = max(int(round(duration_s * fps)), 2)
+
+    def update(k):
+        t = k / fps
+        # The protocol's own rule: cos >= 0 shows the inverted frame (phase A).
+        phase = 'A' if np.sign(np.cos(2 * np.pi * freq * t)) > 0 else 'B'
+        im.set_data(phase_a if phase == 'A' else phase_b)
+        title.set_text(f't = {t * 1e3:4.0f} ms   phase {phase}')
+        return (im, title)
+
+    anim = FuncAnimation(fig, update, frames=n_frames, interval=1000 / fps, blit=False)
+    if not embed:
+        return anim
+    from IPython.display import HTML
+    html = HTML(anim.to_jshtml(fps=fps))
+    plt.close(fig)
+    return html

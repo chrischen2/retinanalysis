@@ -540,15 +540,17 @@ def plot_group(rec: DiscRecord, figsize: Tuple[float, float] = (9.0, 4.2)):
     style.apply_publication_style()
     fig, (ax_s, ax_n) = plt.subplots(1, 2, figsize=figsize)
 
-    ax_s.scatter(rec.disc_onset, rec.image_onset, s=26, color='#666666',
+    # Orientation follows analyzeLinearDiscCone.m: image on x, disc on y, so
+    # points *below* unity are patches the image drove harder than the disc.
+    ax_s.scatter(rec.image_onset, rec.disc_onset, s=26, color='#666666',
                  label='standard disc', zorder=3)
-    ax_s.scatter(rec.cone_onset, rec.image_onset, s=26, color='#D55E00',
+    ax_s.scatter(rec.image_onset, rec.cone_onset, s=26, color='#D55E00',
                  label='cone-linearized disc', zorder=3)
     lims = np.array([np.nanmin([rec.disc_onset.min(initial=0), rec.image_onset.min(initial=0)]),
                      np.nanmax([rec.disc_onset.max(initial=1), rec.image_onset.max(initial=1)])])
     ax_s.plot(lims, lims, '--', color='#000000', lw=1, zorder=2, label='unity')
-    ax_s.set_xlabel(f'disc response ({rec.units})')
-    ax_s.set_ylabel(f'image response ({rec.units})')
+    ax_s.set_xlabel(f'image response ({rec.units})')
+    ax_s.set_ylabel(f'disc response ({rec.units})')
     ax_s.set_title(f'{rec.exp_name} {rec.cell_label} ({rec.cell_type})\n'
                    f'{rec.online_analysis} | disc over {rec.site} | {rec.light_setting} | '
                    f'{rec.n_patches} patches', fontsize=8.5)
@@ -720,3 +722,160 @@ def inspect_cell(cell: str, groups: pd.DataFrame, plot: bool = True,
     from retinanalysis.SCutils import explore as _sc
     return _sc.inspect_cell(groups, cell, analyze=analyze_group,
                             plot=plot_group if plot else None, show=show, **kwargs)
+
+
+# --------------------------------------------------------------------------
+# stimulus rendering (natural image patch + the two discs)
+# --------------------------------------------------------------------------
+
+# NaturalImageFlashProtocol.m works in van Hateren pixels at this scale.
+VH_MICRONS_PER_PIXEL = 6.6
+VH_SHAPE = (1536, 1024)          # as MATLAB reads it: fread(fid, [1536 1024])
+
+
+def vh_image_path(image_name: str, image_set: str = 'VHsubsample_20160105'):
+    """Locate ``imk<name>.iml`` in the turner package resources, or None."""
+    from pathlib import Path
+    from retinanalysis.config.settings import PROTOCOL_REPOS_ROOT
+
+    if not PROTOCOL_REPOS_ROOT:
+        return None
+    root = Path(PROTOCOL_REPOS_ROOT)
+    name = f'imk{str(image_name).strip()}.iml'
+    for cand in root.glob(f'**/+resources/{image_set}/{name}'):
+        return cand
+    hits = list(root.glob(f'**/{image_set}/{name}')) or list(root.glob(f'**/{name}'))
+    return hits[0] if hits else None
+
+
+def load_vh_contrast_image(image_name: str, image_set: str = 'VHsubsample_20160105'):
+    """Load a van Hateren image the way the protocol does.
+
+    Port of the loader in ``NaturalImageFlashProtocol.m``: big-endian uint16 read
+    as a 1536x1024 matrix, rescaled so the brightest pixel is 1, then converted
+    to contrast about the image mean. Returns ``(contrast_image, background)``
+    with the image in MATLAB's (x, y) orientation so patch locations index it
+    directly, or ``(None, nan)`` when the file is not on this machine.
+    """
+    path = vh_image_path(image_name, image_set)
+    if path is None:
+        return None, np.nan
+    raw = np.fromfile(str(path), dtype='>u2')
+    if raw.size < VH_SHAPE[0] * VH_SHAPE[1]:
+        return None, np.nan
+    # MATLAB fills [1536,1024] column-wise; the row-major read is its transpose.
+    img = raw[:VH_SHAPE[0] * VH_SHAPE[1]].reshape(VH_SHAPE[1], VH_SHAPE[0]).T.astype(float)
+    img = img / img.max()
+    background = float(img.mean())
+    return (img - background) / background, background
+
+
+def image_patch(image_name: str, patch_location, aperture_diameter: float,
+                image_set: str = 'VHsubsample_20160105', pad: float = 1.35,
+                inner_diameter: float = 0.0):
+    """The image patch a cell saw, in intensity units, plus its aperture mask.
+
+    ``patch_location`` is ``currentPatchLocation`` (van Hateren pixels).
+    ``inner_diameter`` > 0 makes the mask an annulus, which is what the
+    LinearEquivalentAnnulus protocol shows. Returns
+    ``(patch, mask, extent_um, background)``; ``patch`` is background *
+    (1 + contrast) so it is directly comparable with the discs' equivalent
+    intensities, and ``mask`` is True where the stimulus was visible.
+    """
+    contrast, background = load_vh_contrast_image(image_name, image_set)
+    if contrast is None:
+        return None, None, np.nan, np.nan
+    x, y = (int(round(v)) for v in np.asarray(patch_location, dtype=float)[:2])
+    half = int(round(aperture_diameter * pad / 2 / VH_MICRONS_PER_PIXEL))
+    x0, x1 = max(x - half, 0), min(x + half, contrast.shape[0])
+    y0, y1 = max(y - half, 0), min(y + half, contrast.shape[1])
+    patch_contrast = contrast[x0:x1, y0:y1].T      # to (row, col) for imshow
+    extent_um = half * VH_MICRONS_PER_PIXEL
+    g = np.linspace(-extent_um, extent_um, patch_contrast.shape[1])
+    h = np.linspace(-extent_um, extent_um, patch_contrast.shape[0])
+    r = np.hypot(*np.meshgrid(g, h))
+    mask = (r <= aperture_diameter / 2) & (r >= inner_diameter / 2)
+    return background * (1 + patch_contrast), mask, extent_um, background
+
+
+def plot_stimulus_example(params: Dict, patch_location=None,
+                          equivalent_intensity: Optional[float] = None,
+                          equivalent_intensity_cone: Optional[float] = None,
+                          figsize: Tuple[float, float] = (10.0, 3.4)):
+    """The three stimuli for one patch: image, standard disc, cone-linearized disc.
+
+    ``params`` is an epoch-parameter dict from an ``image`` trial — it carries
+    the patch location and both equivalent intensities. Everything is drawn on
+    one grey scale so the discs can be compared with the patch they replace.
+    """
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    if patch_location is None:
+        patch_location = params.get('currentPatchLocation')
+    if equivalent_intensity is None:
+        equivalent_intensity = float(params.get('equivalentIntensity', np.nan))
+    if equivalent_intensity_cone is None:
+        equivalent_intensity_cone = float(params.get('equivalentIntensityConeLin', np.nan))
+    # The annulus protocol has no apertureDiameter; its stimulus runs between
+    # the annulus diameters instead.
+    outer = params.get('apertureDiameter') or params.get('annulusOuterDiameter') or 200.0
+    inner = float(params.get('annulusInnerDiameter') or 0.0)
+    aperture = float(outer)
+
+    patch, mask, extent, background = image_patch(
+        str(params.get('imageName')), patch_location, aperture,
+        str(params.get('currentImageSet', 'VHsubsample_20160105')),
+        inner_diameter=inner)
+
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+    if patch is None:
+        axes[0].text(0.5, 0.5, f"image imk{params.get('imageName')} not found\n"
+                                'under PROTOCOL_REPOS_ROOT', ha='center', va='center',
+                     transform=axes[0].transAxes, fontsize=8, color='#888888')
+        axes[0].set_xticks([]); axes[0].set_yticks([])
+        vmax = max(v for v in (equivalent_intensity, equivalent_intensity_cone, 1e-6)
+                   if np.isfinite(v))
+    else:
+        shown = np.where(mask, patch, np.nan)
+        vmax = float(np.nanmax([np.nanmax(shown), equivalent_intensity,
+                                equivalent_intensity_cone]))
+        axes[0].imshow(shown, cmap='gray', vmin=0, vmax=vmax, origin='lower',
+                       extent=[-extent, extent, -extent, extent], interpolation='nearest')
+        axes[0].set_xlabel('µm')
+        axes[0].set_ylabel('µm')
+    axes[0].set_title(f"image patch {params.get('imagePatchIndex')}\n"
+                      f"imk{params.get('imageName')}", fontsize=9)
+
+    disc_extent = extent if np.isfinite(extent) else aperture * 0.7
+    for ax, value, name in ((axes[1], equivalent_intensity, 'linear-equivalent disc'),
+                            (axes[2], equivalent_intensity_cone, 'cone-linearized disc')):
+        g = np.linspace(-disc_extent, disc_extent, 301)
+        r = np.hypot(*np.meshgrid(g, g))
+        frame = np.full_like(r, np.nan)
+        frame[(r <= aperture / 2) & (r >= inner / 2)] = value
+        ax.imshow(frame, cmap='gray', vmin=0, vmax=vmax, origin='lower',
+                  extent=[-disc_extent, disc_extent, -disc_extent, disc_extent],
+                  interpolation='nearest')
+        ax.set_title(f'{name}\nintensity {value:.4f}', fontsize=9)
+        ax.set_xlabel('µm')
+    geom = (f'annulus {inner:g}-{aperture:g} µm' if inner > 0
+            else f'aperture {aperture:g} µm')
+    fig.suptitle(f'{geom} | image mean {background:.4f}'
+                 if np.isfinite(background) else geom, fontsize=9, y=1.02)
+    fig.tight_layout()
+    return fig
+
+
+def example_patch_params(exp_name: str, block_id: int, patch_index: Optional[float] = None):
+    """Epoch parameters of one ``image`` trial, for :func:`plot_stimulus_example`."""
+    import retinanalysis as ra
+
+    ep = ra.StimBlock(exp_name, int(block_id), verbose=False).df_epochs
+    for p in ep['epoch_parameters']:
+        if category_of(p.get('stimulusTag')) != 'image':
+            continue
+        if patch_index is None or float(p.get('imagePatchIndex', -1)) == float(patch_index):
+            return p
+    raise ValueError(f'no image trial for patch {patch_index} in block {block_id}')
