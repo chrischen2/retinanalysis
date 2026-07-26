@@ -6,7 +6,7 @@ cheap:
     from retinanalysis.SCutils.protocols import expanding_spots as es
 """
 
-__all__ = ["expanding_spots", "spot_annular_grating", "spot_annular_crg"]
+__all__ = ["expanding_spots", "spot_annular_grating", "spot_annular_crg", "linear_equivalent_disc"]
 
 
 def __getattr__(name):
