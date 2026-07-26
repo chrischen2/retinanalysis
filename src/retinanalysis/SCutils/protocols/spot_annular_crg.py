@@ -874,3 +874,13 @@ def animate_stimulus(params: Dict, dark_contrast: Optional[float] = None,
     html = HTML(anim.to_jshtml(fps=fps))
     plt.close(fig)
     return html
+
+
+def describe_cell(cell: str, groups: pd.DataFrame, show: bool = True, **kwargs):
+    """Basic information about one cell before analyzing any of its recordings.
+
+    Cell type, how many conditions it was recorded in, and one row per
+    condition. ``cell`` is '<experiment>/<cell label>'.
+    """
+    from retinanalysis.SCutils import explore as _sc
+    return _sc.describe_cell(groups, cell, show=show, **kwargs)

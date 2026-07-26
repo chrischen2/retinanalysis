@@ -570,9 +570,10 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
     width and grating polarity, and returns the response-vs-darkBarContrast
     tuning curve with the measured cancellation point and the cone prediction.
 
-    Extracellular responses are spike counts in the stimulus window; whole-cell
-    responses are the mean smoothed current in pA (box-car of ``smooth_ms``),
-    with the sign flipped for 'exc' so larger always means a larger response.
+    Extracellular responses are firing rates in the stimulus window (Hz);
+    whole-cell responses are the mean smoothed current in pA (box-car of
+    ``smooth_ms``), with the sign flipped for 'exc' so larger always means a
+    larger response.
     """
     import retinanalysis as ra
     from retinanalysis.utils.psth import psth_time_axis, spike_times_to_psth
@@ -601,19 +602,24 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
         used_blocks.append(int(bid))
 
         if spiking:
-            # Spike counts in the stimulus window, and a pre-stim baseline
-            # rescaled to the stimulus duration so the two are comparable.
+            # Firing rate in the stimulus window, with a pre-stim baseline rate
+            # for comparison. The MATLAB reports raw spike counts; dividing by
+            # the window duration puts the tuning curve in Hz, on the same scale
+            # as the PSTH traces above it. It is a constant factor within a
+            # recording, so the crossing is unchanged.
+            stim_s = stim_pts / sr
+            pre_s = pre_pts / sr
             for i in keep:
                 st = np.asarray(rb.spike_times[i], dtype=float)
                 stim_n = np.sum((st > pre_pts + spike_offset)
                                 & (st < pre_pts + stim_pts + spike_offset))
                 base_n = np.sum(st < pre_pts)
-                resp_stim.append(float(stim_n))
-                resp_base.append(float(base_n) * (stim_pts / pre_pts) if pre_pts else np.nan)
+                resp_stim.append(float(stim_n) / stim_s)
+                resp_base.append(float(base_n) / pre_s if pre_pts else np.nan)
                 traces_all.append(spike_times_to_psth(st / sr * 1000.0,
                                                       rb.amp_data.shape[1] / sr * 1000.0,
                                                       psth_sigma_ms, 1000.0))
-            units = 'spike count'
+            units = 'rate (Hz)'
         else:
             # Whole-cell: smooth with a smooth_ms box, subtract the pre-stim
             # mean, and take the mean current over the stimulus window. This
@@ -668,7 +674,7 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
     rstar, light_label = light_level_rstar(ndf, bg)
 
     sr = float(first_params['sampleRate'])
-    trace_ms = (psth_time_axis(traces.shape[1], 1000.0) if units == 'spike count'
+    trace_ms = (psth_time_axis(traces.shape[1], 1000.0) if 'Hz' in units
                 else np.arange(traces.shape[1]) / sr * 1000.0)
 
     summary = ra.get_exp_summary(exp_name)
@@ -824,7 +830,7 @@ def plot_group(rec: GratingRecord, figsize: Tuple[float, float] = (7.2, 7.6)):
     ax_t.axvspan(rec.pre_time_ms, rec.pre_time_ms + rec.stim_time_ms,
                  color='#000000', alpha=0.06, lw=0, zorder=0)
     ax_t.set_xlabel('Time (ms)')
-    ax_t.set_ylabel('Rate (Hz)' if rec.units == 'spike count' else rec.units)
+    ax_t.set_ylabel('Rate (Hz)' if 'Hz' in rec.units else rec.units)
     ax_t.set_title(f'{rec.exp_name}  {rec.cell_label} ({rec.cell_type})  {rec.online_analysis}\n'
                    f'grating over {rec.grating_site}  |  FW={rec.ndf:g} '
                    f'bg={rec.background_intensity:g} ({rec.light_level})', fontsize=9)
@@ -1111,3 +1117,13 @@ def inspect_cell(cell: str, groups: pd.DataFrame, plot: bool = True,
     from retinanalysis.SCutils import explore as _sc
     return _sc.inspect_cell(groups, cell, analyze=analyze_group,
                             plot=plot_group if plot else None, show=show, **kwargs)
+
+
+def describe_cell(cell: str, groups: pd.DataFrame, show: bool = True, **kwargs):
+    """Basic information about one cell before analyzing any of its recordings.
+
+    Cell type, how many conditions it was recorded in, and one row per
+    condition. ``cell`` is '<experiment>/<cell label>'.
+    """
+    from retinanalysis.SCutils import explore as _sc
+    return _sc.describe_cell(groups, cell, show=show, **kwargs)

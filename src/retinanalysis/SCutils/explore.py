@@ -363,17 +363,17 @@ def list_cells(groups: 'pd.DataFrame', show: bool = True, height: int = 400) -> 
     return out
 
 
-def inspect_cell(groups: 'pd.DataFrame', cell: str, analyze, plot=None,
-                 show: bool = True, height: int = 260, on_error: str = 'log',
-                 **kwargs) -> list:
-    """Analyze every recording of one cell, split by condition.
+def describe_cell(groups: 'pd.DataFrame', cell: str, show: bool = True,
+                  height: int = 260) -> 'pd.DataFrame':
+    """What was recorded from one cell, before analyzing any of it.
+
+    Prints the basics — cell type, how many recording conditions, how many
+    blocks and epochs — and shows one row per condition. Worth a look before
+    running a single recording, so you know what else that cell has and whether
+    the one you picked is representative.
 
     ``cell`` is a ``cell_id`` (``'<experiment>/<cell label>'``); a bare cell
-    label is accepted when it is unambiguous. ``analyze`` and ``plot`` are the
-    protocol module's ``analyze_group`` / ``plot_group`` — the protocol modules
-    wrap this so you call ``<module>.inspect_cell(cell, groups)``.
-
-    Returns the analyzed records in the order shown.
+    label is accepted when it is unambiguous. Returns the matching rows.
     """
     g = add_cell_id(groups)
     rows = g[g['cell_id'].eq(cell)]
@@ -388,11 +388,36 @@ def inspect_cell(groups: 'pd.DataFrame', cell: str, analyze, plot=None,
 
     cols = _condition_columns(rows)
     if show:
-        print(f"{cell}: {len(rows)} recording condition(s), "
-              f"{int(rows['epochs'].sum())} epochs, "
-              f"cell type {rows['cell_type_short'].iloc[0]}")
+        n_blocks = int(rows['blocks'].sum()) if 'blocks' in rows else len(rows)
+        print(f"{rows['cell_id'].iloc[0]}  |  {rows['cell_type_short'].iloc[0]}  |  "
+              f"{len(rows)} recording condition(s), {n_blocks} blocks, "
+              f"{int(rows['epochs'].sum())} epochs")
+        varying = [c for c in cols if rows[c].astype(str).nunique() > 1]
+        if varying:
+            print('  varies across conditions: '
+                  + '; '.join(f"{c} = {', '.join(sorted(rows[c].astype(str).unique()))}"
+                              for c in varying))
+        else:
+            print('  a single condition — nothing varies across its recordings')
         scroll_table(rows[cols + ['blocks', 'epochs', 'block_ids']], height=height,
                      num_cols=('blocks', 'epochs'))
+    return rows
+
+
+def inspect_cell(groups: 'pd.DataFrame', cell: str, analyze, plot=None,
+                 show: bool = True, height: int = 260, on_error: str = 'log',
+                 **kwargs) -> list:
+    """Analyze every recording of one cell, split by condition.
+
+    Shows :func:`describe_cell` first, then analyzes each condition. ``analyze``
+    and ``plot`` are the protocol module's ``analyze_group`` / ``plot_group`` —
+    the protocol modules wrap this so you call
+    ``<module>.inspect_cell(cell, groups)``.
+
+    Returns the analyzed records in the order shown.
+    """
+    rows = describe_cell(groups, cell, show=show, height=height)
+    cols = _condition_columns(rows)
 
     records = []
     for _, row in rows.iterrows():

@@ -879,3 +879,13 @@ def example_patch_params(exp_name: str, block_id: int, patch_index: Optional[flo
         if patch_index is None or float(p.get('imagePatchIndex', -1)) == float(patch_index):
             return p
     raise ValueError(f'no image trial for patch {patch_index} in block {block_id}')
+
+
+def describe_cell(cell: str, groups: pd.DataFrame, show: bool = True, **kwargs):
+    """Basic information about one cell before analyzing any of its recordings.
+
+    Cell type, how many conditions it was recorded in, and one row per
+    condition. ``cell`` is '<experiment>/<cell label>'.
+    """
+    from retinanalysis.SCutils import explore as _sc
+    return _sc.describe_cell(groups, cell, show=show, **kwargs)
