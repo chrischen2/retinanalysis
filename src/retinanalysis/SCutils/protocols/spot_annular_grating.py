@@ -1276,3 +1276,60 @@ def plot_raw_epochs(exp_name: str, block_ids: Sequence[int],
     fig.supylabel('dark bar contrast', fontsize=9)
     fig.tight_layout()
     return fig
+
+
+def plot_raw_blocks(exp_name: str, block_ids: Sequence[int],
+                    max_epochs: Optional[int] = None, show_mean: bool = True,
+                    figsize: Optional[Tuple[float, float]] = None):
+    """Raw amplifier traces, one panel per block, every epoch overlaid.
+
+    This is the data before any processing: ``SCResponseBlock`` stores ``amp_data``
+    exactly as recorded, and the high-pass filter that precedes spike detection
+    is applied inside the detector, not to this array. So what is plotted here is
+    what the amplifier wrote, with no filtering, smoothing or spike sorting.
+
+    One panel per block, because a recording group pools several and they are
+    where things go wrong independently — a cell lost partway, a seal drifting,
+    a gain change between blocks. All epochs of a block are drawn over each
+    other, with their mean on top by default.
+    """
+    import matplotlib.pyplot as plt
+    import retinanalysis as ra
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    blocks = [int(b) for b in block_ids]
+    if figsize is None:
+        figsize = (8.6, 1.9 * len(blocks) + 0.6)
+    fig, axes = plt.subplots(len(blocks), 1, figsize=figsize, squeeze=False, sharex=True)
+
+    for ax, bid in zip(axes[:, 0], blocks):
+        sb = ra.StimBlock(exp_name, bid, verbose=False)
+        p0 = sb.df_epochs['epoch_parameters'].iloc[0]
+        # b_spiking=False: no detector, so nothing touches the trace.
+        rb = ra.SCResponseBlock(exp_name, bid, b_spiking=False, verbose=False)
+        data = np.asarray(rb.amp_data, dtype=float)
+        sr = float(rb.amp_sample_rate)
+        t_ms = np.arange(data.shape[1]) / sr * 1e3
+        n = data.shape[0] if max_epochs is None else min(max_epochs, data.shape[0])
+
+        for i in range(n):
+            ax.plot(t_ms, data[i], lw=0.4, alpha=0.45, color='#666666')
+        if show_mean:
+            ax.plot(t_ms, data[:n].mean(axis=0), lw=1.1, color='#D55E00', label='mean')
+        ax.axvspan(float(p0['preTime']), float(p0['preTime']) + float(p0['stimTime']),
+                   color='#F0C000', alpha=0.15, lw=0, zorder=0)
+        darks = _epoch_param(sb.df_epochs, 'currentDarkContrast')
+        darks = np.unique(darks[~np.isnan(darks)])
+        ax.set_ylabel('Amplitude', fontsize=8)
+        ax.set_title(f'block {bid} — {n} of {data.shape[0]} epochs overlaid, '
+                     f'{len(darks)} dark contrasts '
+                     f'({darks.min():g} to {darks.max():g})' if len(darks) else
+                     f'block {bid} — {n} epochs', fontsize=8.5)
+        if show_mean:
+            ax.legend(frameon=False, fontsize=7, loc='upper right')
+    axes[-1, 0].set_xlabel('Time (ms)')
+    fig.suptitle(f'{exp_name} — raw traces per block, before filtering or spike detection',
+                 fontsize=9.5, y=1.0)
+    fig.tight_layout()
+    return fig
