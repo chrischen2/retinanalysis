@@ -56,7 +56,37 @@ def test_nli_sign_means_image_preferred():
 
 
 def test_threshold_table_matches_matlab():
+    """These stay in the MATLAB's per-window units: spikes, and pA*s."""
     assert led.NLI_THRESHOLD == {'extracellular': 3.0, 'exc': 10.0, 'inh': 5.0}
+
+
+def test_spike_thresholds_convert_to_rates_per_window():
+    """3 spikes in 0.2 s is 15 Hz; the offset window is longer, so its rate is lower."""
+    on, off = led.working_thresholds('extracellular', stim_s=0.2, offset_s=0.4, spiking=True)
+    assert on == pytest.approx(15.0)
+    assert off == pytest.approx(7.5)
+
+
+def test_whole_cell_thresholds_use_the_stimulus_duration_for_both_windows():
+    """The MATLAB integrated both windows with stimPts, so both scale the same."""
+    on, off = led.working_thresholds('exc', stim_s=0.2, offset_s=0.4, spiking=False)
+    assert on == off == pytest.approx(50.0)          # 10 pA*s / 0.2 s
+    assert led.working_thresholds('inh', 0.2, 0.4, spiking=False)[0] == pytest.approx(25.0)
+
+
+def test_threshold_conversion_preserves_which_patches_are_kept():
+    """Rescaling responses and threshold together must not change the NLI."""
+    stim_s = 0.2
+    counts_img, counts_disc = np.array([2.0, 10.0]), np.array([1.0, 4.0])
+    as_counts = led.compute_nli(counts_img, counts_disc, led.NLI_THRESHOLD['extracellular'])
+    on, _ = led.working_thresholds('extracellular', stim_s, stim_s, spiking=True)
+    as_rates = led.compute_nli(counts_img / stim_s, counts_disc / stim_s, on)
+    assert np.allclose(as_counts, as_rates)
+
+
+def test_zero_duration_falls_back_to_the_raw_threshold():
+    on, off = led.working_thresholds('extracellular', stim_s=0.0, offset_s=0.0, spiking=True)
+    assert on == 3.0 and off == 3.0
 
 
 # --- protocol handling -----------------------------------------------------

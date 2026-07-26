@@ -23,8 +23,11 @@ than in intensity space. The measure is the nonlinearity index, per patch::
 
     NLI = (image - disc) / (|image| + |disc|)
 
-zeroed when neither response clears a recording-mode threshold (3 spikes for
-extracellular, 10 for exc, 5 for inh), exactly as ``computeNLI`` does.
+zeroed when neither response clears a recording-mode threshold, exactly as
+``computeNLI`` does. Extracellular responses are firing rates (Hz) and
+whole-cell responses are mean smoothed current (pA); the MATLAB's per-window
+thresholds -- 3 spikes, 10 pA*s, 5 pA*s -- are converted to those units by
+:func:`working_thresholds`, so the same patches stay above threshold.
 
 **Three protocols feed this analysis**, and one of them needs filtering:
 
@@ -67,6 +70,12 @@ TAG_CONE_DISC = ('linConeIntensity', 'lin cone intensity')
 
 # nliThreshold() in the MATLAB: below this the responses are noise and the index
 # is meaningless, so it is set to zero rather than dividing tiny by tiny.
+#
+# These are the MATLAB's values and they are *per-window integrated* quantities:
+# spike counts within a window for extracellular, pA*s for whole-cell (it
+# multiplied the mean current by the stimulus duration). Responses here are
+# rates and mean currents instead, so working_thresholds() divides by the
+# relevant window duration to keep the same patches above threshold.
 NLI_THRESHOLD = {'extracellular': 3.0, 'exc': 10.0, 'inh': 5.0}
 
 DEFAULTS = dict(
@@ -106,6 +115,25 @@ def category_of(tag) -> str:
     if t in TAG_CONE_DISC or t.replace(' ', '').lower() == 'linconeintensity':
         return 'cone_disc'
     return ''
+
+
+def working_thresholds(mode: str, stim_s: float, offset_s: float,
+                       spiking: bool) -> Tuple[float, float]:
+    """MATLAB per-window thresholds converted to this module's units.
+
+    Returns ``(onset, offset)``. Extracellular responses are rates, so a count
+    threshold becomes ``count / window duration`` -- and the onset and offset
+    windows differ in length, so they get different rate thresholds. Whole-cell
+    responses are mean currents in pA while the MATLAB integrated to pA*s using
+    the stimulus duration for *both* windows, so both divide by ``stim_s``.
+    """
+    thresh = NLI_THRESHOLD.get(mode, NLI_THRESHOLD['extracellular'])
+    if spiking:
+        on = thresh / stim_s if stim_s > 0 else thresh
+        off = thresh / offset_s if offset_s > 0 else on
+        return on, off
+    scale = thresh / stim_s if stim_s > 0 else thresh
+    return scale, scale
 
 
 def compute_nli(image_mean, disc_mean, threshold: float) -> np.ndarray:
@@ -256,7 +284,8 @@ class DiscRecord:
     nli_cone_offset: np.ndarray
     n_epochs: int
     n_patches: int
-    threshold: float
+    threshold_onset: float
+    threshold_offset: float
     block_ids: List[int]
     config: Dict = field(default_factory=dict)
     units: str = ''
@@ -279,7 +308,8 @@ class DiscRecord:
             'light_setting': self.light_setting, 'weber_constant': self.weber_constant,
             'image_names': ','.join(self.image_names),
             'n_epochs': self.n_epochs, 'n_patches': self.n_patches,
-            'threshold': self.threshold,
+            'threshold_onset': self.threshold_onset,
+            'threshold_offset': self.threshold_offset,
             'nli_disc_onset': m(self.nli_disc_onset),
             'nli_disc_offset': m(self.nli_disc_offset),
             'nli_cone_onset': m(self.nli_cone_onset),
@@ -345,13 +375,18 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
         used_blocks.append(int(bid))
 
         if spiking:
+            # Firing rate in each window. The onset window is the stimulus, the
+            # offset window is everything after it, and they differ in length --
+            # hence each count is divided by its own duration.
+            on_lo, on_hi = pre_pts + spike_offset, pre_pts + stim_pts + spike_offset
+            stim_s = (on_hi - on_lo) / sr
+            offset_s = max(n_samples - on_hi, 1) / sr
             onsets, offsets = [], []
             for st in rb.spike_times:
                 st = np.asarray(st, dtype=float)
-                on_lo, on_hi = pre_pts + spike_offset, pre_pts + stim_pts + spike_offset
-                onsets.append(float(np.sum((st > on_lo) & (st < on_hi))))
-                offsets.append(float(np.sum(st > on_hi)))
-            units = 'spike count'
+                onsets.append(float(np.sum((st > on_lo) & (st < on_hi))) / stim_s)
+                offsets.append(float(np.sum(st > on_hi)) / offset_s)
+            units = 'rate (Hz)'
         else:
             if mode == 'whole_cell':
                 # Excitatory currents are inward (negative); flip so a larger
@@ -366,6 +401,8 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
             onsets = [sign * float(data[i, lo:hi].mean()) for i in range(data.shape[0])]
             offsets = [sign * float(data[i, hi:].mean()) if hi < n_samples else np.nan
                        for i in range(data.shape[0])]
+            stim_s = (hi - lo) / sr
+            offset_s = max(n_samples - hi, 1) / sr
             units = 'excitation (pA)' if mode == 'exc' else 'current (pA)'
 
         for i, p in enumerate(params):
@@ -399,7 +436,8 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
     disc_on, disc_off = disc_on[keep], disc_off[keep]
     cone_on, cone_off = cone_on[keep], cone_off[keep]
 
-    thresh = NLI_THRESHOLD.get(mode, 3.0)
+    thresh_on, thresh_off = working_thresholds(mode, stim_s, offset_s,
+                                               spiking=(mode == 'extracellular'))
     ndf = float(first_params.get('NDF', np.nan))
     bg = float(first_params['backgroundIntensity'])
     rstar, _ = light_level_rstar(ndf, bg)
@@ -419,11 +457,12 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
         image_onset=image_on, image_offset=image_off,
         disc_onset=disc_on, disc_offset=disc_off,
         cone_onset=cone_on, cone_offset=cone_off,
-        nli_disc_onset=compute_nli(image_on, disc_on, thresh),
-        nli_disc_offset=compute_nli(image_off, disc_off, thresh),
-        nli_cone_onset=compute_nli(image_on, cone_on, thresh),
-        nli_cone_offset=compute_nli(image_off, cone_off, thresh),
-        n_epochs=int(len(df)), n_patches=int(keep.sum()), threshold=thresh,
+        nli_disc_onset=compute_nli(image_on, disc_on, thresh_on),
+        nli_disc_offset=compute_nli(image_off, disc_off, thresh_off),
+        nli_cone_onset=compute_nli(image_on, cone_on, thresh_on),
+        nli_cone_offset=compute_nli(image_off, cone_off, thresh_off),
+        n_epochs=int(len(df)), n_patches=int(keep.sum()),
+        threshold_onset=thresh_on, threshold_offset=thresh_off,
         block_ids=used_blocks,
         config={k: first_params.get(k) for k in CONFIG_KEYS}, units=units)
     if verbose:
@@ -570,7 +609,8 @@ def plot_group(rec: DiscRecord, figsize: Tuple[float, float] = (9.0, 4.2)):
     ax_n.set_xticks(range(4))
     ax_n.set_xticklabels(labels, fontsize=8)
     ax_n.set_ylabel('NLI  (image - disc) / (|image| + |disc|)')
-    ax_n.set_title(f'nonlinearity index (threshold {rec.threshold:g})', fontsize=9)
+    ax_n.set_title(f'nonlinearity index (threshold {rec.threshold_onset:.3g} onset / '
+                   f'{rec.threshold_offset:.3g} offset {rec.units.split()[-1]})', fontsize=9)
     fig.tight_layout()
     return fig
 
