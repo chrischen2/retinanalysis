@@ -311,3 +311,104 @@ def summarize_experiment(exp_name: str, show: bool = True,
               f'{n_min:.0f} min')
         protocol_tree(df_exp, show=True, height=height)
     return df_exp
+
+
+# --------------------------------------------------------------------------
+# per-cell inspection (shared by the protocol modules)
+# --------------------------------------------------------------------------
+
+# Columns that describe a recording condition, in the order they should be
+# shown. Protocol modules use different subsets, so only those present are used.
+CONDITION_COLUMNS = ('onlineAnalysis', 'grating_site', 'site', 'temporalFrequency',
+                     'protocols', 'bar_widths', 'light_setting', 'light_level',
+                     'filter_wheel_ndf', 'NDF', 'backgroundIntensity', 'weber')
+
+
+def cell_id(exp_name: str, cell_label: str) -> str:
+    """The identifier used to pick a cell: ``'2026-04-23_E/Cell5'``."""
+    return f'{exp_name}/{cell_label}'
+
+
+def add_cell_id(groups: 'pd.DataFrame') -> 'pd.DataFrame':
+    """Return a copy of a group table with a ``cell_id`` column."""
+    out = groups.copy()
+    out['cell_id'] = [cell_id(e, c) for e, c in zip(out['exp_name'], out['cell_label'])]
+    return out
+
+
+def _condition_columns(groups) -> list:
+    return [c for c in CONDITION_COLUMNS if c in groups.columns]
+
+
+def list_cells(groups: 'pd.DataFrame', show: bool = True, height: int = 400) -> 'pd.DataFrame':
+    """One row per cell: how many recording conditions it has, and of what kind.
+
+    Use this to find the ``cell_id`` to pass to :func:`inspect_cell`.
+    """
+    import pandas as pd
+
+    g = add_cell_id(groups)
+    joined = lambda s: ', '.join(sorted({str(v) for v in s}))
+    agg = {'cell_type': ('cell_type_short', 'first'),
+           'conditions': ('cell_id', 'size'),
+           'epochs': ('epochs', 'sum')}
+    for col in _condition_columns(g):
+        agg[col] = (col, joined)
+    out = g.groupby('cell_id', sort=False).agg(**agg).reset_index()
+    out = out.sort_values(['cell_type', 'cell_id'], ignore_index=True)
+    if show:
+        print(f'{len(out)} cells, {len(g)} recording conditions in total')
+        tree_table(out, levels=['cell_type'], height=height,
+                   num_cols=('conditions', 'epochs'))
+    return out
+
+
+def inspect_cell(groups: 'pd.DataFrame', cell: str, analyze, plot=None,
+                 show: bool = True, height: int = 260, on_error: str = 'log',
+                 **kwargs) -> list:
+    """Analyze every recording of one cell, split by condition.
+
+    ``cell`` is a ``cell_id`` (``'<experiment>/<cell label>'``); a bare cell
+    label is accepted when it is unambiguous. ``analyze`` and ``plot`` are the
+    protocol module's ``analyze_group`` / ``plot_group`` — the protocol modules
+    wrap this so you call ``<module>.inspect_cell(cell, groups)``.
+
+    Returns the analyzed records in the order shown.
+    """
+    g = add_cell_id(groups)
+    rows = g[g['cell_id'].eq(cell)]
+    if rows.empty:                      # allow a bare cell label if unambiguous
+        rows = g[g['cell_label'].eq(cell)]
+        if rows['cell_id'].nunique() > 1:
+            raise ValueError(f'{cell!r} matches several cells: '
+                             f"{sorted(rows['cell_id'].unique())} -- use the full id")
+    if rows.empty:
+        raise ValueError(f'no recordings for {cell!r}; '
+                         f'try list_cells(groups) to see the available ids')
+
+    cols = _condition_columns(rows)
+    if show:
+        print(f"{cell}: {len(rows)} recording condition(s), "
+              f"{int(rows['epochs'].sum())} epochs, "
+              f"cell type {rows['cell_type_short'].iloc[0]}")
+        scroll_table(rows[cols + ['blocks', 'epochs', 'block_ids']], height=height,
+                     num_cols=('blocks', 'epochs'))
+
+    records = []
+    for _, row in rows.iterrows():
+        label = ' | '.join(f'{c}={row[c]}' for c in cols)
+        try:
+            rec = analyze(row['exp_name'], [int(b) for b in str(row['block_ids']).split(',')],
+                          online_analysis=row['onlineAnalysis'], **kwargs)
+            records.append(rec)
+            if plot is not None:
+                fig = plot(rec)
+                if fig is not None and hasattr(fig, 'suptitle') and show:
+                    pass  # the per-group plot already titles itself
+        except Exception as e:
+            if on_error != 'log':
+                raise
+            print(f'  FAILED {label}: {type(e).__name__}: {e}')
+    if show:
+        print(f'analyzed {len(records)}/{len(rows)} conditions for {cell}')
+    return records

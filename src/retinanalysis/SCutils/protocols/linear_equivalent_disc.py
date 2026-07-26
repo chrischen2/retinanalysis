@@ -694,3 +694,29 @@ def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
     if save and records:
         save_records(records, verbose=False)
     return records
+
+
+# --------------------------------------------------------------------------
+# per-cell inspection
+# --------------------------------------------------------------------------
+
+def list_cells(groups: pd.DataFrame, show: bool = True, height: int = 400) -> pd.DataFrame:
+    """Cells available in a group table, with the conditions each was recorded in.
+
+    Use it to find the ``cell_id`` ('<experiment>/<cell label>') for
+    :func:`inspect_cell`.
+    """
+    from retinanalysis.SCutils import explore as _sc
+    return _sc.list_cells(groups, show=show, height=height)
+
+
+def inspect_cell(cell: str, groups: pd.DataFrame, plot: bool = True,
+                 show: bool = True, **kwargs):
+    """Analyze and plot every recording of one cell, split by condition.
+
+    ``cell`` is '<experiment>/<cell label>', e.g. ``'2026-04-23_E/Cell5'``; a
+    bare label works when it is unambiguous. Returns the records.
+    """
+    from retinanalysis.SCutils import explore as _sc
+    return _sc.inspect_cell(groups, cell, analyze=analyze_group,
+                            plot=plot_group if plot else None, show=show, **kwargs)
