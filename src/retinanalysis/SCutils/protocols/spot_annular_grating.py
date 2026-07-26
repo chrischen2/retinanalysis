@@ -60,6 +60,11 @@ ALLOWED_FILTER_WHEEL = (0.0, 0.5, 1.0)
 # Cell types the analysis is currently restricted to; override per call.
 DEFAULT_CELL_TYPES = ('ON-parasol', 'OFF-parasol')
 
+# Whole-cell epochs whose access resistance exceeds this are discarded: the
+# series resistance sits between the amplifier and the cell, so above ~20 MOhm
+# the recorded current is badly filtered and attenuated. Ohms, so 20 MOhm.
+MAX_SERIES_RESISTANCE = 20e6
+
 # Epoch parameters that define a stimulus configuration / light level.
 CONFIG_KEYS = ['apertureDiameter', 'annulusInnerDiameter', 'annulusOuterDiameter',
                'backgroundIntensity', 'spotIntensity', 'NDF', 'onlineAnalysis',
@@ -208,6 +213,276 @@ def read_filter_wheel_ndf(exp_name: str, block_id: int) -> float:
                 if fw is not None and 'NDF' in fw.attrs:
                     return float(fw.attrs['NDF'])
     return np.nan
+
+
+# --------------------------------------------------------------------------
+# series resistance: is this recording what onlineAnalysis says it is?
+# --------------------------------------------------------------------------
+
+def _amp_epoch_groups(exp_name: str, block_id: int, amp: str = 'Amp1') -> List[str]:
+    """h5 epoch-group paths for a block's amplifier responses, in ``amp_data`` order.
+
+    Built from the same query ``get_epochblock_amp_data`` uses, so element *i*
+    of anything read through these paths lines up with row *i* of
+    ``SCResponseBlock.amp_data`` and of ``StimBlock.df_epochs``.
+    """
+    from retinanalysis.utils.datajoint_utils import get_epochblock_response_query
+
+    df = get_epochblock_response_query(exp_name, int(block_id)).fetch(format='frame').reset_index()
+    df = df[df['device_name'].astype(str).eq(amp)]
+    return [str(p).split('/responses/')[0] for p in df['h5path'].values]
+
+
+def _epoch_series_resistance(epoch_group, amp: str = 'Amp1') -> float:
+    """``stimulus:<amp>:seriesResistance`` for one epoch group, in ohms.
+
+    Symphony writes the amplifier's device configuration into
+    ``stimuli/<amp>-<uuid>/dataConfigurationSpans/span_0/<amp>``, which is what
+    ``epoch.protocolSettings('stimulus:Amp1:seriesResistance')`` returns in the
+    MATLAB. NaN when the attribute is absent (older rigs never wrote it).
+    """
+    stimuli = epoch_group.get('stimuli')
+    if stimuli is None:
+        return np.nan
+    for dev in stimuli:
+        if str(dev).split('-')[0] != amp:
+            continue
+        spans = stimuli[dev].get('dataConfigurationSpans')
+        if spans is None:
+            continue
+        for span in spans:
+            node = spans[span].get(amp)
+            if node is not None and 'seriesResistance' in node.attrs:
+                return float(node.attrs['seriesResistance'])
+    return np.nan
+
+
+def read_series_resistance(exp_name: str, block_id: int, amp: str = 'Amp1',
+                           h5=None) -> np.ndarray:
+    """Per-epoch ``stimulus:<amp>:seriesResistance`` for a block, in ohms.
+
+    One value per epoch, ordered to match ``SCResponseBlock.amp_data``. In
+    practice the amplifier configuration is set once per block so the array is
+    constant, but it is read per epoch because that is where Symphony stores it
+    and because the cutoff is applied per epoch.
+
+    A cell-attached recording has no access resistance and reads exactly 0; a
+    whole-cell recording reads the value the experimenter entered on the
+    amplifier. Pass an open :class:`h5py.File` as ``h5`` to read many blocks of
+    one experiment without reopening the file.
+    """
+    import h5py
+    from retinanalysis.utils.datajoint_utils import get_h5_file
+
+    groups = _amp_epoch_groups(exp_name, int(block_id), amp=amp)
+    if not groups:
+        return np.zeros(0, dtype=float)
+
+    def _read(f):
+        out = []
+        for g in groups:
+            node = f.get(g)
+            out.append(_epoch_series_resistance(node, amp) if node is not None else np.nan)
+        return np.asarray(out, dtype=float)
+
+    if h5 is not None:
+        return _read(h5)
+    with h5py.File(get_h5_file(exp_name), 'r') as f:
+        return _read(f)
+
+
+def mode_family(online_analysis) -> str:
+    """The recording mode behind an ``onlineAnalysis`` label.
+
+    ``'extracellular'`` is a cell-attached spike recording; ``'exc'`` and
+    ``'inh'`` are whole-cell voltage clamp at two holding potentials. Anything
+    else (``'none'``, missing) gives ``''`` — unknown, not a mismatch.
+    """
+    m = str(online_analysis).strip().lower()
+    if m == 'extracellular':
+        return 'cell-attached'
+    if m in ('exc', 'inh'):
+        return 'whole-cell'
+    return ''
+
+
+def technique_family(recording_technique) -> str:
+    """The recording mode recorded in the experiment metadata, normalized."""
+    t = str(recording_technique).strip().lower().replace('_', '-').replace(' ', '-')
+    if 'cell-attached' in t:
+        return 'cell-attached'
+    if 'whole-cell' in t:
+        return 'whole-cell'
+    return ''
+
+
+def series_resistance_table(df: pd.DataFrame, amp: str = 'Amp1',
+                            max_series_resistance: float = MAX_SERIES_RESISTANCE,
+                            verbose: bool = True) -> pd.DataFrame:
+    """Read the series resistance of every block in ``df``, one h5 open per date.
+
+    Returns one row per ``block_id`` with the median / min / max reading and how
+    many of its epochs sit above ``max_series_resistance``. Blocks whose h5 is
+    missing come back with NaN rather than raising, so one absent file does not
+    stop the audit.
+    """
+    import h5py
+    from retinanalysis.utils.datajoint_utils import get_h5_file
+
+    rows = []
+    for exp, sub in df.groupby('exp_name', sort=True):
+        try:
+            f = h5py.File(get_h5_file(str(exp)), 'r')
+        except Exception as e:
+            if verbose:
+                print(f'  {exp}: cannot open the h5 ({type(e).__name__}) — '
+                      f'{len(sub)} block(s) have no series-resistance reading')
+            f = None
+        for bid in sub['block_id']:
+            rs = np.zeros(0, dtype=float)
+            if f is not None:
+                try:
+                    rs = read_series_resistance(str(exp), int(bid), amp=amp, h5=f)
+                except Exception as e:
+                    if verbose:
+                        print(f'  {exp} block {bid}: {type(e).__name__}: {e}')
+            good = rs[np.isfinite(rs)]
+            rows.append({
+                'block_id': int(bid),
+                'series_resistance': float(np.median(good)) if good.size else np.nan,
+                'series_resistance_min': float(good.min()) if good.size else np.nan,
+                'series_resistance_max': float(good.max()) if good.size else np.nan,
+                'n_epochs_rs': int(good.size),
+                'n_epochs_high_rs': int(np.sum(good > max_series_resistance)),
+            })
+        if f is not None:
+            f.close()
+    return pd.DataFrame(rows)
+
+
+def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
+                            max_series_resistance: float = MAX_SERIES_RESISTANCE,
+                            drop: bool = True, show: bool = True) -> pd.DataFrame:
+    """Cross-check every block's ``onlineAnalysis`` label against the amplifier.
+
+    Three independent sources say how a cell was recorded, and they can
+    disagree: the ``onlineAnalysis`` protocol parameter the experimenter picked,
+    the ``recording_technique`` field in the experiment metadata, and
+    ``stimulus:Amp1:seriesResistance`` — which the amplifier writes into every
+    epoch and which is exactly 0 for cell-attached and positive for whole-cell.
+    A block labelled ``extracellular`` but recorded whole-cell would be run
+    through spike detection and produce a meaningless tuning curve, so it is
+    worth catching before analysis rather than after.
+
+    **The reading is only evidence when the field was in use.** A 0 means
+    "cell-attached" only on a date where some other block reads non-zero,
+    proving the experimenter was filling it in; on a date where every block
+    reads 0 the field was simply never set and says nothing. Blocks on such a
+    date get ``rs_mode = ''`` and are never flagged.
+
+    Adds these columns and, with ``drop=True`` (the default), removes the
+    flagged blocks:
+
+    ``series_resistance``
+        Median reading over the block's epochs, in ohms.
+    ``rs_mode`` / ``label_mode`` / ``meta_mode``
+        'cell-attached', 'whole-cell' or '' from the amplifier, the
+        ``onlineAnalysis`` label and the metadata respectively.
+    ``n_epochs_high_rs``
+        Epochs above ``max_series_resistance`` (:func:`analyze_group` drops
+        these individually; a block where *every* epoch is above it is dropped
+        here since nothing would be left).
+    ``rs_flag``
+        '' when nothing is wrong, else why the block was flagged.
+
+    ``drop=False`` annotates without removing anything, for when you want to
+    look at a flagged recording rather than lose it.
+    """
+    out = df.copy()
+    table = series_resistance_table(out[['exp_name', 'block_id']], amp=amp,
+                                    max_series_resistance=max_series_resistance,
+                                    verbose=show)
+    out = out.merge(table, on='block_id', how='left')
+
+    # A date where the field was never set cannot distinguish the two modes.
+    used = out.groupby('exp_name')['series_resistance'].transform(
+        lambda s: bool(np.nansum(np.asarray(s, dtype=float) > 0) > 0))
+    out['rs_recorded'] = used.astype(bool)
+    rs = out['series_resistance'].to_numpy(dtype=float)
+    out['rs_mode'] = np.where(np.isnan(rs), '',
+                              np.where(rs > 0, 'whole-cell',
+                                       np.where(out['rs_recorded'], 'cell-attached', '')))
+    out['label_mode'] = out['onlineAnalysis'].apply(mode_family)
+    out['meta_mode'] = (out['recording_technique'].apply(technique_family)
+                        if 'recording_technique' in out.columns else '')
+
+    mismatch = (out['rs_mode'].ne('') & out['label_mode'].ne('')
+                & out['rs_mode'].ne(out['label_mode']))
+    all_high = (out['n_epochs_rs'] > 0) & out['n_epochs_high_rs'].eq(out['n_epochs_rs'])
+    meta_only = (out['meta_mode'].ne('') & out['label_mode'].ne('')
+                 & out['meta_mode'].ne(out['label_mode']) & ~mismatch)
+    # Where the label and the metadata disagree, the amplifier either backs the
+    # label (so the metadata is the wrong one) or says nothing at all.
+    meta_wrong = meta_only & out['rs_mode'].eq(out['label_mode'])
+    undecided = meta_only & out['rs_mode'].eq('')
+
+    out['rs_flag'] = np.where(
+        mismatch, 'onlineAnalysis contradicted by series resistance',
+        np.where(all_high, f'series resistance above {max_series_resistance / 1e6:g} MOhm',
+                 np.where(meta_wrong, 'metadata technique contradicted by series resistance',
+                          np.where(undecided, 'onlineAnalysis disagrees with the metadata '
+                                              'technique, no reading to settle it', ''))))
+
+    if show:
+        n_read = int((out['n_epochs_rs'] > 0).sum())
+        dates_used = sorted(out.loc[out['rs_recorded'], 'exp_name'].unique())
+        print(f'series resistance read for {n_read}/{len(out)} blocks; the field was '
+              f'actually filled in on {len(dates_used)} of '
+              f"{out['exp_name'].nunique()} dates"
+              + (f" ({', '.join(dates_used)})" if dates_used else ''))
+        if len(dates_used) < out['exp_name'].nunique():
+            print('  on every other date every block reads 0, so the reading cannot '
+                  'confirm the label there — those blocks are left alone')
+        print()
+        print('recording mode by source (metadata technique x onlineAnalysis x amplifier)')
+        print(pd.crosstab([out['meta_mode'].replace('', '(none)'),
+                           out['label_mode'].replace('', '(none)')],
+                          out['rs_mode'].replace('', '(no usable reading)')).to_string())
+
+        # The blocks whose analysis is actually at risk come first; the ones
+        # where only the metadata is off, or nothing can settle it, after them.
+        severity = {'onlineAnalysis contradicted by series resistance': 0}
+        flagged = out[out['rs_flag'].ne('')].sort_values(
+            'rs_flag', key=lambda s: s.map(lambda v: severity.get(v, 1)), kind='stable')
+        print()
+        if flagged.empty:
+            print('no blocks flagged')
+        else:
+            print(f'{len(flagged)} block(s) flagged:')
+            cols = [c for c in ('exp_name', 'cell_label', 'cell_type_short', 'onlineAnalysis',
+                                'recording_technique', 'series_resistance', 'n_epochs',
+                                'n_epochs_high_rs', 'block_id', 'rs_flag') if c in flagged.columns]
+            show_df = flagged[cols].copy()
+            show_df['series_resistance'] = (show_df['series_resistance'] / 1e6).round(2)
+            show_df = show_df.rename(columns={'series_resistance': 'Rs (MOhm)'})
+            print(show_df.to_string(index=False))
+
+    if drop:
+        # Only the amplifier's own verdict removes a block: a wrong metadata
+        # field does not make the recording unanalyzable, and a disagreement
+        # nothing can settle is not a reason to throw data away.
+        losing = mismatch | all_high
+        n_dropped = int(losing.sum())
+        if show:
+            if n_dropped:
+                print(f'\ndropping {n_dropped} block(s) the amplifier disqualifies — the '
+                      f'recording mode is not what the label says, or every epoch is over '
+                      f'the cutoff; pass drop=False to keep and inspect them')
+            elif out['rs_flag'].ne('').any():
+                print('\nnothing dropped: the flags above are metadata disagreements, '
+                      'which do not make a recording unanalyzable')
+        out = out[~losing].reset_index(drop=True)
+    return out
 
 
 def rig_of(exp_name: str) -> str:
@@ -449,15 +724,21 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
 
     keys = ['exp_name', 'rig', 'cell_label', 'cell_type_short', 'onlineAnalysis',
             'grating_site', 'filter_wheel_ndf', 'backgroundIntensity']
-    g = (df.groupby(keys, dropna=False, sort=False)
-           .agg(blocks=('block_id', 'size'), epochs=('n_epochs', 'sum'),
-                light_setting=('light_setting', 'first'),
-                aperture=('apertureDiameter', 'first'),
-                annulus_inner=('annulusInnerDiameter', 'first'),
-                annulus_outer=('annulusOuterDiameter', 'first'),
-                bright=('brightBarContrast', 'first'),
-                block_ids=('block_id', lambda s: ', '.join(str(int(b)) for b in sorted(s))))
-           .reset_index())
+    agg = dict(blocks=('block_id', 'size'), epochs=('n_epochs', 'sum'),
+               light_setting=('light_setting', 'first'),
+               aperture=('apertureDiameter', 'first'),
+               annulus_inner=('annulusInnerDiameter', 'first'),
+               annulus_outer=('annulusOuterDiameter', 'first'),
+               bright=('brightBarContrast', 'first'),
+               block_ids=('block_id', lambda s: ', '.join(str(int(b)) for b in sorted(s))))
+    # Carry the amplifier reading through when check_series_resistance() has run,
+    # so the recording-group table shows how each cell was actually held. In
+    # MOhm here because the table is for reading; the ohms stay canonical.
+    has_rs = 'series_resistance' in df.columns
+    if has_rs:
+        agg['rs_mohm'] = ('series_resistance', lambda s: np.round(np.nanmedian(s) / 1e6, 2))
+        agg['epochs_high_rs'] = ('n_epochs_high_rs', 'sum')
+    g = df.groupby(keys, dropna=False, sort=False).agg(**agg).reset_index()
     if show:
         print(f'{len(g)} recording groups '
               f'(experiment x cell x mode x grating site x filter wheel x background)')
@@ -465,11 +746,13 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
                 'grating_site', 'aperture', 'annulus_inner', 'annulus_outer',
                 'filter_wheel_ndf', 'backgroundIntensity', 'light_setting',
                 'blocks', 'epochs']
+        cols += [c for c in ('rs_mohm', 'epochs_high_rs') if c in g.columns]
         sc.tree_table(g.sort_values(['cell_type_short', 'exp_name', 'cell_label'])[cols],
                       levels=['cell_type_short', 'rig', 'exp_name', 'cell_label'],
                       height=height, num_cols=('aperture', 'annulus_inner', 'annulus_outer',
                                                'filter_wheel_ndf', 'backgroundIntensity',
-                                               'blocks', 'epochs'))
+                                               'blocks', 'epochs', 'rs_mohm',
+                                               'epochs_high_rs'))
     return g
 
 
@@ -560,8 +843,18 @@ class GratingRecord:
     stim_time_ms: float
     n_epochs: int
     block_ids: List[int]
+    # Amplifier access resistance (ohms), median over the epochs that survived
+    # the cutoff; 0 for a cell-attached recording, NaN when the h5 had no
+    # reading. See check_series_resistance().
+    series_resistance: float = np.nan
+    n_epochs_high_rs: int = 0
+    mode_mismatch: bool = False
     config: Dict = field(default_factory=dict)
     units: str = ''
+    # Unprocessed amplifier traces, kept only when analyze_group(keep_raw=True),
+    # so the raw views can be drawn without reloading the blocks. Never stored
+    # on disk.
+    raw: Optional[Dict] = None
 
     @property
     def key(self) -> str:
@@ -585,7 +878,9 @@ class GratingRecord:
             'n_epochs': self.n_epochs, 'n_contrasts': len(self.dark_contrasts),
             'bar_widths': ','.join(f'{b:g}' for b in self.bar_widths),
             'block_ids': ','.join(str(b) for b in self.block_ids),
-            'units': self.units,
+            'units': self.units, 'series_resistance': self.series_resistance,
+            'n_epochs_high_rs': self.n_epochs_high_rs,
+            'mode_mismatch': self.mode_mismatch,
             'aperture_diameter': self.config.get('apertureDiameter', np.nan),
             'annulus_inner': self.config.get('annulusInnerDiameter', np.nan),
             'annulus_outer': self.config.get('annulusOuterDiameter', np.nan),
@@ -593,10 +888,17 @@ class GratingRecord:
         }
 
     def describe(self) -> str:
+        rs = ('' if not np.isfinite(self.series_resistance)
+              else '  Rs=0 (cell-attached)' if self.series_resistance == 0
+              else f'  Rs={self.series_resistance / 1e6:.1f} MOhm')
+        if self.n_epochs_high_rs:
+            rs += f'  [{self.n_epochs_high_rs} epoch(s) dropped over the Rs cutoff]'
+        if self.mode_mismatch:
+            rs += '  [MODE MISMATCH: the amplifier contradicts onlineAnalysis]'
         return (f'{self.exp_name} | {self.cell_type} | {self.cell_label} | '
                 f'{self.online_analysis} | grating {self.grating_site} | '
                 f'FW={self.ndf} bg={self.background_intensity:.2f} ({self.light_level}) | '
-                f'{self.n_epochs} epochs\n'
+                f'{self.n_epochs} epochs{rs}\n'
                 f'  dark contrasts : {np.round(self.dark_contrasts, 3)}\n'
                 f'  response       : {np.round(self.resp_mean, 3)}\n'
                 f'  baseline={self.baseline_mean:.3f} | crossing nearest='
@@ -625,6 +927,8 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
                   cone_i0: float = DEFAULTS['cone_i0'],
                   detector_kwargs: Optional[dict] = None,
                   drop_epochs: Sequence[int] = (),
+                  max_series_resistance: Optional[float] = MAX_SERIES_RESISTANCE,
+                  keep_raw: bool = False,
                   verbose: bool = True) -> GratingRecord:
     """Port of the per-node body of analyzeSpotAnnularGrating.m.
 
@@ -636,6 +940,19 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
     whole-cell responses are the mean smoothed current in pA (box-car of
     ``smooth_ms``), with the sign flipped for 'exc' so larger always means a
     larger response.
+
+    Every epoch is checked against the amplifier's ``seriesResistance`` before
+    it is used. A whole-cell epoch recorded through more than
+    ``max_series_resistance`` ohms is dropped (the current is too filtered to
+    trust); set it to ``None`` to keep them. If the reading says the cell was
+    held the other way round from what ``onlineAnalysis`` claims, the record is
+    marked ``mode_mismatch`` and it is reported — :func:`check_series_resistance`
+    is the place to catch that across the whole dataset.
+
+    ``keep_raw=True`` attaches the unprocessed amplifier traces to the record as
+    ``rec.raw``, so :func:`plot_raw_blocks` and :func:`plot_raw_epochs` can draw
+    the data underneath the summary without loading the blocks a second time.
+    They are never written to the store.
     """
     import retinanalysis as ra
     from retinanalysis.utils.psth import psth_time_axis, spike_times_to_psth
@@ -644,6 +961,9 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
     dark, bright, bar, pol, resp_stim, resp_base = [], [], [], [], [], []
     traces_all, first_params, used_blocks = [], None, []
     n_samples = None
+    rs_kept, n_high_rs, mode_mismatch = [], 0, False
+    raw = {'traces': [], 'spike_times_ms': [], 'block_id': [], 'sample_rate': None,
+           'series_resistance': []} if keep_raw else None
 
     for bid in block_ids:
         sb = ra.StimBlock(exp_name, int(bid), verbose=False)
@@ -661,7 +981,56 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
         stim_pts = int(round(float(p0['stimTime']) / 1e3 * sr))
 
         keep = [i for i in range(len(ep)) if i not in set(drop_epochs)]
+
+        # Access resistance, per epoch, straight from the h5. A missing reading
+        # (no h5, old rig) leaves every epoch in: absent evidence is not
+        # evidence of a bad recording.
+        try:
+            rs = read_series_resistance(exp_name, int(bid))
+        except Exception as e:
+            if verbose:
+                print(f'  block {bid}: could not read series resistance '
+                      f'({type(e).__name__}); no epochs excluded on that basis')
+            rs = np.full(len(ep), np.nan)
+        if rs.size < len(ep):
+            rs = np.concatenate([rs, np.full(len(ep) - rs.size, np.nan)])
+
+        # Applied whatever the label says: a non-zero reading means the cell was
+        # held whole-cell, so the cutoff is about the recording, not the label.
+        if max_series_resistance is not None:
+            too_high = [i for i in keep
+                        if np.isfinite(rs[i]) and rs[i] > max_series_resistance]
+            if too_high:
+                n_high_rs += len(too_high)
+                keep = [i for i in keep if i not in set(too_high)]
+                if verbose:
+                    print(f'  block {bid}: dropped {len(too_high)}/{len(ep)} epoch(s) with '
+                          f'series resistance above {max_series_resistance / 1e6:g} MOhm '
+                          f'(up to {np.nanmax(rs[too_high]) / 1e6:.1f} MOhm)')
+        if not keep:
+            if verbose:
+                print(f'  block {bid}: no epochs left after the series-resistance '
+                      f'cutoff — block skipped')
+            continue
+
+        measured = ('' if not np.isfinite(np.nanmedian(rs))
+                    else 'whole-cell' if np.nanmedian(rs) > 0 else 'cell-attached')
+        if measured == 'whole-cell' and spiking:
+            mode_mismatch = True
+            if verbose:
+                print(f"  block {bid}: labelled '{mode}' but the amplifier reports "
+                      f'{np.nanmedian(rs) / 1e6:.1f} MOhm of series resistance — this is a '
+                      f'whole-cell recording being analyzed as spikes')
+        rs_kept.extend(rs[i] for i in keep)
         used_blocks.append(int(bid))
+        if keep_raw:
+            raw['sample_rate'] = sr
+            for i in keep:
+                raw['traces'].append(np.asarray(rb.amp_data[i], dtype=float))
+                raw['spike_times_ms'].append(
+                    np.asarray(rb.spike_times[i], dtype=float) / sr * 1e3 if spiking else None)
+                raw['block_id'].append(int(bid))
+                raw['series_resistance'].append(float(rs[i]))
 
         if spiking:
             # Firing rate in the stimulus window, with a pre-stim baseline rate
@@ -706,6 +1075,11 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
         pol.extend(_epoch_param(ep, 'currentGratingPolarity')[keep])
         n_samples = traces_all[-1].size
 
+    if not used_blocks:
+        raise ValueError(
+            f'{exp_name} blocks {list(block_ids)}: every epoch was excluded by the '
+            f'{max_series_resistance / 1e6:g} MOhm series-resistance cutoff')
+
     dark = np.asarray(dark); resp_stim = np.asarray(resp_stim); resp_base = np.asarray(resp_base)
     bright = np.asarray(bright); bar = np.asarray(bar)
     traces_all = np.vstack([t[:n_samples] for t in traces_all])
@@ -742,6 +1116,16 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
     summary = ra.get_exp_summary(exp_name)
     row = summary[summary['block_id'].eq(int(used_blocks[0]))].iloc[0]
 
+    if keep_raw:
+        raw['dark'] = dark
+        raw['pre_time_ms'] = float(first_params['preTime'])
+        raw['stim_time_ms'] = float(first_params['stimTime'])
+        raw['units'] = units
+        raw['exp_name'] = exp_name
+
+    rs_kept = np.asarray(rs_kept, dtype=float)
+    rs_median = float(np.nanmedian(rs_kept)) if np.isfinite(rs_kept).any() else np.nan
+
     rec = GratingRecord(
         exp_name=exp_name, cell_label=str(row['cell_label']), cell_type=str(row['cell_type']),
         online_analysis=mode, grating_site=grating_site(first_params['annulusInnerDiameter']),
@@ -755,7 +1139,9 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
         traces=traces, trace_time_ms=trace_ms,
         pre_time_ms=float(first_params['preTime']), stim_time_ms=float(first_params['stimTime']),
         n_epochs=int(valid.sum()), block_ids=used_blocks,
-        config={k: first_params.get(k) for k in CONFIG_KEYS}, units=units)
+        series_resistance=rs_median, n_epochs_high_rs=n_high_rs,
+        mode_mismatch=mode_mismatch,
+        config={k: first_params.get(k) for k in CONFIG_KEYS}, units=units, raw=raw)
     if verbose:
         print(rec.describe())
     return rec
@@ -1193,33 +1579,40 @@ def describe_cell(cell: str, groups: pd.DataFrame, show: bool = True, **kwargs):
     return _sc.describe_cell(groups, cell, show=show, **kwargs)
 
 
-def plot_raw_epochs(exp_name: str, block_ids: Sequence[int],
-                    online_analysis: Optional[str] = None,
-                    max_contrasts: int = 6, max_epochs_per_contrast: int = 8,
-                    detector_kwargs: Optional[dict] = None,
-                    figsize: Tuple[float, float] = (10.0, 7.0)):
-    """Raw data behind one recording: traces overlaid, and a spike raster.
+def load_raw(exp_name, block_ids: Optional[Sequence[int]] = None,
+             online_analysis: Optional[str] = None,
+             detector_kwargs: Optional[dict] = None) -> Dict:
+    """Every epoch's unprocessed amplifier trace for a recording, as loaded from the h5.
 
-    Loads the blocks again — this is the slow, inspect-it-yourself view, so the
-    notebook keeps it behind a flag. For a spiking recording the left column
-    overlays the raw amplifier traces per dark-bar contrast and the right column
-    is the raster across epochs, one row per epoch, with detected spikes marked
-    against the same time base. For whole-cell there is no raster, so the
-    smoothed traces are overlaid alone.
+    ``SCResponseBlock`` stores ``amp_data`` exactly as the amplifier wrote it —
+    the high-pass filter that precedes spike detection is applied inside the
+    detector, not to this array — so these are the raw traces, with no
+    filtering, smoothing or baseline subtraction.
 
-    Epochs are grouped by ``currentDarkContrast`` and at most
-    ``max_contrasts`` of them are shown, spread across the tested range.
+    Pass a :class:`GratingRecord` that was built with ``analyze_group(keep_raw=True)``
+    as ``exp_name`` and the traces it already holds are returned instead, so the
+    blocks are not loaded a second time. Otherwise give ``exp_name`` and
+    ``block_ids`` and they are loaded now.
+
+    Returns a dict with ``traces`` (list of 1-D arrays, one per epoch),
+    ``spike_times_ms`` (per epoch, ``None`` for whole-cell), ``dark`` (the
+    epoch's ``currentDarkContrast``), ``block_id``, ``series_resistance``,
+    ``sample_rate``, ``pre_time_ms``, ``stim_time_ms`` and ``units``.
     """
-    import matplotlib.pyplot as plt
     import retinanalysis as ra
-    from retinanalysis.utils import style
-    from scipy.ndimage import uniform_filter1d
 
-    style.apply_publication_style()
-    traces, spikes, darks = [], [], []
-    pre_ms = stim_ms = sr = None
-    mode = None
+    if isinstance(exp_name, GratingRecord):
+        if exp_name.raw is None:
+            raise ValueError('this record has no raw traces; build it with '
+                             'analyze_group(..., keep_raw=True) or pass '
+                             'exp_name and block_ids instead')
+        return exp_name.raw
+    if block_ids is None:
+        raise ValueError('block_ids is required unless a GratingRecord is passed')
 
+    out = {'traces': [], 'spike_times_ms': [], 'dark': [], 'block_id': [],
+           'series_resistance': [], 'sample_rate': None, 'exp_name': exp_name,
+           'units': ''}
     for bid in block_ids:
         sb = ra.StimBlock(exp_name, int(bid), verbose=False)
         ep = sb.df_epochs
@@ -1229,26 +1622,75 @@ def plot_raw_epochs(exp_name: str, block_ids: Sequence[int],
         rb = ra.SCResponseBlock(exp_name, int(bid), b_spiking=spiking, verbose=False,
                                 **(detector_kwargs or {}))
         sr = float(rb.amp_sample_rate)
-        pre_ms, stim_ms = float(p0['preTime']), float(p0['stimTime'])
+        try:
+            rs = read_series_resistance(exp_name, int(bid))
+        except Exception:
+            rs = np.full(len(ep), np.nan)
         data = np.asarray(rb.amp_data, dtype=float)
-        if not spiking:
-            width = max(int(round(DEFAULTS['smooth_ms'] / 1e3 * sr)), 1)
-            data = uniform_filter1d(data, size=width, axis=1)
         for i in range(data.shape[0]):
-            traces.append(data[i])
-            spikes.append(np.asarray(rb.spike_times[i], float) / sr * 1e3 if spiking else None)
-        darks.extend(_epoch_param(ep, 'currentDarkContrast'))
+            out['traces'].append(data[i])
+            out['spike_times_ms'].append(
+                np.asarray(rb.spike_times[i], float) / sr * 1e3 if spiking else None)
+            out['block_id'].append(int(bid))
+            out['series_resistance'].append(float(rs[i]) if i < rs.size else np.nan)
+        out['dark'].extend(_epoch_param(ep, 'currentDarkContrast'))
+        out['sample_rate'] = sr
+        out['pre_time_ms'] = float(p0['preTime'])
+        out['stim_time_ms'] = float(p0['stimTime'])
+        out['units'] = 'rate (Hz)' if spiking else 'pA'
+    out['dark'] = np.asarray(out['dark'], dtype=float)
+    return out
 
-    darks = np.asarray(darks, dtype=float)
+
+def plot_raw_epochs(exp_name, block_ids: Optional[Sequence[int]] = None,
+                    online_analysis: Optional[str] = None,
+                    max_contrasts: int = 6, max_epochs_per_contrast: int = 8,
+                    detector_kwargs: Optional[dict] = None,
+                    smooth: bool = True,
+                    figsize: Tuple[float, float] = (10.0, 7.0)):
+    """Raw data behind one recording: traces overlaid by contrast, and a spike raster.
+
+    For a spiking recording the left column overlays the amplifier traces per
+    dark-bar contrast and the right column is the raster across epochs, one row
+    per epoch, with detected spikes marked against the same time base. For
+    whole-cell there is no raster, so the traces are overlaid alone and
+    ``smooth=True`` box-cars them (by ``DEFAULTS['smooth_ms']``) to make the
+    current legible; ``smooth=False`` leaves them exactly as recorded.
+
+    Accepts either a :class:`GratingRecord` built with ``keep_raw=True`` (no
+    reload) or ``exp_name`` + ``block_ids``. Epochs are grouped by
+    ``currentDarkContrast`` and at most ``max_contrasts`` of them are shown,
+    spread across the tested range.
+    """
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+    from scipy.ndimage import uniform_filter1d
+
+    style.apply_publication_style()
+    raw = load_raw(exp_name, block_ids, online_analysis, detector_kwargs)
+    exp_label = raw.get('exp_name', '')
+    sr = float(raw['sample_rate'])
+    pre_ms, stim_ms = float(raw['pre_time_ms']), float(raw['stim_time_ms'])
+    spikes = raw['spike_times_ms']
+    spiking = len(spikes) > 0 and spikes[0] is not None
+    mode = 'extracellular' if spiking else 'whole cell'
+
+    traces = [np.asarray(t, dtype=float) for t in raw['traces']]
+    if not spiking and smooth:
+        width = max(int(round(DEFAULTS['smooth_ms'] / 1e3 * sr)), 1)
+        traces = [uniform_filter1d(t, size=width) for t in traces]
+
+    darks = np.asarray(raw['dark'], dtype=float)
     contrasts = np.unique(darks[~np.isnan(darks)])
     if len(contrasts) > max_contrasts:                 # spread across the range
         contrasts = contrasts[np.linspace(0, len(contrasts) - 1, max_contrasts).astype(int)]
 
-    spiking = spikes[0] is not None
     n_col = 2 if spiking else 1
     fig, axes = plt.subplots(len(contrasts), n_col, figsize=figsize, squeeze=False,
                              sharex=True)
-    t_ms = np.arange(len(traces[0])) / sr * 1e3
+    # Blocks can differ in length, so the axis spans the longest of them and
+    # each trace is drawn against as much of it as it has.
+    t_ms = np.arange(max(len(t) for t in traces)) / sr * 1e3
 
     for r, c in enumerate(contrasts):
         idx = [i for i in np.flatnonzero(darks == c)][:max_epochs_per_contrast]
@@ -1258,7 +1700,8 @@ def plot_raw_epochs(exp_name: str, block_ids: Sequence[int],
         ax.axvspan(pre_ms, pre_ms + stim_ms, color='#F0C000', alpha=0.15, lw=0, zorder=0)
         ax.set_ylabel(f'{c:g}\n({len(idx)} ep)', fontsize=7)
         if r == 0:
-            ax.set_title(f'raw traces — {exp_name} {mode}', fontsize=9)
+            smoothed = '' if spiking or not smooth else f" (box-car {DEFAULTS['smooth_ms']:g} ms)"
+            ax.set_title(f'traces from the h5 — {exp_label} {mode}{smoothed}', fontsize=9)
         if spiking:
             ax_r = axes[r][1]
             for k, i in enumerate(idx):
@@ -1278,8 +1721,9 @@ def plot_raw_epochs(exp_name: str, block_ids: Sequence[int],
     return fig
 
 
-def plot_raw_blocks(exp_name: str, block_ids: Sequence[int],
+def plot_raw_blocks(exp_name, block_ids: Optional[Sequence[int]] = None,
                     max_epochs: Optional[int] = None, show_mean: bool = True,
+                    online_analysis: Optional[str] = None,
                     figsize: Optional[Tuple[float, float]] = None):
     """Raw amplifier traces, one panel per block, every epoch overlaid.
 
@@ -1291,45 +1735,58 @@ def plot_raw_blocks(exp_name: str, block_ids: Sequence[int],
     One panel per block, because a recording group pools several and they are
     where things go wrong independently — a cell lost partway, a seal drifting,
     a gain change between blocks. All epochs of a block are drawn over each
-    other, with their mean on top by default.
+    other, with their mean on top by default. Each panel's title carries the
+    block's series resistance, so a whole-cell block recorded through a bad
+    electrode is visible next to its trace.
+
+    Accepts either a :class:`GratingRecord` built with ``keep_raw=True`` (drawn
+    from the traces it already holds, no reload) or ``exp_name`` + ``block_ids``.
     """
     import matplotlib.pyplot as plt
-    import retinanalysis as ra
     from retinanalysis.utils import style
 
     style.apply_publication_style()
-    blocks = [int(b) for b in block_ids]
+    raw = load_raw(exp_name, block_ids, online_analysis)
+    exp_label = raw.get('exp_name', '')
+    sr = float(raw['sample_rate'])
+    pre_ms, stim_ms = float(raw['pre_time_ms']), float(raw['stim_time_ms'])
+    ep_block = np.asarray(raw['block_id'], dtype=int)
+    ep_dark = np.asarray(raw['dark'], dtype=float)
+    ep_rs = np.asarray(raw['series_resistance'], dtype=float)
+
+    blocks = list(dict.fromkeys(ep_block.tolist()))
     if figsize is None:
         figsize = (8.6, 1.9 * len(blocks) + 0.6)
     fig, axes = plt.subplots(len(blocks), 1, figsize=figsize, squeeze=False, sharex=True)
 
     for ax, bid in zip(axes[:, 0], blocks):
-        sb = ra.StimBlock(exp_name, bid, verbose=False)
-        p0 = sb.df_epochs['epoch_parameters'].iloc[0]
-        # b_spiking=False: no detector, so nothing touches the trace.
-        rb = ra.SCResponseBlock(exp_name, bid, b_spiking=False, verbose=False)
-        data = np.asarray(rb.amp_data, dtype=float)
-        sr = float(rb.amp_sample_rate)
-        t_ms = np.arange(data.shape[1]) / sr * 1e3
-        n = data.shape[0] if max_epochs is None else min(max_epochs, data.shape[0])
+        idx = np.flatnonzero(ep_block == bid)
+        n = len(idx) if max_epochs is None else min(max_epochs, len(idx))
+        shown = idx[:n]
+        length = min(len(raw['traces'][i]) for i in shown)
+        data = np.vstack([np.asarray(raw['traces'][i], dtype=float)[:length] for i in shown])
+        t_ms = np.arange(length) / sr * 1e3
 
-        for i in range(n):
-            ax.plot(t_ms, data[i], lw=0.4, alpha=0.45, color='#666666')
+        for row in data:
+            ax.plot(t_ms, row, lw=0.4, alpha=0.45, color='#666666')
         if show_mean:
-            ax.plot(t_ms, data[:n].mean(axis=0), lw=1.1, color='#D55E00', label='mean')
-        ax.axvspan(float(p0['preTime']), float(p0['preTime']) + float(p0['stimTime']),
-                   color='#F0C000', alpha=0.15, lw=0, zorder=0)
-        darks = _epoch_param(sb.df_epochs, 'currentDarkContrast')
-        darks = np.unique(darks[~np.isnan(darks)])
+            ax.plot(t_ms, data.mean(axis=0), lw=1.1, color='#D55E00', label='mean')
+        ax.axvspan(pre_ms, pre_ms + stim_ms, color='#F0C000', alpha=0.15, lw=0, zorder=0)
+
+        darks = np.unique(ep_dark[idx][~np.isnan(ep_dark[idx])])
+        rs = np.nanmedian(ep_rs[idx]) if np.isfinite(ep_rs[idx]).any() else np.nan
+        rs_txt = ('' if not np.isfinite(rs)
+                  else ', Rs 0 (cell-attached)' if rs == 0
+                  else f', Rs {rs / 1e6:.1f} MOhm')
+        contrast_txt = (f', {len(darks)} dark contrasts '
+                        f'({darks.min():g} to {darks.max():g})' if len(darks) else '')
         ax.set_ylabel('Amplitude', fontsize=8)
-        ax.set_title(f'block {bid} — {n} of {data.shape[0]} epochs overlaid, '
-                     f'{len(darks)} dark contrasts '
-                     f'({darks.min():g} to {darks.max():g})' if len(darks) else
-                     f'block {bid} — {n} epochs', fontsize=8.5)
+        ax.set_title(f'block {bid} — {n} of {len(idx)} epochs overlaid'
+                     f'{contrast_txt}{rs_txt}', fontsize=8.5)
         if show_mean:
             ax.legend(frameon=False, fontsize=7, loc='upper right')
     axes[-1, 0].set_xlabel('Time (ms)')
-    fig.suptitle(f'{exp_name} — raw traces per block, before filtering or spike detection',
+    fig.suptitle(f'{exp_label} — raw traces per block, before filtering or spike detection',
                  fontsize=9.5, y=1.0)
     fig.tight_layout()
     return fig
