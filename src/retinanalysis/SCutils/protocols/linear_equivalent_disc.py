@@ -336,6 +336,10 @@ class DiscRecord:
     threshold_onset: float
     threshold_offset: float
     block_ids: List[int]
+    # True when exc/inh came from the sign of the data rather than a recorded
+    # onlineAnalysis label, so an inferred polarity is never mistaken for one
+    # the experimenter set.
+    mode_inferred: bool = False
     config: Dict = field(default_factory=dict)
     units: str = ''
 
@@ -357,6 +361,7 @@ class DiscRecord:
             'light_setting': self.light_setting, 'weber_constant': self.weber_constant,
             'image_names': ','.join(self.image_names),
             'n_epochs': self.n_epochs, 'n_patches': self.n_patches,
+            'mode_inferred': bool(self.mode_inferred),
             'threshold_onset': self.threshold_onset,
             'threshold_offset': self.threshold_offset,
             'nli_disc_onset': m(self.nli_disc_onset),
@@ -407,6 +412,7 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
         if first_params is None:
             first_params = p0
         mode = (online_analysis or p0.get('onlineAnalysis', 'extracellular')).lower()
+        mode_inferred = mode == 'whole_cell'
         if mode in ('', 'none', 'nan'):
             # Many blocks were recorded with onlineAnalysis left at 'none'; fall
             # back to how the cell was actually recorded. Whole-cell polarity is
@@ -439,7 +445,11 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
         else:
             if mode == 'whole_cell':
                 # Excitatory currents are inward (negative); flip so a larger
-                # number always means a larger response.
+                # number always means a larger response. Checked across the
+                # affected recordings: every epoch agrees with the grand mean,
+                # so this is not a marginal call -- but it is still an
+                # inference, hence mode_inferred.
+                mode_inferred = True
                 mode = 'exc' if float(np.mean(rb.amp_data)) < 0 else 'inh'
             sign = -1.0 if mode == 'exc' else 1.0
             width = max(int(round(smooth_ms / 1e3 * sr)), 1)
@@ -510,7 +520,7 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
         nli_disc_offset=compute_nli(image_off, disc_off, thresh_off),
         nli_cone_onset=compute_nli(image_on, cone_on, thresh_on),
         nli_cone_offset=compute_nli(image_off, cone_off, thresh_off),
-        n_epochs=int(len(df)), n_patches=int(keep.sum()),
+        n_epochs=int(len(df)), n_patches=int(keep.sum()), mode_inferred=mode_inferred,
         threshold_onset=thresh_on, threshold_offset=thresh_off,
         block_ids=used_blocks,
         config={k: first_params.get(k) for k in CONFIG_KEYS}, units=units)
