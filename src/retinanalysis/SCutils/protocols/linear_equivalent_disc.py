@@ -228,14 +228,63 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
     return df
 
 
+def resolve_mode(df: pd.DataFrame, verbose: bool = True) -> pd.Series:
+    """The recording mode to group on, with ``onlineAnalysis='none'`` resolved.
+
+    A recorded label is authoritative. Where it is missing, the mode comes from
+    how the cell was actually recorded: cell-attached is 'extracellular',
+    otherwise 'whole_cell' and :func:`analyze_group` reads the polarity off the
+    data. If such a block sits at the same cell / site / light level as exactly
+    one labelled whole-cell sibling, it adopts that label instead.
+
+    Grouping on this rather than on the raw label is what keeps an unlabelled
+    recording from overwriting its labelled sibling's record: they share a key
+    once the mode is resolved, so they must share a group and be pooled.
+    """
+    label = df['onlineAnalysis'].astype(str).str.lower()
+    tech = df['recording_technique'].astype(str)
+    known = label.isin(['extracellular', 'exc', 'inh'])
+    mode = np.where(known, label,
+                    np.where(tech.eq('cell-attached'), 'extracellular', 'whole_cell'))
+    mode = pd.Series(mode, index=df.index)
+
+    site_keys = ['exp_name', 'cell_label', 'site', 'filter_wheel_ndf', 'backgroundIntensity']
+    adopted = 0
+    for _, idx in df.groupby(site_keys, dropna=False).groups.items():
+        here = mode.loc[idx]
+        if 'whole_cell' not in set(here):
+            continue
+        siblings = {m for m in here if m in ('exc', 'inh')}
+        if len(siblings) == 1:
+            mode.loc[idx] = here.replace('whole_cell', siblings.pop())
+            adopted += 1
+    if verbose:
+        n_resolved = int((~known).sum())
+        if n_resolved:
+            print(f"resolved onlineAnalysis for {n_resolved} block(s) recorded as 'none' "
+                  f'from the recording technique'
+                  + (f'; {adopted} adopted a labelled sibling' if adopted else ''))
+    return mode
+
+
 def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420) -> pd.DataFrame:
-    """One row per recording group: experiment x cell x mode x site x light level."""
+    """One row per recording group: experiment x cell x mode x site x light level.
+
+    Groups on the *resolved* mode (:func:`resolve_mode`), so recordings that
+    differ only in whether the experimenter set ``onlineAnalysis`` are pooled
+    rather than colliding on one record key.
+    """
     from retinanalysis.SCutils import explore as sc
 
-    keys = ['exp_name', 'cell_label', 'cell_type_short', 'onlineAnalysis', 'site',
+    df = df.copy()
+    df['mode'] = resolve_mode(df, verbose=show)
+    keys = ['exp_name', 'cell_label', 'cell_type_short', 'mode', 'site',
             'filter_wheel_ndf', 'backgroundIntensity']
     g = (df.groupby(keys, dropna=False, sort=False)
            .agg(blocks=('block_id', 'size'), epochs=('n_epochs', 'sum'),
+                onlineAnalysis=('mode', 'first'),
+                recorded_labels=('onlineAnalysis',
+                                 lambda s: ', '.join(sorted({str(v) for v in s}))),
                 protocols=('protocol', lambda s: ', '.join(sorted(set(s)))),
                 light_setting=('light_setting', 'first'), rstar=('rstar', 'first'),
                 light_level=('light_level', 'first'),
@@ -733,6 +782,17 @@ def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
             failures.append((row['exp_name'], row['cell_label'], f'{type(e).__name__}: {e}'))
     print(f'analyzed {len(records)}/{len(groups)} groups'
           + (f' ({skipped} already stored, skipped)' if skipped else ''))
+    # Two records sharing a key means one overwrote the other in the store --
+    # data quietly not making it in, so say so rather than leaving a gap.
+    seen = {}
+    for rec in records:
+        seen.setdefault(rec.key, []).append(f"{rec.exp_name}/{rec.cell_label}")
+    clashes = {k: v for k, v in seen.items() if len(v) > 1}
+    if clashes:
+        print(f'WARNING: {len(clashes)} record key(s) produced by more than one group; '
+              f'only the last was kept:')
+        for k, who in clashes.items():
+            print(f'  {k} <- {len(who)} groups')
     if failures:
         print(f'{len(failures)} failed:')
         for exp, cell, msg in failures[:20]:
