@@ -507,6 +507,34 @@ def _groupable_blocks(bright_contrasts):
     })
 
 
+@pytest.mark.parametrize('aperture, expected', [
+    (0.0, 'none'), (0, 'none'), (200.0, 'spot'), (350.0, 'spot'),
+])
+def test_center_spot_reads_the_aperture(aperture, expected):
+    assert sag.center_spot(aperture) == expected
+
+
+def test_center_spot_is_blank_when_the_aperture_is_missing():
+    assert sag.center_spot(float('nan')) == ''
+    assert sag.center_spot(None) == ''
+
+
+def test_grating_site_is_the_annulus_not_the_aperture():
+    """The 44-block case: no center spot, but the grating still excludes the center.
+
+    inner=400 / outer=1200 puts the grating at r=200-600 um with the center
+    r=0-200 um plain background. Keying the site on the aperture would call that
+    a center recording, which would relabel the whole ON-parasol surround series.
+    """
+    assert sag.grating_site(400.0) == 'surround'      # regardless of aperture
+    assert sag.center_spot(0.0) == 'none'             # no spot there
+    assert sag.grating_site(0.0) == 'center'
+    # The three configurations that actually occur, kept distinct by the pair.
+    configs = {(sag.grating_site(inner), sag.center_spot(ap))
+               for inner, ap in [(0.0, 0.0), (400.0, 0.0), (400.0, 300.0)]}
+    assert configs == {('center', 'none'), ('surround', 'none'), ('surround', 'spot')}
+
+
 def test_group_blocks_shows_every_bright_contrast_it_pooled():
     """brightBarContrast is a block-level setting but not a grouping key, so a cell
     swept over it lands in one group -- which the table has to show, not hide."""

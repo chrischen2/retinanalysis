@@ -331,12 +331,49 @@ def rig_of(exp_name: str) -> str:
 
 
 def grating_site(annulus_inner_diameter: float) -> str:
-    """'center' when the grating mask starts at r=0, else 'surround'.
+    """Where the grating is: 'center' when its mask starts at r=0, else 'surround'.
 
-    The protocol masks the grating to inner/2 <= r <= outer/2, so an inner
-    diameter of 0 puts the grating over the receptive-field center.
+    The protocol masks the grating to ``inner/2 <= r <= outer/2``, so the inner
+    diameter alone says whether the grating reaches the receptive-field center.
+
+    **``apertureDiameter`` does not decide this, and it is the natural thing to
+    assume it does.** The aperture is the center *spot* drawn on top of the
+    grating, a separate object — see :func:`center_spot`. The two come apart in
+    44 blocks of this dataset, which have ``apertureDiameter == 0`` (no spot)
+    and ``annulusInnerDiameter > 0`` (annular grating): at inner 400 / outer
+    1200 the grating covers r = 200-600 um and the center r = 0-200 um is plain
+    background, stimulated by nothing at all. Those are surround recordings with
+    an empty center, not center recordings — 37 of them are the ON-parasol
+    surround series. Keying on the aperture would relabel every one.
+
+    So the three configurations that actually occur are::
+
+        inner == 0                 -> grating disc over the center
+        inner > 0, aperture == 0   -> grating annulus over the surround, empty center
+        inner > 0, aperture > 0    -> grating annulus over the surround, spot in the center
+
+    ``grating_site`` separates the first from the other two; :func:`center_spot`
+    separates the second from the third.
     """
     return 'center' if float(annulus_inner_diameter) == 0.0 else 'surround'
+
+
+def center_spot(aperture_diameter: float) -> str:
+    """Whether a center spot was drawn on top of the grating: 'spot' or 'none'.
+
+    ``apertureDiameter`` is the diameter of the ``spotIntensity`` disc the
+    protocol paints over the middle of the frame (``stimulus_frame`` fills
+    ``r <= apertureDiameter/2``); 0 means no spot was drawn.
+
+    This is the *other* half of the stimulus configuration, independent of
+    :func:`grating_site` — a surround grating can be run with the center left
+    empty or with a spot in it, and those are different experiments. Splitting
+    them out is what makes both groupable without relabelling either.
+    """
+    if aperture_diameter is None or (isinstance(aperture_diameter, float)
+                                     and np.isnan(aperture_diameter)):
+        return ''
+    return 'spot' if float(aperture_diameter) > 0.0 else 'none'
 
 
 # --------------------------------------------------------------------------
@@ -398,6 +435,7 @@ def plot_stimulus_schematic(params: Dict, dark_contrasts: Optional[Sequence[floa
         dark_contrasts = [dc[0], dc[len(dc) // 2], dc[-1]] if len(dc) >= 3 else dc
 
     site = grating_site(params['annulusInnerDiameter'])
+    spot = center_spot(params['apertureDiameter'])
     fig, axes = plt.subplots(1, len(dark_contrasts), figsize=figsize, squeeze=False)
     for ax, dark in zip(axes[0], dark_contrasts):
         frame, extent = stimulus_frame(
@@ -415,10 +453,12 @@ def plot_stimulus_schematic(params: Dict, dark_contrasts: Optional[Sequence[floa
     axes[0][0].set_ylabel('µm')
 
     bar = params.get('currentBarWidth', params['barWidth'])
+    spot_txt = ('no center spot' if spot == 'none'
+                else f"spot {params['apertureDiameter']:g} µm @ {params['spotIntensity']:g}")
     fig.suptitle(
         f"grating over {site}  |  annulus {params['annulusInnerDiameter']:g}-"
-        f"{params['annulusOuterDiameter']:g} µm  |  spot {params['apertureDiameter']:g} µm "
-        f"@ {params['spotIntensity']:g}  |  bar {bar:g} µm  |  bg {params['backgroundIntensity']:g}"
+        f"{params['annulusOuterDiameter']:g} µm  |  {spot_txt}"
+        f"  |  bar {bar:g} µm  |  bg {params['backgroundIntensity']:g}"
         f"  |  bright {params.get('currentBrightContrast', params['brightBarContrast']):g}",
         fontsize=9, y=1.02)
     return fig
@@ -470,6 +510,7 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
     df = df.merge(meta, on=['exp_name', 'block_id'], how='left')
 
     df['grating_site'] = df['annulusInnerDiameter'].apply(grating_site)
+    df['center_spot'] = df['apertureDiameter'].apply(center_spot)
     df['cell_type_short'] = df['cell_type'].astype(str).str.split('\\').str[-1]
     df['rig'] = df['exp_name'].apply(rig_of)
 
@@ -518,9 +559,9 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
         # balancing contrast is a function of the pair, not of the light level
         # alone. See cone_predict_dark_contrast().
         cols = ['exp_name', 'cell_label', 'cell_type_short', 'onlineAnalysis', 'grating_site',
-                'filter_wheel_ndf', 'stage_ndfs', 'backgroundIntensity', 'light_level',
-                'apertureDiameter', 'annulusInnerDiameter', 'annulusOuterDiameter',
-                'brightBarContrast', 'n_epochs', 'block_id']
+                'center_spot', 'filter_wheel_ndf', 'stage_ndfs', 'backgroundIntensity',
+                'light_level', 'apertureDiameter', 'annulusInnerDiameter',
+                'annulusOuterDiameter', 'brightBarContrast', 'n_epochs', 'block_id']
         print(f"{len(df)} blocks | {df['exp_name'].nunique()} experiments | "
               f"{df.groupby(['exp_name', 'cell_label']).ngroups} cells")
         missing = df[~df['has_filter_wheel']]
@@ -608,6 +649,11 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
                   + f" -- {', '.join(sorted(dropped['exp_name'].unique()))}")
         df = df[keep]
 
+    # Purely derived from apertureDiameter, so fill it in rather than demanding
+    # the caller's block table already carry it.
+    if 'center_spot' not in df.columns:
+        df = df.assign(center_spot=df['apertureDiameter'].apply(center_spot))
+
     keys = ['exp_name', 'rig', 'cell_label', 'cell_type_short', 'onlineAnalysis',
             'grating_site', 'filter_wheel_ndf', 'backgroundIntensity']
     agg = dict(blocks=('block_id', 'size'), epochs=('n_epochs', 'sum'),
@@ -619,6 +665,11 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
                annulus_inner=('annulusInnerDiameter', 'first'),
                annulus_outer=('annulusOuterDiameter', 'first'),
                spot_intensity=('spotIntensity', 'first'),
+               # Joined for the same reason as bright: the aperture is not a
+               # grouping key either, so a group that ever mixed spot with no
+               # spot has to show it rather than report whichever came first.
+               center_spot=('center_spot',
+                            lambda s: ', '.join(sorted(set(str(v) for v in s)))),
                # Joined, not 'first': brightBarContrast is a block-level setting
                # (constant within a block, varied between them) but it is *not*
                # a grouping key, so a cell that was swept over bright contrast
@@ -658,7 +709,7 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
                       f"bg{r['backgroundIntensity']:g}: bright {r['bright']} "
                       f"({r['blocks']} blocks, {r['epochs']} epochs)")
         cols = ['cell_type_short', 'rig', 'exp_name', 'cell_label', 'onlineAnalysis',
-                'grating_site', 'aperture', 'annulus_inner', 'annulus_outer',
+                'grating_site', 'center_spot', 'aperture', 'annulus_inner', 'annulus_outer',
                 'spot_intensity', 'bright', 'filter_wheel_ndf', 'backgroundIntensity',
                 'rstar_level', 'blocks', 'epochs']
         cols += [c for c in ('rs_mohm', 'epochs_high_rs') if c in g.columns]
@@ -805,6 +856,7 @@ class GratingRecord:
             'mode_mismatch': self.mode_mismatch,
             'online_analysis_recorded': self.online_analysis_recorded or self.online_analysis,
             'aperture_diameter': self.config.get('apertureDiameter', np.nan),
+            'center_spot': center_spot(self.config.get('apertureDiameter', np.nan)),
             'annulus_inner': self.config.get('annulusInnerDiameter', np.nan),
             'annulus_outer': self.config.get('annulusOuterDiameter', np.nan),
             'spot_intensity': self.config.get('spotIntensity', np.nan),
@@ -1289,6 +1341,10 @@ def load_summary(path=None, rstar: bool = True) -> pd.DataFrame:
         return pd.DataFrame()
     out = pd.DataFrame(rows).sort_values(['cell_type', 'exp_name', 'cell_label'],
                                          ignore_index=True)
+    # Derived from a field records have always stored, so backfill it on read
+    # rather than making every pre-existing record need re-analysis for it.
+    if 'center_spot' not in out.columns and 'aperture_diameter' in out.columns:
+        out['center_spot'] = out['aperture_diameter'].apply(center_spot)
     return refresh_rstar(out) if rstar else out
 
 
