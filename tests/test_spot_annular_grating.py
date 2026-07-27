@@ -137,6 +137,25 @@ def test_refresh_rstar_restates_a_stored_summary_without_reanalysis():
     assert np.isnan(stored.loc[0, 'rstar'])
 
 
+def test_refresh_rstar_fills_a_blank_rig_column_from_the_experiment_name():
+    """Records written before summary_row() carried 'rig' have the column but leave it
+    empty; trusting the blank dropped them to the RSTAR_TABLE fallback and lost their R*."""
+    import pandas as pd
+    stored = pd.DataFrame({
+        'exp_name': ['2026-04-23_E', '2026-06-04_G', '2026-04-23_E'],
+        'rig': [np.nan, '', 'G'],          # blank, blank-string, and an explicit override
+        'ndf': [0.0, 1.0, 0.0], 'background_intensity': [0.5, 0.3, 0.5],
+        'rstar': [np.nan, np.nan, np.nan],
+        'light_level': ['(?R*)', '(?R*)', '(?R*)'],
+    })
+    out = sag.refresh_rstar(stored)
+    assert out['rig'].tolist() == ['E', 'G', 'G']
+    assert out.loc[0, 'rstar'] == pytest.approx(15000.0)      # E, derived
+    assert out.loc[1, 'rstar'] == pytest.approx(2310.0)       # G, derived
+    assert out.loc[2, 'rstar'] == pytest.approx(38500.0)      # explicit rig wins
+    assert out['rstar'].notna().all()
+
+
 def test_refresh_rstar_is_a_no_op_without_the_setting_columns():
     import pandas as pd
     empty = pd.DataFrame()
@@ -467,6 +486,39 @@ def test_mode_family_maps_labels_to_recording_modes():
     assert sag.mode_family('inh') == 'whole-cell'
     assert sag.mode_family('none') == ''      # unknown, never a mismatch
     assert sag.mode_family(None) == ''
+
+
+def _groupable_blocks(bright_contrasts):
+    """A minimal block table for group_blocks: one cell, one setting, N blocks."""
+    import pandas as pd
+    n = len(bright_contrasts)
+    return pd.DataFrame({
+        'exp_name': ['2026-04-04_E'] * n, 'rig': ['E'] * n,
+        'block_id': list(range(1, n + 1)), 'n_epochs': [10] * n,
+        'cell_label': ['Cell1'] * n, 'cell_type_short': ['OFF-parasol'] * n,
+        'onlineAnalysis': ['extracellular'] * n, 'grating_site': ['center'] * n,
+        'filter_wheel_ndf': [0.0] * n, 'backgroundIntensity': [0.5] * n,
+        'has_filter_wheel': [True] * n,
+        'light_setting': ['FW0/bg0.5'] * n, 'light_level': ['15000R*'] * n,
+        'rstar': [15000.0] * n, 'rstar_level': [15000.0] * n,
+        'apertureDiameter': [0.0] * n, 'annulusInnerDiameter': [0.0] * n,
+        'annulusOuterDiameter': [300.0] * n, 'spotIntensity': [0.0] * n,
+        'brightBarContrast': list(bright_contrasts),
+    })
+
+
+def test_group_blocks_shows_every_bright_contrast_it_pooled():
+    """brightBarContrast is a block-level setting but not a grouping key, so a cell
+    swept over it lands in one group -- which the table has to show, not hide."""
+    g = sag.group_blocks(_groupable_blocks([0.9, 0.5, 0.25]), show=False)
+    assert len(g) == 1
+    assert g.loc[0, 'bright'] == '0.9, 0.5, 0.25'      # descending, all of them
+    assert g.loc[0, 'blocks'] == 3
+
+
+def test_group_blocks_bright_is_a_bare_value_when_there_is_only_one():
+    g = sag.group_blocks(_groupable_blocks([0.9, 0.9]), show=False)
+    assert g.loc[0, 'bright'] == '0.9'
 
 
 def _blocks_with_rs(labels, resistances, exp='X_E', high_rs=None):

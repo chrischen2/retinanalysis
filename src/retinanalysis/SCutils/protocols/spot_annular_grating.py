@@ -505,10 +505,14 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
     df = df.sort_values(['exp_name', 'cell_label', 'start_time']).reset_index(drop=True)
 
     if show:
+        # brightBarContrast is shown because the cone prediction depends on it:
+        # the dark bar has to cancel *this* bright bar, so a block's predicted
+        # balancing contrast is a function of the pair, not of the light level
+        # alone. See cone_predict_dark_contrast().
         cols = ['exp_name', 'cell_label', 'cell_type_short', 'onlineAnalysis', 'grating_site',
                 'filter_wheel_ndf', 'stage_ndfs', 'backgroundIntensity', 'light_level',
                 'apertureDiameter', 'annulusInnerDiameter', 'annulusOuterDiameter',
-                'n_epochs', 'block_id']
+                'brightBarContrast', 'n_epochs', 'block_id']
         print(f"{len(df)} blocks | {df['exp_name'].nunique()} experiments | "
               f"{df.groupby(['exp_name', 'cell_label']).ngroups} cells")
         missing = df[~df['has_filter_wheel']]
@@ -532,7 +536,7 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
                                       zip(off['rstar'], off['rstar_level'])})))
         sc.scroll_table(df[cols], height=height,
                         num_cols=('n_epochs', 'block_id', 'filter_wheel_ndf',
-                                  'backgroundIntensity'))
+                                  'backgroundIntensity', 'brightBarContrast'))
     return df
 
 
@@ -586,7 +590,13 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
                annulus_inner=('annulusInnerDiameter', 'first'),
                annulus_outer=('annulusOuterDiameter', 'first'),
                spot_intensity=('spotIntensity', 'first'),
-               bright=('brightBarContrast', 'first'),
+               # Joined, not 'first': brightBarContrast is a block-level setting
+               # (constant within a block, varied between them) but it is *not*
+               # a grouping key, so a cell that was swept over bright contrast
+               # lands in one group. Showing only the first would hide that the
+               # tuning curve underneath averages different stimuli.
+               bright=('brightBarContrast',
+                       lambda s: ', '.join(f'{v:g}' for v in sorted(set(s), reverse=True))),
                block_ids=('block_id', lambda s: ', '.join(str(int(b)) for b in sorted(s))))
     if 'stage_ndfs' in df.columns:
         # Joined rather than 'first': a group can span blocks run behind
@@ -604,15 +614,30 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
     if show:
         print(f'{len(g)} recording groups '
               f'(experiment x cell x mode x grating site x filter wheel x background)')
+        # The cone prediction is a function of the bright bar the dark bar has to
+        # cancel, so pooling several bright contrasts into one tuning curve makes
+        # the measured crossing uninterpretable against it.
+        mixed = g[g['bright'].str.contains(',')]
+        if len(mixed):
+            print(f'  WARNING: {len(mixed)} group(s) pool more than one '
+                  f'brightBarContrast -- their tuning curve averages different '
+                  f'stimuli, and the crossing cannot be compared to a single '
+                  f'cone prediction. brightBarContrast is not a grouping key:')
+            for _, r in mixed.iterrows():
+                print(f"    {r['exp_name']} {r['cell_label']} {r['onlineAnalysis']} "
+                      f"{r['grating_site']} FW{r['filter_wheel_ndf']:g}/"
+                      f"bg{r['backgroundIntensity']:g}: bright {r['bright']} "
+                      f"({r['blocks']} blocks, {r['epochs']} epochs)")
         cols = ['cell_type_short', 'rig', 'exp_name', 'cell_label', 'onlineAnalysis',
                 'grating_site', 'aperture', 'annulus_inner', 'annulus_outer',
-                'spot_intensity', 'filter_wheel_ndf', 'backgroundIntensity',
+                'spot_intensity', 'bright', 'filter_wheel_ndf', 'backgroundIntensity',
                 'rstar_level', 'blocks', 'epochs']
         cols += [c for c in ('rs_mohm', 'epochs_high_rs') if c in g.columns]
         sc.tree_table(g.sort_values(['cell_type_short', 'exp_name', 'cell_label'])[cols],
                       levels=['cell_type_short', 'rig', 'exp_name', 'cell_label'],
                       height=height, num_cols=('aperture', 'annulus_inner', 'annulus_outer',
-                                               'filter_wheel_ndf', 'backgroundIntensity',
+                                               'spot_intensity', 'filter_wheel_ndf',
+                                               'backgroundIntensity',
                                                'rstar_level', 'blocks', 'epochs', 'rs_mohm',
                                                'epochs_high_rs'))
     return g
@@ -1191,8 +1216,16 @@ def refresh_rstar(summary: pd.DataFrame) -> pd.DataFrame:
     if summary.empty or 'ndf' not in summary.columns:
         return summary
     out = summary.copy()
-    rigs = (out['rig'] if 'rig' in out.columns
-            else out['exp_name'].apply(rig_of))
+    # The rig is the letter at the end of the experiment name, so derive it and
+    # let a stored value override only where it actually has one. Records saved
+    # before summary_row() carried 'rig' have the column but leave it empty, and
+    # trusting that blank dropped them to the RSTAR_TABLE fallback -- which is
+    # rig G's numbers and covers five settings -- leaving most of them with no
+    # light level at all.
+    rigs = out['exp_name'].apply(rig_of)
+    if 'rig' in out.columns:
+        stored = out['rig']
+        rigs = stored.where(stored.notna() & (stored.astype(str).str.strip() != ''), rigs)
     values = [light_level_rstar(n, b, rig=r)
               for n, b, r in zip(out['ndf'], out['background_intensity'], rigs)]
     out['rig'] = list(rigs)
