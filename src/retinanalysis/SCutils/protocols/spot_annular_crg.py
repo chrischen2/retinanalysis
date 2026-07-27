@@ -64,13 +64,15 @@ from retinanalysis.SCutils.protocols.spot_annular_grating import (  # noqa: F401
 # The recording-mode audit and the raw-trace views are protocol-independent —
 # they read amp_data and the epoch timing, both of which this protocol has — so
 # they are re-exported rather than reimplemented. crg.check_series_resistance is
-# the same function the flashed notebook calls in its section 1b.
+# the same function the flashed notebook calls in its section 1b. The raw views
+# take a `reversal_hz` that marks each grating reversal: a CRGRecord built with
+# keep_raw=True supplies it, and a bare (exp_name, block_ids) call passes it.
 from retinanalysis.SCutils.protocols.spot_annular_grating import (  # noqa: F401
     load_raw, plot_raw_blocks, plot_raw_epochs,
 )
 from retinanalysis.SCutils.recording_mode import (  # noqa: F401
     MAX_SERIES_RESISTANCE, check_series_resistance, mode_family,
-    resolve_recording_mode, stage_ndf_table,
+    read_series_resistance, resolve_recording_mode, stage_ndf_table,
 )
 
 PROTOCOL = 'spotWithAnnularContrastReversingGrating'
@@ -456,6 +458,10 @@ class CRGRecord:
     block_ids: List[int]
     config: Dict = field(default_factory=dict)
     units: str = ''
+    # Unprocessed amplifier traces, kept only when analyze_group(keep_raw=True),
+    # so plot_raw_blocks / plot_raw_epochs can draw the data underneath the
+    # summary without loading the blocks again. Never written to the store.
+    raw: Optional[Dict] = None
 
     @property
     def key(self) -> str:
@@ -548,6 +554,7 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
                   cycles_to_drop: int = DEFAULTS['cycles_to_drop'],
                   detector_kwargs: Optional[dict] = None,
                   drop_epochs: Sequence[int] = (),
+                  keep_raw: bool = False,
                   verbose: bool = True) -> CRGRecord:
     """Reversal-null analysis for one recording group.
 
@@ -561,6 +568,11 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
 
     ``cycles_to_drop`` skips the first reversal cycle, which carries the onset
     transient rather than a steady-state reversal response.
+
+    ``keep_raw=True`` attaches the unprocessed amplifier traces to the record as
+    ``rec.raw``, so :func:`plot_raw_blocks` and :func:`plot_raw_epochs` can draw
+    the data underneath the summary without loading the blocks a second time.
+    They are never written to the store.
     """
     import retinanalysis as ra
     from retinanalysis.utils.psth import spike_times_to_psth
@@ -570,6 +582,9 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
     diff, f1, f2, cycles_all = [], [], [], []
     first_params, used_blocks, freq = None, [], None
     trace_rate = None
+    raw = {'traces': [], 'spike_times_ms': [], 'dark': [], 'block_id': [],
+           'series_resistance': [], 'sample_rate': None, 'exp_name': exp_name,
+           'units': ''} if keep_raw else None
 
     for bid in block_ids:
         sb = ra.StimBlock(exp_name, int(bid), verbose=False)
@@ -591,6 +606,25 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
         stim_pts = int(round(float(p0['stimTime']) / 1e3 * sr))
         keep = [i for i in range(len(ep)) if i not in set(drop_epochs)]
         used_blocks.append(int(bid))
+
+        # The traces exactly as the amplifier wrote them, before the PSTH or the
+        # box-car below — kept only so the raw views can be drawn from this load.
+        if keep_raw:
+            try:
+                rs = read_series_resistance(exp_name, int(bid))
+            except Exception:
+                rs = np.full(len(ep), np.nan)
+            raw['sample_rate'] = sr
+            raw['pre_time_ms'] = float(p0['preTime'])
+            raw['stim_time_ms'] = float(p0['stimTime'])
+            raw['units'] = 'rate (Hz)' if spiking else 'pA'
+            amp = np.asarray(rb.amp_data, dtype=float)
+            for i in keep:
+                raw['traces'].append(amp[i])
+                raw['spike_times_ms'].append(
+                    np.asarray(rb.spike_times[i], float) / sr * 1e3 if spiking else None)
+                raw['block_id'].append(int(bid))
+                raw['series_resistance'].append(float(rs[i]) if i < rs.size else np.nan)
 
         if spiking:
             # PSTH at 1 kHz, then window on the stimulus with the spike latency
@@ -628,6 +662,9 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
         bar.extend(sag._epoch_param(ep, 'currentBarWidth')[keep])
 
     dark = np.asarray(dark); diff = np.asarray(diff)
+    if keep_raw:
+        # Same order as the traces: both are appended per block over `keep`.
+        raw['dark'] = dark
     f1 = np.asarray(f1); f2 = np.asarray(f2)
     bright = np.asarray(bright); bar = np.asarray(bar)
     width = min(c.size for c in cycles_all)
@@ -671,7 +708,7 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
         cycles=cycles, cycle_time_ms=np.arange(width) / trace_rate * 1e3,
         pre_time_ms=float(first_params['preTime']), stim_time_ms=float(first_params['stimTime']),
         n_epochs=int(valid.sum()), block_ids=used_blocks,
-        config={k: first_params.get(k) for k in CONFIG_KEYS}, units=units)
+        config={k: first_params.get(k) for k in CONFIG_KEYS}, units=units, raw=raw)
     if verbose:
         print(rec.describe())
     return rec

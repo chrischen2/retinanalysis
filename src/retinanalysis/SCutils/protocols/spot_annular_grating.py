@@ -2351,10 +2351,12 @@ def load_raw(exp_name, block_ids: Optional[Sequence[int]] = None,
     detector, not to this array — so these are the raw traces, with no
     filtering, smoothing or baseline subtraction.
 
-    Pass a :class:`GratingRecord` that was built with ``analyze_group(keep_raw=True)``
-    as ``exp_name`` and the traces it already holds are returned instead, so the
-    blocks are not loaded a second time. Otherwise give ``exp_name`` and
-    ``block_ids`` and they are loaded now.
+    Pass a record built with ``analyze_group(keep_raw=True)`` as ``exp_name`` and
+    the traces it already holds are returned instead, so the blocks are not
+    loaded a second time. Any record with a ``raw`` attribute works — the
+    reversing protocol's :class:`spot_annular_crg.CRGRecord` fills the same
+    dict — which is why this tests for the attribute rather than the class.
+    Otherwise give ``exp_name`` and ``block_ids`` and they are loaded now.
 
     Returns a dict with ``traces`` (list of 1-D arrays, one per epoch),
     ``spike_times_ms`` (per epoch, ``None`` for whole-cell), ``dark`` (the
@@ -2363,12 +2365,14 @@ def load_raw(exp_name, block_ids: Optional[Sequence[int]] = None,
     """
     import retinanalysis as ra
 
-    if isinstance(exp_name, GratingRecord):
-        if exp_name.raw is None:
-            raise ValueError('this record has no raw traces; build it with '
-                             'analyze_group(..., keep_raw=True) or pass '
-                             'exp_name and block_ids instead')
-        return exp_name.raw
+    if not isinstance(exp_name, str):
+        raw = getattr(exp_name, 'raw', None)
+        if raw is None:
+            raise ValueError(
+                f'this {type(exp_name).__name__} has no raw traces; build it with '
+                f'analyze_group(..., keep_raw=True) or pass exp_name and block_ids '
+                f'instead')
+        return raw
     if block_ids is None:
         raise ValueError('block_ids is required unless a GratingRecord is passed')
 
@@ -2410,11 +2414,29 @@ def load_raw(exp_name, block_ids: Optional[Sequence[int]] = None,
     return out
 
 
+def _reversal_times_ms(pre_ms: float, stim_ms: float,
+                       reversal_hz: Optional[float]) -> np.ndarray:
+    """Times of each grating reversal within the stimulus window, in ms.
+
+    The reversing protocol drives the grating with ``sign(cos(2·pi·f·t))``, so
+    the frames swap every half period and a burst is expected at each swap.
+    Empty for a flashed recording, which has no reversals.
+
+    Strictly inside the window: a swap landing exactly on the end of the
+    stimulus is the window's own edge, already drawn by the shading, and it is
+    not a reversal the cell ever saw.
+    """
+    if not reversal_hz or not np.isfinite(reversal_hz) or reversal_hz <= 0:
+        return np.zeros(0, dtype=float)
+    half_ms = 1e3 / (2.0 * float(reversal_hz))
+    return pre_ms + np.arange(1, int(np.ceil(stim_ms / half_ms))) * half_ms
+
+
 def plot_raw_epochs(exp_name, block_ids: Optional[Sequence[int]] = None,
                     online_analysis: Optional[str] = None,
                     max_contrasts: int = 6, max_epochs_per_contrast: int = 8,
                     detector_kwargs: Optional[dict] = None,
-                    smooth: bool = True,
+                    smooth: bool = True, reversal_hz: Optional[float] = None,
                     figsize: Tuple[float, float] = (10.0, 7.0)):
     """Raw data behind one recording: traces overlaid by contrast, and a spike raster.
 
@@ -2425,10 +2447,16 @@ def plot_raw_epochs(exp_name, block_ids: Optional[Sequence[int]] = None,
     ``smooth=True`` box-cars them (by ``DEFAULTS['smooth_ms']``) to make the
     current legible; ``smooth=False`` leaves them exactly as recorded.
 
-    Accepts either a :class:`GratingRecord` built with ``keep_raw=True`` (no
-    reload) or ``exp_name`` + ``block_ids``. Epochs are grouped by
-    ``currentDarkContrast`` and at most ``max_contrasts`` of them are shown,
-    spread across the tested range.
+    Accepts either a record built with ``keep_raw=True`` (no reload) or
+    ``exp_name`` + ``block_ids``. Epochs are grouped by ``currentDarkContrast``
+    and at most ``max_contrasts`` of them are shown, spread across the tested
+    range.
+
+    ``reversal_hz`` draws a line at every grating reversal, which is what makes
+    a reversing recording readable: the response should burst at each one, twice
+    per cycle, and that doubling is the measurement. Left at ``None`` for the
+    flashed protocol, which has nothing to reverse. A record carrying a
+    ``temporal_frequency`` supplies it automatically.
     """
     import matplotlib.pyplot as plt
     from retinanalysis.utils import style
@@ -2439,6 +2467,9 @@ def plot_raw_epochs(exp_name, block_ids: Optional[Sequence[int]] = None,
     exp_label = raw.get('exp_name', '')
     sr = float(raw['sample_rate'])
     pre_ms, stim_ms = float(raw['pre_time_ms']), float(raw['stim_time_ms'])
+    if reversal_hz is None:
+        reversal_hz = getattr(exp_name, 'temporal_frequency', None)
+    reversals = _reversal_times_ms(pre_ms, stim_ms, reversal_hz)
     spikes = raw['spike_times_ms']
     spiking = len(spikes) > 0 and spikes[0] is not None
     mode = 'extracellular' if spiking else 'whole cell'
@@ -2466,16 +2497,23 @@ def plot_raw_epochs(exp_name, block_ids: Optional[Sequence[int]] = None,
         for i in idx:
             ax.plot(t_ms[:len(traces[i])], traces[i], lw=0.5, alpha=0.7, color='#333333')
         ax.axvspan(pre_ms, pre_ms + stim_ms, color='#F0C000', alpha=0.15, lw=0, zorder=0)
+        for x in reversals:
+            ax.axvline(x, color='#0072B2', lw=0.9, alpha=0.8, zorder=1)
         ax.set_ylabel(f'{c:g}\n({len(idx)} ep)', fontsize=7)
         if r == 0:
             smoothed = '' if spiking or not smooth else f" (box-car {DEFAULTS['smooth_ms']:g} ms)"
-            ax.set_title(f'traces from the h5 — {exp_label} {mode}{smoothed}', fontsize=9)
+            reversed_txt = (f' — blue = reversals at {reversal_hz:g} Hz'
+                            if reversals.size else '')
+            ax.set_title(f'traces from the h5 — {exp_label} {mode}{smoothed}{reversed_txt}',
+                         fontsize=9)
         if spiking:
             ax_r = axes[r][1]
             for k, i in enumerate(idx):
                 ax_r.eventplot(spikes[i], lineoffsets=k, linelengths=0.7, linewidths=0.8,
                                colors='#222222')
             ax_r.axvspan(pre_ms, pre_ms + stim_ms, color='#F0C000', alpha=0.15, lw=0, zorder=0)
+            for x in reversals:
+                ax_r.axvline(x, color='#0072B2', lw=0.9, alpha=0.8, zorder=1)
             ax_r.set_ylim(-0.6, max(len(idx) - 0.4, 0.6))
             ax_r.invert_yaxis()
             ax_r.set_yticks([])
@@ -2492,6 +2530,7 @@ def plot_raw_epochs(exp_name, block_ids: Optional[Sequence[int]] = None,
 def plot_raw_blocks(exp_name, block_ids: Optional[Sequence[int]] = None,
                     max_epochs: Optional[int] = None, show_mean: bool = True,
                     online_analysis: Optional[str] = None,
+                    reversal_hz: Optional[float] = None,
                     figsize: Optional[Tuple[float, float]] = None):
     """Raw amplifier traces, one panel per block, every epoch overlaid.
 
@@ -2507,8 +2546,9 @@ def plot_raw_blocks(exp_name, block_ids: Optional[Sequence[int]] = None,
     block's series resistance, so a whole-cell block recorded through a bad
     electrode is visible next to its trace.
 
-    Accepts either a :class:`GratingRecord` built with ``keep_raw=True`` (drawn
-    from the traces it already holds, no reload) or ``exp_name`` + ``block_ids``.
+    Accepts either a record built with ``keep_raw=True`` (drawn from the traces
+    it already holds, no reload) or ``exp_name`` + ``block_ids``.
+    ``reversal_hz`` marks each grating reversal, as in :func:`plot_raw_epochs`.
     """
     import matplotlib.pyplot as plt
     from retinanalysis.utils import style
@@ -2518,6 +2558,9 @@ def plot_raw_blocks(exp_name, block_ids: Optional[Sequence[int]] = None,
     exp_label = raw.get('exp_name', '')
     sr = float(raw['sample_rate'])
     pre_ms, stim_ms = float(raw['pre_time_ms']), float(raw['stim_time_ms'])
+    if reversal_hz is None:
+        reversal_hz = getattr(exp_name, 'temporal_frequency', None)
+    reversals = _reversal_times_ms(pre_ms, stim_ms, reversal_hz)
     ep_block = np.asarray(raw['block_id'], dtype=int)
     ep_dark = np.asarray(raw['dark'], dtype=float)
     ep_rs = np.asarray(raw['series_resistance'], dtype=float)
@@ -2540,6 +2583,8 @@ def plot_raw_blocks(exp_name, block_ids: Optional[Sequence[int]] = None,
         if show_mean:
             ax.plot(t_ms, data.mean(axis=0), lw=1.1, color='#D55E00', label='mean')
         ax.axvspan(pre_ms, pre_ms + stim_ms, color='#F0C000', alpha=0.15, lw=0, zorder=0)
+        for x in reversals:
+            ax.axvline(x, color='#0072B2', lw=0.9, alpha=0.8, zorder=1)
 
         darks = np.unique(ep_dark[idx][~np.isnan(ep_dark[idx])])
         rs = np.nanmedian(ep_rs[idx]) if np.isfinite(ep_rs[idx]).any() else np.nan
@@ -2554,7 +2599,8 @@ def plot_raw_blocks(exp_name, block_ids: Optional[Sequence[int]] = None,
         if show_mean:
             ax.legend(frameon=False, fontsize=7, loc='upper right')
     axes[-1, 0].set_xlabel('Time (ms)')
-    fig.suptitle(f'{exp_label} — raw traces per block, before filtering or spike detection',
+    fig.suptitle(f'{exp_label} — raw traces per block, before filtering or spike detection'
+                 + (f'  (blue = reversals at {reversal_hz:g} Hz)' if reversals.size else ''),
                  fontsize=9.5, y=1.0)
     fig.tight_layout()
     return fig

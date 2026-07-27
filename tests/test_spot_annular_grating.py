@@ -985,6 +985,55 @@ def test_overlay_of_nothing_is_empty():
     assert sag.tuning_overlay([]).empty
 
 
+# --- raw-view helpers -------------------------------------------------------
+
+def test_reversal_times_fall_on_every_half_period():
+    """sign(cos(2·pi·f·t)) swaps the frames twice per cycle."""
+    times = sag._reversal_times_ms(pre_ms=200.0, stim_ms=1000.0, reversal_hz=2.0)
+    assert np.allclose(times, [450.0, 700.0, 950.0])
+
+
+def test_reversal_times_scale_with_frequency():
+    slow = sag._reversal_times_ms(200.0, 1000.0, 2.0)
+    fast = sag._reversal_times_ms(200.0, 1000.0, 4.0)
+    assert len(fast) == 7 and len(slow) == 3        # twice as many, minus the edge
+    assert np.allclose(np.diff(fast), 125.0)
+
+
+def test_reversal_on_the_window_edge_is_not_drawn():
+    """A swap at the end of the stimulus is the window's edge, already shaded."""
+    times = sag._reversal_times_ms(200.0, 1000.0, 2.0)
+    assert 1200.0 not in times                       # 200 + 4 * 250
+    assert times.max() < 1200.0
+
+
+def test_no_reversals_for_a_flashed_recording():
+    for hz in (None, 0.0, float('nan'), -1.0):
+        assert sag._reversal_times_ms(200.0, 1000.0, hz).size == 0
+
+
+class _StubRecord:
+    """Stands in for a GratingRecord / CRGRecord in load_raw."""
+    def __init__(self, raw=None):
+        self.raw = raw
+
+
+def test_load_raw_takes_any_record_that_carries_traces():
+    """CRGRecord is not a GratingRecord, so the check is on the attribute."""
+    raw = {'traces': [np.zeros(3)], 'sample_rate': 1e4}
+    assert sag.load_raw(_StubRecord(raw)) is raw
+
+
+def test_load_raw_says_how_to_get_the_traces_when_a_record_has_none():
+    with pytest.raises(ValueError, match='keep_raw=True'):
+        sag.load_raw(_StubRecord(None))
+
+
+def test_load_raw_needs_block_ids_when_given_an_experiment_name():
+    with pytest.raises(ValueError, match='block_ids is required'):
+        sag.load_raw('2026-06-04_G')
+
+
 def test_overlay_keeps_units_so_modes_are_not_pooled_on_one_axis():
     long = sag.tuning_overlay([_overlay_record(),
                                _overlay_record(units='excitation (pA)',
