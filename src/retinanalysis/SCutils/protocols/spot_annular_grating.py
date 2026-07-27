@@ -43,8 +43,26 @@ DEFAULTS = dict(
     cone_i0=2000.0,        # Weber I0 (R*) for the cancellation prediction
 )
 
-# (filter-wheel NDF, backgroundIntensity) -> mean photoisomerization rate (R*).
-# Calibration table from lightLevelRStar() in the MATLAB.
+# Photoisomerization rate at display intensity 1.0 with the filter wheel at
+# NDF 0, measured per rig. Everything else follows from these two numbers: the
+# wheel attenuates by 10**NDF, and the display is linear in intensity, so
+#
+#     R* = RIG_MAX_RSTAR[rig] / 10**NDF * intensity
+#
+# The rigs differ by a factor of 2.6, which is why the light level cannot be
+# read off the wheel setting alone.
+RIG_MAX_RSTAR: Dict[str, float] = {'E': 30000.0, 'G': 77000.0}
+
+# (filter-wheel NDF, backgroundIntensity) -> R*, the table from
+# lightLevelRStar() in the MATLAB. Superseded by RIG_MAX_RSTAR and kept only as
+# the fallback for a recording whose rig is not in that dict.
+#
+# Worth knowing what it actually was: every entry matches rig G to within
+# 0.91-1.16x (it is rounded), and none describe rig E, which is 2.6x dimmer.
+# It keyed on the wheel and background alone, so a rig-E block landing on one
+# of these pairs would have been handed rig-G numbers -- as it happens none
+# ever did, and the table's real effect was to leave 129 of 180 blocks, and
+# every rig-E block, with no light level at all.
 RSTAR_TABLE: List[Tuple[float, float, float]] = [
     (0.0, 0.15, 12000.0),
     (1.0, 0.15, 1000.0),
@@ -86,8 +104,28 @@ CONFIG_KEYS = ['apertureDiameter', 'annulusInnerDiameter', 'annulusOuterDiameter
 # light level / model
 # --------------------------------------------------------------------------
 
-def is_calibrated(ndf: float, background_intensity: float) -> bool:
-    """True when (NDF, background) is an exact entry in :data:`RSTAR_TABLE`."""
+def max_rstar(rig, ndf: float = 0.0) -> float:
+    """R* at display intensity 1.0 for a rig at a given filter-wheel setting.
+
+    The wheel is a neutral density, so it attenuates by ``10**NDF``: rig G's
+    77000 R* ceiling becomes 24350 at NDF 0.5 and 7700 at NDF 1. NaN for a rig
+    with no measured ceiling or a missing wheel reading.
+    """
+    base = RIG_MAX_RSTAR.get(str(rig).strip().upper()) if rig is not None else None
+    if base is None or ndf is None or np.isnan(float(ndf)):
+        return np.nan
+    return float(base) / 10.0 ** float(ndf)
+
+
+def is_calibrated(ndf: float, background_intensity: float, rig=None) -> bool:
+    """True when this recording's light level rests on a measured calibration.
+
+    That means a known rig and a filter-wheel reading (:data:`RIG_MAX_RSTAR`).
+    Without a rig it falls back to asking whether the combination is an exact
+    entry in the older :data:`RSTAR_TABLE`.
+    """
+    if rig is not None and np.isfinite(max_rstar(rig, ndf if ndf is not None else np.nan)):
+        return True
     if ndf is None or np.isnan(ndf):
         return False
     return any(abs(ndf - fw) < 1e-6 and abs(background_intensity - bg) < 1e-6
@@ -97,23 +135,40 @@ def is_calibrated(ndf: float, background_intensity: float) -> bool:
 def light_setting(ndf: float, background_intensity: float) -> str:
     """The light level as recorded: ``'FW0/bg0.50'``.
 
-    This is the raw, always-available description — filter-wheel NDF plus
-    background intensity. Converting it to R* needs a calibration that belongs
-    to the experimenter; see :func:`apply_rstar_mapping`.
+    The raw, always-available description — filter-wheel NDF plus background
+    intensity — independent of any calibration. :func:`light_level_rstar`
+    converts it to R*.
     """
     fw = 'FW?' if ndf is None or np.isnan(ndf) else f'FW{ndf:g}'
     return f'{fw}/bg{background_intensity:g}'
 
 
-def light_level_rstar(ndf: float, background_intensity: float) -> Tuple[float, str]:
-    """Map (filter-wheel NDF, backgroundIntensity) to R*; port of lightLevelRStar.m.
+def light_level_rstar(ndf: float, background_intensity: float,
+                      rig=None) -> Tuple[float, str]:
+    """Mean photoisomerization rate for a recording, and a label for it.
 
-    Returns ``(rstar, label)``, NaN for anything not in :data:`RSTAR_TABLE`.
-    Nothing is estimated or interpolated here: an uncalibrated combination stays
-    NaN and the label falls back to the raw setting, so a missing calibration is
-    always visible rather than silently filled in. Supply your own conversion
-    with :func:`apply_rstar_mapping`.
+    With a rig, this is the measured calibration::
+
+        R* = RIG_MAX_RSTAR[rig] / 10**NDF * backgroundIntensity
+
+    — the rig's intensity-1 ceiling, attenuated by the wheel, scaled by the
+    background the protocol actually ran at. **The rig is not optional in
+    practice**: E and G differ by 2.6x, so the same wheel and background mean
+    two different light levels on the two rigs.
+
+    Without a rig it falls back to :data:`RSTAR_TABLE`, the older MATLAB
+    lookup, which covers five (NDF, background) pairs and is really rig G's
+    numbers. Anything it does not cover stays NaN and the label says so, rather
+    than being quietly filled in.
+
+    Returns ``(rstar, label)``.
     """
+    ceiling = max_rstar(rig, ndf)
+    if np.isfinite(ceiling) and background_intensity is not None \
+            and not np.isnan(float(background_intensity)):
+        rstar = ceiling * float(background_intensity)
+        return rstar, f'{rstar:.0f}R*'
+
     for fw, bg, rstar in RSTAR_TABLE:
         if (ndf is not None and not np.isnan(ndf) and abs(ndf - fw) < 1e-6
                 and abs(background_intensity - bg) < 1e-6):
@@ -123,20 +178,24 @@ def light_level_rstar(ndf: float, background_intensity: float) -> Tuple[float, s
 
 def apply_rstar_mapping(summary: pd.DataFrame,
                         mapping: Dict[Tuple[float, float], float]) -> pd.DataFrame:
-    """Attach your own (filter wheel, background) -> R* calibration to a summary.
+    """Override the light-level conversion on a stored summary.
 
-    The analysis never needs R* — crossings come from the tuning curves — so the
-    conversion can be done at any time, on stored records, without re-running
-    anything::
+    :data:`RIG_MAX_RSTAR` now gives every rig-E and rig-G recording an R*, so
+    this is no longer needed to fill the Weber comparison in. It remains for
+    re-calibrating: measure the rigs again and you can restate stored records
+    without re-analyzing anything, since the crossings never depended on the
+    conversion::
 
         summary = sag.apply_rstar_mapping(sag.load_summary(), {
             (0.0, 0.50): 40000, (0.0, 0.30): 24000, (1.0, 0.50): 3333,
         })
         sag.plot_weber_comparison(sag.add_condition(summary))
 
-    Keys are ``(ndf, background_intensity)``; entries already covered by
-    :data:`RSTAR_TABLE` keep their measured value unless the mapping overrides
-    them. Returns a copy with ``rstar`` and ``light_level`` updated.
+    Keys are ``(ndf, background_intensity)``, so a mapping applies to **both
+    rigs at once** — which is wrong for anything but a single-rig summary,
+    since E and G differ by 2.6x at the same setting. Filter the summary by rig
+    first, or change :data:`RIG_MAX_RSTAR` and re-run. Returns a copy with
+    ``rstar`` and ``light_level`` updated.
     """
     out = summary.copy()
     rstar = list(out['rstar'])
@@ -404,14 +463,18 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
                   on='block_id', how='left')
     df['stage_ndfs'] = df['stage_ndfs'].fillna('')
 
-    rs = [light_level_rstar(n, b)
-          for n, b in zip(df['filter_wheel_ndf'], df['backgroundIntensity'])]
+    # R* comes from the rig's measured ceiling, so the rig has to come with the
+    # wheel setting -- the two rigs differ by 2.6x at the same setting.
+    rs = [light_level_rstar(n, b, rig=r)
+          for n, b, r in zip(df['filter_wheel_ndf'], df['backgroundIntensity'], df['rig'])]
     df['rstar'] = [r for r, _ in rs]
     df['light_level'] = [lab for _, lab in rs]
     df['light_setting'] = [light_setting(n, b)
                            for n, b in zip(df['filter_wheel_ndf'], df['backgroundIntensity'])]
-    df['rstar_measured'] = [is_calibrated(n, b)
-                            for n, b in zip(df['filter_wheel_ndf'], df['backgroundIntensity'])]
+    df['rstar_measured'] = [is_calibrated(n, b, rig=r)
+                            for n, b, r in zip(df['filter_wheel_ndf'],
+                                               df['backgroundIntensity'], df['rig'])]
+    df['max_rstar'] = [max_rstar(r, n) for r, n in zip(df['rig'], df['filter_wheel_ndf'])]
     df = df.sort_values(['exp_name', 'cell_label', 'start_time']).reset_index(drop=True)
 
     if show:
@@ -629,7 +692,9 @@ class GratingRecord:
             'cell_type': self.cell_type, 'online_analysis': self.online_analysis,
             'grating_site': self.grating_site, 'ndf': self.ndf,
             'background_intensity': self.background_intensity, 'rstar': self.rstar,
-            'rstar_measured': is_calibrated(self.ndf, self.background_intensity),
+            'rig': rig_of(self.exp_name),
+            'rstar_measured': is_calibrated(self.ndf, self.background_intensity,
+                                            rig=rig_of(self.exp_name)),
             'light_setting': light_setting(self.ndf, self.background_intensity),
             'light_level': self.light_level, 'baseline_mean': self.baseline_mean,
             'baseline_sem': self.baseline_sem, 'crossing_nearest': self.crossing_nearest,
@@ -893,7 +958,7 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
     bright_mode = float(pd.Series(bright[valid]).mode().iloc[0]) if valid.any() else np.nan
     ndf = float(first_params.get('NDF', np.nan))
     bg = float(first_params['backgroundIntensity'])
-    rstar, light_label = light_level_rstar(ndf, bg)
+    rstar, light_label = light_level_rstar(ndf, bg, rig=rig_of(exp_name))
 
     sr = float(first_params['sampleRate'])
     trace_ms = (psth_time_axis(traces.shape[1], 1000.0) if 'Hz' in units
@@ -1068,8 +1133,41 @@ def save_records(records: Sequence[GratingRecord], path=None, verbose: bool = Tr
     return h5_path
 
 
-def load_summary(path=None) -> pd.DataFrame:
-    """Scalar fields for every stored record — the population-analysis index."""
+def refresh_rstar(summary: pd.DataFrame) -> pd.DataFrame:
+    """Recompute ``rstar`` / ``light_level`` from the stored setting and the rig.
+
+    What a record stores is the *setting* — filter-wheel NDF and background
+    intensity — which is a fact about the experiment. R* is a fact about the
+    rig, and it can be restated whenever the calibration is. Since the analysis
+    never uses R* (the crossings come from the tuning curves), doing the
+    conversion on read means a change to :data:`RIG_MAX_RSTAR` reaches records
+    that were analyzed before it, with no re-analysis.
+
+    Returns a copy with ``rstar``, ``light_level`` and ``rstar_measured``
+    brought up to date.
+    """
+    if summary.empty or 'ndf' not in summary.columns:
+        return summary
+    out = summary.copy()
+    rigs = (out['rig'] if 'rig' in out.columns
+            else out['exp_name'].apply(rig_of))
+    values = [light_level_rstar(n, b, rig=r)
+              for n, b, r in zip(out['ndf'], out['background_intensity'], rigs)]
+    out['rig'] = list(rigs)
+    out['rstar'] = [v for v, _ in values]
+    out['light_level'] = [lab for _, lab in values]
+    out['rstar_measured'] = [is_calibrated(n, b, rig=r)
+                             for n, b, r in zip(out['ndf'], out['background_intensity'], rigs)]
+    return out
+
+
+def load_summary(path=None, rstar: bool = True) -> pd.DataFrame:
+    """Scalar fields for every stored record — the population-analysis index.
+
+    The light level is recomputed on read (:func:`refresh_rstar`), so records
+    analyzed before the rig calibration existed still come back with an R*.
+    Pass ``rstar=False`` to see exactly what is on disk.
+    """
     import h5py
     from pathlib import Path
 
@@ -1082,8 +1180,11 @@ def load_summary(path=None) -> pd.DataFrame:
         for key in f:
             a = dict(f[key].attrs)
             rows.append({k: (v.decode() if isinstance(v, bytes) else v) for k, v in a.items()})
-    return pd.DataFrame(rows).sort_values(['cell_type', 'exp_name', 'cell_label'],
-                                          ignore_index=True) if rows else pd.DataFrame()
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows).sort_values(['cell_type', 'exp_name', 'cell_label'],
+                                         ignore_index=True)
+    return refresh_rstar(out) if rstar else out
 
 
 def load_records(keys: Optional[Sequence[str]] = None, path=None) -> Dict[str, Dict]:

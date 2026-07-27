@@ -11,6 +11,43 @@ from retinanalysis.SCutils.protocols import spot_annular_grating as sag
 
 # --- light level -----------------------------------------------------------
 
+def test_rig_ceilings_are_the_measured_calibration():
+    assert sag.RIG_MAX_RSTAR == {'E': 30000.0, 'G': 77000.0}
+    assert sag.max_rstar('E') == 30000.0
+    assert sag.max_rstar('G') == 77000.0
+
+
+@pytest.mark.parametrize('rig, ndf, expected', [
+    ('E', 0.0, 30000.0), ('E', 1.0, 3000.0),
+    ('G', 0.0, 77000.0), ('G', 1.0, 7700.0),
+])
+def test_filter_wheel_attenuates_by_ten_to_the_ndf(rig, ndf, expected):
+    assert sag.max_rstar(rig, ndf) == pytest.approx(expected)
+
+
+def test_half_ndf_is_a_root_ten_step():
+    assert sag.max_rstar('E', 0.5) == pytest.approx(30000 / 10 ** 0.5)
+    assert sag.max_rstar('G', 0.5) == pytest.approx(77000 / 10 ** 0.5)
+
+
+def test_background_scales_the_ceiling_linearly():
+    rstar, label = sag.light_level_rstar(0.0, 0.5, rig='E')
+    assert rstar == pytest.approx(15000.0) and label == '15000R*'
+    assert sag.light_level_rstar(0.0, 0.15, rig='G')[0] == pytest.approx(11550.0)
+
+
+def test_the_two_rigs_differ_at_the_same_setting():
+    """The whole reason the rig has to be threaded through."""
+    e = sag.light_level_rstar(0.5, 0.30, rig='E')[0]
+    g = sag.light_level_rstar(0.5, 0.30, rig='G')[0]
+    assert g / e == pytest.approx(77000 / 30000)
+
+
+def test_lowercase_and_padded_rig_names_work():
+    assert sag.max_rstar(' g ') == 77000.0
+    assert sag.max_rstar('e') == 30000.0
+
+
 @pytest.mark.parametrize('ndf, bg, expected', [
     (0.0, 0.15, 12000.0),
     (1.0, 0.15, 1000.0),
@@ -18,31 +55,66 @@ from retinanalysis.SCutils.protocols import spot_annular_grating as sag
     (0.5, 0.15, 4000.0),
     (0.5, 0.30, 8000.0),
 ])
-def test_rstar_table_matches_matlab(ndf, bg, expected):
-    rstar, label = sag.light_level_rstar(ndf, bg)
+def test_rstar_table_is_the_fallback_for_an_unknown_rig(ndf, bg, expected):
+    """Superseded by RIG_MAX_RSTAR, but still reachable when the rig is not one of ours."""
+    rstar, label = sag.light_level_rstar(ndf, bg, rig='Z')
     assert rstar == expected
     assert label == f'{expected:g}R*'
+    assert sag.light_level_rstar(ndf, bg)[0] == expected   # rig omitted entirely
 
 
-def test_rstar_unknown_combo_is_nan_with_descriptive_label():
-    rstar, label = sag.light_level_rstar(0.0, 0.50)   # common in the data, not calibrated
+def test_the_old_table_is_really_rig_g():
+    """Documents why the table could not be reused for rig E."""
+    for ndf, bg, tabled in sag.RSTAR_TABLE:
+        ratio = sag.light_level_rstar(ndf, bg, rig='G')[0] / tabled
+        assert 0.9 < ratio < 1.2
+
+
+def test_unknown_rig_and_uncovered_combo_stays_nan():
+    rstar, label = sag.light_level_rstar(0.0, 0.50, rig='Z')
     assert np.isnan(rstar)
-    # falls back to the raw setting, so a missing calibration stays visible
     assert label == 'FW0/bg0.5 (?R*)'
 
 
-def test_is_calibrated_marks_only_table_entries():
+def test_missing_filter_wheel_has_no_light_level_on_any_rig():
+    for rig in ('E', 'G', None):
+        assert np.isnan(sag.light_level_rstar(float('nan'), 0.5, rig=rig)[0])
+
+
+def test_refresh_rstar_restates_a_stored_summary_without_reanalysis():
+    """R* is a fact about the rig, so it is applied on read, not frozen at analysis."""
+    import pandas as pd
+    stored = pd.DataFrame({
+        'exp_name': ['2026-04-23_E', '2026-06-04_G'],
+        'ndf': [0.0, 1.0], 'background_intensity': [0.5, 0.3],
+        'rstar': [np.nan, np.nan],          # analyzed before the calibration existed
+        'light_level': ['FW0/bg0.5 (?R*)', 'FW1/bg0.3 (?R*)'],
+    })
+    out = sag.refresh_rstar(stored)
+    assert out.loc[0, 'rstar'] == pytest.approx(15000.0)     # rig E
+    assert out.loc[1, 'rstar'] == pytest.approx(2310.0)      # rig G
+    assert out['rstar_measured'].all()
+    assert out['rig'].tolist() == ['E', 'G']
+    # The stored frame is untouched.
+    assert np.isnan(stored.loc[0, 'rstar'])
+
+
+def test_refresh_rstar_is_a_no_op_without_the_setting_columns():
+    import pandas as pd
+    empty = pd.DataFrame()
+    assert sag.refresh_rstar(empty).empty
+    no_ndf = pd.DataFrame({'exp_name': ['x_E']})
+    assert 'rstar' not in sag.refresh_rstar(no_ndf).columns
+
+
+def test_is_calibrated_follows_the_rig():
+    # A known rig with a wheel reading is calibrated whatever the background.
+    assert sag.is_calibrated(0.0, 0.50, rig='E')
+    assert sag.is_calibrated(0.0, 0.50, rig='G')
+    # Without one it falls back to asking the old table.
     assert sag.is_calibrated(0.0, 0.15)
     assert not sag.is_calibrated(0.0, 0.50)
-    assert not sag.is_calibrated(float('nan'), 0.15)
-
-
-def test_uncalibrated_combos_stay_nan_and_are_never_estimated():
-    """The analysis must not invent a light level; that conversion is the user's."""
-    for ndf, bg in [(0.0, 0.50), (0.0, 0.30), (1.0, 0.50), (3.0, 0.10)]:
-        rstar, label = sag.light_level_rstar(ndf, bg)
-        assert np.isnan(rstar)
-        assert '?R*' in label and 'est' not in label
+    assert not sag.is_calibrated(float('nan'), 0.15, rig='E')
 
 
 def test_light_setting_is_always_available():
