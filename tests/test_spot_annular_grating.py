@@ -488,11 +488,14 @@ def test_mode_family_maps_labels_to_recording_modes():
     assert sag.mode_family(None) == ''
 
 
-def _groupable_blocks(bright_contrasts):
+def _groupable_blocks(bright_contrasts, bar_widths=None):
     """A minimal block table for group_blocks: one cell, one setting, N blocks."""
     import pandas as pd
     n = len(bright_contrasts)
+    if bar_widths is None:
+        bar_widths = [100.0] * n
     return pd.DataFrame({
+        'bar_width': list(bar_widths),
         'exp_name': ['2026-04-04_E'] * n, 'rig': ['E'] * n,
         'block_id': list(range(1, n + 1)), 'n_epochs': [10] * n,
         'cell_label': ['Cell1'] * n, 'cell_type_short': ['OFF-parasol'] * n,
@@ -558,6 +561,28 @@ def test_group_blocks_keeps_both_allowed_bright_contrasts():
     g = sag.group_blocks(_groupable_blocks([0.9, 1.0]), show=False)
     assert g.loc[0, 'blocks'] == 2                     # 0.9 and 1.0 both survive
     assert g.loc[0, 'bright'] == '1, 0.9'
+
+
+def test_group_blocks_drops_bars_narrower_than_the_cutoff():
+    """Below ~60 um the optics low-pass the grating, so the cancellation is partly optical."""
+    blocks = _groupable_blocks([0.9] * 4, bar_widths=[40.0, 50.0, 75.0, 100.0])
+    g = sag.group_blocks(blocks, show=False)
+    assert g.loc[0, 'blocks'] == 2                     # only 75 and 100 survive
+    assert g.loc[0, 'bar_width'] == '75, 100'
+
+
+def test_group_blocks_min_bar_width_is_inclusive_and_optional():
+    exactly_60 = _groupable_blocks([0.9], bar_widths=[60.0])
+    assert sag.group_blocks(exactly_60, show=False).loc[0, 'blocks'] == 1
+    narrow = _groupable_blocks([0.9] * 2, bar_widths=[40.0, 100.0])
+    assert sag.group_blocks(narrow, show=False, min_bar_width=None).loc[0, 'blocks'] == 2
+    assert sag.group_blocks(narrow, show=False).loc[0, 'blocks'] == 1
+
+
+def test_group_blocks_bar_width_lists_every_width_it_pooled():
+    """analyze_group pools across bar width, so a group spanning two has to show both."""
+    g = sag.group_blocks(_groupable_blocks([0.9] * 2, bar_widths=[100.0, 200.0]), show=False)
+    assert g.loc[0, 'bar_width'] == '100, 200'
 
 
 def test_group_blocks_bright_is_a_bare_value_when_there_is_only_one():

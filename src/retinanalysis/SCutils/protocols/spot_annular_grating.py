@@ -113,8 +113,19 @@ from retinanalysis.SCutils.recording_mode import (      # noqa: E402
 # Epoch parameters that define a stimulus configuration / light level.
 CONFIG_KEYS = ['apertureDiameter', 'annulusInnerDiameter', 'annulusOuterDiameter',
                'backgroundIntensity', 'spotIntensity', 'NDF', 'onlineAnalysis',
-               'brightBarContrast', 'preTime', 'stimTime', 'tailTime', 'sampleRate',
-               'micronsPerPixel']
+               'brightBarContrast', 'barWidth', 'preTime', 'stimTime', 'tailTime',
+               'sampleRate', 'micronsPerPixel']
+
+# Narrow bars are carried by the optics as much as by the cell: below roughly a
+# cone-spacing-and-blur scale the grating is low-pass filtered before it reaches
+# the photoreceptors, so a "cancellation" measured there is partly an optical
+# result. group_blocks() keeps blocks at or above this bar width and reports the
+# rest.
+#
+# The protocol interleaves bar width and analyze_group() pools across it, but in
+# this dataset every one of the 180 blocks ran a single width, so the filter is
+# applied per block on the recorded ``barWidth``.
+MIN_BAR_WIDTH = 60.0
 
 
 # --------------------------------------------------------------------------
@@ -518,7 +529,7 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
     # (verified equal to read_filter_wheel_ndf on every sampled block). A rig
     # with no filter wheel leaves it missing -- those blocks have no defined
     # light level and should not enter the Weber comparison.
-    df = df.rename(columns={'NDF': 'filter_wheel_ndf'})
+    df = df.rename(columns={'NDF': 'filter_wheel_ndf', 'barWidth': 'bar_width'})
     df['has_filter_wheel'] = df['filter_wheel_ndf'].notna()
     if verify_fw:
         mismatch = []
@@ -561,7 +572,8 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
         cols = ['exp_name', 'cell_label', 'cell_type_short', 'onlineAnalysis', 'grating_site',
                 'center_spot', 'filter_wheel_ndf', 'stage_ndfs', 'backgroundIntensity',
                 'light_level', 'apertureDiameter', 'annulusInnerDiameter',
-                'annulusOuterDiameter', 'brightBarContrast', 'n_epochs', 'block_id']
+                'annulusOuterDiameter', 'brightBarContrast', 'bar_width',
+                'n_epochs', 'block_id']
         print(f"{len(df)} blocks | {df['exp_name'].nunique()} experiments | "
               f"{df.groupby(['exp_name', 'cell_label']).ngroups} cells")
         missing = df[~df['has_filter_wheel']]
@@ -585,15 +597,86 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
                                       zip(off['rstar'], off['rstar_level'])})))
         sc.scroll_table(df[cols], height=height,
                         num_cols=('n_epochs', 'block_id', 'filter_wheel_ndf',
-                                  'backgroundIntensity', 'brightBarContrast'))
+                                  'backgroundIntensity', 'brightBarContrast', 'bar_width'))
     return df
+
+
+def check_polarity_pooling(df: pd.DataFrame, show: bool = True) -> pd.DataFrame:
+    """Verify that both grating polarities are pooled, and evenly.
+
+    :func:`analyze_group` groups epochs by ``currentDarkContrast`` alone, so the
+    two ``currentGratingPolarity`` values (+1 / -1) are pooled by construction —
+    polarity is never a grouping variable. Polarity flips which stripes are
+    bright, so pooling it is what removes the dependence on where the bars
+    happen to fall on the receptive field.
+
+    Pooling correctly is not the same as pooling *evenly*, though. If a block
+    was stopped mid-interleave, one polarity gets an extra epoch and the pooled
+    mean is tilted toward it. This walks every epoch and reports, per
+    (block, dark contrast, bar width) cell, whether the +1 and -1 counts match.
+
+    Returns one row per cell with ``n_pos`` / ``n_neg`` / ``balanced``. Scanning
+    every epoch takes a minute or two on the full dataset.
+    """
+    from retinanalysis.config import schema
+
+    rows = []
+    for bid in df['block_id']:
+        for p in (schema.Epoch() & f'parent_id={int(bid)}').to_dicts():
+            par = p.get('parameters', {})
+            rows.append({'block_id': int(bid),
+                         'dark_contrast': par.get('currentDarkContrast'),
+                         'bar_width': par.get('currentBarWidth'),
+                         'polarity': par.get('currentGratingPolarity')})
+    ep = pd.DataFrame(rows)
+    if ep.empty:
+        if show:
+            print('no epochs found')
+        return ep
+
+    has_pol = ep[ep['polarity'].notna()]
+    counts = (has_pol.assign(pos=has_pol['polarity'] > 0)
+              .groupby(['block_id', 'dark_contrast', 'bar_width'], dropna=False)['pos']
+              .agg(n_pos='sum', n_total='size').reset_index())
+    counts['n_neg'] = counts['n_total'] - counts['n_pos']
+    counts['balanced'] = counts['n_pos'] == counts['n_neg']
+
+    if show:
+        n_blocks = ep['block_id'].nunique()
+        with_pol = has_pol['block_id'].nunique()
+        print(f'polarity is pooled by construction: analyze_group groups on '
+              f'currentDarkContrast only.')
+        print(f'  {len(ep)} epochs over {n_blocks} blocks; '
+              f'{with_pol} blocks record currentGratingPolarity '
+              f'({len(has_pol)} epochs), {n_blocks - with_pol} do not '
+              f'({len(ep) - len(has_pol)} epochs)')
+        vals = sorted(has_pol['polarity'].unique())
+        print(f'  values recorded: {vals}')
+        if len(counts):
+            bal = int(counts['balanced'].sum())
+            print(f'  (block x contrast x bar width) cells: {len(counts)} — '
+                  f'{bal} balanced ({bal / len(counts):.0%}), '
+                  f'{len(counts) - bal} off by '
+                  f'{int((counts["n_pos"] - counts["n_neg"]).abs().max())} epoch or less')
+            only_one = counts[(counts['n_pos'] == 0) | (counts['n_neg'] == 0)]
+            if len(only_one):
+                print(f'  WARNING: {len(only_one)} cell(s) have only ONE polarity, so '
+                      f'nothing is averaged out there:')
+                for _, r in only_one.head(8).iterrows():
+                    print(f"    block {int(r['block_id'])} dark {r['dark_contrast']:g} "
+                          f"bar {r['bar_width']:g}: +1 x{int(r['n_pos'])}, "
+                          f"-1 x{int(r['n_neg'])}")
+        totals = has_pol['polarity'].value_counts().to_dict()
+        print(f'  overall epoch counts: {totals}')
+    return counts
 
 
 def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
                  require_filter_wheel: bool = True,
                  allowed_filter_wheel: Sequence[float] = ALLOWED_FILTER_WHEEL,
                  allowed_bright_contrast: Optional[Sequence[float]]
-                 = ALLOWED_BRIGHT_CONTRAST) -> pd.DataFrame:
+                 = ALLOWED_BRIGHT_CONTRAST,
+                 min_bar_width: Optional[float] = MIN_BAR_WIDTH) -> pd.DataFrame:
     """Collapse the block table to one row per recording group.
 
     A group is the MATLAB epoch-tree leaf: (experiment, cell, recording mode,
@@ -609,6 +692,13 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
     one of :data:`ALLOWED_BRIGHT_CONTRAST` (0.9, 1.0) — the two the protocol was
     effectively always run at. Pass ``None`` to keep every contrast, which is
     what you want if you are analyzing the bright-contrast sweep itself.
+
+    ``min_bar_width`` drops blocks run at a bar width below
+    :data:`MIN_BAR_WIDTH` (60 µm), where the optics low-pass the grating enough
+    that the cancellation is partly an optical result. ``None`` keeps every
+    width. This is a per-block test: bar width is interleaved in principle and
+    :func:`analyze_group` pools across it, but every block in this dataset ran a
+    single width.
     """
     from retinanalysis.SCutils import explore as sc
 
@@ -649,6 +739,17 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
                   + f" -- {', '.join(sorted(dropped['exp_name'].unique()))}")
         df = df[keep]
 
+    if min_bar_width is not None and 'bar_width' in df.columns:
+        keep = df['bar_width'] >= float(min_bar_width)
+        if (~keep).any():
+            dropped = df[~keep]
+            print(f'dropping {len(dropped)} block(s) with bar width below '
+                  f'{float(min_bar_width):g} µm: '
+                  + ', '.join(f'{w:g} µm ({n} block{"s" if n > 1 else ""})'
+                              for w, n in sorted(dropped['bar_width'].value_counts().items()))
+                  + f" -- {', '.join(sorted(dropped['exp_name'].unique()))}")
+        df = df[keep]
+
     # Purely derived from apertureDiameter, so fill it in rather than demanding
     # the caller's block table already carry it.
     if 'center_spot' not in df.columns:
@@ -665,6 +766,11 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
                annulus_inner=('annulusInnerDiameter', 'first'),
                annulus_outer=('annulusOuterDiameter', 'first'),
                spot_intensity=('spotIntensity', 'first'),
+               # Joined like bright: bar width is not a grouping key either, and
+               # analyze_group pools across it, so a group spanning two widths
+               # has to say so rather than report whichever came first.
+               bar_width=('bar_width',
+                          lambda s: ', '.join(f'{v:g}' for v in sorted(set(s)))),
                # Joined for the same reason as bright: the aperture is not a
                # grouping key either, so a group that ever mixed spot with no
                # spot has to show it rather than report whichever came first.
@@ -710,8 +816,8 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
                       f"({r['blocks']} blocks, {r['epochs']} epochs)")
         cols = ['cell_type_short', 'rig', 'exp_name', 'cell_label', 'onlineAnalysis',
                 'grating_site', 'center_spot', 'aperture', 'annulus_inner', 'annulus_outer',
-                'spot_intensity', 'bright', 'filter_wheel_ndf', 'backgroundIntensity',
-                'rstar_level', 'blocks', 'epochs']
+                'spot_intensity', 'bright', 'bar_width', 'filter_wheel_ndf',
+                'backgroundIntensity', 'rstar_level', 'blocks', 'epochs']
         cols += [c for c in ('rs_mohm', 'epochs_high_rs') if c in g.columns]
         sc.tree_table(g.sort_values(['cell_type_short', 'exp_name', 'cell_label'])[cols],
                       levels=['cell_type_short', 'rig', 'exp_name', 'cell_label'],
