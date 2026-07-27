@@ -510,15 +510,122 @@ def _groupable_blocks(bright_contrasts):
 def test_group_blocks_shows_every_bright_contrast_it_pooled():
     """brightBarContrast is a block-level setting but not a grouping key, so a cell
     swept over it lands in one group -- which the table has to show, not hide."""
-    g = sag.group_blocks(_groupable_blocks([0.9, 0.5, 0.25]), show=False)
+    g = sag.group_blocks(_groupable_blocks([0.9, 0.5, 0.25]), show=False,
+                         allowed_bright_contrast=None)
     assert len(g) == 1
     assert g.loc[0, 'bright'] == '0.9, 0.5, 0.25'      # descending, all of them
     assert g.loc[0, 'blocks'] == 3
 
 
+def test_group_blocks_drops_bright_contrasts_outside_the_allowed_set():
+    """The default filter is what stops a bright-contrast sweep pooling into one curve."""
+    g = sag.group_blocks(_groupable_blocks([0.9, 0.5, 0.25]), show=False)
+    assert len(g) == 1
+    assert g.loc[0, 'bright'] == '0.9'                 # the sweep blocks are gone
+    assert g.loc[0, 'blocks'] == 1
+    assert g.loc[0, 'epochs'] == 10
+
+
+def test_group_blocks_keeps_both_allowed_bright_contrasts():
+    g = sag.group_blocks(_groupable_blocks([0.9, 1.0]), show=False)
+    assert g.loc[0, 'blocks'] == 2                     # 0.9 and 1.0 both survive
+    assert g.loc[0, 'bright'] == '1, 0.9'
+
+
 def test_group_blocks_bright_is_a_bare_value_when_there_is_only_one():
     g = sag.group_blocks(_groupable_blocks([0.9, 0.9]), show=False)
     assert g.loc[0, 'bright'] == '0.9'
+
+
+def _pop_summary_and_records(curves):
+    """A summary + record store for population_tuning.
+
+    ``curves`` maps cell label -> (rstar_level, baseline, [responses]) on a shared
+    three-point dark-contrast grid.
+    """
+    import pandas as pd
+    contrasts = np.array([-1.0, -0.5, 0.0])
+    rows, recs = [], {}
+    for i, (cell, (lvl, base, resp)) in enumerate(curves.items()):
+        key = f'k{i}'
+        rows.append({'key': key, 'exp_name': 'X_E', 'cell_label': cell,
+                     'cell_type': 'ON-parasol', 'grating_site': 'surround',
+                     'online_analysis': 'extracellular', 'units': 'rate (Hz)',
+                     'rstar_level': lvl, 'bright_bar_contrast': 0.9})
+        recs[key] = {'dark_contrasts': contrasts, 'resp_mean': np.asarray(resp, dtype=float),
+                     'baseline_mean': float(base)}
+    return pd.DataFrame(rows), recs
+
+
+def test_population_tuning_subtracts_each_cells_own_baseline():
+    """Cells are poolable only relative to their own spontaneous rate."""
+    summary, recs = _pop_summary_and_records({
+        'Cell1': (1000.0, 10.0, [30.0, 20.0, 10.0]),   # rel  20, 10, 0
+        'Cell2': (1000.0, 50.0, [70.0, 60.0, 50.0]),   # rel  20, 10, 0 -- same curve
+    })
+    t = sag.population_tuning(summary, records=recs, normalize=False)
+    assert t['mean'].tolist() == [20.0, 10.0, 0.0]
+    assert t['n_cells'].tolist() == [2, 2, 2]
+    assert t['sem'].eq(0).all()                        # identical after baselining
+
+
+def test_population_tuning_normalization_preserves_the_zero_crossing():
+    """The divisor is a positive scalar, so it cannot move where the curve crosses."""
+    summary, recs = _pop_summary_and_records({
+        'Cell1': (1000.0, 0.0, [100.0, 50.0, 0.0]),    # loud cell
+        'Cell2': (1000.0, 0.0, [2.0, 1.0, 0.0]),       # quiet cell, same shape
+    })
+    raw = sag.population_tuning(summary, records=recs, normalize=False)
+    norm = sag.population_tuning(summary, records=recs, normalize=True)
+    # Raw is dominated by the loud cell; normalized weights them equally.
+    assert raw['mean'].tolist() == [51.0, 25.5, 0.0]
+    assert norm['mean'].tolist() == [1.0, 0.5, 0.0]
+    # Both cross zero at the same contrast.
+    assert raw.loc[raw['mean'].abs().idxmin(), 'dark_contrast'] == 0.0
+    assert norm.loc[norm['mean'].abs().idxmin(), 'dark_contrast'] == 0.0
+
+
+def test_population_tuning_averages_a_repeated_cell_once():
+    """A cell recorded twice in one condition must not count twice."""
+    summary, recs = _pop_summary_and_records({
+        'Cell1': (1000.0, 0.0, [10.0, 5.0, 0.0]),
+        'Cell1_dup': (1000.0, 0.0, [30.0, 15.0, 0.0]),
+        'Cell2': (1000.0, 0.0, [20.0, 10.0, 0.0]),
+    })
+    summary.loc[1, 'cell_label'] = 'Cell1'             # same cell, second recording
+    t = sag.population_tuning(summary, records=recs, normalize=False)
+    assert t['n_cells'].max() == 2                     # two cells, not three
+    # Cell1 averages to 20/10/0, so the population mean matches Cell2 exactly.
+    assert t['mean'].tolist() == [20.0, 10.0, 0.0]
+
+
+def test_population_tuning_splits_by_light_level():
+    summary, recs = _pop_summary_and_records({
+        'Cell1': (1000.0, 0.0, [10.0, 5.0, 0.0]),
+        'Cell2': (15000.0, 0.0, [10.0, 8.0, 2.0]),
+    })
+    t = sag.population_tuning(summary, records=recs, normalize=False)
+    assert sorted(t['rstar_level'].unique()) == [1000.0, 15000.0]
+    assert t[t['rstar_level'].eq(15000.0)]['mean'].tolist() == [10.0, 8.0, 2.0]
+
+
+def test_population_tuning_drops_records_that_are_not_curves():
+    """A single sampled contrast is not a tuning curve."""
+    summary, recs = _pop_summary_and_records({'Cell1': (1000.0, 0.0, [10.0, 5.0, 0.0])})
+    recs['k0']['dark_contrasts'] = np.array([-0.9])
+    recs['k0']['resp_mean'] = np.array([10.0])
+    assert sag.population_tuning(summary, records=recs).empty
+
+
+def test_population_tuning_excludes_disallowed_bright_contrasts():
+    """The stored h5 keeps records the current filters would drop; the guard is here too."""
+    summary, recs = _pop_summary_and_records({
+        'Cell1': (1000.0, 0.0, [10.0, 5.0, 0.0]),
+        'Cell2': (1000.0, 0.0, [10.0, 5.0, 0.0]),
+    })
+    summary.loc[1, 'bright_bar_contrast'] = 0.25
+    t = sag.population_tuning(summary, records=recs, normalize=False)
+    assert t['n_cells'].max() == 1
 
 
 def _blocks_with_rs(labels, resistances, exp='X_E', high_rs=None):

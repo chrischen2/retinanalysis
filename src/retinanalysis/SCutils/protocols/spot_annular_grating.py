@@ -84,6 +84,14 @@ RSTAR_LEVELS: Tuple[float, ...] = (1000.0, 2000.0, 4000.0, 5000.0, 7000.0,
 # else -- including a missing reading -- is excluded by group_blocks().
 ALLOWED_FILTER_WHEEL = (0.0, 0.5, 1.0)
 
+# Bright-bar contrasts the analysis runs on. The protocol was almost always run
+# at 0.9 or 1.0; the handful of blocks at 0.25 and 0.5 are a one-cell sweep
+# (2026-04-04_E Cell1) too small to say anything on its own, and pooling them
+# with the rest would mix stimuli the cone prediction treats differently -- it
+# is a function of the (light level, bright bar) pair. group_blocks() drops
+# anything else and reports it.
+ALLOWED_BRIGHT_CONTRAST = (0.9, 1.0)
+
 # Cell types the analysis is currently restricted to; override per call.
 DEFAULT_CELL_TYPES = ('ON-parasol', 'OFF-parasol')
 
@@ -542,7 +550,9 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
 
 def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
                  require_filter_wheel: bool = True,
-                 allowed_filter_wheel: Sequence[float] = ALLOWED_FILTER_WHEEL) -> pd.DataFrame:
+                 allowed_filter_wheel: Sequence[float] = ALLOWED_FILTER_WHEEL,
+                 allowed_bright_contrast: Optional[Sequence[float]]
+                 = ALLOWED_BRIGHT_CONTRAST) -> pd.DataFrame:
     """Collapse the block table to one row per recording group.
 
     A group is the MATLAB epoch-tree leaf: (experiment, cell, recording mode,
@@ -553,6 +563,11 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
     filter wheel: without ``background:FilterWheel:NDF`` the light level is
     undefined, so those recordings cannot enter the Weber comparison. What was
     dropped is always reported.
+
+    ``allowed_bright_contrast`` keeps only blocks whose ``brightBarContrast`` is
+    one of :data:`ALLOWED_BRIGHT_CONTRAST` (0.9, 1.0) — the two the protocol was
+    effectively always run at. Pass ``None`` to keep every contrast, which is
+    what you want if you are analyzing the bright-contrast sweep itself.
     """
     from retinanalysis.SCutils import explore as sc
 
@@ -578,6 +593,20 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
                   f'{list(allowed_filter_wheel)}: NDF '
                   f"{sorted(off_list['filter_wheel_ndf'].dropna().unique().tolist())}")
         df = df[df['filter_wheel_ndf'].isin(list(allowed_filter_wheel))]
+
+    # Bright bar is the other half of the cone prediction, so a block shown at a
+    # contrast the rest of the dataset never used cannot be pooled with them.
+    if allowed_bright_contrast is not None and 'brightBarContrast' in df.columns:
+        keep = df['brightBarContrast'].isin(list(allowed_bright_contrast))
+        if (~keep).any():
+            dropped = df[~keep]
+            print(f'dropping {len(dropped)} block(s) whose bright bar contrast is not in '
+                  f'{list(allowed_bright_contrast)}: '
+                  + ', '.join(f'{c:g} ({n} block{"s" if n > 1 else ""})'
+                              for c, n in sorted(
+                                  dropped['brightBarContrast'].value_counts().items()))
+                  + f" -- {', '.join(sorted(dropped['exp_name'].unique()))}")
+        df = df[keep]
 
     keys = ['exp_name', 'rig', 'cell_label', 'cell_type_short', 'onlineAnalysis',
             'grating_site', 'filter_wheel_ndf', 'backgroundIntensity']
@@ -1475,6 +1504,160 @@ def add_condition(summary: pd.DataFrame) -> pd.DataFrame:
     out['cell_type_short'] = short
     out['condition'] = [CANONICAL_CONDITIONS.get(k, 'other') for k in keys]
     return out
+
+
+def population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Dict]] = None,
+                      normalize: bool = True, min_contrasts: int = 3,
+                      allowed_bright_contrast: Optional[Sequence[float]]
+                      = ALLOWED_BRIGHT_CONTRAST) -> pd.DataFrame:
+    """Mean response-vs-dark-contrast curve per light level, pooled over cells.
+
+    The per-recording tuning curve is ``resp_mean - baseline_mean``: the
+    response relative to that cell's own pre-stimulus baseline, which is the
+    quantity whose zero crossing is the balancing contrast. Subtracting the
+    baseline per cell is what makes cells poolable at all — the raw rate says as
+    much about the cell's spontaneous activity as about the stimulus.
+
+    ``normalize`` (default) then divides each cell's curve by its own peak
+    ``|response - baseline|``. Two reasons it is the default:
+
+    - Cells differ enormously in absolute response — in this dataset the
+      excitatory-current records span 1.2 to 538 pA, so a raw mean is just the
+      loudest cell with a little noise added. Firing rates are milder (16 to 92
+      Hz) but still 6-fold.
+    - It is a *positive* scalar, so it leaves every zero crossing exactly where
+      it was. The balancing contrast — the thing being measured — is unchanged.
+
+    Set ``normalize=False`` to keep the recorded units, which is only meaningful
+    within one recording mode.
+
+    A cell recorded more than once in the same (condition, mode, light level) is
+    averaged to one curve before entering the population mean, so a cell with
+    several blocks does not count several times. Recordings sampling fewer than
+    ``min_contrasts`` dark contrasts are not tuning curves and are dropped.
+
+    Returns one row per (condition, mode, light level, dark contrast) with the
+    mean, its SEM across cells, and the cell count.
+    """
+    df = add_condition(summary) if 'condition' not in summary.columns else summary.copy()
+    if allowed_bright_contrast is not None and 'bright_bar_contrast' in df.columns:
+        df = df[df['bright_bar_contrast'].isin(list(allowed_bright_contrast))]
+    if df.empty:
+        return pd.DataFrame(columns=['condition', 'online_analysis', 'units', 'rstar_level',
+                                     'dark_contrast', 'mean', 'sem', 'n_cells'])
+    if records is None:
+        records = load_records(list(df['key']))
+
+    rows = []
+    for _, r in df.iterrows():
+        rec = records.get(r['key'])
+        if rec is None:
+            continue
+        contrasts = np.asarray(rec['dark_contrasts'], dtype=float)
+        if contrasts.size < min_contrasts:
+            continue
+        rel = np.asarray(rec['resp_mean'], dtype=float) - float(rec['baseline_mean'])
+        if normalize:
+            peak = np.nanmax(np.abs(rel))
+            if not np.isfinite(peak) or peak == 0:
+                continue
+            rel = rel / peak
+        for c, v in zip(contrasts, rel):
+            rows.append({'condition': r['condition'], 'online_analysis': r['online_analysis'],
+                         'units': 'normalized' if normalize else r.get('units', ''),
+                         'rstar_level': r['rstar_level'],
+                         'cell': f"{r['exp_name']}/{r['cell_label']}",
+                         'dark_contrast': round(float(c), 4), 'value': float(v)})
+    long = pd.DataFrame(rows)
+    if long.empty:
+        return long
+
+    keys = ['condition', 'online_analysis', 'units', 'rstar_level', 'dark_contrast']
+    per_cell = long.groupby(keys + ['cell'], dropna=False)['value'].mean().reset_index()
+    out = (per_cell.groupby(keys, dropna=False)['value']
+           .agg(mean='mean',
+                sem=lambda s: float(s.std(ddof=1) / np.sqrt(len(s))) if len(s) > 1 else np.nan,
+                n_cells='size')
+           .reset_index()
+           .sort_values(keys))
+    return out.reset_index(drop=True)
+
+
+def plot_population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Dict]] = None,
+                           normalize: bool = True, min_cells: int = 2,
+                           conditions: Sequence[str] = ('ON-parasol / surround',
+                                                        'OFF-parasol / center'),
+                           modes: Sequence[str] = ('extracellular', 'exc'),
+                           figsize: Tuple[float, float] = (10.0, 7.0),
+                           **kwargs):
+    """Population tuning curves, one line per light level, overlaid.
+
+    One panel per (condition, recording mode); within a panel each light level
+    is its own curve of mean response against dark-bar contrast, with a shaded
+    SEM across cells. Under a Weber cone model the curve should shift as the
+    mean light level changes, so overlaying the levels puts that shift on one
+    pair of axes.
+
+    Light level is an *ordered* quantity, so the curves are colored on the
+    house sequential ramp (``cividis``, dim to bright) rather than categorical
+    hues, and the mapping is built once across every level in ``summary`` — a
+    given R* is the same color in every panel.
+
+    ``min_cells`` hides a level whose mean rests on fewer than that many cells
+    at every contrast; those points are still in :func:`population_tuning`.
+    """
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    tuning = population_tuning(summary, records=records, normalize=normalize, **kwargs)
+    if tuning.empty:
+        print('no records with a tuning curve to plot')
+        return None
+
+    # Color follows the light level, not its rank within a panel, so build the
+    # mapping once over every level present.
+    levels = sorted(tuning['rstar_level'].dropna().unique())
+    colors = style.colors_for_conditions(levels)
+
+    fig, axes = plt.subplots(len(conditions), len(modes), figsize=figsize,
+                             squeeze=False, sharex=True)
+    for i, cond in enumerate(conditions):
+        for j, mode in enumerate(modes):
+            ax = axes[i][j]
+            panel = tuning[tuning['condition'].eq(cond) & tuning['online_analysis'].eq(mode)]
+            ax.axhline(0.0, color='#666666', ls='--', lw=1.0, zorder=1)
+            if panel.empty:
+                ax.text(0.5, 0.5, 'no recordings', ha='center', va='center',
+                        transform=ax.transAxes, fontsize=9, color='#888888')
+                ax.set_title(f'{cond} — {mode}', fontsize=9)
+                continue
+            drawn = 0
+            for lvl in levels:
+                sub = panel[panel['rstar_level'].eq(lvl)].sort_values('dark_contrast')
+                if sub.empty or int(sub['n_cells'].max()) < min_cells:
+                    continue
+                n = int(sub['n_cells'].max())
+                ax.fill_between(sub['dark_contrast'], sub['mean'] - sub['sem'].fillna(0),
+                                sub['mean'] + sub['sem'].fillna(0),
+                                color=colors[lvl], alpha=0.16, lw=0, zorder=2)
+                ax.plot(sub['dark_contrast'], sub['mean'], 'o-', ms=4, lw=1.8,
+                        color=colors[lvl], zorder=3, label=f'{lvl:g} R* (n={n})')
+                drawn += 1
+            units = panel['units'].iloc[0]
+            ax.set_title(f'{cond} — {mode}', fontsize=9)
+            if drawn:
+                ax.legend(frameon=False, fontsize=7, title='light level',
+                          title_fontsize=7, loc='best')
+            if i == len(conditions) - 1:
+                ax.set_xlabel('dark bar contrast')
+            if j == 0:
+                ax.set_ylabel(f'response − baseline\n({units})')
+    fig.suptitle('Population tuning curves by light level'
+                 + ('' if normalize else '  (recorded units — never pooled across modes)'),
+                 fontsize=11)
+    fig.tight_layout()
+    return fig
 
 
 def plot_condition_examples(records: Optional[Dict[str, Dict]] = None,
