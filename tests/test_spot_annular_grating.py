@@ -497,7 +497,9 @@ def _groupable_blocks(bright_contrasts, bar_widths=None):
     return pd.DataFrame({
         'bar_width': list(bar_widths),
         'exp_name': ['2026-04-04_E'] * n, 'rig': ['E'] * n,
-        'block_id': list(range(1, n + 1)), 'n_epochs': [10] * n,
+        # Comfortably over MIN_EPOCHS so these fixtures exercise the filter under
+        # test rather than the epoch-count one; the epoch tests set it explicitly.
+        'block_id': list(range(1, n + 1)), 'n_epochs': [20] * n,
         'cell_label': ['Cell1'] * n, 'cell_type_short': ['OFF-parasol'] * n,
         'onlineAnalysis': ['extracellular'] * n, 'grating_site': ['center'] * n,
         'filter_wheel_ndf': [0.0] * n, 'backgroundIntensity': [0.5] * n,
@@ -554,7 +556,7 @@ def test_group_blocks_drops_bright_contrasts_outside_the_allowed_set():
     assert len(g) == 1
     assert g.loc[0, 'bright'] == '0.9'                 # the sweep blocks are gone
     assert g.loc[0, 'blocks'] == 1
-    assert g.loc[0, 'epochs'] == 10
+    assert g.loc[0, 'epochs'] == 20
 
 
 def test_group_blocks_keeps_both_allowed_bright_contrasts():
@@ -577,6 +579,29 @@ def test_group_blocks_min_bar_width_is_inclusive_and_optional():
     narrow = _groupable_blocks([0.9] * 2, bar_widths=[40.0, 100.0])
     assert sag.group_blocks(narrow, show=False, min_bar_width=None).loc[0, 'blocks'] == 2
     assert sag.group_blocks(narrow, show=False).loc[0, 'blocks'] == 1
+
+
+def test_group_blocks_drops_groups_with_too_few_epochs():
+    """A 10-epoch group is ~1 epoch per dark contrast -- a single trial, not a curve."""
+    blocks = _groupable_blocks([0.9])
+    blocks['n_epochs'] = [10]
+    assert sag.group_blocks(blocks, show=False).empty
+    assert len(sag.group_blocks(blocks, show=False, min_epochs=None)) == 1
+
+
+def test_min_epochs_counts_the_pooled_group_not_the_block():
+    """Two thin blocks of the same condition add up to a usable recording."""
+    blocks = _groupable_blocks([0.9, 0.9])
+    blocks['n_epochs'] = [10, 10]              # 20 pooled, over the cutoff
+    g = sag.group_blocks(blocks, show=False)
+    assert len(g) == 1 and g.loc[0, 'epochs'] == 20 and g.loc[0, 'blocks'] == 2
+
+
+def test_min_epochs_boundary_is_inclusive():
+    for n, kept in ((15, False), (16, True)):
+        blocks = _groupable_blocks([0.9])
+        blocks['n_epochs'] = [n]
+        assert (not sag.group_blocks(blocks, show=False).empty) is kept
 
 
 def test_group_blocks_bar_width_lists_every_width_it_pooled():

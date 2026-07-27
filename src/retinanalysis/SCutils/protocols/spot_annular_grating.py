@@ -127,6 +127,13 @@ CONFIG_KEYS = ['apertureDiameter', 'annulusInnerDiameter', 'annulusOuterDiameter
 # applied per block on the recorded ``barWidth``.
 MIN_BAR_WIDTH = 60.0
 
+# Fewest epochs a recording group may rest on. The tuning curve splits its
+# epochs across ~11 dark contrasts and then pools polarity within each, so a
+# group of 10 epochs is roughly one epoch per contrast and no polarity averaging
+# at all -- the crossing it yields is a single trial, not a measurement.
+# group_blocks() drops groups below this and reports them.
+MIN_EPOCHS = 16
+
 
 # --------------------------------------------------------------------------
 # light level / model
@@ -676,7 +683,8 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
                  allowed_filter_wheel: Sequence[float] = ALLOWED_FILTER_WHEEL,
                  allowed_bright_contrast: Optional[Sequence[float]]
                  = ALLOWED_BRIGHT_CONTRAST,
-                 min_bar_width: Optional[float] = MIN_BAR_WIDTH) -> pd.DataFrame:
+                 min_bar_width: Optional[float] = MIN_BAR_WIDTH,
+                 min_epochs: Optional[int] = MIN_EPOCHS) -> pd.DataFrame:
     """Collapse the block table to one row per recording group.
 
     A group is the MATLAB epoch-tree leaf: (experiment, cell, recording mode,
@@ -699,6 +707,11 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
     width. This is a per-block test: bar width is interleaved in principle and
     :func:`analyze_group` pools across it, but every block in this dataset ran a
     single width.
+
+    ``min_epochs`` drops whole recording groups with fewer than
+    :data:`MIN_EPOCHS` (16) epochs. Unlike the others this is a test on the
+    *group*, applied after the blocks are pooled, since a cell can reach a
+    usable count by having been run twice. ``None`` keeps every group.
     """
     from retinanalysis.SCutils import explore as sc
 
@@ -797,6 +810,24 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
         agg['rs_mohm'] = ('series_resistance', lambda s: np.round(np.nanmedian(s) / 1e6, 2))
         agg['epochs_high_rs'] = ('n_epochs_high_rs', 'sum')
     g = df.groupby(keys, dropna=False, sort=False).agg(**agg).reset_index()
+
+    # After pooling, not before: a cell run twice at the same condition reaches a
+    # usable count between them, and dropping its blocks individually would lose
+    # a group that is actually well sampled.
+    if min_epochs is not None:
+        keep = g['epochs'] >= int(min_epochs)
+        if (~keep).any():
+            thin = g[~keep]
+            print(f'dropping {len(thin)} recording group(s) with fewer than '
+                  f'{int(min_epochs)} epochs '
+                  f'({int(thin["epochs"].sum())} epochs, '
+                  f'{thin["epochs"].min():g}-{thin["epochs"].max():g} each):')
+            for _, r in thin.sort_values('epochs').iterrows():
+                print(f"    {r['exp_name']} {r['cell_label']} {r['cell_type_short']} "
+                      f"{r['onlineAnalysis']} {r['grating_site']} "
+                      f"{r['rstar_level']:g}R*: {int(r['epochs'])} epochs")
+        g = g[keep].reset_index(drop=True)
+
     if show:
         print(f'{len(g)} recording groups '
               f'(experiment x cell x mode x grating site x filter wheel x background)')
