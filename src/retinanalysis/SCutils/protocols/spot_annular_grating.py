@@ -1376,13 +1376,110 @@ _ARRAY_FIELDS = ('dark_contrasts', 'resp_mean', 'resp_sem', 'resp_n', 'bar_width
                  'traces', 'trace_time_ms')
 
 
-def save_records(records: Sequence[GratingRecord], path=None, verbose: bool = True):
+def group_keys(groups: pd.DataFrame) -> List[str]:
+    """The :func:`record_key` each row of a group table would be stored under.
+
+    Note this reads ``onlineAnalysis``, which :func:`check_series_resistance`
+    **overwrites** with the mode the amplifier resolved — so run that first, or
+    a relabelled recording produces a different key here than the one its record
+    was actually saved under.
+    """
+    return [record_key(r['exp_name'], r['cell_label'], r['onlineAnalysis'],
+                       r['grating_site'], r['filter_wheel_ndf'], r['backgroundIntensity'])
+            for _, r in groups.iterrows()]
+
+
+def prune_records(keep, path=None, dry_run: bool = False,
+                  verbose: bool = True) -> List[str]:
+    """Delete stored records that are no longer in the analysis set.
+
+    The store upserts and never deletes, so a record outlives the reason it was
+    made: tighten a filter, change ``CELL_TYPES``, or let the amplifier relabel
+    a block's recording mode, and the old record stays in ``records.h5`` and
+    keeps turning up in :func:`load_summary` and every population figure. This
+    is the verb that removes them.
+
+    ``keep`` is the current analysis set — a group table (``selected``) or an
+    iterable of keys. Anything stored under a key not in it is deleted.
+
+    **Run :func:`check_series_resistance` before building ``keep`` from a group
+    table.** It rewrites ``onlineAnalysis`` to the mode the amplifier resolved,
+    and :func:`record_key` includes that mode, so skipping it makes every
+    relabelled recording look like an orphan and deletes a live record.
+
+    ``dry_run=True`` reports what would go without touching the file — worth
+    doing first, since this is the one operation here that loses data. An empty
+    ``keep`` raises rather than emptying the store.
+
+    Returns the keys removed. HDF5 does not reclaim the freed space in place, so
+    the file will not shrink until it is rewritten.
+    """
+    import h5py
+    from pathlib import Path
+
+    keep_keys = set(group_keys(keep) if isinstance(keep, pd.DataFrame) else keep)
+    if not keep_keys:
+        raise ValueError(
+            'prune_records() refuses an empty keep set — that would delete every '
+            'stored record. Pass the current group table (e.g. `selected`) or an '
+            'explicit list of keys.')
+
+    base = Path(path) if path is not None else store_dir()
+    h5_path, csv_path = base / 'records.h5', base / 'summary.csv'
+    if not h5_path.exists():
+        if verbose:
+            print('no store to prune')
+        return []
+
+    stored = load_summary(path=base, rstar=False)
+    if stored.empty:
+        return []
+    orphans = stored[~stored['key'].isin(keep_keys)]
+    if orphans.empty:
+        if verbose:
+            print(f'nothing to prune: all {len(stored)} stored record(s) are in the '
+                  f'current set of {len(keep_keys)}')
+        return []
+
+    if verbose:
+        verb = 'would remove' if dry_run else 'removing'
+        print(f'{verb} {len(orphans)} stored record(s) no longer in the analysis set '
+              f'({len(stored)} stored, {len(keep_keys)} current):')
+        for _, r in orphans.sort_values(['cell_type', 'exp_name', 'cell_label']).iterrows():
+            print(f"    {r['exp_name']} {r['cell_label']} "
+                  f"{str(r.get('cell_type', '')).split(chr(92))[-1]} "
+                  f"{r.get('online_analysis', '')} {r.get('grating_site', '')} "
+                  f"— {int(r.get('n_epochs', 0))} epochs")
+    if dry_run:
+        return list(orphans['key'])
+
+    removed = []
+    with h5py.File(h5_path, 'a') as f:
+        for key in orphans['key']:
+            if key in f:
+                del f[key]
+                removed.append(key)
+    summary = load_summary(path=base)
+    summary.to_csv(csv_path, index=False)
+    if verbose:
+        print(f'{len(removed)} record(s) removed -> {len(summary)} rows remain')
+    return removed
+
+
+def save_records(records: Sequence[GratingRecord], path=None, verbose: bool = True,
+                 prune_to=None):
     """Upsert records into ``<store>/records.h5`` and refresh ``summary.csv``.
 
     One HDF5 group per :func:`record_key`, overwritten if it already exists —
     the same upsert semantics as ``upsertSummary`` in the MATLAB, so re-running
     a cell replaces its row instead of duplicating it. ``summary.csv`` holds the
     scalar fields so population analysis can filter without opening the HDF5.
+
+    ``prune_to`` additionally *deletes* any stored record outside that analysis
+    set, via :func:`prune_records` — the store otherwise only ever grows. Leave
+    it None (the default) when saving incrementally, as :func:`analyze_all` does
+    per record: pruning against one record's worth of keys would delete the rest
+    of the store.
     """
     import h5py
     from pathlib import Path
@@ -1410,6 +1507,9 @@ def save_records(records: Sequence[GratingRecord], path=None, verbose: bool = Tr
                     g.attrs[f'cfg_{k}'] = v
             if verbose:
                 print(f'  {action} {rec.key}')
+
+    if prune_to is not None:
+        prune_records(prune_to, path=base, verbose=verbose)
 
     summary = load_summary(path=base)
     summary.to_csv(csv_path, index=False)
@@ -1552,7 +1652,7 @@ def plot_group(rec: GratingRecord, figsize: Tuple[float, float] = (7.2, 7.6)):
 def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
                 on_error: str = 'log', verbose: bool = False,
                 skip_existing: bool = False, status: bool = True,
-                **kwargs) -> List[GratingRecord]:
+                prune: bool = False, **kwargs) -> List[GratingRecord]:
     """Run :func:`analyze_group` over every row of :func:`group_blocks` output.
 
     ``status=True`` (the default) announces each recording before it is
@@ -1568,6 +1668,12 @@ def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
     leaves groups already in the store untouched, so re-running a notebook does
     not redo hours of spike detection; the stored records are still there for
     :func:`load_records`.
+
+    ``prune=True`` deletes stored records outside ``groups`` once the batch is
+    done (:func:`prune_records`), so the store ends up matching the analysis set
+    instead of accumulating every record ever made. It prunes against ``groups``
+    rather than against the records that just succeeded, so a group that failed
+    this run keeps whatever it had — a failure should not delete data.
     """
     records, failures = [], []
     stored = set(load_summary()['key']) if skip_existing else set()
@@ -1610,6 +1716,12 @@ def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
             failures.append((row['exp_name'], row['cell_label'], f'{type(e).__name__}: {e}'))
             if status:
                 print(f'  -> FAILED: {type(e).__name__}: {str(e)[:110]}\n')
+    # Against groups, not against `records`: a group that failed this run is
+    # still part of the analysis set, and deleting its stored record because the
+    # rerun crashed would turn a transient failure into data loss.
+    if prune and save and len(groups):
+        prune_records(groups, verbose=status)
+
     print(f'analyzed {len(records)}/{len(groups)} groups'
           + (f' ({skipped} already stored, skipped)' if skipped else ''))
     if failures:

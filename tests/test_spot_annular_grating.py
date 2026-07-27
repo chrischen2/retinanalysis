@@ -615,6 +615,88 @@ def test_group_blocks_bright_is_a_bare_value_when_there_is_only_one():
     assert g.loc[0, 'bright'] == '0.9'
 
 
+def _tiny_record(exp='2026-04-23_E', cell='Cell1', mode='extracellular',
+                 site='center', ndf=0.0, bg=0.5):
+    """A minimal GratingRecord that save_records can write."""
+    import numpy as np
+    contrasts = np.array([-1.0, -0.5, 0.0])
+    return sag.GratingRecord(
+        exp_name=exp, cell_label=cell, cell_type='RGC\\OFF-parasol',
+        online_analysis=mode, grating_site=site, ndf=ndf, background_intensity=bg,
+        rstar=15000.0, light_level='15000R*', dark_contrasts=contrasts,
+        resp_mean=np.array([10.0, 5.0, 0.0]), resp_sem=np.zeros(3),
+        resp_n=np.array([3, 3, 3]), baseline_mean=0.0, baseline_sem=0.0,
+        crossing_nearest=0.0, crossing_interp=0.0, bright_bar_contrast=0.9,
+        cone_pred_dark=-0.35, cone_i0=2000.0, bar_widths=np.array([100.0]),
+        traces=np.zeros((3, 4)), trace_time_ms=np.arange(4.0),
+        pre_time_ms=250.0, stim_time_ms=250.0, n_epochs=30, block_ids=[1])
+
+
+def test_prune_records_removes_only_what_is_not_kept(tmp_path):
+    keep = _tiny_record(cell='Cell1')
+    drop = _tiny_record(cell='Cell2')
+    sag.save_records([keep, drop], path=tmp_path, verbose=False)
+    assert len(sag.load_summary(path=tmp_path)) == 2
+
+    removed = sag.prune_records([keep.key], path=tmp_path, verbose=False)
+    assert removed == [drop.key]
+    left = sag.load_summary(path=tmp_path)
+    assert list(left['key']) == [keep.key]
+    # the survivor's arrays are intact
+    arrays = sag.load_records([keep.key], path=tmp_path)[keep.key]
+    assert list(arrays['dark_contrasts']) == [-1.0, -0.5, 0.0]
+
+
+def test_prune_records_dry_run_touches_nothing(tmp_path):
+    a, b = _tiny_record(cell='Cell1'), _tiny_record(cell='Cell2')
+    sag.save_records([a, b], path=tmp_path, verbose=False)
+    would = sag.prune_records([a.key], path=tmp_path, dry_run=True, verbose=False)
+    assert would == [b.key]
+    assert len(sag.load_summary(path=tmp_path)) == 2      # still both
+
+
+def test_prune_records_refuses_an_empty_keep_set(tmp_path):
+    """The guard against wiping the store by passing an empty selection."""
+    sag.save_records([_tiny_record()], path=tmp_path, verbose=False)
+    with pytest.raises(ValueError, match='empty keep set'):
+        sag.prune_records([], path=tmp_path)
+    assert len(sag.load_summary(path=tmp_path)) == 1
+
+
+def test_prune_records_is_idempotent(tmp_path):
+    a, b = _tiny_record(cell='Cell1'), _tiny_record(cell='Cell2')
+    sag.save_records([a, b], path=tmp_path, verbose=False)
+    assert len(sag.prune_records([a.key], path=tmp_path, verbose=False)) == 1
+    assert sag.prune_records([a.key], path=tmp_path, verbose=False) == []
+
+
+def test_prune_records_keys_on_the_resolved_recording_mode(tmp_path):
+    """check_series_resistance rewrites onlineAnalysis, and record_key includes it.
+
+    A group table carrying the *recorded* mode would make every relabelled
+    recording look like an orphan — which is how a live record gets deleted.
+    """
+    import pandas as pd
+    rec = _tiny_record(mode='extracellular')      # what the amplifier resolved
+    sag.save_records([rec], path=tmp_path, verbose=False)
+    resolved = pd.DataFrame([{'exp_name': rec.exp_name, 'cell_label': rec.cell_label,
+                              'onlineAnalysis': 'extracellular', 'grating_site': 'center',
+                              'filter_wheel_ndf': 0.0, 'backgroundIntensity': 0.5}])
+    assert sag.group_keys(resolved) == [rec.key]
+    assert sag.prune_records(resolved, path=tmp_path, verbose=False) == []
+    # The pre-relabel table would not match, and would orphan a live record.
+    as_recorded = resolved.assign(onlineAnalysis='exc')
+    assert sag.group_keys(as_recorded) != [rec.key]
+
+
+def test_save_records_prune_to_deletes_in_one_call(tmp_path):
+    old = _tiny_record(cell='Cell9')
+    sag.save_records([old], path=tmp_path, verbose=False)
+    fresh = _tiny_record(cell='Cell1')
+    sag.save_records([fresh], path=tmp_path, verbose=False, prune_to=[fresh.key])
+    assert list(sag.load_summary(path=tmp_path)['key']) == [fresh.key]
+
+
 def _pop_summary_and_records(curves):
     """A summary + record store for population_tuning.
 
