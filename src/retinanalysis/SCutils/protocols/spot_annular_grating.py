@@ -308,6 +308,92 @@ def mode_family(online_analysis) -> str:
 
 
 
+def trace_is_spiking(amp_data, sample_rate: float, n_trials: int = 12,
+                     min_fraction: float = 0.7, detector_kwargs: Optional[dict] = None) -> bool:
+    """Does this block's raw data actually contain spikes?
+
+    Runs the spike detector over the first ``n_trials`` trials and asks whether
+    at least ``min_fraction`` of them come back with any spikes. The detector's
+    own spike-factor test is what decides per trial, so this is the same
+    judgement the analysis would make, just sampled — a subsample is enough to
+    tell a cell-attached recording from a voltage-clamp one, and it costs a
+    twentieth of a full pass.
+
+    The defaults sit in a gap the data actually leaves. Measured over every
+    block in this protocol whose label and reading disagree, a genuinely
+    cell-attached recording has spikes in 100% of its trials and a whole-cell
+    one in 0-30%, with two borderline blocks at ~43%. 0.7 separates those
+    cleanly; 0.5 would sit on top of the borderline pair and split one cell
+    across two recording modes.
+    """
+    from retinanalysis.utils.spike_detector import detector
+
+    data = np.asarray(amp_data, dtype=float)
+    if data.ndim != 2 or data.shape[0] == 0:
+        return False
+    sample = data[:max(1, min(n_trials, data.shape[0]))]
+    spike_times, _, _ = detector(sample, sample_rate=float(sample_rate),
+                                 **(detector_kwargs or {}))
+    return float(np.mean([len(s) > 0 for s in spike_times])) >= min_fraction
+
+
+def resolve_recording_mode(online_analysis, series_resistance, amp_data=None,
+                           sample_rate: float = 1e4,
+                           detector_kwargs: Optional[dict] = None) -> Tuple[str, str]:
+    """The mode a block should be analyzed as, after checking its label against the amp.
+
+    ``onlineAnalysis`` is a menu item the experimenter picks and can get wrong;
+    ``stimulus:Amp1:seriesResistance`` is what the rig recorded. Where they
+    disagree the reading wins, but the two directions are not symmetric:
+
+    * **Rs > 0 against an ``extracellular`` label** is unambiguous — a
+      cell-attached patch has no access resistance, so the cell was held
+      whole-cell. The holding potential is not in the reading, so the polarity
+      comes from the sign of the current, as
+      ``linear_equivalent_disc.analyze_group`` already does: inward (negative)
+      is 'exc', outward is 'inh'.
+    * **Rs == 0 against an ``exc``/``inh`` label** is *not* unambiguous. It
+      means either cell-attached or that the experimenter never filled the
+      field in, and both occur in this dataset — sometimes on the same date, for
+      different cells. So the relabel is confirmed against the data first
+      (:func:`trace_is_spiking`) and only applied to a trace that really does
+      contain spikes. A trace with none keeps its whole-cell label and says why.
+
+    Returns ``(mode, note)``: ``mode`` is one of 'extracellular', 'exc', 'inh',
+    and ``note`` is empty when the recorded label stood, else what was changed
+    and on what evidence.
+    """
+    recorded = str(online_analysis or 'extracellular').strip().lower()
+    family = mode_family(recorded)
+    rs = np.nan if series_resistance is None else float(series_resistance)
+
+    if not np.isfinite(rs) or family == '':
+        return recorded, ''
+
+    if rs > 0 and family == 'cell-attached':
+        if amp_data is None:
+            return recorded, ('series resistance is '
+                              f'{rs / 1e6:.1f} MOhm, so this is whole-cell, but the trace '
+                              'was not available to read the holding potential from')
+        polarity = 'exc' if float(np.mean(np.asarray(amp_data, dtype=float))) < 0 else 'inh'
+        return polarity, (f"relabelled '{recorded}' -> '{polarity}': series resistance is "
+                          f'{rs / 1e6:.1f} MOhm, so the cell was held whole-cell; polarity '
+                          f'from the sign of the current')
+
+    if rs == 0 and family == 'whole-cell':
+        if amp_data is None:
+            return recorded, ('series resistance is 0, which would make this cell-attached, '
+                              'but the trace was not available to confirm it')
+        if trace_is_spiking(amp_data, sample_rate, detector_kwargs=detector_kwargs):
+            return 'extracellular', (f"relabelled '{recorded}' -> 'extracellular': series "
+                                     f'resistance is 0 and the trace contains spikes')
+        return recorded, ('series resistance is 0 but the trace has no spikes, so the field '
+                          'was never set rather than the recording being cell-attached; '
+                          'label kept')
+
+    return recorded, ''
+
+
 def series_resistance_table(df: pd.DataFrame, amp: str = 'Amp1',
                             max_series_resistance: float = MAX_SERIES_RESISTANCE,
                             verbose: bool = True) -> pd.DataFrame:
@@ -354,28 +440,22 @@ def series_resistance_table(df: pd.DataFrame, amp: str = 'Amp1',
 
 def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
                             max_series_resistance: float = MAX_SERIES_RESISTANCE,
-                            drop: bool = True, show: bool = True) -> pd.DataFrame:
+                            drop: bool = True, show: bool = True,
+                            detector_kwargs: Optional[dict] = None) -> pd.DataFrame:
     """Cross-check every block's ``onlineAnalysis`` label against the amplifier.
 
     ``onlineAnalysis`` is a menu item the experimenter picks; the amplifier's
     ``stimulus:Amp1:seriesResistance`` is what the rig actually recorded, and it
-    is exactly 0 for cell-attached and positive for whole-cell. **Where the two
-    disagree the reading wins** — a block labelled ``extracellular`` but
-    recorded whole-cell would go through spike detection and produce a
-    meaningless tuning curve.
+    is exactly 0 for cell-attached and positive for whole-cell. Where they
+    disagree the reading wins and the block is **relabelled** — it is not thrown
+    away — so a cell recorded cell-attached but labelled ``exc`` gets spike
+    sorted, and one recorded whole-cell but labelled ``extracellular`` gets
+    treated as current. :func:`resolve_recording_mode` makes the call, and
+    :func:`analyze_group` applies the same rule itself, so a block analyzed
+    directly is corrected too.
 
-    What the reading can settle depends on which way the disagreement runs.
-    ``Rs == 0`` names the mode outright, so a block mislabelled ``exc`` or
-    ``inh`` is *relabelled* ``extracellular`` and kept. ``Rs > 0`` only says
-    "whole-cell" — it cannot say whether the cell was held at the excitatory or
-    the inhibitory reversal — so a block mislabelled ``extracellular`` has no
-    label to fall back on and is dropped.
-
-    **The reading is only evidence when the field was in use.** A 0 means
-    "cell-attached" only on a date where some other block reads non-zero,
-    proving the experimenter was filling it in; on a date where every block
-    reads 0 the field was simply never set and says nothing. Blocks on such a
-    date get ``rs_mode = ''`` and are left exactly as they are.
+    Only two things are dropped: a block whose every epoch sits above
+    ``max_series_resistance``, and blocks the caller drops via ``drop``.
 
     Adds these columns:
 
@@ -388,13 +468,17 @@ def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
         Epochs above ``max_series_resistance`` (:func:`analyze_group` drops
         these individually; a block where *every* epoch is above it is dropped
         here since nothing would be left).
-    ``rs_flag``
-        '' when nothing is wrong, else what the amplifier found.
+    ``onlineAnalysis``
+        Rewritten where the amplifier overrules the recorded label.
     ``onlineAnalysis_recorded``
-        The original label, kept whenever a block is relabelled.
+        The label as the experimenter set it, always kept.
+    ``rs_flag``
+        '' when the recorded label stood, else what changed and on what
+        evidence.
 
-    ``drop=False`` annotates and relabels without removing anything, for when
-    you want to look at a disqualified recording rather than lose it.
+    Resolving a contradiction needs the block's raw trace, so this reads the h5
+    for those blocks only; blocks whose label already agrees with the reading
+    cost nothing beyond the reading itself.
     """
     out = df.copy()
     table = series_resistance_table(out[['exp_name', 'block_id']], amp=amp,
@@ -402,78 +486,74 @@ def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
                                     verbose=show)
     out = out.merge(table, on='block_id', how='left')
 
-    # A date where the field was never set cannot distinguish the two modes.
-    used = out.groupby('exp_name')['series_resistance'].transform(
-        lambda s: bool(np.nansum(np.asarray(s, dtype=float) > 0) > 0))
-    out['rs_recorded'] = used.astype(bool)
     rs = out['series_resistance'].to_numpy(dtype=float)
-    out['rs_mode'] = np.where(np.isnan(rs), '',
-                              np.where(rs > 0, 'whole-cell',
-                                       np.where(out['rs_recorded'], 'cell-attached', '')))
+    out['rs_mode'] = np.where(np.isnan(rs), '', np.where(rs > 0, 'whole-cell', 'cell-attached'))
     out['label_mode'] = out['onlineAnalysis'].apply(mode_family)
-
-    mismatch = (out['rs_mode'].ne('') & out['label_mode'].ne('')
-                & out['rs_mode'].ne(out['label_mode']))
-    all_high = (out['n_epochs_rs'] > 0) & out['n_epochs_high_rs'].eq(out['n_epochs_rs'])
-    # Rs == 0 fixes the mode completely, so the label can be corrected. Rs > 0
-    # leaves the holding potential unknown, so there is nothing to correct to.
-    relabel = mismatch & out['rs_mode'].eq('cell-attached')
-    unrecoverable = mismatch & ~relabel
-
-    out['rs_flag'] = np.where(
-        relabel, 'relabelled extracellular: series resistance is 0',
-        np.where(unrecoverable, 'onlineAnalysis contradicted by series resistance',
-                 np.where(all_high,
-                          f'series resistance above {max_series_resistance / 1e6:g} MOhm', '')))
-
     out['onlineAnalysis_recorded'] = out['onlineAnalysis']
-    out.loc[relabel, 'onlineAnalysis'] = 'extracellular'
+
+    contested = (out['rs_mode'].ne('') & out['label_mode'].ne('')
+                 & out['rs_mode'].ne(out['label_mode']))
+    all_high = (out['n_epochs_rs'] > 0) & out['n_epochs_high_rs'].eq(out['n_epochs_rs'])
+
+    flags = pd.Series('', index=out.index, dtype=object)
+    for i in out.index[contested]:
+        row = out.loc[i]
+        amp_data = sample_rate = None
+        try:
+            import retinanalysis as ra
+            rb = ra.SCResponseBlock(str(row['exp_name']), int(row['block_id']),
+                                    b_spiking=False, verbose=False)
+            amp_data, sample_rate = rb.amp_data, float(rb.amp_sample_rate)
+        except Exception as e:
+            flags[i] = f'could not read the trace to resolve the label ({type(e).__name__})'
+            continue
+        mode, note = resolve_recording_mode(row['onlineAnalysis'], row['series_resistance'],
+                                            amp_data=amp_data, sample_rate=sample_rate,
+                                            detector_kwargs=detector_kwargs)
+        out.loc[i, 'onlineAnalysis'] = mode
+        flags[i] = note
+    flags[all_high & flags.eq('')] = (
+        f'series resistance above {max_series_resistance / 1e6:g} MOhm')
+    out['rs_flag'] = flags
+    relabelled = out['onlineAnalysis'].ne(out['onlineAnalysis_recorded'])
 
     if show:
         n_read = int((out['n_epochs_rs'] > 0).sum())
-        dates_used = sorted(out.loc[out['rs_recorded'], 'exp_name'].unique())
-        print(f'series resistance read for {n_read}/{len(out)} blocks; the field was '
-              f'actually filled in on {len(dates_used)} of '
-              f"{out['exp_name'].nunique()} dates"
-              + (f" ({', '.join(dates_used)})" if dates_used else ''))
-        if len(dates_used) < out['exp_name'].nunique():
-            print('  on every other date every block reads 0, so the reading cannot '
-                  'confirm the label there — those blocks are left alone')
+        print(f'series resistance read for {n_read}/{len(out)} blocks')
         print()
-        print('onlineAnalysis vs the amplifier')
+        print('onlineAnalysis vs the amplifier (as recorded, before any relabelling)')
         print(pd.crosstab(out['label_mode'].replace('', '(none)'),
-                          out['rs_mode'].replace('', '(no usable reading)'),
+                          out['rs_mode'].replace('', '(no reading)'),
                           rownames=['onlineAnalysis says'],
                           colnames=['series resistance says']).to_string())
 
         flagged = out[out['rs_flag'].ne('')]
         print()
         if flagged.empty:
-            print('every block with a usable reading agrees with its onlineAnalysis label')
+            print('every block with a reading agrees with its onlineAnalysis label')
         else:
             print(f'{len(flagged)} block(s) where the amplifier disagrees:')
             cols = [c for c in ('exp_name', 'cell_label', 'cell_type_short',
-                                'onlineAnalysis_recorded', 'series_resistance', 'n_epochs',
-                                'n_epochs_high_rs', 'block_id', 'rs_flag')
+                                'onlineAnalysis_recorded', 'onlineAnalysis',
+                                'series_resistance', 'n_epochs', 'block_id', 'rs_flag')
                     if c in flagged.columns]
             show_df = flagged[cols].copy()
             show_df['series_resistance'] = (show_df['series_resistance'] / 1e6).round(2)
             show_df = show_df.rename(columns={'series_resistance': 'Rs (MOhm)',
-                                              'onlineAnalysis_recorded': 'recorded label'})
+                                              'onlineAnalysis_recorded': 'recorded',
+                                              'onlineAnalysis': 'analyzed as'})
             print(show_df.to_string(index=False))
-
-    if int(relabel.sum()) and show:
-        print(f'\nrelabelled {int(relabel.sum())} block(s) as extracellular; '
-              f'their recorded label is kept in onlineAnalysis_recorded')
+        if relabelled.any():
+            print(f'\n{int(relabelled.sum())} block(s) relabelled; they are analyzed as the '
+                  f'amplifier says, and their recorded label is kept in '
+                  f'onlineAnalysis_recorded')
 
     if drop:
-        losing = unrecoverable | all_high
-        n_dropped = int(losing.sum())
+        n_dropped = int(all_high.sum())
         if show and n_dropped:
-            print(f'\ndropping {n_dropped} block(s): the amplifier says whole-cell where the '
-                  f'label says extracellular (so the holding potential is unknown), or every '
-                  f'epoch is over the cutoff. Pass drop=False to keep and inspect them')
-        out = out[~losing].reset_index(drop=True)
+            print(f'\ndropping {n_dropped} block(s) whose every epoch is above the '
+                  f'{max_series_resistance / 1e6:g} MOhm cutoff; pass drop=False to keep them')
+        out = out[~all_high].reset_index(drop=True)
     return out
 
 
@@ -840,7 +920,11 @@ class GratingRecord:
     # reading. See check_series_resistance().
     series_resistance: float = np.nan
     n_epochs_high_rs: int = 0
+    # True when the amplifier overruled onlineAnalysis. online_analysis is then
+    # the mode the data was actually analyzed as, and online_analysis_recorded
+    # the label the experimenter set.
     mode_mismatch: bool = False
+    online_analysis_recorded: str = ''
     config: Dict = field(default_factory=dict)
     units: str = ''
     # Unprocessed amplifier traces, kept only when analyze_group(keep_raw=True),
@@ -873,6 +957,7 @@ class GratingRecord:
             'units': self.units, 'series_resistance': self.series_resistance,
             'n_epochs_high_rs': self.n_epochs_high_rs,
             'mode_mismatch': self.mode_mismatch,
+            'online_analysis_recorded': self.online_analysis_recorded or self.online_analysis,
             'aperture_diameter': self.config.get('apertureDiameter', np.nan),
             'annulus_inner': self.config.get('annulusInnerDiameter', np.nan),
             'annulus_outer': self.config.get('annulusOuterDiameter', np.nan),
@@ -880,15 +965,24 @@ class GratingRecord:
         }
 
     def describe(self) -> str:
-        rs = ('' if not np.isfinite(self.series_resistance)
-              else '  Rs=0 (cell-attached)' if self.series_resistance == 0
-              else f'  Rs={self.series_resistance / 1e6:.1f} MOhm')
+        if not np.isfinite(self.series_resistance):
+            rs = ''
+        elif self.series_resistance > 0:
+            rs = f'  Rs={self.series_resistance / 1e6:.1f} MOhm'
+        elif self.online_analysis == 'extracellular':
+            rs = '  Rs=0 (cell-attached)'
+        else:
+            # Whole-cell with a 0 reading: the field was never filled in, which
+            # is not the same claim as "no access resistance".
+            rs = '  Rs=0 (never set)'
         if self.n_epochs_high_rs:
             rs += f'  [{self.n_epochs_high_rs} epoch(s) dropped over the Rs cutoff]'
+        mode = self.online_analysis
         if self.mode_mismatch:
-            rs += '  [MODE MISMATCH: the amplifier contradicts onlineAnalysis]'
+            mode = f"{mode} (recorded as '{self.online_analysis_recorded}', " \
+                   f'relabelled from the amplifier)'
         return (f'{self.exp_name} | {self.cell_type} | {self.cell_label} | '
-                f'{self.online_analysis} | grating {self.grating_site} | '
+                f'{mode} | grating {self.grating_site} | '
                 f'FW={self.ndf} bg={self.background_intensity:.2f} ({self.light_level}) | '
                 f'{self.n_epochs} epochs{rs}\n'
                 f'  dark contrasts : {np.round(self.dark_contrasts, 3)}\n'
@@ -933,13 +1027,18 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
     ``smooth_ms``), with the sign flipped for 'exc' so larger always means a
     larger response.
 
-    Every epoch is checked against the amplifier's ``seriesResistance`` before
-    it is used. A whole-cell epoch recorded through more than
-    ``max_series_resistance`` ohms is dropped (the current is too filtered to
-    trust); set it to ``None`` to keep them. If the reading says the cell was
-    held the other way round from what ``onlineAnalysis`` claims, the record is
-    marked ``mode_mismatch`` and it is reported — :func:`check_series_resistance`
-    is the place to catch that across the whole dataset.
+    Every block is checked against the amplifier's ``seriesResistance`` before
+    it is used, by the same :func:`resolve_recording_mode` rule
+    :func:`check_series_resistance` applies — so a block handed straight to this
+    function is corrected too, not only one that came through the block table.
+    If the reading overrules ``onlineAnalysis``, the block is analyzed as it was
+    actually recorded (spike sorted rather than averaged, or the reverse) and
+    the record is marked ``mode_mismatch`` with the recorded label kept in
+    ``online_analysis_recorded``.
+
+    An epoch recorded through more than ``max_series_resistance`` ohms is
+    dropped, per epoch, since the current is too filtered to trust; set it to
+    ``None`` to keep them.
 
     ``keep_raw=True`` attaches the unprocessed amplifier traces to the record as
     ``rec.raw``, so :func:`plot_raw_blocks` and :func:`plot_raw_epochs` can draw
@@ -963,14 +1062,14 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
         p0 = ep['epoch_parameters'].iloc[0]
         if first_params is None:
             first_params = p0
-        mode = (online_analysis or p0.get('onlineAnalysis', 'extracellular')).lower()
-        spiking = mode == 'extracellular'
+        recorded_mode = (online_analysis or p0.get('onlineAnalysis', 'extracellular')).lower()
 
         # spike_th is analyzeSpotAnnularGrating.m's paras.spikeTh, passed to
         # SpikeDetectorNew as thresholdSpikeFactor. detector_kwargs still wins.
         det = {'threshold_spike_factor': spike_th, **(detector_kwargs or {})}
-        rb = ra.SCResponseBlock(exp_name, int(bid), b_spiking=spiking, verbose=False,
-                                **(det if spiking else {}))
+        # Load the trace before deciding how to treat it: the recorded label may
+        # be wrong, and resolving that needs the data as well as the reading.
+        rb = ra.SCResponseBlock(exp_name, int(bid), b_spiking=False, verbose=False)
         sr = float(rb.amp_sample_rate)
         pre_pts = int(round(float(p0['preTime']) / 1e3 * sr))
         stim_pts = int(round(float(p0['stimTime']) / 1e3 * sr))
@@ -1008,14 +1107,21 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
                       f'cutoff — block skipped')
             continue
 
-        measured = ('' if not np.isfinite(np.nanmedian(rs))
-                    else 'whole-cell' if np.nanmedian(rs) > 0 else 'cell-attached')
-        if measured == 'whole-cell' and spiking:
-            mode_mismatch = True
+        # The amplifier overrules the label, so the block is analyzed as it was
+        # actually recorded rather than as it was tagged. Same rule as
+        # check_series_resistance, applied here too so a block analyzed directly
+        # is corrected as well.
+        rs_median = float(np.nanmedian(rs[keep])) if np.isfinite(rs[keep]).any() else np.nan
+        mode, note = resolve_recording_mode(recorded_mode, rs_median,
+                                            amp_data=np.asarray(rb.amp_data)[keep],
+                                            sample_rate=sr, detector_kwargs=det)
+        spiking = mode == 'extracellular'
+        if note:
+            mode_mismatch = mode_mismatch or (mode != recorded_mode)
             if verbose:
-                print(f"  block {bid}: labelled '{mode}' but the amplifier reports "
-                      f'{np.nanmedian(rs) / 1e6:.1f} MOhm of series resistance — this is a '
-                      f'whole-cell recording being analyzed as spikes')
+                print(f'  block {bid}: {note}')
+        if spiking:
+            rb.get_spike_times(**det)
         rs_kept.extend(rs[i] for i in keep)
         used_blocks.append(int(bid))
         if keep_raw:
@@ -1135,7 +1241,7 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
         pre_time_ms=float(first_params['preTime']), stim_time_ms=float(first_params['stimTime']),
         n_epochs=int(valid.sum()), block_ids=used_blocks,
         series_resistance=rs_median, n_epochs_high_rs=n_high_rs,
-        mode_mismatch=mode_mismatch,
+        mode_mismatch=mode_mismatch, online_analysis_recorded=recorded_mode,
         config={k: first_params.get(k) for k in CONFIG_KEYS}, units=units, raw=raw)
     if verbose:
         print(rec.describe())
@@ -1612,15 +1718,21 @@ def load_raw(exp_name, block_ids: Optional[Sequence[int]] = None,
         sb = ra.StimBlock(exp_name, int(bid), verbose=False)
         ep = sb.df_epochs
         p0 = ep['epoch_parameters'].iloc[0]
-        mode = (online_analysis or p0.get('onlineAnalysis', 'extracellular')).lower()
-        spiking = mode == 'extracellular'
-        rb = ra.SCResponseBlock(exp_name, int(bid), b_spiking=spiking, verbose=False,
-                                **(detector_kwargs or {}))
+        recorded = (online_analysis or p0.get('onlineAnalysis', 'extracellular')).lower()
+        rb = ra.SCResponseBlock(exp_name, int(bid), b_spiking=False, verbose=False)
         sr = float(rb.amp_sample_rate)
         try:
             rs = read_series_resistance(exp_name, int(bid))
         except Exception:
             rs = np.full(len(ep), np.nan)
+        # Same relabelling rule as the analysis, so the raster appears for a
+        # block that was recorded cell-attached whatever its label says.
+        rs_median = float(np.nanmedian(rs)) if np.isfinite(rs).any() else np.nan
+        mode, _ = resolve_recording_mode(recorded, rs_median, amp_data=rb.amp_data,
+                                         sample_rate=sr, detector_kwargs=detector_kwargs)
+        spiking = mode == 'extracellular'
+        if spiking:
+            rb.get_spike_times(**(detector_kwargs or {}))
         data = np.asarray(rb.amp_data, dtype=float)
         for i in range(data.shape[0]):
             out['traces'].append(data[i])

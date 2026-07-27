@@ -272,7 +272,76 @@ def test_add_condition_labels_from_cell_type_and_site():
 
 
 # --- series resistance vs onlineAnalysis -----------------------------------
-# The amplifier reading is stubbed so these stay pure helpers, no h5 needed.
+# Synthetic traces, so these stay pure helpers with no h5 and no database.
+
+def _spiking_trace(n=12, length=3000, seed=0):
+    """Noise with sharp negative spikes and rebounds — a cell-attached trace."""
+    rng = np.random.RandomState(seed)
+    data = rng.randn(n, length)
+    for trial in range(n):
+        for centre in rng.choice(np.arange(50, length - 50), 20, replace=False):
+            data[trial, centre - 2:centre + 3] += np.array([6., -12., -40., -12., 6.])
+    return data
+
+
+def _smooth_trace(n=12, length=3000, seed=1):
+    """A drifting current with no spikes — a voltage-clamp trace."""
+    rng = np.random.RandomState(seed)
+    return np.cumsum(rng.randn(n, length) * 0.5, axis=1) * 0.05
+
+
+def test_trace_is_spiking_separates_the_two_recording_kinds():
+    assert sag.trace_is_spiking(_spiking_trace(), 1e4)
+    assert not sag.trace_is_spiking(_smooth_trace(), 1e4)
+
+
+def test_zero_rs_relabels_extracellular_only_when_the_trace_has_spikes():
+    # Rs == 0 is ambiguous on its own: cell-attached, or the field was never
+    # filled in. Both happen in this dataset, so the data breaks the tie.
+    mode, note = sag.resolve_recording_mode('exc', 0.0, _spiking_trace(), 1e4)
+    assert mode == 'extracellular' and 'contains spikes' in note
+
+    mode, note = sag.resolve_recording_mode('exc', 0.0, _smooth_trace(), 1e4)
+    assert mode == 'exc' and 'never set' in note
+
+
+def test_positive_rs_relabels_whole_cell_and_reads_polarity_off_the_current():
+    # Rs > 0 is unambiguous -- a cell-attached patch has no access resistance --
+    # but the holding potential is not in the reading, so it comes from the sign.
+    inward = np.full((4, 100), -5.0)
+    outward = np.full((4, 100), 5.0)
+    assert sag.resolve_recording_mode('extracellular', 8e6, inward)[0] == 'exc'
+    assert sag.resolve_recording_mode('extracellular', 8e6, outward)[0] == 'inh'
+
+
+def test_agreeing_label_and_reading_are_left_alone():
+    assert sag.resolve_recording_mode('extracellular', 0.0, _spiking_trace(), 1e4) \
+        == ('extracellular', '')
+    assert sag.resolve_recording_mode('exc', 8e6, _smooth_trace(), 1e4) == ('exc', '')
+
+
+def test_missing_reading_keeps_the_recorded_label():
+    assert sag.resolve_recording_mode('exc', np.nan, _smooth_trace(), 1e4) == ('exc', '')
+    assert sag.resolve_recording_mode('exc', None, _smooth_trace(), 1e4) == ('exc', '')
+
+
+def test_unknown_label_is_never_overridden():
+    # 'none' says nothing to contradict, so there is no disagreement to resolve.
+    assert sag.resolve_recording_mode('none', 0.0, _spiking_trace(), 1e4) == ('none', '')
+
+
+def test_resolution_without_a_trace_keeps_the_label_and_says_why():
+    mode, note = sag.resolve_recording_mode('exc', 0.0, amp_data=None)
+    assert mode == 'exc' and 'not available' in note
+
+
+def test_mode_family_maps_labels_to_recording_modes():
+    assert sag.mode_family('extracellular') == 'cell-attached'
+    assert sag.mode_family('exc') == 'whole-cell'
+    assert sag.mode_family('inh') == 'whole-cell'
+    assert sag.mode_family('none') == ''      # unknown, never a mismatch
+    assert sag.mode_family(None) == ''
+
 
 def _blocks_with_rs(labels, resistances, exp='X_E', high_rs=None):
     """A block table plus the matching stubbed amplifier reading."""
@@ -295,30 +364,36 @@ def _blocks_with_rs(labels, resistances, exp='X_E', high_rs=None):
     return blocks, rs
 
 
-def _check(blocks, rs, **kwargs):
+def _check(blocks, rs, traces=None, **kwargs):
+    """Run the audit with both the reading and the raw traces stubbed."""
     from unittest import mock
-    with mock.patch.object(sag, 'series_resistance_table', return_value=rs):
+
+    class _Stub:
+        def __init__(self, exp_name, block_id, **_):
+            self.amp_data = (traces or {}).get(int(block_id), _smooth_trace())
+            self.amp_sample_rate = 1e4
+
+    ra_stub = mock.MagicMock()
+    ra_stub.SCResponseBlock = _Stub
+    with mock.patch.object(sag, 'series_resistance_table', return_value=rs), \
+            mock.patch.dict('sys.modules', {'retinanalysis': ra_stub}):
         return sag.check_series_resistance(blocks, show=False, **kwargs)
 
 
-def test_zero_series_resistance_relabels_a_whole_cell_label():
-    # Rs == 0 fixes the mode outright, so an 'exc' label is corrected, not lost.
-    # The second block reads non-zero, which is what makes the field trustworthy
-    # on this date.
-    blocks, rs = _blocks_with_rs(['exc', 'exc'], [0.0, 8e6])
-    out = _check(blocks, rs)
-    assert len(out) == 2
+def test_audit_relabels_a_mislabelled_cell_attached_block():
+    blocks, rs = _blocks_with_rs(['exc', 'exc'], [0.0, 0.0])
+    out = _check(blocks, rs, traces={1: _spiking_trace(), 2: _smooth_trace()})
     assert out.loc[0, 'onlineAnalysis'] == 'extracellular'
     assert out.loc[0, 'onlineAnalysis_recorded'] == 'exc'
-    assert out.loc[1, 'onlineAnalysis'] == 'exc'      # agrees, untouched
+    assert out.loc[1, 'onlineAnalysis'] == 'exc'          # no spikes, label stands
+    assert len(out) == 2                                  # neither is thrown away
 
 
-def test_positive_series_resistance_drops_an_extracellular_label():
-    # Rs > 0 says whole-cell but not exc vs inh, so there is no label to fall
-    # back on and the block cannot be analyzed.
-    blocks, rs = _blocks_with_rs(['extracellular', 'exc'], [8e6, 8e6])
-    out = _check(blocks, rs)
-    assert out['block_id'].tolist() == [2]
+def test_audit_relabels_rather_than_drops_a_mislabelled_whole_cell_block():
+    blocks, rs = _blocks_with_rs(['extracellular'], [8e6])
+    out = _check(blocks, rs, traces={1: np.full((4, 100), -5.0)})
+    assert len(out) == 1
+    assert out.loc[0, 'onlineAnalysis'] == 'exc'
 
 
 def test_every_epoch_over_the_cutoff_drops_the_block():
@@ -327,36 +402,8 @@ def test_every_epoch_over_the_cutoff_drops_the_block():
     assert out['block_id'].tolist() == [2]
 
 
-def test_drop_false_keeps_disqualified_blocks_but_still_relabels():
-    blocks, rs = _blocks_with_rs(['extracellular', 'exc'], [8e6, 0.0])
+def test_drop_false_keeps_blocks_over_the_cutoff():
+    blocks, rs = _blocks_with_rs(['exc'], [25e6], high_rs=[10])
     out = _check(blocks, rs, drop=False)
-    assert len(out) == 2
-    assert out.loc[1, 'onlineAnalysis'] == 'extracellular'   # relabelled
-    assert out.loc[0, 'rs_flag'] != ''                       # flagged, not dropped
-
-
-def test_all_zero_date_is_left_alone():
-    # Every block reads 0, so the field was never set: it cannot mean
-    # "cell-attached" and no 'exc' label may be overridden on its say-so.
-    blocks, rs = _blocks_with_rs(['exc', 'extracellular'], [0.0, 0.0])
-    out = _check(blocks, rs)
-    assert len(out) == 2
-    assert out['onlineAnalysis'].tolist() == ['exc', 'extracellular']
-    assert (out['rs_flag'] == '').all()
-    assert (out['rs_mode'] == '').all()
-
-
-def test_missing_reading_never_flags():
-    blocks, rs = _blocks_with_rs(['exc', 'extracellular'], [np.nan, 8e6])
-    rs.loc[0, 'n_epochs_rs'] = 0
-    out = _check(blocks, rs)
-    assert out.loc[out['block_id'].eq(1), 'rs_flag'].iloc[0] == ''
-    assert out.loc[out['block_id'].eq(1), 'onlineAnalysis'].iloc[0] == 'exc'
-
-
-def test_mode_family_maps_labels_to_recording_modes():
-    assert sag.mode_family('extracellular') == 'cell-attached'
-    assert sag.mode_family('exc') == 'whole-cell'
-    assert sag.mode_family('inh') == 'whole-cell'
-    assert sag.mode_family('none') == ''      # unknown, never a mismatch
-    assert sag.mode_family(None) == ''
+    assert len(out) == 1
+    assert 'above 20 MOhm' in out.loc[0, 'rs_flag']
