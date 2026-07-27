@@ -974,8 +974,11 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
         mode = (online_analysis or p0.get('onlineAnalysis', 'extracellular')).lower()
         spiking = mode == 'extracellular'
 
+        # spike_th is analyzeSpotAnnularGrating.m's paras.spikeTh, passed to
+        # SpikeDetectorNew as thresholdSpikeFactor. detector_kwargs still wins.
+        det = {'threshold_spike_factor': spike_th, **(detector_kwargs or {})}
         rb = ra.SCResponseBlock(exp_name, int(bid), b_spiking=spiking, verbose=False,
-                                **(detector_kwargs or {}))
+                                **(det if spiking else {}))
         sr = float(rb.amp_sample_rate)
         pre_pts = int(round(float(p0['preTime']) / 1e3 * sr))
         stim_pts = int(round(float(p0['stimTime']) / 1e3 * sr))

@@ -180,6 +180,10 @@ class SCResponseBlock(ResponseBlock):
             self.get_spike_times(**detector_kwargs)
 
     def get_spike_times(self, **detector_kwargs):
+        # The detector is silent unless asked; verbose=False on the block means
+        # no per-trial chatter, which is what a batch over hundreds of blocks
+        # needs. An explicit detector verbose= still wins.
+        detector_kwargs.setdefault('verbose', self.verbose)
         spike_times, amps, refs = detector(self.amp_data, sample_rate=self.amp_sample_rate, **detector_kwargs)
         self.spike_times = spike_times
         self.spike_amps = amps

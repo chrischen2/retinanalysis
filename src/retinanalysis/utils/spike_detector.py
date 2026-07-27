@@ -3,42 +3,58 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # Import for 3D plotting
 import os
 
-def fit_kmeans(data, n_clusters):
+def fit_kmeans(data, n_clusters, verbose=False):
     from sklearn.cluster import KMeans   # heavy import, deferred to use site
     # KMeans
     # Fix non-spike cluster index to k-1, and spike cluster indices to k-2
     spike_cluster_indices = np.arange(n_clusters - 1)  # k-1 clusters for spikes
     non_spike_cluster_index = n_clusters - 1  # k-1 cluster for non-spikes
+    # Seeds follow SpikeDetectorNew.m: the median of each feature for the noise
+    # cluster, then the column-wise max for the spike cluster. That max is not
+    # generally one of the observations -- it is the corner of the bounding box
+    # -- which is what the MATLAB seeds with, so it is reproduced here rather
+    # than substituting the largest-amplitude point.
     start_matrix = np.zeros((n_clusters, 3))
+    start_matrix[0, :] = np.median(data, axis=0)
+    if n_clusters > 1:
+        start_matrix[1, :] = data.max(axis=0)
+    # Only k=2 has a MATLAB counterpart; extra clusters are seeded from the
+    # next-largest peaks, as this port did before k was configurable.
     sorted_peak_indices = np.argsort(data[:, 0])[::-1]
-    for i in range(n_clusters):
-        if i == 0:
-            start_matrix[i, :] = [np.median(data[:, 0]), np.median(data[:, 1]), np.median(data[:, 2])]
-        else:
-            start_matrix[i, :] = data[sorted_peak_indices[i - 1]]
+    for i in range(2, n_clusters):
+        start_matrix[i, :] = data[sorted_peak_indices[i - 2]]
 
-    kmeans = KMeans(n_clusters=n_clusters, init=start_matrix, n_init=1, max_iter=10000)
-    try:
-        kmeans.fit(data)
-        centroid_amplitudes = kmeans.cluster_centers_
-        # Sort clusters by peak amplitude
-        sorted_indices = np.argsort(centroid_amplitudes[:, 0])[::-1]
-        # For cluster_index, map kmeans.labels_ to values in sorted_indices.
-        # So label=1 with largest peak amplitude will be 0, and so on.
-        labels = np.zeros_like(kmeans.labels_)
+    def _fit(init, n_init):
+        km = KMeans(n_clusters=n_clusters, init=init, n_init=n_init, max_iter=10000)
+        km.fit(data)
+        # Sort clusters by peak amplitude, so label 0 is the largest-amplitude
+        # cluster and label k-1 the noise one.
+        sorted_indices = np.argsort(km.cluster_centers_[:, 0])[::-1]
+        lab = np.zeros_like(km.labels_)
         for i, label in enumerate(sorted_indices):
-            labels[kmeans.labels_ == label] = i
+            lab[km.labels_ == label] = i
+        return lab, np.isin(lab, spike_cluster_indices)
 
-        spike_index_logical = np.isin(labels, spike_cluster_indices)  # Logical array for spikes
-    except Exception as e:
-        print(f"Section KMeans failed with error: {e}")
-        labels = np.zeros(len(data), dtype=int) 
-        labels = non_spike_cluster_index  # Assign to non-spike cluster
-        spike_index_logical = np.zeros(len(data), dtype=bool)
+    try:
+        labels, spike_index_logical = _fit(start_matrix, 1)
+    except Exception:
+        # A trace with no spikes can collapse the seeded fit into an empty
+        # cluster. SpikeDetectorNew.m retries from a random sample rather than
+        # abandoning the trial, so the same retry happens here; only if that
+        # also fails does everything fall to the noise cluster.
+        try:
+            labels, spike_index_logical = _fit('random', 10)
+        except Exception as e:
+            if verbose:
+                print(f'KMeans failed even from a random start ({type(e).__name__}: {e}); '
+                      f'treating every peak as noise')
+            labels = np.full(len(data), non_spike_cluster_index, dtype=int)
+            spike_index_logical = np.zeros(len(data), dtype=bool)
 
     return labels, spike_index_logical
 
-def apply_min_peak_amp(min_peak_amplitude, peak_amplitudes, peak_times, spike_index_logical, cluster_index, non_spike_cluster_index):
+def apply_min_peak_amp(min_peak_amplitude, peak_amplitudes, peak_times, spike_index_logical,
+                       cluster_index, non_spike_cluster_index, verbose=False):
     if min_peak_amplitude > 0:
         n_old_spikes = np.sum(spike_index_logical)
         temp_amp = peak_amplitudes[spike_index_logical]
@@ -54,8 +70,9 @@ def apply_min_peak_amp(min_peak_amplitude, peak_amplitudes, peak_times, spike_in
         spike_index_logical = new_spike_index_logical
         n_new_spikes = np.sum(spike_index_logical)
         n_rejected_spikes = n_old_spikes - n_new_spikes
-        print(f'Rejected {n_rejected_spikes}/{n_old_spikes} spikes with amplitude < {min_peak_amplitude:.2f} peak amp.')
-        
+        if verbose and n_rejected_spikes:
+            print(f'Rejected {n_rejected_spikes}/{n_old_spikes} spikes with amplitude < {min_peak_amplitude:.2f} peak amp.')
+
         non_spike_amplitudes = peak_amplitudes[~spike_index_logical]
         spike_times = temp_times[indices]
         spike_amplitudes = temp_amp[indices]
@@ -69,13 +86,49 @@ def apply_min_peak_amp(min_peak_amplitude, peak_amplitudes, peak_times, spike_in
 
     return spike_times, spike_amplitudes, non_spike_amplitudes, spike_index_logical, cluster_index
 
-def detector(data_matrix, check_detection=False, sample_rate=1e4, refractory_period=1.5e-3, search_window=1.2e-3, 
-             cutoff_frequency=500, global_polarity=False, min_peak_amplitude=0,
-             n_clusters=2, max_trial_length_s=1, str_save_dir=None):
+def detector(data_matrix, check_detection=False, sample_rate=1e4, refractory_period=1.5e-3,
+             search_window=1.2e-3, cutoff_frequency=300, global_polarity=False,
+             min_peak_amplitude=0, n_clusters=2, threshold_spike_factor=3,
+             remove_refractory_violations=True, max_trial_length_s=1, str_save_dir=None,
+             verbose=False):
+    """Detect spikes in extracellular / cell-attached traces; port of SpikeDetectorNew.m.
+
+    Each row of ``data_matrix`` is one trial. The trace is high-pass filtered,
+    every local extremum is taken as a *candidate*, and k-means on (peak
+    amplitude, left rebound, right rebound) splits those candidates into a spike
+    and a noise cluster. A trial only counts as spiking when its spike cluster
+    stands ``threshold_spike_factor`` noise standard deviations clear of the
+    noise cluster; otherwise it is returned with zero spikes.
+
+    The candidate pool is large by construction — a local minimum occurs at
+    roughly every third sample of band-passed noise, so a 1 s trial at 10 kHz
+    yields a few thousand — and it is an intermediate, not a result. Only the
+    final spike counts are reported.
+
+    Defaults follow ``SpikeDetectorNew.m``: 300 Hz high pass, polarity decided
+    from the tails of the sorted trace, and refractory violations removed from
+    the returned spike times.
+
+    ``threshold_spike_factor`` defaults to 3, not to the MATLAB signature's 1.5:
+    every linCone analysis script passes ``paras.spikeTh = 3``
+    (``spotAnnularGratingMain.m``, ``linConeMain.m``), so 3 is the value the
+    MATLAB pipeline actually runs at and 1.5 is never reached. The distinction
+    matters — on a non-spiking trace, where the clustering has only noise to
+    work with, 1.5 admits hundreds of "spikes" per trial while 3 admits almost
+    none. Pass ``threshold_spike_factor=1.5`` for the bare function default.
+
+    Two documented departures remain: ``n_clusters`` may exceed the MATLAB's
+    fixed 2, and traces longer than ``max_trial_length_s`` are clustered in
+    sections (the MATLAB always clusters the whole trace) so that a slow drift
+    in noise amplitude does not swamp the spike cluster.
+
+    Returns ``(spike_times, spike_amplitudes, refractory_violations)``, each a
+    list with one entry per trial. Spike times are in samples. ``verbose=True``
+    prints per-trial diagnostics; by default only the caller sees the counts.
+    """
     refractory_period_dp = refractory_period * sample_rate  # datapoints
     search_window_dp = search_window * sample_rate  # datapoints
     max_trial_length_dp = int(max_trial_length_s * sample_rate)  # Convert seconds to datapoints
-    print(f'Max trial length in data points: {max_trial_length_dp} = {max_trial_length_s} s')
 
     data_matrix = high_pass_filter(data_matrix, cutoff_frequency, 1/sample_rate)
 
@@ -88,31 +141,51 @@ def detector(data_matrix, check_detection=False, sample_rate=1e4, refractory_per
     spike_cluster_indices = np.arange(n_clusters - 1)  # k-1 clusters for spikes
     non_spike_cluster_index = n_clusters - 1  # k-1 cluster for non-spikes
 
+    def _empty(tt):
+        # Sample indices, so keep them integer even when empty -- a float64
+        # empty array cannot index a trace (raw[spike_times[i]] raises
+        # IndexError on no-spike epochs).
+        spike_times[tt] = np.array([], dtype=int)
+        spike_amplitudes[tt] = np.array([])
+        refractory_violations[tt] = np.array([], dtype=int)
+
     for tt in range(n_traces):
         current_trace = data_matrix[tt, :]
-        if global_polarity:
-            if abs(np.max(data_matrix)) > abs(np.min(data_matrix)):  # flip it over, big peaks down
-                current_trace = -current_trace
-        else:
-            if abs(np.max(current_trace)) > abs(np.min(current_trace)):  # flip it over, big peaks down
-                current_trace = -current_trace
+        # Polarity from the tails of the sorted trace rather than the single
+        # most extreme sample, as SpikeDetectorNew.m does: one perfusion
+        # transient can outweigh every spike in the trace and flip it wrongly.
+        # Oriented big-peaks-down here, so the candidates below are minima.
+        polarity_source = data_matrix.ravel() if global_polarity else current_trace
+        tail = min(500, max(polarity_source.size // 2, 1))
+        sorted_trace = np.sort(polarity_source)
+        if abs(np.mean(sorted_trace[-tail:])) > abs(np.mean(sorted_trace[:tail])):
+            current_trace = -current_trace
 
-        # get peaks
+        # Candidate peaks: every local minimum. This is the pool k-means sorts
+        # into spikes and noise, not a spike count.
         peak_amplitudes, peak_times = get_peaks(current_trace, -1)  # -1 for negative peaks
+        if len(peak_times) < 2:
+            _empty(tt)
+            if verbose:
+                print(f'Trial {tt + 1}: 0 spikes (trace is flat)')
+            continue
         peak_times = peak_times[peak_amplitudes < 0]  # only negative deflections
         peak_amplitudes = np.abs(peak_amplitudes[peak_amplitudes < 0])  # only negative deflections
-        print(f'Trial {tt + 1}: Found {len(peak_amplitudes)} peaks')
+        if len(peak_times) < 2:
+            _empty(tt)
+            if verbose:
+                print(f'Trial {tt + 1}: 0 spikes (no negative deflections)')
+            continue
 
         # get rebounds on either side of each peak
         rebound = get_rebounds(peak_times, current_trace, search_window_dp)
 
         # cluster spikes
         clustering_data = np.column_stack((peak_amplitudes, rebound['Left'], rebound['Right']))
-        
+
         if len(current_trace) > max_trial_length_dp:
             num_sections = int(np.ceil(len(current_trace) / max_trial_length_dp))
             section_indices = np.array_split(np.arange(len(current_trace)), num_sections)
-            print(f"Trial {tt + 1}: Splitting data into {num_sections} sections for KMeans clustering.")
 
             cluster_index = np.zeros(len(peak_amplitudes), dtype=int)
             spike_index_logical = np.zeros(len(peak_amplitudes), dtype=bool)
@@ -122,45 +195,45 @@ def detector(data_matrix, check_detection=False, sample_rate=1e4, refractory_per
 
                 if len(section_data) == 0:
                     continue
-                cluster_index[section_mask], spike_index_logical[section_mask] = fit_kmeans(section_data, n_clusters)
+                cluster_index[section_mask], spike_index_logical[section_mask] = fit_kmeans(
+                    section_data, n_clusters, verbose=verbose)
 
         else:
             # Standard KMeans clustering for shorter traces
-            cluster_index, spike_index_logical = fit_kmeans(clustering_data, n_clusters)
-        
-        print(f'Trial {tt + 1}: Found {spike_index_logical.sum()} spikes')
+            cluster_index, spike_index_logical = fit_kmeans(clustering_data, n_clusters, verbose=verbose)
+
         spike_times[tt], spike_amplitudes[tt], non_spike_amplitudes, spike_index_logical, cluster_index = apply_min_peak_amp(
-            min_peak_amplitude, peak_amplitudes, peak_times, spike_index_logical, cluster_index, non_spike_cluster_index
+            min_peak_amplitude, peak_amplitudes, peak_times, spike_index_logical,
+            cluster_index, non_spike_cluster_index, verbose=verbose
         )
 
         # check for no spikes trace. With no surviving spike or non-spike peaks
         # (e.g. min_peak_amplitude rejected them all) sigF is undefined, and
-        # NaN < 5 would be False -- i.e. the trace would wrongly pass as spiking.
+        # NaN < threshold would be False -- i.e. the trace would wrongly pass as
+        # spiking.
         if len(spike_amplitudes[tt]) == 0 or len(non_spike_amplitudes) == 0:
             sigF = -np.inf
         else:
             sigF = (np.mean(spike_amplitudes[tt]) - np.mean(non_spike_amplitudes)) / np.std(non_spike_amplitudes)
 
-        if sigF < 5:  # no spikes
-            # spike_times / refractory_violations are sample indices, so keep them
-            # integer even when empty -- a float64 empty array cannot index a trace
-            # (raw[spike_times[i]] raises IndexError on no-spike epochs).
-            spike_times[tt] = np.array([], dtype=int)
-            spike_amplitudes[tt] = np.array([])
-            refractory_violations[tt] = np.array([], dtype=int)
-            print(f'Trial {tt + 1}: no spikes!')
+        if sigF < abs(threshold_spike_factor):  # no spikes
+            _empty(tt)
+            if verbose:
+                print(f'Trial {tt + 1}: 0 spikes (spike factor {sigF:.2f} < '
+                      f'{abs(threshold_spike_factor):g})')
             if check_detection:
                 plot_clustering_data(peak_amplitudes, rebound, cluster_index, spike_cluster_indices,
-                                      non_spike_cluster_index, current_trace, spike_times[tt], 
+                                      non_spike_cluster_index, current_trace, spike_times[tt],
                                       refractory_violations[tt], sigF)
             continue
 
         # check for refractory violations
         refractory_violations[tt] = np.where(np.diff(spike_times[tt]) < refractory_period_dp)[0] + 1
         ref_violations = len(refractory_violations[tt])
-        if ref_violations > 0:
-            print(f'Trial {tt + 1}: {ref_violations} refractory violations')
-            
+        if ref_violations > 0 and verbose:
+            print(f'Trial {tt + 1}: {ref_violations} refractory violations '
+                  + ('removed' if remove_refractory_violations else 'remain'))
+
         if check_detection:
             # Plot clustering data for each section
             if len(current_trace) > max_trial_length_dp:
@@ -190,11 +263,19 @@ def detector(data_matrix, check_detection=False, sample_rate=1e4, refractory_per
                                     non_spike_cluster_index, current_trace, spike_times[tt],
                                     refractory_violations[tt], sigF, str_save_plot=str_save_plot)
 
-    # if len(spike_times) == 1:  # return vector not list if only 1 trial
-    #     spike_times = spike_times[0]
-    #     spike_amplitudes = spike_amplitudes[0]
-    #     refractory_violations = refractory_violations[0]
-    
+    if remove_refractory_violations:
+        # SpikeDetectorNew.m drops the violating spikes rather than only
+        # reporting them: a peak within the refractory period of its
+        # predecessor is a second detection of one spike, not a second spike.
+        # The indices stay in refractory_violations so the count is still
+        # visible, but they now index into the pre-removal spike train.
+        for tt in range(n_traces):
+            if len(refractory_violations[tt]) == 0:
+                continue
+            keep = np.ones(len(spike_times[tt]), dtype=bool)
+            keep[np.asarray(refractory_violations[tt], dtype=int)] = False
+            spike_times[tt] = np.asarray(spike_times[tt])[keep]
+            spike_amplitudes[tt] = np.asarray(spike_amplitudes[tt])[keep]
 
     return spike_times, spike_amplitudes, refractory_violations
 
