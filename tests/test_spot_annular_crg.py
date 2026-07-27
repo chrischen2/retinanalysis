@@ -224,3 +224,59 @@ def test_crg_refresh_rstar_fills_a_blank_rig_from_the_experiment_name():
     assert out.loc[0, 'rstar'] == pytest.approx(15000.0)
     assert out.loc[1, 'rstar'] == pytest.approx(2310.0)
     assert out['rstar_level'].tolist() == [15000.0, 2000.0]
+
+
+# --- multi-recording overlay -----------------------------------------------
+
+def _crg_record(rstar=2000.0, tf=2.0, amp=30.0, contrasts=(-1.0, -0.75, -0.5, -0.25, 0.0)):
+    """A record dict with an F2 curve rising linearly with |dark contrast|."""
+    c = np.asarray(contrasts, dtype=float)
+    f2 = amp * np.abs(c)
+    return {'exp_name': '2026-06-04_G', 'cell_label': 'Cell2',
+            'online_analysis': 'extracellular', 'grating_site': 'center',
+            'light_level': f'{rstar:g}R*', 'units': 'rate difference (Hz)',
+            'rstar': rstar, 'temporal_frequency': tf, 'n_epochs': 21,
+            'crossing_interp': -0.5, 'dark_contrasts': c, 'f2_mean': f2,
+            'f1_mean': f2 * 0.3, 'resp_mean': f2 * 0.1,
+            'resp_sem': np.zeros_like(c), 'baseline_mean': 0.0}
+
+
+def test_crg_overlay_plots_the_harmonic_not_the_half_cycle_difference():
+    long = crg.tuning_overlay([_crg_record(amp=30.0)])
+    assert np.allclose(long.sort_values('dark_contrast')['rel'].to_numpy(),
+                       [30.0, 22.5, 15.0, 7.5, 0.0])
+
+
+def test_crg_overlay_does_not_subtract_a_baseline():
+    """An amplitude is already a modulation depth, so there is nothing to subtract."""
+    rec = _crg_record()
+    rec['baseline_mean'] = 12.0          # would shift every point if it were used
+    long = crg.tuning_overlay([rec])
+    assert long['rel'].max() == pytest.approx(30.0)
+
+
+def test_crg_overlay_normalizes_at_the_deepest_contrast():
+    long = crg.tuning_overlay([_crg_record(amp=30.0), _crg_record(amp=90.0)])
+    assert long.groupby('position')['ref_amplitude'].first().tolist() == [30.0, 90.0]
+    at_ref = long[long['dark_contrast'].eq(-1.0)]['norm']
+    assert np.allclose(at_ref.to_numpy(), 1.0)
+    # Three-fold apart in absolute F2, identical once normalized.
+    a, b = [sub.sort_values('dark_contrast')['norm'].to_numpy()
+            for _, sub in long.groupby('position')]
+    assert np.allclose(a, b)
+
+
+def test_crg_overlay_can_still_show_the_half_cycle_difference():
+    long = crg.tuning_overlay([_crg_record()], harmonic='resp_mean',
+                              subtract_baseline=True)
+    assert long['rel'].max() == pytest.approx(3.0)
+
+
+def test_crg_overlay_carries_the_temporal_frequency_for_labelling():
+    long = crg.tuning_overlay([_crg_record(tf=2.0), _crg_record(tf=4.0)])
+    assert long.groupby('position')['temporal_frequency'].first().tolist() == [2.0, 4.0]
+
+
+def test_crg_overlay_rejects_an_array_the_record_does_not_have():
+    with pytest.raises(KeyError, match='f3_mean'):
+        crg.tuning_overlay([_crg_record()], harmonic='f3_mean')

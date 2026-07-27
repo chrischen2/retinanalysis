@@ -28,7 +28,7 @@ to the nearest nominal rung in :data:`RSTAR_LEVELS` for grouping and labelling.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -1655,31 +1655,49 @@ _SITE_MARKERS = {'center': 'o', 'surround': 's'}
 _MODE_STYLES = {'extracellular': '-', 'exc': '--', 'inh': ':'}
 
 
-def _curve_fields(rec) -> Dict:
-    """Pull the tuning curve off a GratingRecord or a stored record dict."""
+def _curve_fields(rec, value: str = 'resp_mean', sem: Optional[str] = 'auto') -> Dict:
+    """Pull one curve off a GratingRecord, a CRGRecord or a stored record dict.
+
+    ``value`` names the array to plot — 'resp_mean' for the flashed protocol,
+    'f2_mean' / 'f1_mean' for the reversing one. ``sem`` names its error array;
+    'auto' pairs 'resp_mean' with 'resp_sem' and gives the harmonics none, since
+    the record stores no spread for them.
+    """
     get = rec.get if isinstance(rec, dict) else lambda k, d=None: getattr(rec, k, d)
+    raw = get(value)
+    if raw is None:
+        raise KeyError(f'record {get("exp_name")}/{get("cell_label")} has no {value!r} — '
+                       f'pass value= the array this protocol measures')
+    curve = np.asarray(raw, dtype=float)
+    if sem == 'auto':
+        sem = 'resp_sem' if value == 'resp_mean' else None
+    err = np.asarray(get(sem), dtype=float) if sem and get(sem) is not None \
+        else np.zeros_like(curve)
     return {
         'exp_name': str(get('exp_name')), 'cell_label': str(get('cell_label')),
         'online_analysis': str(get('online_analysis')),
         'grating_site': str(get('grating_site')),
         'light_level': str(get('light_level')), 'units': str(get('units', '')),
         'rstar': float(get('rstar', np.nan)),
+        'temporal_frequency': float(get('temporal_frequency', np.nan)),
         'crossing_interp': float(get('crossing_interp', np.nan)),
         'n_epochs': int(get('n_epochs', 0)),
         'dark_contrasts': np.asarray(get('dark_contrasts'), dtype=float),
-        'resp_mean': np.asarray(get('resp_mean'), dtype=float),
-        'resp_sem': np.asarray(get('resp_sem'), dtype=float),
+        'curve': curve, 'sem': err,
         'baseline_mean': float(get('baseline_mean', np.nan)),
     }
 
 
-def tuning_overlay(records: Sequence, ref_contrast: Optional[float] = None) -> pd.DataFrame:
+def tuning_overlay(records: Sequence, ref_contrast: Optional[float] = None,
+                   value: str = 'resp_mean', subtract_baseline: bool = True,
+                   sem: Optional[str] = 'auto') -> pd.DataFrame:
     """Long-form table behind :func:`plot_tuning_overlay`, one row per point.
 
-    Each record contributes ``resp_mean - baseline_mean`` — the response
-    relative to its own pre-stimulus baseline, the curve whose zero crossing is
-    the balancing contrast — in ``rel``, and that curve divided by
-    ``|rel|`` at its most negative dark contrast in ``norm``.
+    Each record contributes its curve as plotted in ``rel`` — ``resp_mean -
+    baseline_mean`` by default, the response relative to that recording's own
+    pre-stimulus baseline, which is the curve whose zero crossing is the
+    balancing contrast — and that curve divided by ``|rel|`` at its most
+    negative dark contrast in ``norm``.
 
     That reference point is the deepest dark bar the recording was run at, where
     the grating is furthest from cancelling and the response is largest, so it
@@ -1688,6 +1706,12 @@ def tuning_overlay(records: Sequence, ref_contrast: Optional[float] = None) -> p
     across conditions: *where along the contrast axis does the response come
     back to baseline*, not how many Hz or pA it started from. The divisor is a
     magnitude, hence positive, so the crossing does not move.
+
+    ``value`` selects the measured array, and ``subtract_baseline`` whether to
+    take it relative to ``baseline_mean``. The reversing protocol passes
+    ``value='f2_mean', subtract_baseline=False``: a harmonic amplitude is
+    already a modulation depth, zero when the cell does not follow the grating,
+    so there is nothing to subtract.
 
     ``ref_contrast`` overrides the reference with the contrast nearest a given
     value (e.g. ``-1.0``); the default uses each record's own most negative,
@@ -1698,18 +1722,20 @@ def tuning_overlay(records: Sequence, ref_contrast: Optional[float] = None) -> p
     """
     rows = []
     for i, rec in enumerate(records):
-        f = _curve_fields(rec)
-        contrasts, rel = f['dark_contrasts'], f['resp_mean'] - f['baseline_mean']
+        f = _curve_fields(rec, value=value, sem=sem)
+        contrasts = f['dark_contrasts']
+        rel = f['curve'] - (f['baseline_mean'] if subtract_baseline else 0.0)
         if contrasts.size == 0:
             continue
         ref_idx = (int(np.argmin(contrasts)) if ref_contrast is None
                    else int(np.argmin(np.abs(contrasts - float(ref_contrast)))))
         amp = float(abs(rel[ref_idx]))
-        for c, v, s in zip(contrasts, rel, f['resp_sem']):
+        for c, v, s in zip(contrasts, rel, f['sem']):
             rows.append({
                 'position': i, 'cell': f"{f['exp_name']}/{f['cell_label']}",
                 'online_analysis': f['online_analysis'], 'grating_site': f['grating_site'],
                 'light_level': f['light_level'], 'rstar': f['rstar'], 'units': f['units'],
+                'temporal_frequency': f['temporal_frequency'],
                 'n_epochs': f['n_epochs'], 'crossing_interp': f['crossing_interp'],
                 'dark_contrast': float(c), 'rel': float(v), 'sem': float(s),
                 'ref_contrast': float(contrasts[ref_idx]), 'ref_amplitude': amp,
@@ -1721,7 +1747,12 @@ def tuning_overlay(records: Sequence, ref_contrast: Optional[float] = None) -> p
 def plot_tuning_overlay(records: Sequence, labels: Optional[Sequence[str]] = None,
                         ref_contrast: Optional[float] = None,
                         figsize: Tuple[float, float] = (11.0, 4.6),
-                        title: Optional[str] = None):
+                        title: Optional[str] = None,
+                        value: str = 'resp_mean', subtract_baseline: bool = True,
+                        sem: Optional[str] = 'auto',
+                        value_label: Optional[str] = None,
+                        units_label: Optional[Callable[[str], str]] = None,
+                        mark_crossing: Optional[bool] = None):
     """Several recordings' tuning curves on one pair of axes, raw and normalized.
 
     Built for comparing one cell across conditions — the rows of ``selected``
@@ -1747,13 +1778,27 @@ def plot_tuning_overlay(records: Sequence, labels: Optional[Sequence[str]] = Non
     color within a figure only.
 
     ``labels`` overrides the legend text, one per record — pass the section-2
-    row indices to tie a curve back to the table it came from.
+    row indices to tie a curve back to the table it came from. Where a record
+    carries a temporal frequency (the reversing protocol) the automatic label
+    names it, since it is a condition that varies within a cell.
+
+    ``value`` / ``subtract_baseline`` / ``sem`` pass through to
+    :func:`tuning_overlay`, and ``value_label`` names the quantity on the y
+    axis. ``units_label`` rewrites the record's units string for display only —
+    the reversing protocol drops the ' difference' from 'rate difference (Hz)',
+    which describes ``resp_mean`` and not the harmonic amplitude it plots.
+    ``mark_crossing`` defaults to ``subtract_baseline``: a crossing marker only
+    means something on a curve that is measured against zero.
     """
     import matplotlib.pyplot as plt
     from retinanalysis.utils import style
 
     style.apply_publication_style()
-    long = tuning_overlay(records, ref_contrast=ref_contrast)
+    long = tuning_overlay(records, ref_contrast=ref_contrast, value=value,
+                          subtract_baseline=subtract_baseline, sem=sem)
+    if mark_crossing is None:
+        mark_crossing = subtract_baseline
+    quantity = value_label or ('response − baseline' if subtract_baseline else 'response')
     if long.empty:
         print('no tuning curves to overlay')
         return None
@@ -1783,9 +1828,12 @@ def plot_tuning_overlay(records: Sequence, labels: Optional[Sequence[str]] = Non
                  if np.isfinite(r['rstar']) else '#888888')
         ls = _MODE_STYLES.get(r['online_analysis'], '-')
         marker = _SITE_MARKERS.get(r['grating_site'], 'D')
+        bits = [r['online_analysis'], r['grating_site']]
+        if np.isfinite(r['temporal_frequency']):
+            bits.append(f"{r['temporal_frequency']:g} Hz")
+        bits.append(r['light_level'])
         label = (str(labels[int(position)]) if labels is not None
-                 and int(position) < len(labels)
-                 else f"{r['online_analysis']} · {r['grating_site']} · {r['light_level']}")
+                 and int(position) < len(labels) else ' · '.join(bits))
 
         ax_raw = raw_axes[r['units']]
         ax_raw.errorbar(sub['dark_contrast'], sub['rel'], yerr=sub['sem'], fmt=marker,
@@ -1795,14 +1843,14 @@ def plot_tuning_overlay(records: Sequence, labels: Optional[Sequence[str]] = Non
                      lw=1.5, color=color, label=label, zorder=3)
         # Where this recording's response returns to baseline -- the number the
         # whole protocol is after, on the axis it is measured on.
-        if np.isfinite(r['crossing_interp']):
+        if mark_crossing and np.isfinite(r['crossing_interp']):
             for ax in (ax_raw, ax_norm):
                 ax.plot([r['crossing_interp']], [0.0], marker='v', ms=6, color=color,
                         mec='#333333', mew=0.5, zorder=4, clip_on=False)
 
     for units, ax in raw_axes.items():
         ax.axhline(0.0, color='#666666', ls='--', lw=1.0, zorder=1)
-        ax.set_ylabel(f'response − baseline\n({units})')
+        ax.set_ylabel(f'{quantity}\n({units_label(units) if units_label else units})')
         ax.legend(frameon=False, fontsize=7, loc='best')
     list(raw_axes.values())[-1].set_xlabel('dark bar contrast')
     list(raw_axes.values())[0].set_title('recorded units', fontsize=9)
@@ -1811,7 +1859,7 @@ def plot_tuning_overlay(records: Sequence, labels: Optional[Sequence[str]] = Non
     ref = long['ref_contrast'].unique()
     ref_txt = (f'{ref[0]:g}' if len(ref) == 1 else 'each curve’s own deepest')
     ax_norm.set_xlabel('dark bar contrast')
-    ax_norm.set_ylabel(f'response − baseline,\nnormalized at contrast {ref_txt}')
+    ax_norm.set_ylabel(f'{quantity},\nnormalized at contrast {ref_txt}')
     ax_norm.set_title('normalized' + (' — comparable across modes'
                                       if len(units_present) > 1 else ''), fontsize=9)
     ax_norm.legend(frameon=False, fontsize=7, loc='best')
@@ -1819,7 +1867,7 @@ def plot_tuning_overlay(records: Sequence, labels: Optional[Sequence[str]] = Non
     cells = list(dict.fromkeys(long['cell']))
     fig.suptitle(title if title is not None else
                  f"{', '.join(cells)} — {long['position'].nunique()} recordings"
-                 + ('  (▾ = interpolated crossing)'), fontsize=10)
+                 + ('  (▾ = interpolated crossing)' if mark_crossing else ''), fontsize=10)
     return fig
 
 

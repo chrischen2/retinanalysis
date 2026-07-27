@@ -961,6 +961,41 @@ def plot_condition_examples(records: Optional[Dict[str, Dict]] = None, **kwargs)
     return sag.plot_condition_examples(records, **kwargs)
 
 
+# The harmonic is the measurement for a reversing grating, so the overlay plots
+# it rather than the half-cycle difference, and there is nothing to subtract: an
+# amplitude is already a modulation depth, zero when the cell does not follow
+# the grating. Otherwise this is the flashed protocol's figure.
+
+def tuning_overlay(records: Sequence, harmonic: str = 'f2_mean', **kwargs) -> pd.DataFrame:
+    """Long-form contrast-response table for several recordings; see
+    :func:`spot_annular_grating.tuning_overlay`.
+
+    ``harmonic`` is 'f2_mean' (the frequency-doubled response this protocol is
+    about) or 'f1_mean'. Pass ``value='resp_mean', subtract_baseline=True`` to
+    overlay the half-cycle difference and its null instead.
+    """
+    kwargs.setdefault('subtract_baseline', False)
+    return sag.tuning_overlay(records, value=harmonic, **kwargs)
+
+
+def plot_tuning_overlay(records: Sequence, harmonic: str = 'f2_mean', **kwargs):
+    """Several recordings' contrast-response curves overlaid, raw and normalized.
+
+    The reversing twin of :func:`spot_annular_grating.plot_tuning_overlay`: one
+    curve per recording, colored by light level and labelled with its temporal
+    frequency, in recorded units on the left and normalized to each curve's own
+    amplitude at its most negative dark contrast on the right. No crossing
+    marker — an F2 curve rises with contrast rather than returning to zero, so
+    the null lives in ``resp_mean``, not here.
+    """
+    kwargs.setdefault('subtract_baseline', False)
+    kwargs.setdefault('value_label', f'{harmonic.split("_")[0].upper()} amplitude')
+    # 'rate difference (Hz)' is the unit of resp_mean, the half-cycle difference;
+    # the harmonic amplitude it is plotted beside is just Hz.
+    kwargs.setdefault('units_label', lambda u: u.replace(' difference', ''))
+    return sag.plot_tuning_overlay(records, value=harmonic, **kwargs)
+
+
 def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
                 on_error: str = 'log', verbose: bool = False,
                 skip_existing: bool = False, prune: bool = False,
