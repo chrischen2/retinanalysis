@@ -306,14 +306,6 @@ def mode_family(online_analysis) -> str:
     return ''
 
 
-def technique_family(recording_technique) -> str:
-    """The recording mode recorded in the experiment metadata, normalized."""
-    t = str(recording_technique).strip().lower().replace('_', '-').replace(' ', '-')
-    if 'cell-attached' in t:
-        return 'cell-attached'
-    if 'whole-cell' in t:
-        return 'whole-cell'
-    return ''
 
 
 def series_resistance_table(df: pd.DataFrame, amp: str = 'Amp1',
@@ -365,38 +357,44 @@ def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
                             drop: bool = True, show: bool = True) -> pd.DataFrame:
     """Cross-check every block's ``onlineAnalysis`` label against the amplifier.
 
-    Three independent sources say how a cell was recorded, and they can
-    disagree: the ``onlineAnalysis`` protocol parameter the experimenter picked,
-    the ``recording_technique`` field in the experiment metadata, and
-    ``stimulus:Amp1:seriesResistance`` — which the amplifier writes into every
-    epoch and which is exactly 0 for cell-attached and positive for whole-cell.
-    A block labelled ``extracellular`` but recorded whole-cell would be run
-    through spike detection and produce a meaningless tuning curve, so it is
-    worth catching before analysis rather than after.
+    ``onlineAnalysis`` is a menu item the experimenter picks; the amplifier's
+    ``stimulus:Amp1:seriesResistance`` is what the rig actually recorded, and it
+    is exactly 0 for cell-attached and positive for whole-cell. **Where the two
+    disagree the reading wins** — a block labelled ``extracellular`` but
+    recorded whole-cell would go through spike detection and produce a
+    meaningless tuning curve.
+
+    What the reading can settle depends on which way the disagreement runs.
+    ``Rs == 0`` names the mode outright, so a block mislabelled ``exc`` or
+    ``inh`` is *relabelled* ``extracellular`` and kept. ``Rs > 0`` only says
+    "whole-cell" — it cannot say whether the cell was held at the excitatory or
+    the inhibitory reversal — so a block mislabelled ``extracellular`` has no
+    label to fall back on and is dropped.
 
     **The reading is only evidence when the field was in use.** A 0 means
     "cell-attached" only on a date where some other block reads non-zero,
     proving the experimenter was filling it in; on a date where every block
     reads 0 the field was simply never set and says nothing. Blocks on such a
-    date get ``rs_mode = ''`` and are never flagged.
+    date get ``rs_mode = ''`` and are left exactly as they are.
 
-    Adds these columns and, with ``drop=True`` (the default), removes the
-    flagged blocks:
+    Adds these columns:
 
     ``series_resistance``
         Median reading over the block's epochs, in ohms.
-    ``rs_mode`` / ``label_mode`` / ``meta_mode``
-        'cell-attached', 'whole-cell' or '' from the amplifier, the
-        ``onlineAnalysis`` label and the metadata respectively.
+    ``rs_mode`` / ``label_mode``
+        'cell-attached', 'whole-cell' or '' (unknown), from the amplifier and
+        from the ``onlineAnalysis`` label respectively.
     ``n_epochs_high_rs``
         Epochs above ``max_series_resistance`` (:func:`analyze_group` drops
         these individually; a block where *every* epoch is above it is dropped
         here since nothing would be left).
     ``rs_flag``
-        '' when nothing is wrong, else why the block was flagged.
+        '' when nothing is wrong, else what the amplifier found.
+    ``onlineAnalysis_recorded``
+        The original label, kept whenever a block is relabelled.
 
-    ``drop=False`` annotates without removing anything, for when you want to
-    look at a flagged recording rather than lose it.
+    ``drop=False`` annotates and relabels without removing anything, for when
+    you want to look at a disqualified recording rather than lose it.
     """
     out = df.copy()
     table = series_resistance_table(out[['exp_name', 'block_id']], amp=amp,
@@ -413,25 +411,23 @@ def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
                               np.where(rs > 0, 'whole-cell',
                                        np.where(out['rs_recorded'], 'cell-attached', '')))
     out['label_mode'] = out['onlineAnalysis'].apply(mode_family)
-    out['meta_mode'] = (out['recording_technique'].apply(technique_family)
-                        if 'recording_technique' in out.columns else '')
 
     mismatch = (out['rs_mode'].ne('') & out['label_mode'].ne('')
                 & out['rs_mode'].ne(out['label_mode']))
     all_high = (out['n_epochs_rs'] > 0) & out['n_epochs_high_rs'].eq(out['n_epochs_rs'])
-    meta_only = (out['meta_mode'].ne('') & out['label_mode'].ne('')
-                 & out['meta_mode'].ne(out['label_mode']) & ~mismatch)
-    # Where the label and the metadata disagree, the amplifier either backs the
-    # label (so the metadata is the wrong one) or says nothing at all.
-    meta_wrong = meta_only & out['rs_mode'].eq(out['label_mode'])
-    undecided = meta_only & out['rs_mode'].eq('')
+    # Rs == 0 fixes the mode completely, so the label can be corrected. Rs > 0
+    # leaves the holding potential unknown, so there is nothing to correct to.
+    relabel = mismatch & out['rs_mode'].eq('cell-attached')
+    unrecoverable = mismatch & ~relabel
 
     out['rs_flag'] = np.where(
-        mismatch, 'onlineAnalysis contradicted by series resistance',
-        np.where(all_high, f'series resistance above {max_series_resistance / 1e6:g} MOhm',
-                 np.where(meta_wrong, 'metadata technique contradicted by series resistance',
-                          np.where(undecided, 'onlineAnalysis disagrees with the metadata '
-                                              'technique, no reading to settle it', ''))))
+        relabel, 'relabelled extracellular: series resistance is 0',
+        np.where(unrecoverable, 'onlineAnalysis contradicted by series resistance',
+                 np.where(all_high,
+                          f'series resistance above {max_series_resistance / 1e6:g} MOhm', '')))
+
+    out['onlineAnalysis_recorded'] = out['onlineAnalysis']
+    out.loc[relabel, 'onlineAnalysis'] = 'extracellular'
 
     if show:
         n_read = int((out['n_epochs_rs'] > 0).sum())
@@ -444,43 +440,39 @@ def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
             print('  on every other date every block reads 0, so the reading cannot '
                   'confirm the label there — those blocks are left alone')
         print()
-        print('recording mode by source (metadata technique x onlineAnalysis x amplifier)')
-        print(pd.crosstab([out['meta_mode'].replace('', '(none)'),
-                           out['label_mode'].replace('', '(none)')],
-                          out['rs_mode'].replace('', '(no usable reading)')).to_string())
+        print('onlineAnalysis vs the amplifier')
+        print(pd.crosstab(out['label_mode'].replace('', '(none)'),
+                          out['rs_mode'].replace('', '(no usable reading)'),
+                          rownames=['onlineAnalysis says'],
+                          colnames=['series resistance says']).to_string())
 
-        # The blocks whose analysis is actually at risk come first; the ones
-        # where only the metadata is off, or nothing can settle it, after them.
-        severity = {'onlineAnalysis contradicted by series resistance': 0}
-        flagged = out[out['rs_flag'].ne('')].sort_values(
-            'rs_flag', key=lambda s: s.map(lambda v: severity.get(v, 1)), kind='stable')
+        flagged = out[out['rs_flag'].ne('')]
         print()
         if flagged.empty:
-            print('no blocks flagged')
+            print('every block with a usable reading agrees with its onlineAnalysis label')
         else:
-            print(f'{len(flagged)} block(s) flagged:')
-            cols = [c for c in ('exp_name', 'cell_label', 'cell_type_short', 'onlineAnalysis',
-                                'recording_technique', 'series_resistance', 'n_epochs',
-                                'n_epochs_high_rs', 'block_id', 'rs_flag') if c in flagged.columns]
+            print(f'{len(flagged)} block(s) where the amplifier disagrees:')
+            cols = [c for c in ('exp_name', 'cell_label', 'cell_type_short',
+                                'onlineAnalysis_recorded', 'series_resistance', 'n_epochs',
+                                'n_epochs_high_rs', 'block_id', 'rs_flag')
+                    if c in flagged.columns]
             show_df = flagged[cols].copy()
             show_df['series_resistance'] = (show_df['series_resistance'] / 1e6).round(2)
-            show_df = show_df.rename(columns={'series_resistance': 'Rs (MOhm)'})
+            show_df = show_df.rename(columns={'series_resistance': 'Rs (MOhm)',
+                                              'onlineAnalysis_recorded': 'recorded label'})
             print(show_df.to_string(index=False))
 
+    if int(relabel.sum()) and show:
+        print(f'\nrelabelled {int(relabel.sum())} block(s) as extracellular; '
+              f'their recorded label is kept in onlineAnalysis_recorded')
+
     if drop:
-        # Only the amplifier's own verdict removes a block: a wrong metadata
-        # field does not make the recording unanalyzable, and a disagreement
-        # nothing can settle is not a reason to throw data away.
-        losing = mismatch | all_high
+        losing = unrecoverable | all_high
         n_dropped = int(losing.sum())
-        if show:
-            if n_dropped:
-                print(f'\ndropping {n_dropped} block(s) the amplifier disqualifies — the '
-                      f'recording mode is not what the label says, or every epoch is over '
-                      f'the cutoff; pass drop=False to keep and inspect them')
-            elif out['rs_flag'].ne('').any():
-                print('\nnothing dropped: the flags above are metadata disagreements, '
-                      'which do not make a recording unanalyzable')
+        if show and n_dropped:
+            print(f'\ndropping {n_dropped} block(s): the amplifier says whole-cell where the '
+                  f'label says extracellular (so the holding potential is unknown), or every '
+                  f'epoch is over the cutoff. Pass drop=False to keep and inspect them')
         out = out[~losing].reset_index(drop=True)
     return out
 

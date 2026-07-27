@@ -269,3 +269,94 @@ def test_add_condition_labels_from_cell_type_and_site():
                             'grating_site': ['surround', 'center', 'surround']})
     out = sag.add_condition(summary)
     assert out['condition'].tolist() == ['ON-parasol / surround', 'OFF-parasol / center', 'other']
+
+
+# --- series resistance vs onlineAnalysis -----------------------------------
+# The amplifier reading is stubbed so these stay pure helpers, no h5 needed.
+
+def _blocks_with_rs(labels, resistances, exp='X_E', high_rs=None):
+    """A block table plus the matching stubbed amplifier reading."""
+    import pandas as pd
+    n = len(labels)
+    blocks = pd.DataFrame({
+        'exp_name': [exp] * n, 'block_id': list(range(1, n + 1)),
+        'cell_label': [f'Cell{i}' for i in range(1, n + 1)],
+        'cell_type_short': ['ON-parasol'] * n,
+        'onlineAnalysis': list(labels), 'n_epochs': [10] * n,
+    })
+    rs = pd.DataFrame({
+        'block_id': list(range(1, n + 1)),
+        'series_resistance': list(resistances),
+        'series_resistance_min': list(resistances),
+        'series_resistance_max': list(resistances),
+        'n_epochs_rs': [10] * n,
+        'n_epochs_high_rs': list(high_rs) if high_rs is not None else [0] * n,
+    })
+    return blocks, rs
+
+
+def _check(blocks, rs, **kwargs):
+    from unittest import mock
+    with mock.patch.object(sag, 'series_resistance_table', return_value=rs):
+        return sag.check_series_resistance(blocks, show=False, **kwargs)
+
+
+def test_zero_series_resistance_relabels_a_whole_cell_label():
+    # Rs == 0 fixes the mode outright, so an 'exc' label is corrected, not lost.
+    # The second block reads non-zero, which is what makes the field trustworthy
+    # on this date.
+    blocks, rs = _blocks_with_rs(['exc', 'exc'], [0.0, 8e6])
+    out = _check(blocks, rs)
+    assert len(out) == 2
+    assert out.loc[0, 'onlineAnalysis'] == 'extracellular'
+    assert out.loc[0, 'onlineAnalysis_recorded'] == 'exc'
+    assert out.loc[1, 'onlineAnalysis'] == 'exc'      # agrees, untouched
+
+
+def test_positive_series_resistance_drops_an_extracellular_label():
+    # Rs > 0 says whole-cell but not exc vs inh, so there is no label to fall
+    # back on and the block cannot be analyzed.
+    blocks, rs = _blocks_with_rs(['extracellular', 'exc'], [8e6, 8e6])
+    out = _check(blocks, rs)
+    assert out['block_id'].tolist() == [2]
+
+
+def test_every_epoch_over_the_cutoff_drops_the_block():
+    blocks, rs = _blocks_with_rs(['exc', 'exc'], [25e6, 8e6], high_rs=[10, 0])
+    out = _check(blocks, rs)
+    assert out['block_id'].tolist() == [2]
+
+
+def test_drop_false_keeps_disqualified_blocks_but_still_relabels():
+    blocks, rs = _blocks_with_rs(['extracellular', 'exc'], [8e6, 0.0])
+    out = _check(blocks, rs, drop=False)
+    assert len(out) == 2
+    assert out.loc[1, 'onlineAnalysis'] == 'extracellular'   # relabelled
+    assert out.loc[0, 'rs_flag'] != ''                       # flagged, not dropped
+
+
+def test_all_zero_date_is_left_alone():
+    # Every block reads 0, so the field was never set: it cannot mean
+    # "cell-attached" and no 'exc' label may be overridden on its say-so.
+    blocks, rs = _blocks_with_rs(['exc', 'extracellular'], [0.0, 0.0])
+    out = _check(blocks, rs)
+    assert len(out) == 2
+    assert out['onlineAnalysis'].tolist() == ['exc', 'extracellular']
+    assert (out['rs_flag'] == '').all()
+    assert (out['rs_mode'] == '').all()
+
+
+def test_missing_reading_never_flags():
+    blocks, rs = _blocks_with_rs(['exc', 'extracellular'], [np.nan, 8e6])
+    rs.loc[0, 'n_epochs_rs'] = 0
+    out = _check(blocks, rs)
+    assert out.loc[out['block_id'].eq(1), 'rs_flag'].iloc[0] == ''
+    assert out.loc[out['block_id'].eq(1), 'onlineAnalysis'].iloc[0] == 'exc'
+
+
+def test_mode_family_maps_labels_to_recording_modes():
+    assert sag.mode_family('extracellular') == 'cell-attached'
+    assert sag.mode_family('exc') == 'whole-cell'
+    assert sag.mode_family('inh') == 'whole-cell'
+    assert sag.mode_family('none') == ''      # unknown, never a mismatch
+    assert sag.mode_family(None) == ''
