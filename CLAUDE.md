@@ -157,19 +157,39 @@ written next to `offline.h5`; `load_spike_distance_many()` /
 DataJoint ingest and deletion live in `utils/database_utils.py`,
 auto-exported on `ra.*`:
 
-- `ra.populate_database()` — append-only ingest from `H5_DIR` /
-  `META_DIR` / `TAGS_DIR`. Never deletes.
-- `ra.delete_experiments(['<exp>', ...])` — drop specific experiments.
-  Cascades through DataJoint to every downstream table. No confirmation
-  prompt.
+- `ra.populate_database()` — ingest from `H5_DIR` / `META_DIR` /
+  `TAGS_DIR`. Mostly append-only, but **not purely**: since 2026-07-27
+  it also compares each source file's mtime against the stored
+  `Experiment.date_added`, and a meta/tags `.json` newer than the row
+  triggers a delete-then-re-ingest of that experiment. Returns
+  `{'n_ingested', 'added', 'updated', 'skipped'}`. Only the two json
+  files are watched — nothing in the DB is read from the `.h5`, so a
+  re-copied raw file must not force a re-ingest; `watch_data_file=True`
+  opts into that, `update_if_modified=False` restores strict
+  append-only.
+- `ra.list_database_experiments()` — read-only freshness view: one row
+  per experiment with `date_added`, newest `source_mtime` /
+  `source_file`, and `is_stale`. Use it to preview what a populate
+  would refresh.
+- `ra.delete_experiments(['<exp>', ...])` / `ra.purge_experiments(...)`
+  — same function under two names. Drop specific experiments (a bare
+  string works too). Cascades through DataJoint to every downstream
+  table. No confirmation prompt.
 - `ra.reload_experiment_data('<exp>')` — drop one experiment then
   re-ingest from H5. The right verb for "refresh this date".
 - `ra.purge_database(confirm='YES_DELETE_ALL')` — drop every experiment.
   **Refuses to run without the literal sentinel** to prevent accidental
   catastrophic deletion.
 
-Keep ingest and delete as separate calls — never collapse `populate_*`
-into a "refresh-then-insert" without an explicit user ask.
+The mtime-driven refresh inside `populate_database` was an explicit
+user ask (2026-07-27). Outside of that one path, keep ingest and delete
+as separate calls — don't widen `populate_*` into further
+"refresh-then-insert" behaviour without another explicit ask.
+
+Demoed in `demos/single_cell_main.ipynb` §"Populate the database" →
+"Which dates are out of date?" → "Purging entries". The purge calls in
+that notebook are **deliberately left commented out**; don't uncomment
+them.
 
 ## Conventions
 

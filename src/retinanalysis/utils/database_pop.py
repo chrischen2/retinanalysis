@@ -582,17 +582,82 @@ def gen_meta_list(data_dir: str, meta_dir: str, tags_dir: str) -> list:
             meta_list.append([os.path.join(meta_dir, item), item[:-5], tags_file])
     return meta_list
 
+def _as_datetime(value):
+    """Coerce a DataJoint timestamp fetch into a naive ``datetime.datetime``.
+
+    Depending on the connector, a ``timestamp`` column comes back as a python
+    ``datetime``, a ``numpy.datetime64`` or a ``pandas.Timestamp``. All three
+    need to be comparable against ``datetime.datetime.fromtimestamp(mtime)``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime.datetime):
+        return value.replace(tzinfo=None)
+    try:
+        import pandas as pd
+        ts = pd.Timestamp(value)
+        if ts.tzinfo is not None:
+            ts = ts.tz_localize(None)
+        return ts.to_pydatetime()
+    except Exception:
+        return None
+
+
+def newest_source_mtime(*paths):
+    """Latest mtime across the given source files, as ``(datetime, path)``.
+
+    Returns ``(None, None)`` when none of the paths exist on disk. MEA rows
+    store a bare experiment name in the ``data`` slot rather than a real path,
+    so a missing file is expected and not an error.
+    """
+    newest, newest_path = None, None
+    for path in paths:
+        if not path or not os.path.isfile(path):
+            continue
+        mtime = datetime.datetime.fromtimestamp(os.path.getmtime(path))
+        if newest is None or mtime > newest:
+            newest, newest_path = mtime, path
+    return newest, newest_path
+
+
 # entrance method to generate database from a directory
-def append_data(data_dir: str, meta_dir: str, tags_dir: str, username: str, db_param: dj.VirtualModule):
+def append_data(data_dir: str, meta_dir: str, tags_dir: str, username: str,
+                db_param: dj.VirtualModule, update_if_modified: bool = True,
+                watch_data_file: bool = False,
+                mtime_tolerance_sec: float = 2.0):
+    """Ingest every experiment found under ``data_dir`` / ``meta_dir``.
+
+    An experiment already present in the database is normally skipped. With
+    ``update_if_modified=True`` (the default) the source files are also
+    compared against the stored ``Experiment.date_added``: if the .json meta
+    file or the tags .json has been touched since the row was ingested — e.g.
+    a newer copy synced down from the shared drive — the existing experiment
+    is deleted (cascading to all downstream tables) and re-ingested from the
+    new file. Set ``update_if_modified=False`` to get the old append-only
+    behaviour.
+
+    Only the two .json files are watched by default. The .h5 is never read
+    here (everything in the database comes from the meta json), so re-copying
+    a raw file to the drive bumps its mtime without changing anything
+    ingestible. Pass ``watch_data_file=True`` to treat a newer .h5 as a
+    trigger anyway.
+
+    ``mtime_tolerance_sec`` guards against filesystem timestamp granularity
+    re-triggering an ingest on every call; only sources newer than
+    ``date_added + tolerance`` count as modified.
+    """
     global db
     global user
     db = db_param
     user = username
     fill_tables()
 
+    tolerance = datetime.timedelta(seconds=mtime_tolerance_sec)
+
     meta_list = gen_meta_list(data_dir, meta_dir, tags_dir)
     records_added = 0
     ls_new_exp = []
+    ls_updated = []  # exp_names re-ingested because their source files changed
     ls_skipped = []  # (exp_name, reason) for experiments skipped due to errors
     for meta, data, tags in tqdm(meta_list, desc='Experiments'):
         exp_name = os.path.basename(data)[:-3]
@@ -600,11 +665,32 @@ def append_data(data_dir: str, meta_dir: str, tags_dir: str, username: str, db_p
             # Skip macOS resource fork files
         if os.path.basename(meta).startswith('._'):
             continue
-        # check if meta already in database
-        if len(Experiment & {'exp_name' : exp_name}) == 1:
-            print(f"Already in database: {exp_name}")
-            continue
-        
+        # Already in the database? Compare source mtimes against date_added
+        # so an updated .json on the drive gets pulled in instead of skipped.
+        existing = (Experiment & {'exp_name': exp_name})
+        if len(existing) >= 1:
+            date_added = _as_datetime(existing.fetch('date_added')[0])
+            watched = [meta, tags] + ([data] if watch_data_file else [])
+            newest, newest_path = newest_source_mtime(*watched)
+            b_stale = (update_if_modified
+                       and date_added is not None
+                       and newest is not None
+                       and newest > date_added + tolerance)
+            if not b_stale:
+                print(f"Already in database: {exp_name}")
+                continue
+            print(f"Source file newer than database entry for {exp_name}: "
+                  f"{os.path.basename(newest_path)} modified {newest}, "
+                  f"added {date_added}. Re-ingesting.", flush=True)
+            try:
+                existing.delete(prompt=False)
+            except Exception as del_e:
+                reason = f"could not drop stale entry: {del_e}"
+                print(f"ERROR refreshing experiment {exp_name}: {reason}")
+                ls_skipped.append((exp_name, reason))
+                continue
+            ls_updated.append(exp_name)
+
         print("Adding", meta, flush=True)
         # not in database, add to database
         try:
@@ -642,14 +728,23 @@ def append_data(data_dir: str, meta_dir: str, tags_dir: str, username: str, db_p
     else:
         print("\nNo experiments skipped due to errors.")
 
+    if ls_updated:
+        print(f"Refreshed {len(ls_updated)} experiment(s) whose source files "
+              f"changed: {', '.join(sorted(ls_updated))}")
+
     e_q = Experiment() & 'is_mea=1' & [f'exp_name="{exp_name}"' for exp_name in ls_new_exp]
     sc_q = SortingChunk() * e_q.proj(..., experiment_id='id')
     if len(sc_q) == 0:
         print("No new sorting chunks found in database, skipping cell type file population.")
     else:
         append_celltypefiles(sc_q)
-    
-    return records_added
+
+    return {
+        'n_ingested': records_added,
+        'added': [e for e in ls_new_exp if e not in ls_updated],
+        'updated': ls_updated,
+        'skipped': ls_skipped,
+    }
 
 
 def append_celltypefiles(sc_q):
