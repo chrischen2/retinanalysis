@@ -250,6 +250,101 @@ def test_brighter_background_needs_shallower_dark_bar():
     assert preds[0] < -0.8 and preds[-1] > -0.4
 
 
+def test_prediction_saturates_at_the_bright_limit():
+    """I0 negligible against the mean gives -c/(1+2c) -- -0.32 for a 0.9 bar."""
+    for bright in (0.5, 0.9, 1.0):
+        limit = -bright / (1 + 2 * bright)
+        assert sag.cone_predict_dark_contrast(1e9, bright) == pytest.approx(limit, abs=1e-6)
+
+
+# --- gain of the model -----------------------------------------------------
+
+def test_weber_response_is_half_maximal_at_i0():
+    assert sag.weber_response(2000.0, i0=2000.0) == pytest.approx(0.5)
+    assert sag.weber_response(0.0, i0=2000.0) == pytest.approx(0.0)
+
+
+def test_incremental_gain_is_the_derivative_of_the_response():
+    """Compare against a numerical derivative of R(I) rather than the algebra."""
+    i0, i, h = 2000.0, 5000.0, 1e-3
+    numeric = (sag.weber_response(i + h, i0) - sag.weber_response(i - h, i0)) / (2 * h)
+    assert sag.weber_gain(i, i0, kind='incremental', normalize=False) \
+        == pytest.approx(numeric, rel=1e-6)
+
+
+def test_incremental_gain_is_one_in_darkness_when_normalized():
+    assert sag.weber_gain(0.0, 2000.0) == pytest.approx(1.0)
+    assert sag.weber_gain(2000.0, 2000.0) == pytest.approx(0.25)
+
+
+def test_incremental_gain_falls_faster_than_weber_above_i0():
+    """A decade of light costs the model 100x gain where Weber would cost 10x."""
+    i0 = 2000.0
+    hi, lo = sag.weber_gain(1e5, i0), sag.weber_gain(1e6, i0)
+    assert hi / lo == pytest.approx(100.0, rel=0.05)
+
+
+def test_contrast_gain_peaks_at_i0():
+    i0 = 2000.0
+    grid = np.logspace(1, 6, 500)
+    g = sag.weber_gain(grid, i0, kind='contrast')
+    assert grid[int(np.argmax(g))] == pytest.approx(i0, rel=0.05)
+    assert sag.weber_gain(i0, i0, kind='contrast') == pytest.approx(1.0)
+    assert sag.weber_gain(i0, i0, kind='contrast', normalize=False) == pytest.approx(0.25)
+
+
+def test_contrast_gain_rolls_off_as_one_over_i_above_i0():
+    """Well above I0 a decade of light costs a decade of contrast gain."""
+    i0 = 2000.0
+    assert sag.weber_gain(1e5, i0, kind='contrast') \
+        / sag.weber_gain(1e6, i0, kind='contrast') == pytest.approx(10.0, rel=0.05)
+
+
+def test_weber_gain_rejects_an_unknown_kind():
+    with pytest.raises(ValueError):
+        sag.weber_gain(1000.0, kind='absolute')
+
+
+def test_model_tuning_crosses_zero_at_the_predicted_contrast():
+    """The zero of the model tuning curve IS cone_predict_dark_contrast."""
+    grid = np.linspace(-1.0, 0.0, 4001)
+    for rstar in (1000, 2000, 4000, 8000, 16000):
+        y = sag.model_tuning(grid, rstar, 0.9)
+        assert sag.interp_zero_crossing(grid, y) == pytest.approx(
+            sag.cone_predict_dark_contrast(rstar, 0.9), abs=1e-3)
+
+
+def test_model_tuning_is_positive_at_the_deepest_dark_bar():
+    """Drawn in the orientation the measured curves come out in: +1 at c = -1."""
+    y = sag.model_tuning(np.linspace(-1.0, 0.0, 11), 4000.0, 0.9)
+    assert y[0] == pytest.approx(1.0)
+    assert y[-1] < 0                      # only the bright bars deviate at c = 0
+    assert all(np.diff(y) < 0)            # monotone as the dark bars shallow out
+
+
+def test_model_tuning_normalization_moves_no_crossing():
+    grid = np.linspace(-1.0, 0.0, 2001)
+    for rstar in (1000.0, 16000.0):
+        raw = sag.interp_zero_crossing(grid, sag.model_tuning(grid, rstar, 0.9,
+                                                              normalize=False))
+        norm = sag.interp_zero_crossing(grid, sag.model_tuning(grid, rstar, 0.9))
+        assert raw == pytest.approx(norm, abs=1e-6)
+
+
+def test_model_tuning_crossings_march_toward_zero_with_light():
+    crossings = [sag.interp_zero_crossing(
+        np.linspace(-1.0, 0.0, 4001),
+        sag.model_tuning(np.linspace(-1.0, 0.0, 4001), r, 0.9))
+        for r in (1000, 2000, 4000, 8000, 16000)]
+    assert all(np.diff(crossings) > 0)
+
+
+def test_weber_curve_matches_the_pointwise_prediction():
+    grid = [500.0, 2000.0, 20000.0]
+    assert list(sag.weber_curve(grid, 0.9, 2000.0)) == pytest.approx(
+        [sag.cone_predict_dark_contrast(r, 0.9, 2000.0) for r in grid])
+
+
 # --- zero crossing ---------------------------------------------------------
 
 def test_interp_zero_crossing_linear():

@@ -2023,6 +2023,312 @@ def plot_weber_comparison(summary: pd.DataFrame, i0: float = DEFAULTS['cone_i0']
     return fig
 
 
+# --------------------------------------------------------------------------
+# the model on its own — clean curves with no data on them
+# --------------------------------------------------------------------------
+
+def weber_response(rstar, i0: float = DEFAULTS['cone_i0']):
+    """Naka-Rushton cone response ``R(I) = I / (I + I0)``, the model everything
+    else in this module is derived from. Scalar or array in, same shape out."""
+    i = np.asarray(rstar, dtype=float)
+    return i / (i + float(i0))
+
+
+def weber_gain(rstar, i0: float = DEFAULTS['cone_i0'], kind: str = 'incremental',
+               normalize: bool = True):
+    """Gain of the cone model at a mean light level.
+
+    Two gains, and the difference between them is the whole point of the figure:
+
+    - ``kind='incremental'`` — ``dR/dI = I0 / (I + I0)**2``, the response per
+      unit *absolute* change in intensity. With ``normalize`` (default) it is
+      divided by its dark-adapted value ``1/I0``, giving ``(I0/(I+I0))**2``:
+      1 in darkness, falling toward zero as the mean light rises.
+    - ``kind='contrast'`` — ``I * dR/dI``, the response per unit *contrast*,
+      which is what a grating experiment actually probes. ``normalize`` divides
+      by its peak value (``1/4``, reached at ``I = I0``).
+
+    A system obeying Weber's law exactly would hold contrast gain flat: gain
+    falling as ``1/I`` so that a fixed contrast gives a fixed response at every
+    background. This model does that only near and below ``I0``; above it the
+    contrast gain falls off as ``I0/I`` because the static saturation has no
+    mechanism to keep up. That roll-off is what makes the balancing dark
+    contrast saturate in :func:`cone_predict_dark_contrast` rather than staying
+    at ``-bright_contrast``.
+    """
+    i = np.asarray(rstar, dtype=float)
+    i0 = float(i0)
+    incremental = i0 / (i + i0) ** 2
+    if kind == 'incremental':
+        return incremental * i0 if normalize else incremental
+    if kind == 'contrast':
+        g = i * incremental
+        return g * 4.0 if normalize else g
+    raise ValueError(f"kind must be 'incremental' or 'contrast', got {kind!r}")
+
+
+def _i0_list(i0) -> List[float]:
+    """Accept a scalar or a sequence of I0 values uniformly."""
+    return [float(i0)] if np.isscalar(i0) else [float(v) for v in i0]
+
+
+def _model_colors(values: Sequence) -> Dict:
+    """One curve → the house blue; several → the sequential ramp, dim to bright."""
+    from retinanalysis.utils import style
+    if len(values) == 1:
+        return {values[0]: '#0072B2'}
+    return style.colors_for_conditions(list(values))
+
+
+def plot_weber_gain(i0=DEFAULTS['cone_i0'],
+                    rstar_range: Tuple[float, float] = (100.0, 100000.0),
+                    kind: str = 'both', highlight: Optional[Tuple[float, float]] = None,
+                    figsize: Tuple[float, float] = (9.5, 4.0)):
+    """Gain of the cone model against light level — model only, no data.
+
+    The presentation figure for "what adaptation does to gain". Left panel is
+    incremental gain ``dR/dI`` relative to its dark-adapted value, on log-log,
+    with the slope ``-1`` line a perfectly Weber-adapting system would follow
+    drawn through the curve at ``I0``. Right panel is the same model expressed
+    as response per unit *contrast* — flat means contrast-invariant, i.e. Weber
+    — which plateaus around ``I0`` and then falls.
+
+    ``i0`` takes a scalar or a sequence; several values draw a family of curves
+    on the sequential ramp, which is the honest way to show a figure whose one
+    unmeasured parameter is ``I0``. ``kind`` selects ``'incremental'``,
+    ``'contrast'`` or ``'both'`` (default, two panels).
+
+    ``highlight=(lo, hi)`` shades the span of light levels an experiment
+    actually covered — context rather than a data overlay; leave it None for
+    the clean version. ``summary.rstar.min(), summary.rstar.max()`` is the
+    span this dataset reaches.
+    """
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    i0s = _i0_list(i0)
+    colors = _model_colors(i0s)
+    kinds = ('incremental', 'contrast') if kind == 'both' else (kind,)
+    grid = np.logspace(np.log10(rstar_range[0]), np.log10(rstar_range[1]), 400)
+
+    fig, axes = plt.subplots(1, len(kinds), figsize=figsize, squeeze=False)
+    for ax, k in zip(axes[0], kinds):
+        if highlight is not None:
+            ax.axvspan(highlight[0], highlight[1], color='#666666', alpha=0.10,
+                       lw=0, zorder=0, label='light levels recorded')
+        for v in i0s:
+            ax.plot(grid, weber_gain(grid, v, kind=k), '-', lw=2.2,
+                    color=colors[v], zorder=3,
+                    label=f'I0 = {v:g} R*' if len(i0s) > 1 else 'cone model')
+            ax.axvline(v, color=colors[v], ls=':', lw=1.0, alpha=0.6, zorder=1)
+        ax.set_xscale('log')
+        ax.set_xlabel('mean light level (R*)')
+        if k == 'incremental':
+            # Weber = gain falling as 1/I. Anchor the reference on the model
+            # curve at I0 (relative gain 1/4 there) so the two are comparable
+            # by slope alone rather than by an arbitrary offset.
+            ref = np.logspace(np.log10(i0s[0]), np.log10(rstar_range[1]), 100)
+            ax.plot(ref, 0.25 * i0s[0] / ref, '--', color='#666666', lw=1.3,
+                    zorder=2, label="Weber slope (gain $\\propto$ 1/I)")
+            ax.set_yscale('log')
+            ax.set_ylim(1e-4, 2.0)
+            ax.set_ylabel('incremental gain dR/dI\n(relative to dark-adapted)')
+            ax.set_title('gain falls with background', fontsize=9)
+        else:
+            ax.axhline(1.0, color='#666666', ls='--', lw=1.0, zorder=1)
+            ax.set_ylim(0, 1.45)      # headroom above the plateau for the legend
+            ax.set_ylabel('response per unit contrast\n(relative to peak)')
+            ax.set_title('contrast gain: flat would be exact Weber', fontsize=9)
+        ax.legend(frameon=False, fontsize=8, loc='lower left' if k == 'incremental'
+                  else 'upper left')
+    fig.suptitle('Weber adaptation in the cone model  R(I) = I / (I + I0)', fontsize=11)
+    fig.tight_layout()
+    return fig
+
+
+def plot_weber_prediction(bright_contrast=0.9, i0=DEFAULTS['cone_i0'],
+                          rstar_range: Tuple[float, float] = (100.0, 100000.0),
+                          asymptotes: bool = True,
+                          highlight: Optional[Tuple[float, float]] = None,
+                          figsize: Tuple[float, float] = (6.4, 4.4)):
+    """Predicted cancelling dark contrast against light level — model only.
+
+    The curve underneath :func:`plot_weber_comparison`, drawn on its own with no
+    recordings on top: the dark-bar contrast that negates a bright bar of
+    ``bright_contrast`` under ``R(I) = I/(I+I0)``, across light level.
+
+    It runs between two limits worth naming out loud on a slide, both drawn by
+    ``asymptotes``:
+
+    - dim (``I << I0``) the cone response is linear, so cancelling a bright bar
+      of contrast ``c`` takes a dark bar of ``-c`` — equal and opposite.
+    - bright (``I >> I0``) saturation compresses the bright bar more than the
+      dark one, so a *smaller* dark contrast suffices, and the requirement
+      flattens out at ``-c / (1 + 2c)`` — ``-0.32`` for ``c = 0.9``.
+
+    The move between those two plateaus happens within about a decade either
+    side of ``I0``, which is why it is measurable at all: it is also roughly the
+    range this protocol spans.
+
+    ``bright_contrast`` and ``i0`` each take a scalar or a sequence — a family
+    over ``i0`` shows how much the figure rests on the one number in it that
+    was never measured. The asymptote lines are drawn for a single bright
+    contrast only; a family of them would put six gray lines on the axes.
+    ``highlight=(lo, hi)`` shades the light levels an experiment covered; None
+    (default) keeps it clean.
+    """
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    i0s = _i0_list(i0)
+    brights = _i0_list(bright_contrast)
+    grid = np.logspace(np.log10(rstar_range[0]), np.log10(rstar_range[1]), 400)
+
+    # Whichever of the two is being varied carries the color; the other one
+    # (usually a single value) is named in the title instead.
+    vary_i0 = len(i0s) >= len(brights)
+    colors = _model_colors(i0s if vary_i0 else brights)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    if highlight is not None:
+        ax.axvspan(highlight[0], highlight[1], color='#666666', alpha=0.10, lw=0,
+                   zorder=0, label='light levels recorded')
+    for bc in brights:
+        for v in i0s:
+            y = weber_curve(grid, bc, v)
+            key = v if vary_i0 else bc
+            label = f'I0 = {v:g} R*' if vary_i0 else f'bright bar {bc:g}'
+            if len(i0s) == 1 and len(brights) == 1:
+                label = 'cone prediction'
+            ax.plot(grid, y, '-', lw=2.2, color=colors[key], zorder=3, label=label)
+        # The two plateaus the curve runs between. One bright bar only: a set of
+        # them puts six gray lines on the axes and reads as clutter. Labels go
+        # where the curve is not — the saturated line is empty at the dim end,
+        # the linear one at the bright end.
+        if asymptotes and len(brights) == 1:
+            sat = -bc / (1 + 2 * bc)
+            ax.axhline(-bc, color='#666666', ls='--', lw=1.1, zorder=1)
+            ax.axhline(sat, color='#666666', ls=':', lw=1.1, zorder=1)
+            ax.text(rstar_range[0] * 1.15, sat + 0.015, f'saturated limit  {sat:.2f}',
+                    fontsize=7.5, color='#666666', va='bottom')
+            ax.text(rstar_range[1] * 0.9, -bc + 0.015, f'linear limit  $-c$ = {-bc:g}',
+                    fontsize=7.5, color='#666666', ha='right', va='bottom')
+    if len(i0s) == 1:
+        ax.axvline(i0s[0], color='#666666', ls=':', lw=1.0, alpha=0.7, zorder=1)
+        ax.annotate(f'I0 = {i0s[0]:g} R*',
+                    xy=(i0s[0], float(weber_curve([i0s[0]], brights[0], i0s[0])[0])),
+                    xytext=(4, -12), textcoords='offset points',
+                    fontsize=7.5, color='#666666')
+    ax.set_xscale('log')
+    ax.set_xlabel('mean light level (R*)')
+    ax.set_ylabel('cancelling dark bar contrast')
+    ax.set_ylim(-max(brights) - 0.10, 0.0)
+    title = 'Contrast that negates the bright bar'
+    if len(brights) == 1:
+        title += f'  (bright bar {brights[0]:g})'
+    ax.set_title(title, fontsize=10)
+    ax.legend(frameon=False, fontsize=8, loc='center right')
+    fig.tight_layout()
+    return fig
+
+
+def model_tuning(dark_contrasts, rstar: float, bright_contrast: float = 0.9,
+                 i0: float = DEFAULTS['cone_i0'], normalize: bool = True) -> np.ndarray:
+    """Predicted response against dark-bar contrast at one light level.
+
+    The model version of a measured tuning curve. The cell sees both bar sets
+    at once, so the predicted response is their sum through ``R(I) = I/(I+I0)``,
+    written as the two deviations from the mean::
+
+        net(c) = (Ib - Im)/(Ib + I0) + (Id - Im)/(Id + I0)
+
+    with ``Im = rstar``, ``Ib = Im(1 + bright_contrast)`` and
+    ``Id = Im(1 + c)``. Its zero is exactly the balance equation
+    :func:`cone_predict_dark_contrast` solves, so each curve crosses zero at
+    that light level's predicted cancelling contrast.
+
+    **Sign.** ``net`` is the cone signal, which goes negative as the dark bars
+    deepen. Both conditions in this dataset — ON-parasol surround, OFF-parasol
+    center — are ones where a dark bar *drives* the cell, so the returned curve
+    is ``-net``: positive at the deepest dark bar, the same orientation the
+    measured population curves come out in. A cell of the opposite polarity
+    flips the whole curve and leaves the crossing exactly where it is.
+
+    ``normalize`` (default) divides by the value at ``c = -1``, the deepest dark
+    bar and the point every recording of this protocol has in common, so every
+    curve is +1 there — the convention :func:`tuning_overlay` and
+    :func:`population_tuning` use. It is a positive divisor, so no crossing
+    moves.
+    """
+    c = np.asarray(dark_contrasts, dtype=float)
+    im, i0 = float(rstar), float(i0)
+    ib = im * (1.0 + float(bright_contrast))
+    idk = im * (1.0 + c)
+    bright_term = (ib - im) / (ib + i0)
+    resp = -(bright_term + (idk - im) / (idk + i0))
+    if normalize:
+        ref = abs(-(bright_term + (0.0 - im) / (0.0 + i0)))   # the c = -1 end
+        if ref > 0:
+            resp = resp / ref
+    return resp
+
+
+def plot_model_tuning(light_levels: Sequence[float] = (1000.0, 2000.0, 4000.0,
+                                                       8000.0, 16000.0),
+                      bright_contrast: float = 0.9, i0: float = DEFAULTS['cone_i0'],
+                      normalize: bool = True, mark_crossings: bool = True,
+                      figsize: Tuple[float, float] = (6.8, 4.8)):
+    """Model tuning curves against dark-bar contrast, one per light level.
+
+    The clean counterpart to :func:`plot_population_tuning`: same axes, same
+    sequential color ramp, no recordings on it. Each curve is the cone model's
+    response as the dark bars deepen from ``0`` to ``-1``, and where it crosses
+    zero is that light level's cancelling contrast — the number the whole
+    protocol measures, marked ▾ and printed in the legend.
+
+    Brighter backgrounds cross **closer to zero**: saturation compresses the
+    bright bar, so less dark contrast is needed to balance it. That leftward-to-
+    rightward march of the crossings is the prediction, drawn on the same axes
+    the data is drawn on.
+
+    ``normalize`` (default) puts every curve at +1 at the deepest dark bar, so
+    the crossings can be read against each other; see :func:`model_tuning` for
+    the sign convention and what the normalization does not change.
+    """
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    levels = sorted(float(v) for v in light_levels)
+    colors = style.colors_for_conditions(levels)
+    grid = np.linspace(-1.0, 0.0, 401)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.axhline(0.0, color='#666666', ls='--', lw=1.0, zorder=1)
+    for lvl in levels:
+        y = model_tuning(grid, lvl, bright_contrast, i0, normalize=normalize)
+        crossing = cone_predict_dark_contrast(lvl, bright_contrast, i0)
+        ax.plot(grid, y, '-', lw=2.2, color=colors[lvl], zorder=3,
+                label=f'{lvl:g} R*   (crosses {crossing:.2f})')
+        if mark_crossings:
+            ax.plot([crossing], [0.0], marker='v', ms=7, color=colors[lvl],
+                    mec='white', mew=0.8, zorder=4)
+    ax.set_xlim(-1.0, 0.0)
+    ax.set_xlabel('dark bar contrast')
+    ax.set_ylabel('predicted response'
+                  + ('\n(+1 at the deepest dark bar)' if normalize else ''))
+    ax.set_title(f'Cone model tuning curves by light level  '
+                 f'(bright bar {bright_contrast:g}, I0 = {i0:g} R*)', fontsize=10)
+    # Upper right is the empty corner: every curve is near zero by the time the
+    # dark bars are shallow, and the dim ones run down to the lower right.
+    ax.legend(frameon=False, fontsize=8, title='light level', title_fontsize=8,
+              loc='upper right')
+    fig.tight_layout()
+    return fig
+
+
 def add_condition(summary: pd.DataFrame) -> pd.DataFrame:
     """Attach the canonical ``condition`` label to a stored summary table."""
     short = summary['cell_type'].astype(str).str.split('\\').str[-1]
