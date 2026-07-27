@@ -55,10 +55,22 @@ from retinanalysis.SCutils.protocols import spot_annular_grating as sag
 # Shared, protocol-independent pieces — imported so the two analyses cannot drift
 # apart on light level, the cone model, or the population figures.
 from retinanalysis.SCutils.protocols.spot_annular_grating import (  # noqa: F401
-    CANONICAL_CONDITIONS, RSTAR_TABLE, add_condition, apply_rstar_mapping,
-    cone_predict_dark_contrast, grating_site, interp_zero_crossing, is_calibrated,
-    light_level_rstar, light_setting, read_filter_wheel_ndf, select_canonical,
-    weber_curve,
+    ALLOWED_BRIGHT_CONTRAST, ALLOWED_FILTER_WHEEL, CANONICAL_CONDITIONS, MIN_BAR_WIDTH,
+    MIN_EPOCHS, RIG_MAX_RSTAR, RSTAR_LEVELS, RSTAR_TABLE, add_condition,
+    apply_rstar_mapping, center_spot, cone_predict_dark_contrast, grating_site,
+    interp_zero_crossing, is_calibrated, light_level_rstar, light_setting, max_rstar,
+    read_filter_wheel_ndf, rig_of, round_rstar, select_canonical, weber_curve,
+)
+# The recording-mode audit and the raw-trace views are protocol-independent —
+# they read amp_data and the epoch timing, both of which this protocol has — so
+# they are re-exported rather than reimplemented. crg.check_series_resistance is
+# the same function the flashed notebook calls in its section 1b.
+from retinanalysis.SCutils.protocols.spot_annular_grating import (  # noqa: F401
+    load_raw, plot_raw_blocks, plot_raw_epochs,
+)
+from retinanalysis.SCutils.recording_mode import (  # noqa: F401
+    MAX_SERIES_RESISTANCE, check_series_resistance, mode_family,
+    resolve_recording_mode, stage_ndf_table,
 )
 
 PROTOCOL = 'spotWithAnnularContrastReversingGrating'
@@ -69,8 +81,16 @@ DEFAULTS.update(
 )
 
 # barWidth and temporalFrequency are constant within a block here and both are
-# shown in the block table, so they join the config keys.
-CONFIG_KEYS = sag.CONFIG_KEYS + ['temporalFrequency', 'barWidth']
+# shown in the block table, so they join the config keys. barWidth is already in
+# the flashed protocol's list, so only add what is missing — a duplicate would
+# survive the dict comprehension but makes the list lie about what it holds.
+CONFIG_KEYS = sag.CONFIG_KEYS + [k for k in ('temporalFrequency', 'barWidth')
+                                 if k not in sag.CONFIG_KEYS]
+
+# Temporal frequencies the analysis runs on. Both reversal rates in this dataset
+# (2 and 4 Hz) are kept by default; the constant exists so a frequency can be
+# excluded the same way a filter-wheel setting can.
+ALLOWED_TEMPORAL_FREQUENCY: Optional[Tuple[float, ...]] = None
 
 
 # --------------------------------------------------------------------------
@@ -200,8 +220,10 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
     df = df.merge(meta, on=['exp_name', 'block_id'], how='left')
 
     df['grating_site'] = df['annulusInnerDiameter'].apply(grating_site)
+    df['center_spot'] = df['apertureDiameter'].apply(center_spot)
     df['cell_type_short'] = df['cell_type'].astype(str).str.split('\\').str[-1]
-    df = df.rename(columns={'NDF': 'filter_wheel_ndf'})
+    df['rig'] = df['exp_name'].apply(rig_of)
+    df = df.rename(columns={'NDF': 'filter_wheel_ndf', 'barWidth': 'bar_width'})
     df['has_filter_wheel'] = df['filter_wheel_ndf'].notna()
     if verify_fw:
         bad = [(r['exp_name'], int(r['block_id']))
@@ -212,37 +234,86 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
         for exp, bid in bad:
             print(f'  MISMATCH {exp} block {bid}')
 
-    rs = [light_level_rstar(n, b)
-          for n, b in zip(df['filter_wheel_ndf'], df['backgroundIntensity'])]
+    # The fixed filters in the light path, which the wheel setting does not cover.
+    df = df.merge(stage_ndf_table(df[['exp_name', 'block_id']], verbose=show),
+                  on='block_id', how='left')
+    df['stage_ndfs'] = df['stage_ndfs'].fillna('')
+
+    # R* comes from the rig's measured ceiling, so the rig has to come with the
+    # wheel setting -- E and G differ by 2.6x at the same setting. Passing no rig
+    # fell back to RSTAR_TABLE and left most blocks with no light level at all.
+    rs = [light_level_rstar(n, b, rig=r)
+          for n, b, r in zip(df['filter_wheel_ndf'], df['backgroundIntensity'], df['rig'])]
     df['rstar'] = [r for r, _ in rs]
     df['light_level'] = [lab for _, lab in rs]
+    df['rstar_level'] = [round_rstar(r) for r, _ in rs]
     df['light_setting'] = [light_setting(n, b)
                            for n, b in zip(df['filter_wheel_ndf'], df['backgroundIntensity'])]
-    df['rstar_measured'] = [is_calibrated(n, b)
-                            for n, b in zip(df['filter_wheel_ndf'], df['backgroundIntensity'])]
+    df['rstar_measured'] = [is_calibrated(n, b, rig=r)
+                            for n, b, r in zip(df['filter_wheel_ndf'],
+                                               df['backgroundIntensity'], df['rig'])]
+    df['max_rstar'] = [max_rstar(r, n) for r, n in zip(df['rig'], df['filter_wheel_ndf'])]
     df = df.sort_values(['exp_name', 'cell_label', 'start_time']).reset_index(drop=True)
 
     if show:
-        cols = ['exp_name', 'cell_label', 'cell_type_short', 'onlineAnalysis', 'grating_site',
-                'temporalFrequency', 'barWidth', 'filter_wheel_ndf', 'backgroundIntensity',
-                'light_level', 'annulusInnerDiameter', 'annulusOuterDiameter',
-                'stimTime', 'n_epochs', 'block_id']
+        cols = ['exp_name', 'rig', 'cell_label', 'cell_type_short', 'onlineAnalysis',
+                'grating_site', 'center_spot', 'temporalFrequency', 'bar_width',
+                'brightBarContrast', 'filter_wheel_ndf', 'stage_ndfs',
+                'backgroundIntensity', 'light_level', 'annulusInnerDiameter',
+                'annulusOuterDiameter', 'stimTime', 'n_epochs', 'block_id']
         print(f"{len(df)} blocks | {df['exp_name'].nunique()} experiments | "
               f"{df.groupby(['exp_name', 'cell_label']).ngroups} cells")
         missing = df[~df['has_filter_wheel']]
         if len(missing):
             print(f'  WARNING: {len(missing)} block(s) have no background:FilterWheel:NDF '
                   f"-- no light level. Experiments: {', '.join(sorted(missing['exp_name'].unique()))}")
+        off = df[df['filter_wheel_ndf'].isin(list(ALLOWED_FILTER_WHEEL))
+                 & ((df['rstar'] < min(RSTAR_LEVELS)) | (df['rstar'] > max(RSTAR_LEVELS)))]
+        if len(off):
+            print(f'  WARNING: {len(off)} block(s) fall outside RSTAR_LEVELS '
+                  f'({min(RSTAR_LEVELS):g}-{max(RSTAR_LEVELS):g} R*) and are clamped to the '
+                  f'nearest end: '
+                  + ', '.join(f'{r:.0f}->{lv:g}R*' for r, lv in
+                              sorted({(r, lv) for r, lv in
+                                      zip(off['rstar'], off['rstar_level'])})))
         sc.scroll_table(df[cols], height=height,
-                        num_cols=('temporalFrequency', 'barWidth', 'filter_wheel_ndf',
-                                  'backgroundIntensity', 'stimTime', 'n_epochs', 'block_id'))
+                        num_cols=('temporalFrequency', 'bar_width', 'brightBarContrast',
+                                  'filter_wheel_ndf', 'backgroundIntensity', 'stimTime',
+                                  'n_epochs', 'block_id'))
     return df
 
 
 def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
-                 require_filter_wheel: bool = True) -> pd.DataFrame:
-    """One row per recording group; like the flashed version plus temporal frequency."""
+                 require_filter_wheel: bool = True,
+                 allowed_filter_wheel: Sequence[float] = ALLOWED_FILTER_WHEEL,
+                 allowed_bright_contrast: Optional[Sequence[float]]
+                 = ALLOWED_BRIGHT_CONTRAST,
+                 allowed_temporal_frequency: Optional[Sequence[float]]
+                 = ALLOWED_TEMPORAL_FREQUENCY,
+                 min_bar_width: Optional[float] = MIN_BAR_WIDTH,
+                 min_epochs: Optional[int] = MIN_EPOCHS) -> pd.DataFrame:
+    """One row per recording group; like the flashed version plus temporal frequency.
+
+    A group is (experiment, rig, cell, recording mode, grating site, **temporal
+    frequency**, filter wheel, background). Temporal frequency is a grouping key
+    rather than something pooled: it changes the response, and F1/F2 are measured
+    at it.
+
+    The filters are the flashed protocol's, applied the same way and reported the
+    same way — ``allowed_filter_wheel`` and ``allowed_bright_contrast`` and
+    ``min_bar_width`` on blocks, ``min_epochs`` on the pooled group — plus
+    ``allowed_temporal_frequency`` for this protocol's extra axis. Any of them
+    takes ``None`` to keep everything.
+    """
     from retinanalysis.SCutils import explore as sc
+
+    needed = ['rig', 'bar_width', 'rstar_level', 'center_spot']
+    absent = [c for c in needed if c not in df.columns]
+    if absent:
+        raise KeyError(
+            f'find_blocks() output is missing {absent}. This usually means the block '
+            f'table was built by an older version of this module still held in the '
+            f'kernel -- restart the kernel and re-run find_blocks().')
 
     if require_filter_wheel and 'has_filter_wheel' in df.columns:
         dropped = df[~df['has_filter_wheel']]
@@ -250,24 +321,95 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
             print(f'dropping {len(dropped)} block(s) with no filter-wheel NDF: '
                   f"{', '.join(sorted(dropped['exp_name'].unique()))}")
         df = df[df['has_filter_wheel']]
+        off_list = df[~df['filter_wheel_ndf'].isin(list(allowed_filter_wheel))]
+        if len(off_list):
+            print(f'dropping {len(off_list)} block(s) whose filter wheel is not in '
+                  f'{list(allowed_filter_wheel)}: NDF '
+                  f"{sorted(off_list['filter_wheel_ndf'].dropna().unique().tolist())}")
+        df = df[df['filter_wheel_ndf'].isin(list(allowed_filter_wheel))]
 
-    keys = ['exp_name', 'cell_label', 'cell_type_short', 'onlineAnalysis', 'grating_site',
-            'temporalFrequency', 'filter_wheel_ndf', 'backgroundIntensity']
-    g = (df.groupby(keys, dropna=False, sort=False)
-           .agg(blocks=('block_id', 'size'), epochs=('n_epochs', 'sum'),
-                light_level=('light_level', 'first'), rstar=('rstar', 'first'),
-                light_setting=('light_setting', 'first'),
-                rstar_measured=('rstar_measured', 'first'),
-                bar_widths=('barWidth', lambda s: ', '.join(f'{b:g}' for b in sorted(set(s)))),
-                block_ids=('block_id', lambda s: ', '.join(str(int(b)) for b in sorted(s))))
-           .reset_index())
+    if allowed_bright_contrast is not None and 'brightBarContrast' in df.columns:
+        keep = df['brightBarContrast'].isin(list(allowed_bright_contrast))
+        if (~keep).any():
+            bad = df[~keep]
+            print(f'dropping {len(bad)} block(s) whose bright bar contrast is not in '
+                  f'{list(allowed_bright_contrast)}: '
+                  + ', '.join(f'{c:g}' for c in sorted(bad['brightBarContrast'].unique())))
+        df = df[keep]
+
+    if allowed_temporal_frequency is not None and 'temporalFrequency' in df.columns:
+        keep = df['temporalFrequency'].isin(list(allowed_temporal_frequency))
+        if (~keep).any():
+            bad = df[~keep]
+            print(f'dropping {len(bad)} block(s) whose temporal frequency is not in '
+                  f'{list(allowed_temporal_frequency)} Hz: '
+                  + ', '.join(f'{c:g}' for c in sorted(bad['temporalFrequency'].unique())))
+        df = df[keep]
+
+    if min_bar_width is not None and 'bar_width' in df.columns:
+        keep = df['bar_width'] >= float(min_bar_width)
+        if (~keep).any():
+            bad = df[~keep]
+            print(f'dropping {len(bad)} block(s) with bar width below '
+                  f'{float(min_bar_width):g} µm: '
+                  + ', '.join(f'{w:g} µm ({n} block{"s" if n > 1 else ""})'
+                              for w, n in sorted(bad['bar_width'].value_counts().items()))
+                  + f" -- {', '.join(sorted(bad['exp_name'].unique()))}")
+        df = df[keep]
+
+    keys = ['exp_name', 'rig', 'cell_label', 'cell_type_short', 'onlineAnalysis',
+            'grating_site', 'temporalFrequency', 'filter_wheel_ndf', 'backgroundIntensity']
+    agg = dict(blocks=('block_id', 'size'), epochs=('n_epochs', 'sum'),
+               light_level=('light_level', 'first'), rstar=('rstar', 'first'),
+               rstar_level=('rstar_level', 'first'),
+               light_setting=('light_setting', 'first'),
+               rstar_measured=('rstar_measured', 'first'),
+               center_spot=('center_spot',
+                            lambda s: ', '.join(sorted(set(str(v) for v in s)))),
+               bright=('brightBarContrast',
+                       lambda s: ', '.join(f'{v:g}' for v in sorted(set(s), reverse=True))),
+               # Bar width is pooled by analyze_group, unlike temporal frequency,
+               # so a group can legitimately span several and has to show them.
+               bar_width=('bar_width',
+                          lambda s: ', '.join(f'{b:g}' for b in sorted(set(s)))),
+               aperture=('apertureDiameter', 'first'),
+               annulus_inner=('annulusInnerDiameter', 'first'),
+               annulus_outer=('annulusOuterDiameter', 'first'),
+               block_ids=('block_id', lambda s: ', '.join(str(int(b)) for b in sorted(s))))
+    if 'stage_ndfs' in df.columns:
+        agg['stage_ndfs'] = ('stage_ndfs', lambda s: ' | '.join(sorted({str(v) for v in s})))
+    if 'series_resistance' in df.columns:
+        agg['rs_mohm'] = ('series_resistance', lambda s: np.round(np.nanmedian(s) / 1e6, 2))
+        agg['epochs_high_rs'] = ('n_epochs_high_rs', 'sum')
+    g = df.groupby(keys, dropna=False, sort=False).agg(**agg).reset_index()
+
+    # On the pooled group, for the same reason as the flashed protocol: a cell run
+    # twice at one condition reaches a usable count between the two blocks.
+    if min_epochs is not None:
+        keep = g['epochs'] >= int(min_epochs)
+        if (~keep).any():
+            thin = g[~keep]
+            print(f'dropping {len(thin)} recording group(s) with fewer than '
+                  f'{int(min_epochs)} epochs ({int(thin["epochs"].sum())} epochs):')
+            for _, r in thin.sort_values('epochs').iterrows():
+                print(f"    {r['exp_name']} {r['cell_label']} {r['cell_type_short']} "
+                      f"{r['onlineAnalysis']} {r['grating_site']} "
+                      f"{r['temporalFrequency']:g}Hz: {int(r['epochs'])} epochs")
+        g = g[keep].reset_index(drop=True)
+
     if show:
         print(f'{len(g)} recording groups (experiment x cell x mode x grating site x '
               f'temporal frequency x filter wheel x background)')
-        sc.tree_table(g.sort_values(['cell_type_short', 'exp_name', 'cell_label']),
-                      levels=['cell_type_short', 'exp_name', 'cell_label'], height=height,
-                      num_cols=('blocks', 'epochs', 'temporalFrequency',
-                                'filter_wheel_ndf', 'backgroundIntensity', 'rstar'))
+        cols = ['cell_type_short', 'rig', 'exp_name', 'cell_label', 'onlineAnalysis',
+                'grating_site', 'center_spot', 'temporalFrequency', 'bar_width', 'bright',
+                'filter_wheel_ndf', 'backgroundIntensity', 'rstar_level', 'blocks', 'epochs']
+        cols += [c for c in ('rs_mohm', 'epochs_high_rs') if c in g.columns]
+        sc.tree_table(g.sort_values(['cell_type_short', 'exp_name', 'cell_label'])[cols],
+                      levels=['cell_type_short', 'rig', 'exp_name', 'cell_label'],
+                      height=height,
+                      num_cols=('temporalFrequency', 'filter_wheel_ndf',
+                                'backgroundIntensity', 'rstar_level', 'blocks', 'epochs',
+                                'rs_mohm', 'epochs_high_rs'))
     return g
 
 
@@ -561,8 +703,111 @@ _ARRAY_FIELDS = ('dark_contrasts', 'resp_mean', 'resp_sem', 'resp_n', 'f1_mean',
                  'f2_mean', 'bar_widths', 'cycles', 'cycle_time_ms')
 
 
-def save_records(records: Sequence[CRGRecord], path=None, verbose: bool = True):
-    """Upsert records into ``<store>/records.h5`` and refresh ``summary.csv``."""
+def group_keys(groups: pd.DataFrame) -> List[str]:
+    """The :func:`record_key` each row of a group table would be stored under.
+
+    Reads ``onlineAnalysis``, which :func:`check_series_resistance` **overwrites**
+    with the mode the amplifier resolved — run that first, or a relabelled
+    recording produces a different key here than its record was saved under.
+    """
+    return [record_key(r['exp_name'], r['cell_label'], r['onlineAnalysis'],
+                       r['grating_site'], r['temporalFrequency'],
+                       r['filter_wheel_ndf'], r['backgroundIntensity'])
+            for _, r in groups.iterrows()]
+
+
+def prune_records(keep, path=None, dry_run: bool = False,
+                  verbose: bool = True) -> List[str]:
+    """Delete stored records no longer in the analysis set.
+
+    The CRG store upserts and never deletes, so a record outlives the reason it
+    was made — see :func:`spot_annular_grating.prune_records`, of which this is
+    the temporal-frequency-aware twin. ``keep`` is a group table or a list of
+    keys; ``dry_run=True`` reports without touching the file; an empty keep set
+    raises rather than emptying the store.
+    """
+    import h5py
+    from pathlib import Path
+
+    keep_keys = set(group_keys(keep) if isinstance(keep, pd.DataFrame) else keep)
+    if not keep_keys:
+        raise ValueError(
+            'prune_records() refuses an empty keep set — that would delete every '
+            'stored record. Pass the current group table or an explicit key list.')
+
+    base = Path(path) if path is not None else store_dir()
+    h5_path, csv_path = base / 'records.h5', base / 'summary.csv'
+    if not h5_path.exists():
+        if verbose:
+            print('no store to prune')
+        return []
+    stored = load_summary(path=base)
+    if stored.empty:
+        return []
+    orphans = stored[~stored['key'].isin(keep_keys)]
+    if orphans.empty:
+        if verbose:
+            print(f'nothing to prune: all {len(stored)} stored record(s) are in the '
+                  f'current set of {len(keep_keys)}')
+        return []
+    if verbose:
+        print(f'{"would remove" if dry_run else "removing"} {len(orphans)} stored '
+              f'record(s) no longer in the analysis set '
+              f'({len(stored)} stored, {len(keep_keys)} current):')
+        for _, r in orphans.iterrows():
+            print(f"    {r['exp_name']} {r['cell_label']} "
+                  f"{r.get('online_analysis', '')} {r.get('grating_site', '')} "
+                  f"{r.get('temporal_frequency', '?')}Hz — "
+                  f"{int(r.get('n_epochs', 0))} epochs")
+    if dry_run:
+        return list(orphans['key'])
+
+    removed = []
+    with h5py.File(h5_path, 'a') as f:
+        for key in orphans['key']:
+            if key in f:
+                del f[key]
+                removed.append(key)
+    load_summary(path=base).to_csv(csv_path, index=False)
+    if verbose:
+        print(f'{len(removed)} record(s) removed')
+    return removed
+
+
+def refresh_rstar(summary: pd.DataFrame) -> pd.DataFrame:
+    """Recompute ``rstar`` / ``rstar_level`` / ``light_level`` from setting and rig.
+
+    Same reasoning as :func:`spot_annular_grating.refresh_rstar`: the record
+    stores the *setting*, which is a fact about the experiment, while R* is a
+    fact about the rig and can be restated on read. The rig is derived from the
+    experiment name, with a stored value overriding only where it has one.
+    """
+    if summary.empty or 'ndf' not in summary.columns:
+        return summary
+    out = summary.copy()
+    rigs = out['exp_name'].apply(rig_of)
+    if 'rig' in out.columns:
+        stored = out['rig']
+        rigs = stored.where(stored.notna() & (stored.astype(str).str.strip() != ''), rigs)
+    values = [light_level_rstar(n, b, rig=r)
+              for n, b, r in zip(out['ndf'], out['background_intensity'], rigs)]
+    out['rig'] = list(rigs)
+    out['rstar'] = [v for v, _ in values]
+    out['light_level'] = [lab for _, lab in values]
+    out['rstar_level'] = [round_rstar(v) for v, _ in values]
+    out['rstar_measured'] = [is_calibrated(n, b, rig=r)
+                             for n, b, r in zip(out['ndf'], out['background_intensity'], rigs)]
+    return out
+
+
+def save_records(records: Sequence[CRGRecord], path=None, verbose: bool = True,
+                 prune_to=None):
+    """Upsert records into ``<store>/records.h5`` and refresh ``summary.csv``.
+
+    ``prune_to`` additionally deletes stored records outside that analysis set
+    (:func:`prune_records`). Leave it None when saving incrementally, as
+    :func:`analyze_all` does per record.
+    """
     import h5py
     from pathlib import Path
 
@@ -588,6 +833,10 @@ def save_records(records: Sequence[CRGRecord], path=None, verbose: bool = True):
                     g.attrs[f'cfg_{k}'] = v
             if verbose:
                 print(f'  {action} {rec.key}')
+
+    if prune_to is not None:
+        prune_records(prune_to, path=base, verbose=verbose)
+
     summary = load_summary(path=base)
     summary.to_csv(base / 'summary.csv', index=False)
     if verbose:
@@ -595,8 +844,13 @@ def save_records(records: Sequence[CRGRecord], path=None, verbose: bool = True):
     return h5_path
 
 
-def load_summary(path=None) -> pd.DataFrame:
-    """Scalar fields for every stored record."""
+def load_summary(path=None, rstar: bool = True) -> pd.DataFrame:
+    """Scalar fields for every stored record — the population-analysis index.
+
+    The light level is recomputed on read (:func:`refresh_rstar`), so records
+    analyzed before the rig calibration existed still come back with an R*.
+    Pass ``rstar=False`` to see exactly what is on disk.
+    """
     import h5py
     from pathlib import Path
 
@@ -609,8 +863,15 @@ def load_summary(path=None) -> pd.DataFrame:
         for key in f:
             a = dict(f[key].attrs)
             rows.append({k: (v.decode() if isinstance(v, bytes) else v) for k, v in a.items()})
-    return (pd.DataFrame(rows).sort_values(['cell_type', 'exp_name', 'cell_label'],
-                                           ignore_index=True) if rows else pd.DataFrame())
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows).sort_values(['cell_type', 'exp_name', 'cell_label'],
+                                         ignore_index=True)
+    # Derived from a field records already store, so backfill rather than
+    # requiring re-analysis.
+    if 'center_spot' not in out.columns and 'aperture_diameter' in out.columns:
+        out['center_spot'] = out['aperture_diameter'].apply(center_spot)
+    return refresh_rstar(out) if rstar else out
 
 
 def load_records(keys: Optional[Sequence[str]] = None, path=None) -> Dict[str, Dict]:
@@ -702,8 +963,14 @@ def plot_condition_examples(records: Optional[Dict[str, Dict]] = None, **kwargs)
 
 def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
                 on_error: str = 'log', verbose: bool = False,
-                skip_existing: bool = False, **kwargs) -> List[CRGRecord]:
-    """Run :func:`analyze_group` over every row of :func:`group_blocks` output."""
+                skip_existing: bool = False, prune: bool = False,
+                **kwargs) -> List[CRGRecord]:
+    """Run :func:`analyze_group` over every row of :func:`group_blocks` output.
+
+    ``prune=True`` deletes stored records outside ``groups`` once the batch is
+    done, against ``groups`` rather than against what just succeeded — a group
+    that failed this run keeps whatever it had.
+    """
     records, failures = [], []
     stored = set(load_summary()['key']) if skip_existing and len(load_summary()) else set()
     skipped = 0
@@ -730,6 +997,10 @@ def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
             if on_error != 'log':
                 raise
             failures.append((row['exp_name'], row['cell_label'], f'{type(e).__name__}: {e}'))
+
+    if prune and save and len(groups):
+        prune_records(groups)
+
     print(f'analyzed {len(records)}/{len(groups)} groups'
           + (f' ({skipped} already stored, skipped)' if skipped else ''))
     if failures:
@@ -737,6 +1008,123 @@ def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
         for exp, cell, msg in failures[:20]:
             print(f'  {exp} {cell}: {msg[:110]}')
     return records
+
+
+def population_contrast_response(summary: pd.DataFrame,
+                                 records: Optional[Dict[str, Dict]] = None,
+                                 harmonic: str = 'f2', normalize: bool = True,
+                                 min_contrasts: int = 3) -> pd.DataFrame:
+    """Mean contrast-response curve per light level, pooled over cells.
+
+    The CRG twin of :func:`spot_annular_grating.population_tuning`. What is
+    averaged is the harmonic amplitude against dark-bar contrast — ``f2`` by
+    default, since F2 exceeds F1 in every canonical recording here and is the
+    frequency-doubled signature of rectifying subunits. There is no baseline to
+    subtract: an amplitude at the reversal frequency is already a modulation
+    depth, zero when the cell does not follow the grating.
+
+    ``normalize`` divides each cell by its own peak amplitude, for the same
+    reason as the flashed protocol — cells differ enormously in absolute
+    response, so a raw mean is the loudest cell plus noise. It is a positive
+    scalar, so the shape of every curve is untouched.
+
+    Groups on temporal frequency as well as light level, since the two
+    frequencies are different stimuli and F1/F2 are measured at them.
+    """
+    df = add_condition(summary) if 'condition' not in summary.columns else summary.copy()
+    if df.empty:
+        return pd.DataFrame()
+    if records is None:
+        records = load_records(list(df['key']))
+
+    field = {'f1': 'f1_mean', 'f2': 'f2_mean', 'diff': 'resp_mean'}.get(harmonic, harmonic)
+    rows = []
+    for _, r in df.iterrows():
+        rec = records.get(r['key'])
+        if rec is None or field not in rec:
+            continue
+        contrasts = np.asarray(rec['dark_contrasts'], dtype=float)
+        values = np.asarray(rec[field], dtype=float)
+        if contrasts.size < min_contrasts or values.size != contrasts.size:
+            continue
+        if normalize:
+            peak = np.nanmax(np.abs(values))
+            if not np.isfinite(peak) or peak == 0:
+                continue
+            values = values / peak
+        for c, v in zip(contrasts, values):
+            rows.append({'condition': r['condition'],
+                         'online_analysis': r.get('online_analysis', ''),
+                         'temporal_frequency': r.get('temporal_frequency', np.nan),
+                         'rstar_level': r.get('rstar_level', np.nan),
+                         'units': 'normalized' if normalize else r.get('units', ''),
+                         'cell': f"{r['exp_name']}/{r['cell_label']}",
+                         'dark_contrast': round(float(c), 4), 'value': float(v)})
+    long = pd.DataFrame(rows)
+    if long.empty:
+        return long
+
+    keys = ['condition', 'online_analysis', 'temporal_frequency', 'units',
+            'rstar_level', 'dark_contrast']
+    per_cell = long.groupby(keys + ['cell'], dropna=False)['value'].mean().reset_index()
+    return (per_cell.groupby(keys, dropna=False)['value']
+            .agg(mean='mean',
+                 sem=lambda s: float(s.std(ddof=1) / np.sqrt(len(s))) if len(s) > 1 else np.nan,
+                 n_cells='size')
+            .reset_index().sort_values(keys).reset_index(drop=True))
+
+
+def plot_population_contrast_response(summary: pd.DataFrame,
+                                      records: Optional[Dict[str, Dict]] = None,
+                                      harmonic: str = 'f2', normalize: bool = True,
+                                      min_cells: int = 1,
+                                      figsize: Tuple[float, float] = (10.0, 4.6),
+                                      **kwargs):
+    """Population contrast-response curves, one line per light level, overlaid.
+
+    One panel per (condition, temporal frequency); within a panel each light
+    level is its own curve of mean harmonic amplitude against dark-bar contrast,
+    shaded with the SEM across cells. Light level is ordered, so the curves use
+    the house sequential ramp (``cividis``, dim to bright) with the mapping built
+    once across every level, exactly as in the flashed notebook.
+    """
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    tuning = population_contrast_response(summary, records=records, harmonic=harmonic,
+                                          normalize=normalize, **kwargs)
+    if tuning.empty:
+        print('no records with a contrast-response curve to plot')
+        return None
+
+    levels = sorted(tuning['rstar_level'].dropna().unique())
+    colors = style.colors_for_conditions(levels)
+    panels = (tuning[['condition', 'temporal_frequency']].drop_duplicates()
+              .sort_values(['condition', 'temporal_frequency']).values.tolist())
+    fig, axes = plt.subplots(1, max(len(panels), 1), figsize=figsize, squeeze=False)
+    for ax, (cond, freq) in zip(axes[0], panels):
+        panel = tuning[tuning['condition'].eq(cond)
+                       & tuning['temporal_frequency'].eq(freq)]
+        for lvl in levels:
+            sub = panel[panel['rstar_level'].eq(lvl)].sort_values('dark_contrast')
+            if sub.empty or int(sub['n_cells'].max()) < min_cells:
+                continue
+            n = int(sub['n_cells'].max())
+            ax.fill_between(sub['dark_contrast'], sub['mean'] - sub['sem'].fillna(0),
+                            sub['mean'] + sub['sem'].fillna(0),
+                            color=colors[lvl], alpha=0.16, lw=0, zorder=2)
+            ax.plot(sub['dark_contrast'], sub['mean'], 'o-', ms=4, lw=1.8,
+                    color=colors[lvl], zorder=3, label=f'{lvl:g} R* (n={n})')
+        ax.set_title(f'{cond} — {freq:g} Hz', fontsize=9)
+        ax.set_xlabel('dark bar contrast')
+        ax.legend(frameon=False, fontsize=7, title='light level', title_fontsize=7)
+    units = tuning['units'].iloc[0]
+    axes[0][0].set_ylabel(f'{harmonic.upper()} amplitude\n({units})')
+    fig.suptitle(f'Population {harmonic.upper()} contrast response by light level',
+                 fontsize=11)
+    fig.tight_layout()
+    return fig
 
 
 def plot_contrast_response(records: Optional[Dict[str, Dict]] = None,

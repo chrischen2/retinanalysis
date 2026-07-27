@@ -126,3 +126,101 @@ def test_shared_helpers_are_reused_from_the_flashed_module():
     for name in ('light_level_rstar', 'cone_predict_dark_contrast', 'grating_site',
                  'apply_rstar_mapping', 'select_canonical', 'weber_curve'):
         assert getattr(crg, name) is getattr(sag, name)
+
+
+# --- the flashed protocol's data hygiene, ported ---------------------------
+
+def test_more_shared_helpers_are_reused_not_copied():
+    """The two protocols must not drift apart on calibration or raw views."""
+    from retinanalysis.SCutils.protocols import spot_annular_grating as sag
+    for name in ('center_spot', 'round_rstar', 'max_rstar', 'rig_of', 'is_calibrated',
+                 'load_raw', 'plot_raw_blocks', 'plot_raw_epochs'):
+        assert getattr(crg, name) is getattr(sag, name)
+    for name in ('RSTAR_LEVELS', 'ALLOWED_FILTER_WHEEL', 'ALLOWED_BRIGHT_CONTRAST',
+                 'MIN_BAR_WIDTH', 'MIN_EPOCHS'):
+        assert getattr(crg, name) == getattr(sag, name)
+
+
+def test_config_keys_do_not_duplicate_bar_width():
+    """barWidth moved into the flashed protocol's CONFIG_KEYS; adding it again would
+    make the list misdescribe itself."""
+    assert crg.CONFIG_KEYS.count('barWidth') == 1
+    assert 'temporalFrequency' in crg.CONFIG_KEYS
+
+
+def _crg_blocks(freqs, bar_widths=None, n_epochs=None, ndf=0.0):
+    """A minimal CRG block table for group_blocks."""
+    import pandas as pd
+    n = len(freqs)
+    bar_widths = [100.0] * n if bar_widths is None else list(bar_widths)
+    n_epochs = [20] * n if n_epochs is None else list(n_epochs)
+    return pd.DataFrame({
+        'exp_name': ['2026-04-23_E'] * n, 'rig': ['E'] * n,
+        'block_id': list(range(1, n + 1)), 'n_epochs': n_epochs,
+        'cell_label': ['Cell1'] * n, 'cell_type_short': ['OFF-parasol'] * n,
+        'onlineAnalysis': ['extracellular'] * n, 'grating_site': ['center'] * n,
+        'center_spot': ['none'] * n, 'temporalFrequency': list(freqs),
+        'bar_width': bar_widths, 'brightBarContrast': [0.9] * n,
+        'filter_wheel_ndf': [ndf] * n, 'backgroundIntensity': [0.5] * n,
+        'has_filter_wheel': [True] * n, 'light_setting': ['FW0/bg0.5'] * n,
+        'light_level': ['15000R*'] * n, 'rstar': [15000.0] * n,
+        'rstar_level': [15000.0] * n, 'rstar_measured': [True] * n,
+        'apertureDiameter': [0.0] * n, 'annulusInnerDiameter': [0.0] * n,
+        'annulusOuterDiameter': [300.0] * n,
+    })
+
+
+def test_temporal_frequency_splits_groups_but_bar_width_does_not():
+    """F1/F2 are measured at the reversal frequency, so it can never be pooled;
+    bar width is pooled by analyze_group, so a group may span several."""
+    g = crg.group_blocks(_crg_blocks([2.0, 4.0]), show=False)
+    assert len(g) == 2                                  # one per frequency
+    g = crg.group_blocks(_crg_blocks([4.0, 4.0], bar_widths=[100.0, 150.0]), show=False)
+    assert len(g) == 1 and g.loc[0, 'bar_width'] == '100, 150'
+
+
+def test_crg_group_blocks_applies_the_shared_filters():
+    # bar width
+    g = crg.group_blocks(_crg_blocks([4.0, 4.0], bar_widths=[50.0, 100.0]), show=False)
+    assert g.loc[0, 'bar_width'] == '100'
+    # min epochs, on the pooled group
+    thin = crg.group_blocks(_crg_blocks([4.0], n_epochs=[10]), show=False)
+    assert thin.empty
+    pooled = crg.group_blocks(_crg_blocks([4.0, 4.0], n_epochs=[10, 10]), show=False)
+    assert len(pooled) == 1 and pooled.loc[0, 'epochs'] == 20
+    # filter wheel
+    assert crg.group_blocks(_crg_blocks([4.0], ndf=3.0), show=False).empty
+
+
+def test_allowed_temporal_frequency_can_restrict():
+    g = crg.group_blocks(_crg_blocks([2.0, 4.0]), show=False,
+                         allowed_temporal_frequency=(4.0,))
+    assert len(g) == 1 and g.loc[0, 'temporalFrequency'] == 4.0
+
+
+def test_crg_group_keys_carry_the_temporal_frequency():
+    blocks = _crg_blocks([2.0, 4.0])
+    g = crg.group_blocks(blocks, show=False)
+    keys = crg.group_keys(g)
+    assert len(set(keys)) == 2
+    assert any('2Hz' in k for k in keys) and any('4Hz' in k for k in keys)
+
+
+def test_crg_prune_records_refuses_an_empty_keep_set():
+    with pytest.raises(ValueError, match='empty keep set'):
+        crg.prune_records([])
+
+
+def test_crg_refresh_rstar_fills_a_blank_rig_from_the_experiment_name():
+    import pandas as pd
+    stored = pd.DataFrame({
+        'exp_name': ['2026-04-23_E', '2026-06-04_G'],
+        'rig': [np.nan, ''],
+        'ndf': [0.0, 1.0], 'background_intensity': [0.5, 0.3],
+        'rstar': [np.nan, np.nan], 'light_level': ['(?R*)', '(?R*)'],
+    })
+    out = crg.refresh_rstar(stored)
+    assert out['rig'].tolist() == ['E', 'G']
+    assert out.loc[0, 'rstar'] == pytest.approx(15000.0)
+    assert out.loc[1, 'rstar'] == pytest.approx(2310.0)
+    assert out['rstar_level'].tolist() == [15000.0, 2000.0]
