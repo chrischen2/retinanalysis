@@ -913,3 +913,80 @@ def test_status_line_survives_missing_columns():
     import pandas as pd
     line = sag.describe_group_row(pd.Series({'exp_name': 'X', 'cell_label': 'Cell1'}))
     assert 'X Cell1' in line and '?' in line      # absent numbers show as '?', no exception
+
+
+# --- multi-recording overlay -----------------------------------------------
+
+def _overlay_record(rstar=2000.0, amp=40.0, baseline=5.0, units='rate (Hz)',
+                    contrasts=(-1.0, -0.8, -0.6, -0.4, -0.2, 0.0), **overrides):
+    """A stored-record dict with a straight-line tuning curve.
+
+    The response falls linearly from ``amp`` above baseline at the most negative
+    contrast to baseline at contrast 0, so the crossing is unambiguous.
+    """
+    c = np.asarray(contrasts, dtype=float)
+    rec = {'exp_name': '2026-06-04_G', 'cell_label': 'Cell4',
+           'online_analysis': 'extracellular', 'grating_site': 'center',
+           'light_level': f'{rstar:g}R*', 'units': units, 'rstar': rstar,
+           'crossing_interp': -0.3, 'n_epochs': 66, 'dark_contrasts': c,
+           'resp_mean': baseline + amp * (-c), 'resp_sem': np.zeros_like(c),
+           'baseline_mean': baseline}
+    rec.update(overrides)
+    return rec
+
+
+def test_overlay_normalizes_to_the_most_negative_contrast():
+    long = sag.tuning_overlay([_overlay_record(amp=40.0), _overlay_record(amp=500.0)])
+    for _, sub in long.groupby('position'):
+        at_ref = sub.loc[sub['dark_contrast'].eq(sub['ref_contrast'].iloc[0]), 'norm']
+        assert np.isclose(abs(float(at_ref.iloc[0])), 1.0)
+    # Two recordings 12.5x apart in absolute response land on the same curve.
+    a, b = [sub.sort_values('dark_contrast')['norm'].to_numpy()
+            for _, sub in long.groupby('position')]
+    assert np.allclose(a, b)
+
+
+def test_overlay_reference_is_each_records_own_deepest_contrast():
+    """A recording that never reached -1 is normalized at the contrast it did reach."""
+    long = sag.tuning_overlay([_overlay_record(),
+                               _overlay_record(contrasts=(-0.6, -0.4, -0.2, 0.0))])
+    assert long.groupby('position')['ref_contrast'].first().tolist() == [-1.0, -0.6]
+
+
+def test_overlay_reference_can_be_pinned():
+    long = sag.tuning_overlay([_overlay_record()], ref_contrast=-0.4)
+    assert long['ref_contrast'].unique().tolist() == [-0.4]
+    assert np.isclose(abs(long.loc[long['dark_contrast'].eq(-0.4), 'norm'].iloc[0]), 1.0)
+
+
+def test_overlay_divisor_is_positive_so_the_crossing_does_not_move():
+    """Normalizing must not move the zero crossing -- it is the measurement."""
+    long = sag.tuning_overlay([_overlay_record(baseline=12.0)])
+    assert (long['ref_amplitude'] > 0).all()
+    assert np.allclose(np.sign(long['rel']), np.sign(long['norm']))
+    assert np.isclose(sag.interp_zero_crossing(long['dark_contrast'], long['rel']),
+                      sag.interp_zero_crossing(long['dark_contrast'], long['norm']))
+
+
+def test_overlay_subtracts_each_records_own_baseline():
+    """Curves are response - baseline, so a cell's spontaneous rate does not shift it."""
+    quiet = sag.tuning_overlay([_overlay_record(baseline=0.0)])
+    busy = sag.tuning_overlay([_overlay_record(baseline=30.0)])
+    assert np.allclose(quiet['rel'].to_numpy(), busy['rel'].to_numpy())
+
+
+def test_overlay_flat_record_normalizes_to_nan_rather_than_dividing_by_zero():
+    long = sag.tuning_overlay([_overlay_record(amp=0.0)])
+    assert long['ref_amplitude'].eq(0.0).all()
+    assert long['norm'].isna().all()
+
+
+def test_overlay_of_nothing_is_empty():
+    assert sag.tuning_overlay([]).empty
+
+
+def test_overlay_keeps_units_so_modes_are_not_pooled_on_one_axis():
+    long = sag.tuning_overlay([_overlay_record(),
+                               _overlay_record(units='excitation (pA)',
+                                               online_analysis='exc')])
+    assert set(long['units']) == {'rate (Hz)', 'excitation (pA)'}

@@ -1649,6 +1649,180 @@ def plot_group(rec: GratingRecord, figsize: Tuple[float, float] = (7.2, 7.6)):
     return fig
 
 
+# Marker per grating site and dash per recording mode, so two recordings that
+# share a light level (hence a color) are still told apart.
+_SITE_MARKERS = {'center': 'o', 'surround': 's'}
+_MODE_STYLES = {'extracellular': '-', 'exc': '--', 'inh': ':'}
+
+
+def _curve_fields(rec) -> Dict:
+    """Pull the tuning curve off a GratingRecord or a stored record dict."""
+    get = rec.get if isinstance(rec, dict) else lambda k, d=None: getattr(rec, k, d)
+    return {
+        'exp_name': str(get('exp_name')), 'cell_label': str(get('cell_label')),
+        'online_analysis': str(get('online_analysis')),
+        'grating_site': str(get('grating_site')),
+        'light_level': str(get('light_level')), 'units': str(get('units', '')),
+        'rstar': float(get('rstar', np.nan)),
+        'crossing_interp': float(get('crossing_interp', np.nan)),
+        'n_epochs': int(get('n_epochs', 0)),
+        'dark_contrasts': np.asarray(get('dark_contrasts'), dtype=float),
+        'resp_mean': np.asarray(get('resp_mean'), dtype=float),
+        'resp_sem': np.asarray(get('resp_sem'), dtype=float),
+        'baseline_mean': float(get('baseline_mean', np.nan)),
+    }
+
+
+def tuning_overlay(records: Sequence, ref_contrast: Optional[float] = None) -> pd.DataFrame:
+    """Long-form table behind :func:`plot_tuning_overlay`, one row per point.
+
+    Each record contributes ``resp_mean - baseline_mean`` — the response
+    relative to its own pre-stimulus baseline, the curve whose zero crossing is
+    the balancing contrast — in ``rel``, and that curve divided by
+    ``|rel|`` at its most negative dark contrast in ``norm``.
+
+    That reference point is the deepest dark bar the recording was run at, where
+    the grating is furthest from cancelling and the response is largest, so it
+    is the one contrast every recording of this protocol has in common. Dividing
+    by it puts every curve at ±1 there and asks the only question worth asking
+    across conditions: *where along the contrast axis does the response come
+    back to baseline*, not how many Hz or pA it started from. The divisor is a
+    magnitude, hence positive, so the crossing does not move.
+
+    ``ref_contrast`` overrides the reference with the contrast nearest a given
+    value (e.g. ``-1.0``); the default uses each record's own most negative,
+    which matters when two recordings sampled different contrast ranges.
+
+    ``ref_amplitude`` is the divisor, in recorded units — the amplitude the
+    normalized curve is expressed as a fraction of.
+    """
+    rows = []
+    for i, rec in enumerate(records):
+        f = _curve_fields(rec)
+        contrasts, rel = f['dark_contrasts'], f['resp_mean'] - f['baseline_mean']
+        if contrasts.size == 0:
+            continue
+        ref_idx = (int(np.argmin(contrasts)) if ref_contrast is None
+                   else int(np.argmin(np.abs(contrasts - float(ref_contrast)))))
+        amp = float(abs(rel[ref_idx]))
+        for c, v, s in zip(contrasts, rel, f['resp_sem']):
+            rows.append({
+                'position': i, 'cell': f"{f['exp_name']}/{f['cell_label']}",
+                'online_analysis': f['online_analysis'], 'grating_site': f['grating_site'],
+                'light_level': f['light_level'], 'rstar': f['rstar'], 'units': f['units'],
+                'n_epochs': f['n_epochs'], 'crossing_interp': f['crossing_interp'],
+                'dark_contrast': float(c), 'rel': float(v), 'sem': float(s),
+                'ref_contrast': float(contrasts[ref_idx]), 'ref_amplitude': amp,
+                'norm': float(v / amp) if np.isfinite(amp) and amp > 0 else np.nan,
+            })
+    return pd.DataFrame(rows)
+
+
+def plot_tuning_overlay(records: Sequence, labels: Optional[Sequence[str]] = None,
+                        ref_contrast: Optional[float] = None,
+                        figsize: Tuple[float, float] = (11.0, 4.6),
+                        title: Optional[str] = None):
+    """Several recordings' tuning curves on one pair of axes, raw and normalized.
+
+    Built for comparing one cell across conditions — the rows of ``selected``
+    for a single cell — where each curve is the same cell at a different light
+    level, grating site or recording mode, and the question is how the
+    cancellation point moves between them.
+
+    Left: ``response - baseline`` in recorded units, one panel per unit. Two
+    panels appear when the picks span both recording modes, because Hz and pA
+    share no axis. Right: every curve normalized to its own amplitude at the
+    most negative dark contrast (see :func:`tuning_overlay`), which is what
+    makes modes comparable — it is one axes however many units are on the left.
+
+    Color is the light level on the house sequential ramp (dim to bright), dash
+    is the recording mode, marker is the grating site, so two recordings that
+    coincide on one of those are still distinguishable. A triangle on the zero
+    line marks each recording's interpolated crossing.
+
+    The ramp is stretched across the levels *in this figure*, not across
+    :data:`RSTAR_LEVELS`, so a cell recorded at two neighboring rungs still gets
+    two clearly different colors — at the cost of a given R* not being the same
+    color in another figure. The legend names each recording's setting, so read
+    color within a figure only.
+
+    ``labels`` overrides the legend text, one per record — pass the section-2
+    row indices to tie a curve back to the table it came from.
+    """
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    long = tuning_overlay(records, ref_contrast=ref_contrast)
+    if long.empty:
+        print('no tuning curves to overlay')
+        return None
+
+    # Color follows the light level, which is ordered, so it gets the sequential
+    # ramp rather than categorical hues -- same convention as the population
+    # figures. Recordings with no R* fall back to gray rather than dropping out.
+    # Wider than the default 0.15-0.85 slice of the ramp: an overlay is a
+    # handful of curves that often share mode and site, leaving color as the
+    # only thing separating them, so the extra spread is worth the darker and
+    # paler ends.
+    levels = sorted(long.loc[long['rstar'].notna(), 'rstar'].map(round_rstar).unique())
+    ramp = style.colors_for_conditions(levels, lo=0.05, hi=0.95)
+
+    # Constrained rather than tight layout: the normalized axes spans every row
+    # of the grid, which tight_layout cannot size.
+    units_present = list(dict.fromkeys(long['units']))
+    fig = plt.figure(figsize=figsize, layout='constrained')
+    gs = fig.add_gridspec(len(units_present), 2)
+    raw_axes = {u: fig.add_subplot(gs[i, 0]) for i, u in enumerate(units_present)}
+    ax_norm = fig.add_subplot(gs[:, 1])
+
+    for position, sub in long.groupby('position', sort=True):
+        sub = sub.sort_values('dark_contrast')
+        r = sub.iloc[0]
+        color = (ramp.get(round_rstar(r['rstar']), '#888888')
+                 if np.isfinite(r['rstar']) else '#888888')
+        ls = _MODE_STYLES.get(r['online_analysis'], '-')
+        marker = _SITE_MARKERS.get(r['grating_site'], 'D')
+        label = (str(labels[int(position)]) if labels is not None
+                 and int(position) < len(labels)
+                 else f"{r['online_analysis']} · {r['grating_site']} · {r['light_level']}")
+
+        ax_raw = raw_axes[r['units']]
+        ax_raw.errorbar(sub['dark_contrast'], sub['rel'], yerr=sub['sem'], fmt=marker,
+                        ls=ls, ms=4, lw=1.5, color=color, ecolor=color, capsize=2.5,
+                        label=label, zorder=3)
+        ax_norm.plot(sub['dark_contrast'], sub['norm'], marker=marker, ls=ls, ms=4,
+                     lw=1.5, color=color, label=label, zorder=3)
+        # Where this recording's response returns to baseline -- the number the
+        # whole protocol is after, on the axis it is measured on.
+        if np.isfinite(r['crossing_interp']):
+            for ax in (ax_raw, ax_norm):
+                ax.plot([r['crossing_interp']], [0.0], marker='v', ms=6, color=color,
+                        mec='#333333', mew=0.5, zorder=4, clip_on=False)
+
+    for units, ax in raw_axes.items():
+        ax.axhline(0.0, color='#666666', ls='--', lw=1.0, zorder=1)
+        ax.set_ylabel(f'response − baseline\n({units})')
+        ax.legend(frameon=False, fontsize=7, loc='best')
+    list(raw_axes.values())[-1].set_xlabel('dark bar contrast')
+    list(raw_axes.values())[0].set_title('recorded units', fontsize=9)
+
+    ax_norm.axhline(0.0, color='#666666', ls='--', lw=1.0, zorder=1)
+    ref = long['ref_contrast'].unique()
+    ref_txt = (f'{ref[0]:g}' if len(ref) == 1 else 'each curve’s own deepest')
+    ax_norm.set_xlabel('dark bar contrast')
+    ax_norm.set_ylabel(f'response − baseline,\nnormalized at contrast {ref_txt}')
+    ax_norm.set_title('normalized' + (' — comparable across modes'
+                                      if len(units_present) > 1 else ''), fontsize=9)
+    ax_norm.legend(frameon=False, fontsize=7, loc='best')
+
+    cells = list(dict.fromkeys(long['cell']))
+    fig.suptitle(title if title is not None else
+                 f"{', '.join(cells)} — {long['position'].nunique()} recordings"
+                 + ('  (▾ = interpolated crossing)'), fontsize=10)
+    return fig
+
+
 def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
                 on_error: str = 'log', verbose: bool = False,
                 skip_existing: bool = False, status: bool = True,
