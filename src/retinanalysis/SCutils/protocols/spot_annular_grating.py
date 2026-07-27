@@ -21,7 +21,9 @@ for ON cells -- but the two parameters are independent, so group on
 :func:`grating_site`.
 
 Light level is keyed on (filter-wheel NDF, backgroundIntensity) and mapped to R*
-by :func:`light_level_rstar`.
+by :func:`light_level_rstar`, which needs the rig -- E and G differ by 2.6x at
+the same setting. The exact value lives in ``rstar``; ``rstar_level`` snaps it
+to the nearest nominal rung in :data:`RSTAR_LEVELS` for grouping and labelling.
 """
 from __future__ import annotations
 
@@ -70,6 +72,13 @@ RSTAR_TABLE: List[Tuple[float, float, float]] = [
     (0.5, 0.15, 4000.0),
     (0.5, 0.30, 8000.0),
 ]
+
+# The nominal light levels the experiments were aimed at. The calibration gives
+# a continuous R* -- 11550 on rig G at wheel 0 / bg 0.15, 9000 on rig E at wheel
+# 0 / bg 0.30 -- and those exact numbers are kept, but for grouping and labelling
+# each recording is assigned to the nearest of these rungs.
+RSTAR_LEVELS: Tuple[float, ...] = (1000.0, 2000.0, 4000.0, 5000.0, 7000.0,
+                                   10000.0, 15000.0, 20000.0)
 
 # Only these filter-wheel settings are calibrated / used for analysis. Anything
 # else -- including a missing reading -- is excluded by group_blocks().
@@ -132,6 +141,21 @@ def is_calibrated(ndf: float, background_intensity: float, rig=None) -> bool:
                for fw, bg, _ in RSTAR_TABLE)
 
 
+def round_rstar(rstar: float, levels: Sequence[float] = RSTAR_LEVELS) -> float:
+    """Snap a measured R* to the nearest nominal level in :data:`RSTAR_LEVELS`.
+
+    Nearest is measured **in log space**, because the levels are rungs on a
+    roughly geometric ladder and a light level is only meaningful as a ratio: a
+    recording at 1500 R* is 1.5x the 1000 rung and 0.75x the 2000 one, so it
+    belongs with 2000, even though the two are equidistant on a linear axis.
+    NaN in, NaN out.
+    """
+    if rstar is None or not np.isfinite(float(rstar)) or float(rstar) <= 0:
+        return np.nan
+    grid = np.asarray(levels, dtype=float)
+    return float(grid[np.argmin(np.abs(np.log(grid) - np.log(float(rstar))))])
+
+
 def light_setting(ndf: float, background_intensity: float) -> str:
     """The light level as recorded: ``'FW0/bg0.50'``.
 
@@ -161,18 +185,20 @@ def light_level_rstar(ndf: float, background_intensity: float,
     numbers. Anything it does not cover stays NaN and the label says so, rather
     than being quietly filled in.
 
-    Returns ``(rstar, label)``.
+    Returns ``(rstar, label)``, where ``rstar`` is the exact calibrated value
+    and the label names the nominal rung it rounds to (:func:`round_rstar`), so
+    11550 R* and 12000 R* both read ``'10000R*'`` and group together.
     """
     ceiling = max_rstar(rig, ndf)
     if np.isfinite(ceiling) and background_intensity is not None \
             and not np.isnan(float(background_intensity)):
         rstar = ceiling * float(background_intensity)
-        return rstar, f'{rstar:.0f}R*'
+        return rstar, f'{round_rstar(rstar):g}R*'
 
     for fw, bg, rstar in RSTAR_TABLE:
         if (ndf is not None and not np.isnan(ndf) and abs(ndf - fw) < 1e-6
                 and abs(background_intensity - bg) < 1e-6):
-            return rstar, f'{rstar:g}R*'
+            return rstar, f'{round_rstar(rstar):g}R*'
     return np.nan, f'{light_setting(ndf, background_intensity)} (?R*)'
 
 
@@ -205,7 +231,7 @@ def apply_rstar_mapping(summary: pd.DataFrame,
             same_fw = (np.isnan(m_ndf) and pd.isna(ndf)) or np.isclose(m_ndf, ndf)
             if same_fw and np.isclose(m_bg, bg):
                 rstar[i] = float(value)
-                label[i] = f'{float(value):g}R*'
+                label[i] = f'{round_rstar(float(value)):g}R*'
                 break
     out['rstar'] = rstar
     out['light_level'] = label
@@ -469,6 +495,7 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
           for n, b, r in zip(df['filter_wheel_ndf'], df['backgroundIntensity'], df['rig'])]
     df['rstar'] = [r for r, _ in rs]
     df['light_level'] = [lab for _, lab in rs]
+    df['rstar_level'] = [round_rstar(r) for r, _ in rs]
     df['light_setting'] = [light_setting(n, b)
                            for n, b in zip(df['filter_wheel_ndf'], df['backgroundIntensity'])]
     df['rstar_measured'] = [is_calibrated(n, b, rig=r)
@@ -489,6 +516,20 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
             print(f'  WARNING: {len(missing)} block(s) have no background:FilterWheel:NDF '
                   f'-- no light level, excluded from the Weber comparison. '
                   f"Experiments: {', '.join(sorted(missing['exp_name'].unique()))}")
+        # Between two rungs the rounding is by construction the best available
+        # description. Past either end it is a clamp, and the rung then
+        # misdescribes the recording -- 38500 R* would read as 20000 -- so say so.
+        # Restricted to the wheel settings that survive group_blocks; the deep-NDF
+        # blocks land at single-digit R* and are dropped there anyway.
+        off = df[df['filter_wheel_ndf'].isin(list(ALLOWED_FILTER_WHEEL))
+                 & ((df['rstar'] < min(RSTAR_LEVELS)) | (df['rstar'] > max(RSTAR_LEVELS)))]
+        if len(off):
+            print(f'  WARNING: {len(off)} block(s) fall outside RSTAR_LEVELS '
+                  f'({min(RSTAR_LEVELS):g}-{max(RSTAR_LEVELS):g} R*) and are clamped to the '
+                  f'nearest end: '
+                  + ', '.join(f'{r:.0f}->{lv:g}R*' for r, lv in
+                              sorted({(r, lv) for r, lv in
+                                      zip(off['rstar'], off['rstar_level'])})))
         sc.scroll_table(df[cols], height=height,
                         num_cols=('n_epochs', 'block_id', 'filter_wheel_ndf',
                                   'backgroundIntensity'))
@@ -511,7 +552,7 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
     """
     from retinanalysis.SCutils import explore as sc
 
-    needed = ['rig', 'light_setting', 'filter_wheel_ndf', 'grating_site',
+    needed = ['rig', 'light_setting', 'filter_wheel_ndf', 'grating_site', 'rstar_level',
               'apertureDiameter', 'annulusInnerDiameter', 'annulusOuterDiameter']
     missing = [c for c in needed if c not in df.columns]
     if missing:
@@ -540,6 +581,7 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
                light_setting=('light_setting', 'first'),
                light_level=('light_level', 'first'),
                rstar=('rstar', 'first'),
+               rstar_level=('rstar_level', 'first'),
                aperture=('apertureDiameter', 'first'),
                annulus_inner=('annulusInnerDiameter', 'first'),
                annulus_outer=('annulusOuterDiameter', 'first'),
@@ -564,14 +606,14 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
               f'(experiment x cell x mode x grating site x filter wheel x background)')
         cols = ['cell_type_short', 'rig', 'exp_name', 'cell_label', 'onlineAnalysis',
                 'grating_site', 'aperture', 'annulus_inner', 'annulus_outer',
-                'spot_intensity', 'filter_wheel_ndf', 'backgroundIntensity', 'light_setting',
-                'blocks', 'epochs']
-        cols += [c for c in ('stage_ndfs', 'rs_mohm', 'epochs_high_rs') if c in g.columns]
+                'spot_intensity', 'filter_wheel_ndf', 'backgroundIntensity',
+                'rstar_level', 'blocks', 'epochs']
+        cols += [c for c in ('rs_mohm', 'epochs_high_rs') if c in g.columns]
         sc.tree_table(g.sort_values(['cell_type_short', 'exp_name', 'cell_label'])[cols],
                       levels=['cell_type_short', 'rig', 'exp_name', 'cell_label'],
                       height=height, num_cols=('aperture', 'annulus_inner', 'annulus_outer',
                                                'filter_wheel_ndf', 'backgroundIntensity',
-                                               'blocks', 'epochs', 'rs_mohm',
+                                               'rstar_level', 'blocks', 'epochs', 'rs_mohm',
                                                'epochs_high_rs'))
     return g
 
@@ -692,7 +734,7 @@ class GratingRecord:
             'cell_type': self.cell_type, 'online_analysis': self.online_analysis,
             'grating_site': self.grating_site, 'ndf': self.ndf,
             'background_intensity': self.background_intensity, 'rstar': self.rstar,
-            'rig': rig_of(self.exp_name),
+            'rstar_level': round_rstar(self.rstar), 'rig': rig_of(self.exp_name),
             'rstar_measured': is_calibrated(self.ndf, self.background_intensity,
                                             rig=rig_of(self.exp_name)),
             'light_setting': light_setting(self.ndf, self.background_intensity),
@@ -1143,8 +1185,8 @@ def refresh_rstar(summary: pd.DataFrame) -> pd.DataFrame:
     conversion on read means a change to :data:`RIG_MAX_RSTAR` reaches records
     that were analyzed before it, with no re-analysis.
 
-    Returns a copy with ``rstar``, ``light_level`` and ``rstar_measured``
-    brought up to date.
+    Returns a copy with ``rstar``, ``rstar_level``, ``light_level`` and
+    ``rstar_measured`` brought up to date.
     """
     if summary.empty or 'ndf' not in summary.columns:
         return summary
@@ -1156,6 +1198,7 @@ def refresh_rstar(summary: pd.DataFrame) -> pd.DataFrame:
     out['rig'] = list(rigs)
     out['rstar'] = [v for v, _ in values]
     out['light_level'] = [lab for _, lab in values]
+    out['rstar_level'] = [round_rstar(v) for v, _ in values]
     out['rstar_measured'] = [is_calibrated(n, b, rig=r)
                              for n, b, r in zip(out['ndf'], out['background_intensity'], rigs)]
     return out

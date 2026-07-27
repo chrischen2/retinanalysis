@@ -58,9 +58,47 @@ def test_lowercase_and_padded_rig_names_work():
 def test_rstar_table_is_the_fallback_for_an_unknown_rig(ndf, bg, expected):
     """Superseded by RIG_MAX_RSTAR, but still reachable when the rig is not one of ours."""
     rstar, label = sag.light_level_rstar(ndf, bg, rig='Z')
-    assert rstar == expected
-    assert label == f'{expected:g}R*'
+    assert rstar == expected                               # exact value, unrounded
+    assert label == f'{sag.round_rstar(expected):g}R*'      # label names the rung
     assert sag.light_level_rstar(ndf, bg)[0] == expected   # rig omitted entirely
+
+
+@pytest.mark.parametrize('rstar, rung', [
+    (1000.0, 1000.0),      # exactly on a rung
+    (1155.0, 1000.0),      # rig G, wheel 1, bg 0.15
+    (1500.0, 2000.0),      # rig E, wheel 1, bg 0.5 -- a linear tie, broken upward
+    (2310.0, 2000.0),
+    (3652.4, 4000.0),
+    (4743.4, 5000.0),
+    (7304.9, 7000.0),
+    (9000.0, 10000.0),     # rig E, wheel 0, bg 0.3
+    (11550.0, 10000.0),    # rig G, wheel 0, bg 0.15
+    (15000.0, 15000.0),
+])
+def test_round_rstar_snaps_to_the_nominal_ladder(rstar, rung):
+    assert sag.round_rstar(rstar) == rung
+
+
+def test_round_rstar_is_nearest_in_log_space():
+    """1500 is equidistant from 1000 and 2000 linearly; as a ratio it is not."""
+    assert sag.round_rstar(1500.0) == 2000.0
+    assert sag.round_rstar(1414.0) == 1000.0        # just below sqrt(1000*2000)
+    assert sag.round_rstar(1415.0) == 2000.0
+
+
+def test_round_rstar_clamps_off_the_ends_and_passes_nan_through():
+    assert sag.round_rstar(38500.0) == 20000.0
+    assert sag.round_rstar(30.0) == 1000.0
+    assert np.isnan(sag.round_rstar(np.nan))
+    assert np.isnan(sag.round_rstar(None))
+    assert np.isnan(sag.round_rstar(0.0))
+
+
+def test_exact_rstar_survives_the_rounding():
+    """The rung is for grouping; the Weber comparison needs the real intensity."""
+    rstar, label = sag.light_level_rstar(0.0, 0.15, rig='G')
+    assert rstar == pytest.approx(11550.0)
+    assert label == '10000R*'
 
 
 def test_the_old_table_is_really_rig_g():
@@ -133,7 +171,9 @@ def test_apply_rstar_mapping_fills_only_requested_settings():
     })
     out = sag.apply_rstar_mapping(summary, {(0.0, 0.50): 40000})
     assert out['rstar'].tolist() == [40000.0, 12000.0] + [pytest.approx(np.nan, nan_ok=True)][:0] or True
-    assert out['rstar'].iloc[0] == 40000.0 and out['light_level'].iloc[0] == '40000R*'
+    # The override is stored exactly; the label is the rung it rounds to, and
+    # 40000 is past the top of the ladder so it clamps there.
+    assert out['rstar'].iloc[0] == 40000.0 and out['light_level'].iloc[0] == '20000R*'
     assert out['rstar'].iloc[1] == 12000.0            # untouched
     assert np.isnan(out['rstar'].iloc[2])             # not in the mapping
     assert np.isnan(summary['rstar'].iloc[0])         # input not mutated
