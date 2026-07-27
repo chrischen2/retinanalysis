@@ -557,6 +557,96 @@ def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
     return out
 
 
+# --------------------------------------------------------------------------
+# fixed neutral-density filters in the light path
+# --------------------------------------------------------------------------
+
+def _stage_ndfs_from_group(epoch_group) -> str:
+    """The Stage device's ``ndfs`` list for one epoch group, as 'EL06, EL2'."""
+    import json
+
+    backgrounds = epoch_group.get('backgrounds')
+    if backgrounds is None:
+        return ''
+    for dev in backgrounds:
+        spans = backgrounds[dev].get('dataConfigurationSpans')
+        if spans is None:
+            continue
+        for span in spans:
+            for node in spans[span]:
+                # The Stage node carries the filters actually in the light path;
+                # the LED devices each carry their own (empty) list.
+                if 'Stage' not in str(node):
+                    continue
+                raw = spans[span][node].attrs.get('ndfs')
+                if raw is None:
+                    continue
+                text = raw.decode() if isinstance(raw, bytes) else str(raw)
+                try:
+                    return ', '.join(str(v) for v in json.loads(text))
+                except Exception:
+                    return text
+    return ''
+
+
+def read_stage_ndfs(exp_name: str, block_id: int, amp: str = 'Amp1', h5=None) -> str:
+    """The fixed neutral-density filters in the light path for a block.
+
+    Distinct from ``background:FilterWheel:NDF``, which is the *wheel* setting:
+    this is the stack of filters physically in the path, which Symphony records
+    on the Stage device as e.g. ``["EL06","EL2"]``. Both attenuate, so neither
+    alone gives the light level — a block at wheel 0 behind an EL3 is three log
+    units darker than the same wheel setting with nothing in the path.
+
+    It is not constant within an experiment: on 2026-06-04_G most blocks ran
+    behind ``EL06, EL2, FW1`` and four behind ``EL06, EL2``. Hence a per-block
+    column rather than a per-date note. Empty string when no filter was in the
+    path or the field is absent.
+    """
+    import h5py
+    from retinanalysis.utils.datajoint_utils import get_h5_file
+
+    groups = _amp_epoch_groups(exp_name, int(block_id), amp=amp)
+    if not groups:
+        return ''
+
+    def _read(f):
+        node = f.get(groups[0])
+        return _stage_ndfs_from_group(node) if node is not None else ''
+
+    if h5 is not None:
+        return _read(h5)
+    with h5py.File(get_h5_file(exp_name), 'r') as f:
+        return _read(f)
+
+
+def stage_ndf_table(df: pd.DataFrame, amp: str = 'Amp1', verbose: bool = True) -> pd.DataFrame:
+    """Read the fixed filter stack of every block in ``df``, one h5 open per date."""
+    import h5py
+    from retinanalysis.utils.datajoint_utils import get_h5_file
+
+    rows = []
+    for exp, sub in df.groupby('exp_name', sort=True):
+        try:
+            f = h5py.File(get_h5_file(str(exp)), 'r')
+        except Exception:
+            if verbose:
+                print(f'  {exp}: cannot open the h5 — no fixed-filter reading for '
+                      f'{len(sub)} block(s)')
+            f = None
+        for bid in sub['block_id']:
+            value = ''
+            if f is not None:
+                try:
+                    value = read_stage_ndfs(str(exp), int(bid), amp=amp, h5=f)
+                except Exception:
+                    value = ''
+            rows.append({'block_id': int(bid), 'stage_ndfs': value})
+        if f is not None:
+            f.close()
+    return pd.DataFrame(rows)
+
+
 def rig_of(exp_name: str) -> str:
     """Rig letter from an experiment name: ``'2026-06-04_G'`` -> ``'G'``.
 
@@ -728,6 +818,12 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
         for exp, bid, db_fw, h5_fw in mismatch:
             print(f'  MISMATCH {exp} block {bid}: database {db_fw} vs h5 {h5_fw}')
 
+    # The fixed filters in the light path, which the wheel setting does not
+    # cover and which change between blocks on some dates.
+    df = df.merge(stage_ndf_table(df[['exp_name', 'block_id']], verbose=show),
+                  on='block_id', how='left')
+    df['stage_ndfs'] = df['stage_ndfs'].fillna('')
+
     rs = [light_level_rstar(n, b)
           for n, b in zip(df['filter_wheel_ndf'], df['backgroundIntensity'])]
     df['rstar'] = [r for r, _ in rs]
@@ -740,8 +836,9 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
 
     if show:
         cols = ['exp_name', 'cell_label', 'cell_type_short', 'onlineAnalysis', 'grating_site',
-                'filter_wheel_ndf', 'backgroundIntensity', 'light_level', 'apertureDiameter',
-                'annulusInnerDiameter', 'annulusOuterDiameter', 'n_epochs', 'block_id']
+                'filter_wheel_ndf', 'stage_ndfs', 'backgroundIntensity', 'light_level',
+                'apertureDiameter', 'annulusInnerDiameter', 'annulusOuterDiameter',
+                'n_epochs', 'block_id']
         print(f"{len(df)} blocks | {df['exp_name'].nunique()} experiments | "
               f"{df.groupby(['exp_name', 'cell_label']).ngroups} cells")
         missing = df[~df['has_filter_wheel']]
@@ -798,11 +895,19 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
             'grating_site', 'filter_wheel_ndf', 'backgroundIntensity']
     agg = dict(blocks=('block_id', 'size'), epochs=('n_epochs', 'sum'),
                light_setting=('light_setting', 'first'),
+               light_level=('light_level', 'first'),
+               rstar=('rstar', 'first'),
                aperture=('apertureDiameter', 'first'),
                annulus_inner=('annulusInnerDiameter', 'first'),
                annulus_outer=('annulusOuterDiameter', 'first'),
+               spot_intensity=('spotIntensity', 'first'),
                bright=('brightBarContrast', 'first'),
                block_ids=('block_id', lambda s: ', '.join(str(int(b)) for b in sorted(s))))
+    if 'stage_ndfs' in df.columns:
+        # Joined rather than 'first': a group can span blocks run behind
+        # different fixed filters, and silently showing one would hide that.
+        agg['stage_ndfs'] = ('stage_ndfs',
+                             lambda s: ' | '.join(sorted({str(v) for v in s})))
     # Carry the amplifier reading through when check_series_resistance() has run,
     # so the recording-group table shows how each cell was actually held. In
     # MOhm here because the table is for reading; the ohms stay canonical.
@@ -816,9 +921,9 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
               f'(experiment x cell x mode x grating site x filter wheel x background)')
         cols = ['cell_type_short', 'rig', 'exp_name', 'cell_label', 'onlineAnalysis',
                 'grating_site', 'aperture', 'annulus_inner', 'annulus_outer',
-                'filter_wheel_ndf', 'backgroundIntensity', 'light_setting',
+                'spot_intensity', 'filter_wheel_ndf', 'backgroundIntensity', 'light_setting',
                 'blocks', 'epochs']
-        cols += [c for c in ('rs_mohm', 'epochs_high_rs') if c in g.columns]
+        cols += [c for c in ('stage_ndfs', 'rs_mohm', 'epochs_high_rs') if c in g.columns]
         sc.tree_table(g.sort_values(['cell_type_short', 'exp_name', 'cell_label'])[cols],
                       levels=['cell_type_short', 'rig', 'exp_name', 'cell_label'],
                       height=height, num_cols=('aperture', 'annulus_inner', 'annulus_outer',
@@ -1259,6 +1364,71 @@ def store_dir():
     return Path(OUTPUT_DIR) / 'spot_annular_grating'
 
 
+def describe_group_row(row, index: Optional[int] = None, total: Optional[int] = None) -> str:
+    """State in words what one recording group is, before it is analyzed.
+
+    Says which cell, what the stimulus actually was, and — the two things a
+    row of the table does not make obvious — *why* it counts as center or
+    surround, and *why* it is analyzed as spikes or as current. Both are
+    derived rather than recorded, so both are spelled out with the number they
+    came from.
+    """
+    def num(v, fmt='g'):
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return '?'
+        return '?' if np.isnan(v) else format(v, fmt)
+
+    def get(name, default=None):
+        try:
+            value = row[name]
+        except Exception:
+            return default
+        return default if value is None else value
+
+    head = f"{get('exp_name')} {get('cell_label')} ({get('cell_type_short')})"
+    if index is not None and total is not None:
+        head = f'[{index:>3}/{total}] {head}'
+    head += f"  —  {get('blocks', '?')} block(s), {get('epochs', '?')} epochs"
+
+    inner, outer = get('annulus_inner'), get('annulus_outer')
+    site = get('grating_site')
+    why_site = ('inner diameter 0, so the grating covers the receptive-field centre'
+                if str(site) == 'center' else
+                f'inner diameter {num(inner)} > 0, so the grating is an annulus over the surround')
+    site_line = (f"  {'grating over ' + str(site):<22s} annulus {num(inner)}-{num(outer)} µm; "
+                 f'{why_site}')
+
+    mode = str(get('onlineAnalysis', ''))
+    rs = get('rs_mohm')
+    rs_txt = '' if rs is None or (isinstance(rs, float) and np.isnan(rs)) else \
+        (f', Rs {num(rs, ".2f")} MOhm' if float(rs) > 0 else ', Rs 0')
+    recorded = str(get('onlineAnalysis_recorded', mode))
+    corrected = f" (recorded as '{recorded}', relabelled from the amplifier)" \
+        if recorded and recorded != mode else ''
+    how = {'extracellular': 'spikes, so the response is a firing rate in Hz',
+           'exc': 'whole-cell at the excitatory reversal, so the response is a current in pA',
+           'inh': 'whole-cell at the inhibitory reversal, so the response is a current in pA',
+           }.get(mode, 'unknown recording mode')
+    mode_line = f"  {mode:<22s} {how}{rs_txt}{corrected}"
+
+    stim = (f"background {num(get('backgroundIntensity'))}, "
+            f"spot {num(get('spot_intensity'))} over a {num(get('aperture'))} µm aperture, "
+            f"bright bars {num(get('bright'))}")
+    stim_line = f"  {'stimulus':<22s} {stim}"
+
+    ndfs = str(get('stage_ndfs', '') or 'none')
+    rstar = get('rstar')
+    calibrated = rstar is not None and not (isinstance(rstar, float) and np.isnan(rstar))
+    rstar_txt = f" = {num(rstar)}R*" if calibrated else ' (no R* calibration yet)'
+    light = (f"wheel NDF {num(get('filter_wheel_ndf'))} + fixed filters {ndfs}, "
+             f"{get('light_setting', '?')}{rstar_txt}")
+    light_line = f"  {'light':<22s} {light}"
+
+    return '\n'.join([head, site_line, mode_line, stim_line, light_line])
+
+
 def record_key(exp_name: str, cell_label: str, online_analysis: str, site: str,
                ndf: float, background_intensity: float) -> str:
     """Stable identifier for one recording group, safe as an HDF5 group name.
@@ -1402,8 +1572,17 @@ def plot_group(rec: GratingRecord, figsize: Tuple[float, float] = (7.2, 7.6)):
 
 def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
                 on_error: str = 'log', verbose: bool = False,
-                skip_existing: bool = False, **kwargs) -> List[GratingRecord]:
+                skip_existing: bool = False, status: bool = True,
+                **kwargs) -> List[GratingRecord]:
     """Run :func:`analyze_group` over every row of :func:`group_blocks` output.
+
+    ``status=True`` (the default) announces each recording before it is
+    analyzed — which cell, which condition, and the stimulus parameters behind
+    it, via :func:`describe_group_row` — then reports the crossing it produced.
+    A batch of this length is otherwise a long silence, and the announcement is
+    what makes it reviewable: it says why each recording counts as center or
+    surround and why it is treated as spikes or current, both of which are
+    derived rather than recorded. Set ``status=False`` for a quiet run.
 
     ``on_error='log'`` keeps the batch going past individual failures (a cell
     with unreadable data should not abort 100 others). ``skip_existing=True``
@@ -1414,15 +1593,21 @@ def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
     records, failures = [], []
     stored = set(load_summary()['key']) if skip_existing else set()
     skipped = 0
-    for _, row in groups.iterrows():
+    total = len(groups)
+    for position, (_, row) in enumerate(groups.iterrows(), start=1):
         if skip_existing:
             key = record_key(row['exp_name'], row['cell_label'], row['onlineAnalysis'],
                              row['grating_site'], row['filter_wheel_ndf'],
                              row['backgroundIntensity'])
             if key in stored:
                 skipped += 1
+                if status:
+                    print(f"[{position:>3}/{total}] {row['exp_name']} {row['cell_label']} "
+                          f'— already stored, skipped')
                 continue
         block_ids = [int(b) for b in str(row['block_ids']).split(',')]
+        if status:
+            print(describe_group_row(row, index=position, total=total))
         try:
             rec = analyze_group(row['exp_name'], block_ids,
                                 online_analysis=row['onlineAnalysis'], verbose=verbose, **kwargs)
@@ -1433,10 +1618,19 @@ def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
                 save_records([rec], verbose=False)
             if plot:
                 plot_group(rec)
+            if status:
+                dropped = (f", {rec.n_epochs_high_rs} epoch(s) dropped over the Rs cutoff"
+                           if rec.n_epochs_high_rs else '')
+                print(f'  -> crossing {rec.crossing_nearest:.2f} '
+                      f'(interp {rec.crossing_interp:.2f}) over '
+                      f'{len(rec.dark_contrasts)} contrasts, {rec.n_epochs} epochs '
+                      f'in {rec.units}{dropped}\n')
         except Exception as e:
             if on_error != 'log':
                 raise
             failures.append((row['exp_name'], row['cell_label'], f'{type(e).__name__}: {e}'))
+            if status:
+                print(f'  -> FAILED: {type(e).__name__}: {str(e)[:110]}\n')
     print(f'analyzed {len(records)}/{len(groups)} groups'
           + (f' ({skipped} already stored, skipped)' if skipped else ''))
     if failures:

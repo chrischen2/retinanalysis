@@ -407,3 +407,62 @@ def test_drop_false_keeps_blocks_over_the_cutoff():
     out = _check(blocks, rs, drop=False)
     assert len(out) == 1
     assert 'above 20 MOhm' in out.loc[0, 'rs_flag']
+
+
+# --- batch status line -----------------------------------------------------
+
+def _group_row(**overrides):
+    import pandas as pd
+    row = {'exp_name': '2026-06-04_G', 'cell_label': 'Cell4', 'cell_type_short': 'OFF-parasol',
+           'onlineAnalysis': 'extracellular', 'grating_site': 'center', 'annulus_inner': 0.0,
+           'annulus_outer': 300.0, 'aperture': 0.0, 'spot_intensity': 0.3, 'bright': 0.9,
+           'backgroundIntensity': 0.3, 'filter_wheel_ndf': 1.0, 'stage_ndfs': 'EL06, EL2, FW1',
+           'light_setting': 'FW1/bg0.3', 'rstar': 2000.0, 'rs_mohm': 0.0,
+           'blocks': 2, 'epochs': 98}
+    row.update(overrides)
+    return pd.Series(row)
+
+
+def test_status_line_says_why_a_recording_is_center_or_surround():
+    centre = sag.describe_group_row(_group_row())
+    assert 'grating over center' in centre
+    assert 'inner diameter 0' in centre          # the number the call was made from
+
+    surround = sag.describe_group_row(_group_row(grating_site='surround', annulus_inner=350.0))
+    assert 'grating over surround' in surround
+    assert 'inner diameter 350 > 0' in surround
+
+
+def test_status_line_says_why_a_recording_is_spikes_or_current():
+    spikes = sag.describe_group_row(_group_row())
+    assert 'firing rate in Hz' in spikes
+
+    current = sag.describe_group_row(_group_row(onlineAnalysis='exc', rs_mohm=6.3))
+    assert 'excitatory reversal' in current and 'current in pA' in current
+    assert 'Rs 6.30 MOhm' in current
+
+
+def test_status_line_reports_a_relabelled_block_as_such():
+    line = sag.describe_group_row(_group_row(onlineAnalysis='extracellular',
+                                             onlineAnalysis_recorded='exc'))
+    assert "recorded as 'exc'" in line and 'relabelled' in line
+
+
+def test_status_line_carries_the_stimulus_and_both_ndf_numbers():
+    line = sag.describe_group_row(_group_row(), index=3, total=76)
+    assert '[  3/76]' in line
+    assert 'background 0.3' in line and 'spot 0.3' in line
+    assert 'wheel NDF 1' in line                  # the wheel setting
+    assert 'EL06, EL2, FW1' in line               # the fixed filters, which it does not imply
+    assert '2000R*' in line
+
+
+def test_status_line_marks_an_uncalibrated_light_level():
+    line = sag.describe_group_row(_group_row(rstar=float('nan')))
+    assert 'no R* calibration yet' in line
+
+
+def test_status_line_survives_missing_columns():
+    import pandas as pd
+    line = sag.describe_group_row(pd.Series({'exp_name': 'X', 'cell_label': 'Cell1'}))
+    assert 'X Cell1' in line and '?' in line      # absent numbers show as '?', no exception
