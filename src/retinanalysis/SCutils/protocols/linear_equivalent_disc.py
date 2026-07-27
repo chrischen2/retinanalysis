@@ -56,6 +56,11 @@ from retinanalysis.SCutils.protocols.spot_annular_grating import (  # noqa: F401
     apply_rstar_mapping, is_calibrated, light_level_rstar, light_setting,
     read_filter_wheel_ndf,
 )
+from retinanalysis.SCutils.recording_mode import (  # noqa: F401
+    MAX_SERIES_RESISTANCE, check_series_resistance, mode_family,
+    read_series_resistance, read_stage_ndfs, resolve_recording_mode,
+    series_resistance_table, stage_ndf_table, trace_is_spiking,
+)
 
 # Protocol leaf names that feed this analysis. LinearEquivalentDisc is only
 # included per-block, when the block carries a linearizeCones parameter.
@@ -90,14 +95,6 @@ CONFIG_KEYS = ['apertureDiameter', 'annulusInnerDiameter', 'annulusOuterDiameter
                'WeberConstant', 'maxIntensity', 'rfSigmaCenter', 'rfSigmaSurround',
                'linearIntegrationFunction', 'currentImageSet', 'noPatches',
                'preTime', 'stimTime', 'tailTime', 'sampleRate', 'micronsPerPixel']
-
-
-def _technique_for(exp_name: str, block_id: int) -> str:
-    """How the cell was recorded, for blocks that left onlineAnalysis as 'none'."""
-    import retinanalysis as ra
-    summary = ra.get_exp_summary(exp_name)
-    row = summary[summary['block_id'].eq(int(block_id))]
-    return str(row['recording_technique'].iloc[0]) if len(row) else 'unknown'
 
 
 def stimulus_site(protocol: str) -> str:
@@ -209,6 +206,11 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
           zip(df['filter_wheel_ndf'], df['backgroundIntensity'])]
     df['rstar'] = [r for r, _ in rs]
     df['light_level'] = [lab for _, lab in rs]
+    # The fixed filters in the light path, which the wheel setting does not
+    # cover; read per block because they change within an experiment.
+    df = df.merge(stage_ndf_table(df[['exp_name', 'block_id']], verbose=show),
+                  on='block_id', how='left')
+    df['stage_ndfs'] = df['stage_ndfs'].fillna('')
     df = df.sort_values(['exp_name', 'cell_label', 'start_time']).reset_index(drop=True)
 
     if show:
@@ -220,83 +222,71 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
         print('  by protocol: ' + ', '.join(f'{k} {v}' for k, v in
                                             df['protocol'].value_counts().items()))
         cols = ['exp_name', 'cell_label', 'cell_type_short', 'protocol', 'site',
-                'onlineAnalysis', 'filter_wheel_ndf', 'backgroundIntensity',
-                'light_setting', 'WeberConstant', 'n_epochs', 'block_id']
+                'onlineAnalysis', 'filter_wheel_ndf', 'stage_ndfs', 'backgroundIntensity',
+                'maxIntensity', 'light_setting', 'WeberConstant', 'n_epochs', 'block_id']
         sc.scroll_table(df[cols], height=height,
-                        num_cols=('filter_wheel_ndf', 'backgroundIntensity',
+                        num_cols=('filter_wheel_ndf', 'backgroundIntensity', 'maxIntensity',
                                   'WeberConstant', 'n_epochs', 'block_id'))
     return df
-
-
-def resolve_mode(df: pd.DataFrame, verbose: bool = True) -> pd.Series:
-    """The recording mode to group on, with ``onlineAnalysis='none'`` resolved.
-
-    A recorded label is authoritative. Where it is missing, the mode comes from
-    how the cell was actually recorded: cell-attached is 'extracellular',
-    otherwise 'whole_cell' and :func:`analyze_group` reads the polarity off the
-    data. If such a block sits at the same cell / site / light level as exactly
-    one labelled whole-cell sibling, it adopts that label instead.
-
-    Grouping on this rather than on the raw label is what keeps an unlabelled
-    recording from overwriting its labelled sibling's record: they share a key
-    once the mode is resolved, so they must share a group and be pooled.
-    """
-    label = df['onlineAnalysis'].astype(str).str.lower()
-    tech = df['recording_technique'].astype(str)
-    known = label.isin(['extracellular', 'exc', 'inh'])
-    mode = np.where(known, label,
-                    np.where(tech.eq('cell-attached'), 'extracellular', 'whole_cell'))
-    mode = pd.Series(mode, index=df.index)
-
-    site_keys = ['exp_name', 'cell_label', 'site', 'filter_wheel_ndf', 'backgroundIntensity']
-    adopted = 0
-    for _, idx in df.groupby(site_keys, dropna=False).groups.items():
-        here = mode.loc[idx]
-        if 'whole_cell' not in set(here):
-            continue
-        siblings = {m for m in here if m in ('exc', 'inh')}
-        if len(siblings) == 1:
-            mode.loc[idx] = here.replace('whole_cell', siblings.pop())
-            adopted += 1
-    if verbose:
-        n_resolved = int((~known).sum())
-        if n_resolved:
-            print(f"resolved onlineAnalysis for {n_resolved} block(s) recorded as 'none' "
-                  f'from the recording technique'
-                  + (f'; {adopted} adopted a labelled sibling' if adopted else ''))
-    return mode
 
 
 def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420) -> pd.DataFrame:
     """One row per recording group: experiment x cell x mode x site x light level.
 
-    Groups on the *resolved* mode (:func:`resolve_mode`), so recordings that
-    differ only in whether the experimenter set ``onlineAnalysis`` are pooled
-    rather than colliding on one record key.
+    Groups on ``onlineAnalysis`` after :func:`check_series_resistance` has
+    resolved it against the amplifier. Run that first: nearly half these blocks
+    were recorded with the label left at ``'none'``, and grouping on the raw
+    label would put every one of them in the same bucket regardless of how the
+    cell was actually held.
+
+    Blocks still carrying an unresolved label are reported rather than silently
+    pooled; :func:`analyze_group` resolves each one itself, so the analysis is
+    right either way, but the grouping is only right once the labels are.
     """
     from retinanalysis.SCutils import explore as sc
 
     df = df.copy()
-    df['mode'] = resolve_mode(df, verbose=show)
+    df['mode'] = df['onlineAnalysis'].astype(str).str.lower()
+    unresolved = ~df['mode'].isin(['extracellular', 'exc', 'inh'])
+    if show and unresolved.any():
+        print(f"WARNING: {int(unresolved.sum())} block(s) still have an unresolved "
+              f"onlineAnalysis ({', '.join(sorted(df.loc[unresolved, 'mode'].unique()))}). "
+              f'Run check_series_resistance() first so they group by how the cell was '
+              f'actually recorded rather than by a label nobody set.')
+
     keys = ['exp_name', 'cell_label', 'cell_type_short', 'mode', 'site',
             'filter_wheel_ndf', 'backgroundIntensity']
-    g = (df.groupby(keys, dropna=False, sort=False)
-           .agg(blocks=('block_id', 'size'), epochs=('n_epochs', 'sum'),
-                onlineAnalysis=('mode', 'first'),
-                recorded_labels=('onlineAnalysis',
-                                 lambda s: ', '.join(sorted({str(v) for v in s}))),
-                protocols=('protocol', lambda s: ', '.join(sorted(set(s)))),
-                light_setting=('light_setting', 'first'), rstar=('rstar', 'first'),
-                light_level=('light_level', 'first'),
-                weber=('WeberConstant', 'first'),
-                block_ids=('block_id', lambda s: ', '.join(str(int(b)) for b in sorted(s))))
-           .reset_index())
+    agg = dict(blocks=('block_id', 'size'), epochs=('n_epochs', 'sum'),
+               onlineAnalysis=('mode', 'first'),
+               protocols=('protocol', lambda s: ', '.join(sorted(set(s)))),
+               light_setting=('light_setting', 'first'), rstar=('rstar', 'first'),
+               light_level=('light_level', 'first'),
+               weber=('WeberConstant', 'first'),
+               max_intensity=('maxIntensity', 'first'),
+               block_ids=('block_id', lambda s: ', '.join(str(int(b)) for b in sorted(s))))
+    recorded_col = ('onlineAnalysis_recorded' if 'onlineAnalysis_recorded' in df.columns
+                    else 'onlineAnalysis')
+    agg['recorded_labels'] = (recorded_col,
+                              lambda s: ', '.join(sorted({str(v) for v in s})))
+    for name, source in (('stage_ndfs', 'stage_ndfs'),
+                         ('rs_mohm', 'series_resistance'),
+                         ('epochs_high_rs', 'n_epochs_high_rs')):
+        if source not in df.columns:
+            continue
+        if name == 'rs_mohm':
+            agg[name] = (source, lambda s: np.round(np.nanmedian(s) / 1e6, 2))
+        elif name == 'epochs_high_rs':
+            agg[name] = (source, 'sum')
+        else:
+            agg[name] = (source, lambda s: ' | '.join(sorted({str(v) for v in s})))
+    g = df.groupby(keys, dropna=False, sort=False).agg(**agg).reset_index()
     if show:
         print(f'{len(g)} recording groups (experiment x cell x mode x site x light level)')
         sc.tree_table(g.sort_values(['cell_type_short', 'exp_name', 'cell_label']),
                       levels=['cell_type_short', 'exp_name', 'cell_label'], height=height,
                       num_cols=('blocks', 'epochs', 'filter_wheel_ndf',
-                                'backgroundIntensity', 'weber', 'rstar'))
+                                'backgroundIntensity', 'weber', 'rstar',
+                                'max_intensity', 'rs_mohm', 'epochs_high_rs'))
     return g
 
 
@@ -340,6 +330,12 @@ class DiscRecord:
     # onlineAnalysis label, so an inferred polarity is never mistaken for one
     # the experimenter set.
     mode_inferred: bool = False
+    # The label as the experimenter set it (often 'none'), kept beside the mode
+    # the block was actually analyzed as. Plus the amplifier reading behind that
+    # decision, in ohms.
+    online_analysis_recorded: str = ''
+    series_resistance: float = np.nan
+    n_epochs_high_rs: int = 0
     config: Dict = field(default_factory=dict)
     units: str = ''
 
@@ -362,6 +358,10 @@ class DiscRecord:
             'image_names': ','.join(self.image_names),
             'n_epochs': self.n_epochs, 'n_patches': self.n_patches,
             'mode_inferred': bool(self.mode_inferred),
+            'online_analysis_recorded': self.online_analysis_recorded or self.online_analysis,
+            'series_resistance': self.series_resistance,
+            'n_epochs_high_rs': self.n_epochs_high_rs,
+            'max_intensity': self.config.get('maxIntensity', np.nan),
             'threshold_onset': self.threshold_onset,
             'threshold_offset': self.threshold_offset,
             'nli_disc_onset': m(self.nli_disc_onset),
@@ -390,6 +390,7 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
                   wc_offset: int = DEFAULTS['wc_offset'],
                   smooth_ms: float = DEFAULTS['smooth_ms'],
                   detector_kwargs: Optional[dict] = None,
+                  max_series_resistance: Optional[float] = MAX_SERIES_RESISTANCE,
                   verbose: bool = True) -> DiscRecord:
     """Port of the per-node body of ``analyzeLinearDiscCone.m``.
 
@@ -397,12 +398,22 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
     (image, patch, stimulus category), and forms the two nonlinearity indices.
     A patch is kept only if it has an image trial and at least one disc trial,
     matching the MATLAB.
+
+    How the block is treated comes from the amplifier, not the label:
+    :func:`resolve_recording_mode` reads ``stimulus:Amp1:seriesResistance`` and,
+    where that alone cannot decide, the trace itself. That matters more here
+    than anywhere else — nearly half these blocks were recorded with
+    ``onlineAnalysis`` left at ``'none'``, so for most of the dataset there is
+    no label to trust in the first place. A block recorded through more than
+    ``max_series_resistance`` ohms is skipped.
     """
     import retinanalysis as ra
     from scipy.ndimage import uniform_filter1d
 
     per_epoch = []          # (image, patch, category, onset, offset)
     first_params, used_blocks = None, []
+    rs_kept, n_high_rs, mode_inferred = [], 0, False
+    recorded_mode = ''
 
     for bid in block_ids:
         sb = ra.StimBlock(exp_name, int(bid), verbose=False)
@@ -411,22 +422,41 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
         p0 = params[0]
         if first_params is None:
             first_params = p0
-        mode = (online_analysis or p0.get('onlineAnalysis', 'extracellular')).lower()
-        mode_inferred = mode == 'whole_cell'
-        if mode in ('', 'none', 'nan'):
-            # Many blocks were recorded with onlineAnalysis left at 'none'; fall
-            # back to how the cell was actually recorded. Whole-cell polarity is
-            # then read off the data below, as the MATLAB does.
-            technique = str(_technique_for(exp_name, int(bid)))
-            mode = 'extracellular' if technique == 'cell-attached' else 'whole_cell'
-        spiking = mode == 'extracellular'
+        recorded_mode = (online_analysis or p0.get('onlineAnalysis', 'extracellular')).lower()
 
-        rb = ra.SCResponseBlock(exp_name, int(bid), b_spiking=spiking, verbose=False,
-                                **(detector_kwargs or {}))
+        # Load before deciding: the label is often absent or wrong, and the
+        # amplifier reading plus the trace are what settle it.
+        rb = ra.SCResponseBlock(exp_name, int(bid), b_spiking=False, verbose=False)
         sr = float(rb.amp_sample_rate)
+        try:
+            rs = read_series_resistance(exp_name, int(bid))
+        except Exception:
+            rs = np.full(len(ep), np.nan)
+        rs_median = float(np.nanmedian(rs)) if np.isfinite(rs).any() else np.nan
+
+        if (max_series_resistance is not None and np.isfinite(rs_median)
+                and rs_median > max_series_resistance):
+            n_high_rs += len(ep)
+            if verbose:
+                print(f'  block {bid}: series resistance {rs_median / 1e6:.1f} MOhm is above '
+                      f'the {max_series_resistance / 1e6:g} MOhm cutoff — block skipped')
+            continue
+
+        mode, note = resolve_recording_mode(recorded_mode, rs_median, amp_data=rb.amp_data,
+                                            sample_rate=sr,
+                                            detector_kwargs=detector_kwargs)
+        if note:
+            mode_inferred = True
+            if verbose:
+                print(f'  block {bid}: {note}')
+        spiking = mode == 'extracellular'
+        if spiking:
+            rb.get_spike_times(**(detector_kwargs or {}))
+
         pre_pts = int(round(float(p0['preTime']) / 1e3 * sr))
         stim_pts = int(round(float(p0['stimTime']) / 1e3 * sr))
         n_samples = rb.amp_data.shape[1]
+        rs_kept.append(rs_median)
         used_blocks.append(int(bid))
 
         if spiking:
@@ -443,12 +473,12 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
                 offsets.append(float(np.sum(st > on_hi)) / offset_s)
             units = 'rate (Hz)'
         else:
-            if mode == 'whole_cell':
-                # Excitatory currents are inward (negative); flip so a larger
-                # number always means a larger response. Checked across the
-                # affected recordings: every epoch agrees with the grand mean,
-                # so this is not a marginal call -- but it is still an
-                # inference, hence mode_inferred.
+            if mode not in ('exc', 'inh'):
+                # Only reachable when the label was never set *and* the h5 had
+                # no series-resistance reading to resolve it with. Excitatory
+                # currents are inward (negative), so the sign still names the
+                # holding potential -- but it is an inference, hence
+                # mode_inferred.
                 mode_inferred = True
                 mode = 'exc' if float(np.mean(rb.amp_data)) < 0 else 'inh'
             sign = -1.0 if mode == 'exc' else 1.0
@@ -523,6 +553,10 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
         n_epochs=int(len(df)), n_patches=int(keep.sum()), mode_inferred=mode_inferred,
         threshold_onset=thresh_on, threshold_offset=thresh_off,
         block_ids=used_blocks,
+        online_analysis_recorded=recorded_mode,
+        series_resistance=(float(np.nanmedian(rs_kept))
+                           if rs_kept and np.isfinite(rs_kept).any() else np.nan),
+        n_epochs_high_rs=n_high_rs,
         config={k: first_params.get(k) for k in CONFIG_KEYS}, units=units)
     if verbose:
         print(rec.describe())

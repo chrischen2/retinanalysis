@@ -325,9 +325,23 @@ def test_missing_reading_keeps_the_recorded_label():
     assert sag.resolve_recording_mode('exc', None, _smooth_trace(), 1e4) == ('exc', '')
 
 
-def test_unknown_label_is_never_overridden():
-    # 'none' says nothing to contradict, so there is no disagreement to resolve.
-    assert sag.resolve_recording_mode('none', 0.0, _spiking_trace(), 1e4) == ('none', '')
+def test_unset_label_is_resolved_from_the_amplifier_and_the_trace():
+    # 'none' has nothing to contradict, so the reading decides outright rather
+    # than overruling. This is most of the linear-equivalent-disc dataset.
+    mode, note = sag.resolve_recording_mode('none', 0.0, _spiking_trace(), 1e4)
+    assert mode == 'extracellular' and 'contains spikes' in note
+
+    mode, note = sag.resolve_recording_mode('none', 8e6, np.full((4, 100), -5.0))
+    assert mode == 'exc' and 'whole-cell' in note
+
+    # No spikes and no access resistance recorded: whole-cell with the field
+    # never set, polarity still readable from the sign.
+    mode, note = sag.resolve_recording_mode('none', 0.0, _smooth_trace() - 50.0, 1e4)
+    assert mode == 'exc' and 'never set' in note
+
+
+def test_unset_label_without_a_trace_stays_unresolved():
+    assert sag.resolve_recording_mode('none', 0.0, amp_data=None) == ('none', '')
 
 
 def test_resolution_without_a_trace_keeps_the_label_and_says_why():
@@ -367,6 +381,7 @@ def _blocks_with_rs(labels, resistances, exp='X_E', high_rs=None):
 def _check(blocks, rs, traces=None, **kwargs):
     """Run the audit with both the reading and the raw traces stubbed."""
     from unittest import mock
+    from retinanalysis.SCutils import recording_mode as rm
 
     class _Stub:
         def __init__(self, exp_name, block_id, **_):
@@ -375,7 +390,8 @@ def _check(blocks, rs, traces=None, **kwargs):
 
     ra_stub = mock.MagicMock()
     ra_stub.SCResponseBlock = _Stub
-    with mock.patch.object(sag, 'series_resistance_table', return_value=rs), \
+    # check_series_resistance lives in the shared module, so patch it there.
+    with mock.patch.object(rm, 'series_resistance_table', return_value=rs), \
             mock.patch.dict('sys.modules', {'retinanalysis': ra_stub}):
         return sag.check_series_resistance(blocks, show=False, **kwargs)
 

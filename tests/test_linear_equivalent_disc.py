@@ -117,3 +117,67 @@ def test_shared_light_helpers_are_reused():
     from retinanalysis.SCutils.protocols import spot_annular_grating as sag
     for name in ('light_level_rstar', 'light_setting', 'apply_rstar_mapping'):
         assert getattr(led, name) is getattr(sag, name)
+
+
+# --- recording mode from the amplifier -------------------------------------
+
+def test_recording_mode_helpers_are_the_shared_ones():
+    """One implementation, so every protocol resolves the mode identically."""
+    from retinanalysis.SCutils import recording_mode as rm
+    from retinanalysis.SCutils.protocols import spot_annular_grating as sag
+    for name in ('resolve_recording_mode', 'check_series_resistance',
+                 'read_series_resistance', 'trace_is_spiking', 'read_stage_ndfs'):
+        assert getattr(led, name) is getattr(rm, name)
+        assert getattr(sag, name) is getattr(rm, name)
+
+
+def _spiking_trace(n=12, length=3000, seed=0):
+    rng = np.random.RandomState(seed)
+    data = rng.randn(n, length)
+    for trial in range(n):
+        for centre in rng.choice(np.arange(50, length - 50), 20, replace=False):
+            data[trial, centre - 2:centre + 3] += np.array([6., -12., -40., -12., 6.])
+    return data
+
+
+def test_unset_label_is_the_common_case_and_resolves_from_the_amplifier():
+    """'none' covers 142 of 331 blocks here, so it must resolve, not pass through."""
+    mode, note = led.resolve_recording_mode('none', 0.0, _spiking_trace(), 1e4)
+    assert mode == 'extracellular' and 'contains spikes' in note
+
+    assert led.resolve_recording_mode('none', 7e6, np.full((4, 100), -5.0))[0] == 'exc'
+    assert led.resolve_recording_mode('none', 7e6, np.full((4, 100), 5.0))[0] == 'inh'
+
+
+def _one_block(**overrides):
+    row = {'exp_name': 'X_E', 'block_id': 1, 'cell_label': 'Cell1',
+           'cell_type_short': 'ON-parasol', 'onlineAnalysis': 'exc', 'site': 'center',
+           'filter_wheel_ndf': 0.0, 'backgroundIntensity': 0.5, 'n_epochs': 10,
+           'protocol': 'P', 'light_setting': 'FW0/bg0.5', 'rstar': np.nan,
+           'light_level': '?', 'WeberConstant': 0.1, 'maxIntensity': 7500.0}
+    row.update(overrides)
+    return row
+
+
+def test_group_blocks_warns_when_labels_were_never_resolved(capsys):
+    df = pd.DataFrame([_one_block(block_id=1, onlineAnalysis='none'),
+                       _one_block(block_id=2, onlineAnalysis='exc')])
+    led.group_blocks(df, show=True)
+    out = capsys.readouterr().out
+    assert 'unresolved onlineAnalysis' in out and 'check_series_resistance' in out
+
+
+def test_group_blocks_carries_max_intensity_and_the_recorded_label():
+    df = pd.DataFrame([_one_block()])
+    g = led.group_blocks(df, show=False)
+    assert g.loc[0, 'max_intensity'] == 7500.0
+    assert g.loc[0, 'recorded_labels'] == 'exc'
+
+
+def test_group_blocks_prefers_the_pre_relabel_column_for_recorded_labels():
+    df = pd.DataFrame([_one_block(onlineAnalysis='extracellular')])
+    df['onlineAnalysis_recorded'] = 'none'
+    g = led.group_blocks(df, show=False)
+    # Grouped by what it is analyzed as, but reporting what was recorded.
+    assert g.loc[0, 'onlineAnalysis'] == 'extracellular'
+    assert g.loc[0, 'recorded_labels'] == 'none'
