@@ -17,7 +17,9 @@ def plot_mosaics_for_datasets(df_exp_search: pd.DataFrame,
                               cell_types: List[str] = ['OnP', 'OffP', 'OnM', 'OffM'],
                               preferred_typing_file: Optional[str] = None,
                               ss_version: Optional[str] = None,
-                              use_chunk_column: bool = False, **kwargs):
+                              use_chunk_column: bool = False,
+                              include_neurons: bool = False,
+                              return_chunks: bool = False, **kwargs):
     """
     Function for plotting mosaics across datasets listed in an experiment search dataframe.
     The user can specify a list of cell types and a preferred typing file. Additional
@@ -44,11 +46,22 @@ def plot_mosaics_for_datasets(df_exp_search: pd.DataFrame,
     ``chunk_name`` column on ``df_exp_search``, which is whatever chunk the
     database has associated with the protocol block.
 
+    include_neurons (bool): Load the .neurons file alongside the params. Off by
+    default because the mosaic only needs RF fits, and the spike times roughly
+    double the read. Turn it on when you want firing-rate stats out of the
+    returned chunks (see :mod:`retinanalysis.utils.chunk_summary`).
+
+    return_chunks (bool): Return ``(ls_rf_axes, chunks)`` instead of just the
+    axes, where ``chunks`` maps ``'<exp>/<chunk>'`` to the loaded
+    ``AnalysisChunk``. Lets the caller summarize what is in each mosaic
+    without paying to load it a second time.
+
     Rows whose chunk is missing from every configured volume are reported and
     skipped rather than aborting the sweep.
 
     Returns:
     ls_rf_axes (List[Axes]): A list of axes, one for each of the plotted datasets.
+    Or ``(ls_rf_axes, chunks)`` when ``return_chunks`` is set.
     """
 
     exp_names = df_exp_search['exp_name'].values
@@ -62,6 +75,7 @@ def plot_mosaics_for_datasets(df_exp_search: pd.DataFrame,
     from retinanalysis.config.settings import find_path
 
     ls_rf_axes = []
+    loaded_chunks = {}
     for e_idx, exp in enumerate(exp_names):
         # Rank the day's noise chunks by recording time, preferring the one
         # that ran before this protocol. Opt into the database's own
@@ -95,7 +109,7 @@ def plot_mosaics_for_datasets(df_exp_search: pd.DataFrame,
                 analysis_chunk = AnalysisChunk(
                     exp, candidate, ss_version = version,
                     b_load_spatial_maps=False, include_ei=False,
-                    include_neurons=False, verbose=True)
+                    include_neurons=include_neurons, verbose=True)
                 print(f'{exp}/{candidate}: loaded {version} from {chunk_dir}')
                 break
             except Exception as e:
@@ -116,13 +130,17 @@ def plot_mosaics_for_datasets(df_exp_search: pd.DataFrame,
                 print(f'{preferred_typing_file} does not exist for {exp} {nearest_chunk}, using {analysis_chunk.typing_files[0]}')
                 rf_axes = analysis_chunk.plot_rfs(cell_types = cell_types, **kwargs)
         
+        loaded_chunks[f'{exp}/{nearest_chunk}'] = analysis_chunk
+
         try:
             fig = rf_axes[0].get_figure()
             fig.suptitle(f'{exp} {nearest_chunk}')
             ls_rf_axes.append(rf_axes)
         except:
             print(f'\nNo RFs for {exp} {nearest_chunk}')
-    
+
+    if return_chunks:
+        return ls_rf_axes, loaded_chunks
     return ls_rf_axes
 
 

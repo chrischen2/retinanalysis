@@ -132,6 +132,43 @@ def _detect_ss_version(exp_name: str, datafile_name: str) -> str:
     return detect_ss_version(exp_name, datafile_name, kind='data')
 
 
+def add_ss_version_column(df, kind: str = 'analysis',
+                          column: str = 'ss_version'):
+    """Annotate a dataset search frame with the sort version present on disk.
+
+    Adds ``column`` to a copy of ``df``, resolved per row with
+    :func:`detect_ss_version` — ``kilosort2.5`` when present, else
+    ``kilosort2``. ``kind='analysis'`` reads the noise chunk's tree (needs a
+    ``chunk_name`` column); ``kind='data'`` reads the protocol datafile's.
+
+    Rows whose directory isn't on any configured volume get ``'not found'``
+    rather than raising, so the column is safe to compute over a whole search
+    result. Answers per row are memoized, so a date appearing several times
+    only costs one directory listing.
+    """
+    df = df.copy()
+    cache = {}
+
+    def _lookup(row):
+        key = (row['exp_name'],
+               row.get('chunk_name') if kind == 'analysis'
+               else row.get('datafile_name'))
+        if key not in cache:
+            try:
+                if kind == 'analysis':
+                    cache[key] = detect_ss_version(
+                        key[0], chunk_name=key[1], kind='analysis')
+                else:
+                    cache[key] = detect_ss_version(
+                        key[0], datafile_name=key[1], kind='data')
+            except (FileNotFoundError, ValueError):
+                cache[key] = 'not found'
+        return cache[key]
+
+    df[column] = [_lookup(r) for _, r in df.iterrows()]
+    return df
+
+
 def pick_typing_file(
     exp_name: str, chunk_name: str, ss_version: str,
     preferred: Optional[str] = None,

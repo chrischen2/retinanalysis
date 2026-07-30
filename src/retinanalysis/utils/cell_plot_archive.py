@@ -42,6 +42,7 @@ import matplotlib.pyplot as plt
 from matplotlib.collections import PatchCollection
 from matplotlib.patches import Ellipse
 
+from .chunk_summary import _draw_isi_panel, _draw_tc_panel
 from .psth import epoch_spikes_to_psth, psth_time_axis
 from .raster import plot_single_cell_raster
 from .vision_utils import get_ells
@@ -376,62 +377,6 @@ def _typed_cell_ids(analysis_chunk, cell_type: str,
     return analysis_chunk.df_cell_params.query(
         f'typing_file_{idx} == @cell_type'
     )['cell_id'].astype(int).tolist()
-
-
-def _isi_bin_centers(analysis_chunk) -> np.ndarray:
-    edges = np.asarray(analysis_chunk.isi_bin_edges)
-    return 0.5 * (edges[:-1] + edges[1:])
-
-
-def _draw_tc_panel(ax, analysis_chunk, ids, color):
-    """Mean temporal filter (green channel) + per-cell traces dim."""
-    tcs = []
-    for cid in ids:
-        tc = analysis_chunk.d_timecourses.get(cid)
-        if tc is None:
-            continue
-        tcs.append(tc['green'])
-    if not tcs:
-        ax.text(0.5, 0.5, '(no timecourses)', transform=ax.transAxes,
-                ha='center', va='center', fontsize=8)
-        return
-    L = min(len(t) for t in tcs)
-    mat = np.stack([t[:L] for t in tcs])
-    x = np.arange(L)
-    for row in mat:
-        ax.plot(x, row, color=color, alpha=0.12, linewidth=0.6)
-    mean = mat.mean(axis=0)
-    sem = mat.std(axis=0) / np.sqrt(max(mat.shape[0], 1))
-    ax.plot(x, mean, color=color, linewidth=1.6)
-    ax.fill_between(x, mean - sem, mean + sem,
-                    color=color, alpha=0.25, linewidth=0)
-    ax.axhline(0, color='gray', lw=0.4, alpha=0.5)
-
-
-def _draw_isi_panel(ax, analysis_chunk, ids, color, xlim_ms=200.0):
-    """Mean ISI density + per-cell traces dim."""
-    centers = _isi_bin_centers(analysis_chunk)
-    rows = []
-    for cid in ids:
-        h = analysis_chunk.d_ISIs.get(cid)
-        if h is None:
-            continue
-        h = np.asarray(h, dtype=float)
-        s = h.sum()
-        rows.append(h / s if s > 0 else h)
-    if not rows:
-        ax.text(0.5, 0.5, '(no ISI data)', transform=ax.transAxes,
-                ha='center', va='center', fontsize=8)
-        return
-    mat = np.stack(rows)
-    for row in mat:
-        ax.plot(centers, row, color=color, alpha=0.12, linewidth=0.6)
-    mean = mat.mean(axis=0)
-    sem = mat.std(axis=0) / np.sqrt(max(mat.shape[0], 1))
-    ax.plot(centers, mean, color=color, linewidth=1.6)
-    ax.fill_between(centers, mean - sem, mean + sem,
-                    color=color, alpha=0.25, linewidth=0)
-    ax.set_xlim(0, xlim_ms)
 
 
 def save_experiment_mosaic(

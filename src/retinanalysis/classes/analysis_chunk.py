@@ -132,7 +132,21 @@ class AnalysisChunk:
             mask = ~np.isin(self.cell_ids, bad_ids)
             self.cell_ids = self.cell_ids[mask]
 
-        # Pull timecourses into an timecourse dictionary 
+        # Cells present in the .neurons file but absent from .params carry no
+        # STA fit — no timecourse, no RF. They only appear when the chunk is
+        # loaded with include_neurons=True, and every downstream consumer here
+        # (timecourses, ISIs, get_rf_params) assumes the params fields exist.
+        # Drop them once, up front, instead of raising KeyError deep in the
+        # timecourse loop.
+        unfitted = [id for id in self.cell_ids
+                    if 'RedTimeCourse' not in self.vcd.main_datatable[id]]
+        if unfitted:
+            if self.verbose:
+                print(f'{len(unfitted)} of {len(self.cell_ids)} cells have no '
+                      f'STA fit (in .neurons but not .params); excluding them.')
+            self.cell_ids = self.cell_ids[~np.isin(self.cell_ids, unfitted)]
+
+        # Pull timecourses into an timecourse dictionary
         self.d_timecourses = dict()
         for id in self.cell_ids:
             timecourse_r = self.vcd.main_datatable[id]['RedTimeCourse']
