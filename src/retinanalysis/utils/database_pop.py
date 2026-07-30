@@ -490,8 +490,22 @@ def append_animal(experiment_id: int, parent_id: int, animal: dict, user: str, t
     for preparation in animal['preparations']:
         append_preparation(experiment_id, animal_id, preparation, user, tags, is_mea)
 
+def exp_name_from_data(data: str) -> str:
+    """Experiment name from a ``meta_list`` data entry.
+
+    The two branches of :func:`gen_meta_list` hand back different things: the
+    single-cell branch gives a path to ``<exp>.h5``, while the MEA branch gives
+    the bare experiment name (there is no .h5 — the data is a sorted-output
+    directory). Stripping a fixed three characters works for the first and
+    silently eats three characters of the second, which is how experiments
+    landed in the database as ``202605`` instead of ``20260506C``.
+    """
+    base = os.path.basename(str(data))
+    return base[:-3] if base.lower().endswith('.h5') else base
+
+
 def append_experiment(meta: str, data: str, tags: str, experiment: dict, user: str, tags_dict: dict):
-    exp_name = os.path.basename(data)[:-3]
+    exp_name = exp_name_from_data(data)
     base_tuple = {
         'exp_name': exp_name,
         'meta_file': meta,
@@ -595,9 +609,7 @@ def gen_meta_list_multi(dir_triples: list) -> list:
             print(f"Skipping ingest root (not mounted): {h5_dir}")
             continue
         for entry in gen_meta_list(h5_dir, meta_dir, tags_dir):
-            exp_name = os.path.basename(entry[1])
-            if exp_name.endswith('.h5'):
-                exp_name = exp_name[:-3]
+            exp_name = exp_name_from_data(entry[1])
             if exp_name in seen:
                 continue
             seen.add(exp_name)
@@ -688,7 +700,7 @@ def append_data(data_dir: str, meta_dir: str, tags_dir: str, username: str,
     ls_updated = []  # exp_names re-ingested because their source files changed
     ls_skipped = []  # (exp_name, reason) for experiments skipped due to errors
     for meta, data, tags in tqdm(meta_list, desc='Experiments'):
-        exp_name = os.path.basename(data)[:-3]
+        exp_name = exp_name_from_data(data)
 
             # Skip macOS resource fork files
         if os.path.basename(meta).startswith('._'):
