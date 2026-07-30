@@ -7,15 +7,24 @@ from retinanalysis.utils import (USER,
                                  META_DIR,
                                  TAGS_DIR,
                                  database_pop)
+from retinanalysis.config.settings import ingest_source_dirs
 import retinanalysis.config.schema as schema
 from typing import List, Union
 
 
-def populate_database(username = USER, h5_dir = H5_DIR,
-                        meta_dir = META_DIR, tags_dir = TAGS_DIR,
+def populate_database(username = USER, h5_dir = None,
+                        meta_dir = None, tags_dir = None,
                         update_if_modified: bool = True,
                         watch_data_file: bool = False):
-    """Ingest every experiment under ``h5_dir`` / ``meta_dir`` into DataJoint.
+    """Ingest every experiment under the configured source volumes.
+
+    By default (all three directory arguments left as ``None``) this sweeps
+    *every* mounted tier from config.ini in read-priority order — local SSDs
+    before the NAS — so a date that only exists on one drive still gets
+    ingested. The first volume holding a given experiment wins; later copies
+    of the same date are ignored rather than re-ingested. Pass an explicit
+    ``h5_dir``/``meta_dir``/``tags_dir`` triple to restrict ingest to one
+    tree.
 
     Experiments already in the database are skipped, *except* when their
     source files are newer than the stored ``date_added``. With
@@ -33,12 +42,28 @@ def populate_database(username = USER, h5_dir = H5_DIR,
     """
     db = dj.VirtualModule('schema.py', 'schema', create_schema=True)
 
+    if h5_dir is None and meta_dir is None and tags_dir is None:
+        triples = ingest_source_dirs()
+        if not triples:
+            raise RuntimeError(
+                "No mounted volume has all of h5/meta/tags configured. "
+                "Check that a drive from config.ini is connected.")
+        for h5, meta, tags in triples:
+            print(f"Ingest source: {h5}")
+        meta_list = database_pop.gen_meta_list_multi(triples)
+    else:
+        h5_dir = h5_dir if h5_dir is not None else H5_DIR
+        meta_dir = meta_dir if meta_dir is not None else META_DIR
+        tags_dir = tags_dir if tags_dir is not None else TAGS_DIR
+        meta_list = None
+
     return database_pop.append_data(h5_dir, meta_dir, tags_dir, username, db,
                                     update_if_modified=update_if_modified,
-                                    watch_data_file=watch_data_file)
+                                    watch_data_file=watch_data_file,
+                                    meta_list=meta_list)
 
-def reload_experiment_data(exp_name, username = USER, h5_dir = H5_DIR,
-                    meta_dir = META_DIR, tags_dir = TAGS_DIR):
+def reload_experiment_data(exp_name, username = USER, h5_dir = None,
+                    meta_dir = None, tags_dir = None):
 
     (schema.Experiment() & {'exp_name' : exp_name}).delete(prompt=False)
 

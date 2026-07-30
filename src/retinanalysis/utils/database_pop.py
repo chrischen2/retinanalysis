@@ -1,6 +1,7 @@
-from retinanalysis.utils import (DATA_DIR, 
+from retinanalysis.utils import (DATA_DIR,
                                  ANALYSIS_DIR,
                                  USER)
+from retinanalysis.config.settings import find_path
 
 import datajoint as dj
 import json
@@ -569,18 +570,39 @@ def gen_meta_list(data_dir: str, meta_dir: str, tags_dir: str) -> list:
             tags_file = os.path.join(tags_dir, item[:-5] + '.json')
             if not os.path.exists(tags_file):
                 gen_tags(item[:-5] + '.json', tags_dir)
-            # Check that NAS directory exists
-            if not os.path.exists(DATA_DIR):
-                print(f"Could not find NAS_DATA_DIR: {DATA_DIR}")
-                print('Make sure you are connected and that api/helpers/utils.py has the correct path.')
-                continue
-            
-            # find the right directory in NAS_DATA_DIR
-            if item[:-5] not in os.listdir(DATA_DIR):
+            # The sorted-data dir may live on a different volume than the meta
+            # json, so search every configured tier rather than just the
+            # top-priority DATA_DIR.
+            if not os.path.isdir(find_path('data', item[:-5])):
                 print(f"Could not find data directory for {item}")
                 continue
             meta_list.append([os.path.join(meta_dir, item), item[:-5], tags_file])
     return meta_list
+
+
+def gen_meta_list_multi(dir_triples: list) -> list:
+    """Merge :func:`gen_meta_list` across several ``(h5, meta, tags)`` roots.
+
+    The first triple that yields a given experiment wins, so an experiment
+    present on both a local SSD and the NAS is ingested from the SSD and the
+    NAS copy never re-triggers the mtime-driven refresh in
+    :func:`append_data`.
+    """
+    merged = []
+    seen = set()
+    for h5_dir, meta_dir, tags_dir in dir_triples:
+        if not os.path.isdir(h5_dir) or not os.path.isdir(meta_dir):
+            print(f"Skipping ingest root (not mounted): {h5_dir}")
+            continue
+        for entry in gen_meta_list(h5_dir, meta_dir, tags_dir):
+            exp_name = os.path.basename(entry[1])
+            if exp_name.endswith('.h5'):
+                exp_name = exp_name[:-3]
+            if exp_name in seen:
+                continue
+            seen.add(exp_name)
+            merged.append(entry)
+    return merged
 
 def _as_datetime(value):
     """Coerce a DataJoint timestamp fetch into a naive ``datetime.datetime``.
@@ -624,7 +646,8 @@ def newest_source_mtime(*paths):
 def append_data(data_dir: str, meta_dir: str, tags_dir: str, username: str,
                 db_param: dj.VirtualModule, update_if_modified: bool = True,
                 watch_data_file: bool = False,
-                mtime_tolerance_sec: float = 2.0):
+                mtime_tolerance_sec: float = 2.0,
+                meta_list: list = None):
     """Ingest every experiment found under ``data_dir`` / ``meta_dir``.
 
     An experiment already present in the database is normally skipped. With
@@ -645,6 +668,10 @@ def append_data(data_dir: str, meta_dir: str, tags_dir: str, username: str,
     ``mtime_tolerance_sec`` guards against filesystem timestamp granularity
     re-triggering an ingest on every call; only sources newer than
     ``date_added + tolerance`` count as modified.
+
+    Pass ``meta_list`` (from :func:`gen_meta_list_multi`) to ingest a
+    pre-merged set of experiments spanning several volumes; the three
+    directory arguments are then unused.
     """
     global db
     global user
@@ -654,7 +681,8 @@ def append_data(data_dir: str, meta_dir: str, tags_dir: str, username: str,
 
     tolerance = datetime.timedelta(seconds=mtime_tolerance_sec)
 
-    meta_list = gen_meta_list(data_dir, meta_dir, tags_dir)
+    if meta_list is None:
+        meta_list = gen_meta_list(data_dir, meta_dir, tags_dir)
     records_added = 0
     ls_new_exp = []
     ls_updated = []  # exp_names re-ingested because their source files changed

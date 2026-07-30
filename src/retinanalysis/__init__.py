@@ -113,6 +113,7 @@ _ATTR_TO_MODULE = {
     'add_parameters_col': 'retinanalysis.utils.datajoint_utils',
     'analyze_experiment': 'retinanalysis.analyze',
     'analyze_experiments': 'retinanalysis.analyze',
+    'apply_publication_style': 'retinanalysis.utils.style',
     'append_animal': 'retinanalysis.utils.database_pop',
     'append_cell': 'retinanalysis.utils.database_pop',
     'append_celltypefiles': 'retinanalysis.utils.database_pop',
@@ -148,6 +149,9 @@ _ATTR_TO_MODULE = {
     'compute_ei_stats': 'retinanalysis.utils.cell_match',
     'compute_image_onset_offset_frames': 'retinanalysis.utils.regen',
     'create_dictionary_from_file': 'retinanalysis.utils.vision_utils',
+    'color_for_celltype': 'retinanalysis.utils.style',
+    'colors_for_celltypes': 'retinanalysis.utils.style',
+    'colors_for_conditions': 'retinanalysis.utils.style',
     'create_mea_pipeline': 'retinanalysis.classes.mea_pipeline',
     'create_mea_pipeline_cached': 'retinanalysis.utils.local_cache',
     'create_mea_response_group': 'retinanalysis.classes.response',
@@ -205,6 +209,7 @@ _ATTR_TO_MODULE = {
     'get_timecourses': 'retinanalysis.utils.vision_utils',
     'get_top_electrodes': 'retinanalysis.utils.ei_utils',
     'get_typing_files_for_datasets': 'retinanalysis.utils.datajoint_utils',
+    'ingest_source_dirs': 'retinanalysis.config.settings',
     'lcr_video_device_um_to_pix': 'retinanalysis.utils.regen',
     'load_all_present_images': 'retinanalysis.utils.regen',
     'load_and_process_img': 'retinanalysis.utils.regen',
@@ -277,6 +282,7 @@ _ATTR_TO_MODULE = {
     'sorting_qc_gui': 'retinanalysis.utils.sorting_qc',
     'spike_times_to_psth': 'retinanalysis.utils.psth',
     'summarize_batch_results': 'retinanalysis.analyze',
+    'tier_dirs': 'retinanalysis.config.settings',
     'visual_qc_csv_path': 'retinanalysis.utils.visual_qc',
 }
 

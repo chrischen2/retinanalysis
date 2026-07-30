@@ -12,9 +12,15 @@
 # `settings.py` is a pure reader; no absolute paths live in source code.
 #
 # Tier semantics (declared in src/retinanalysis/config/settings.py):
-#   DEFAULT     →  "primary"   (lowest priority for READS; highest for WRITES)
-#   SECONDARY   →  "secondary" (warm local cache for reads; writeable)
-#   TERTIARY    →  "tertiary"  (lab server / NAS — highest priority for READS)
+#   On macOS EVERY section below is a tier, read in the order it appears in
+#   the file — add a volume by adding a section anywhere in the sequence.
+#   There is no fixed slot count, and section names are free-form labels
+#   (DEFAULT / SECONDARY / TERTIARY are just the three you start with).
+#   On Linux/Windows only sections prefixed LINUX_ / WINDOWS_ are read.
+#
+#   settings.py then re-sorts mounted tiers so local disks are read before
+#   network mounts, whatever order they appear in here — so a NAS section
+#   is always consulted last even if it sits first in the file.
 #
 # Tier keys per section (all optional except `data`, which gates whether
 # the tier gets loaded at all):

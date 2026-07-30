@@ -253,14 +253,20 @@ def resolve_noise_chunk(
 def find_available_datasets(protocol_search: str):
     """Protocol-registry rows filtered to dates with sort output on disk.
 
-    Calls :func:`get_datasets_from_protocol_names` and intersects with
-    ``os.listdir(ANALYSIS_DIR)`` so registry rows whose Kilosort output
-    isn't local are silently dropped. One row per ``(exp_name,
-    datafile_name)``.
+    Calls :func:`get_datasets_from_protocol_names` and intersects with the
+    dates present under *any* configured analysis root, so registry rows
+    whose Kilosort output isn't reachable are silently dropped. One row per
+    ``(exp_name, datafile_name)``.
+
+    The intersect spans every mounted volume rather than just the
+    top-priority ``ANALYSIS_DIR``: a date archived only on a secondary SSD
+    is just as analyzable as one on the top tier.
     """
     from .utils.datajoint_utils import get_datasets_from_protocol_names
+    from .config.settings import tier_dirs
     df = get_datasets_from_protocol_names(protocol_search)
-    available = set(os.listdir(ANALYSIS_DIR))
+    available = {exp for root in tier_dirs('analysis')
+                 for exp in os.listdir(root)}
     return df[df['exp_name'].isin(available)].reset_index(drop=True)
 
 

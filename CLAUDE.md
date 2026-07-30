@@ -29,6 +29,15 @@ External SSD `/Volumes/ChrisProSSD`:
 
 `ra.DATA_DIR`, `ra.ANALYSIS_DIR`, `ra.OUTPUT_DIR` resolve to these.
 
+**Volumes are tiers, and there can be any number of them.** Each section in
+`src/retinanalysis/config/config.ini` is one volume, read in file order;
+`settings.py` then re-sorts so local disks are read before network mounts.
+Current order: ChrisNewSSD (fred) → ChrisNewSSD (chris) → ChrisProSSD → NAS
+(`/Volumes/data`). `ra.DATA_DIR` and friends name only the *top mounted*
+tier, so anything that needs to sweep all volumes must go through
+`ra.find_path(kind, *parts)` (one file) or `ra.tier_dirs(kind)` (all roots
+for a kind) rather than listing `ra.ANALYSIS_DIR` directly.
+
 ## Demos / notebooks
 
 Notebooks live under `demos/`. Convention: **one notebook per
@@ -157,8 +166,13 @@ written next to `offline.h5`; `load_spike_distance_many()` /
 DataJoint ingest and deletion live in `utils/database_utils.py`,
 auto-exported on `ra.*`:
 
-- `ra.populate_database()` — ingest from `H5_DIR` / `META_DIR` /
-  `TAGS_DIR`. Mostly append-only, but **not purely**: since 2026-07-27
+- `ra.populate_database()` — ingest from **every mounted tier**, not just
+  the top one: since 2026-07-30 it sweeps the `(h5, meta, tags)` triple of
+  each configured volume in read-priority order (local SSDs before NAS)
+  and the first drive holding a given date wins, so duplicate copies never
+  re-trigger an ingest. `ra.ingest_source_dirs()` previews the triples.
+  Pass an explicit `h5_dir`/`meta_dir`/`tags_dir` to restrict to one tree.
+  Mostly append-only, but **not purely**: since 2026-07-27
   it also compares each source file's mtime against the stored
   `Experiment.date_added`, and a meta/tags `.json` newer than the row
   triggers a delete-then-re-ingest of that experiment. Returns

@@ -10,6 +10,36 @@ except:
 import retinanalysis
 
 
+# Positional names for the tiers, in config-file order. Beyond this list
+# tiers are keyed 'tier7', 'tier8', ... — there is no fixed slot count, so a
+# new volume is added by dropping another section into config.ini.
+_TIER_KEY_NAMES = ('primary', 'secondary', 'tertiary', 'quaternary',
+                   'quinary', 'senary')
+
+
+def _tier_key(idx):
+    if idx < len(_TIER_KEY_NAMES):
+        return _TIER_KEY_NAMES[idx]
+    return f'tier{idx + 1}'
+
+
+def _platform_sections(configfile):
+    """Config section names for this platform, highest read-priority first.
+
+    Order is the order the sections appear in config.ini. On Darwin every
+    section that is not explicitly Linux/Windows-prefixed counts as a tier;
+    on the other platforms only the matching prefix does.
+    """
+    system = platform.system()
+    if system == 'Darwin':
+        return ['DEFAULT'] + [s for s in configfile.sections()
+                              if not s.startswith(('LINUX_', 'WINDOWS_'))]
+    head = 'LINUX_DEFAULT' if system == 'Linux' else 'WINDOWS_DEFAULT'
+    prefix = 'LINUX_' if system == 'Linux' else 'WINDOWS_'
+    return [head] + [s for s in configfile.sections()
+                     if s.startswith(prefix) and s != head]
+
+
 def load_config(config_path):
     if os.path.exists(config_path):
         config_path = os.path.abspath(config_path)
@@ -24,17 +54,8 @@ def load_config(config_path):
             f"and edit the absolute paths in each tier for your machine."
         )
 
-    if platform.system() == 'Darwin':
-        DEFAULT_config = configfile['DEFAULT']
-        SECONDARY_config = configfile['SECONDARY']
-        TERTIARY_config = configfile['TERTIARY']
-    elif platform.system() == 'Linux':
-        DEFAULT_config = configfile['LINUX_DEFAULT']
-        SECONDARY_config = configfile['LINUX_SECONDARY']
-    else:
-        DEFAULT_config = configfile['WINDOWS_DEFAULT']
-        SECONDARY_config = configfile['WINDOWS_SECONDARY']
-    
+    section_names = _platform_sections(configfile)
+
     def _row(cfg):
         # protocol_repos_root / output / local_cache are optional — fall
         # back to '' if absent. Keep the existing 8 read-keys required
@@ -46,14 +67,17 @@ def load_config(config_path):
                 'output': cfg.get('output', ''),
                 'local_cache': cfg.get('local_cache', '')}
 
+    # Tiers keep their positional identity: the Nth section in the file is
+    # always 'primary'/'secondary'/... even if an earlier volume is
+    # unmounted, so a missing drive shifts nothing under it.
     mea_config = dict()
-    if os.path.exists(os.path.abspath(DEFAULT_config['data'])):
-        mea_config['primary'] = _row(DEFAULT_config)
-    if os.path.exists(os.path.abspath(SECONDARY_config['data'])):
-        mea_config['secondary'] = _row(SECONDARY_config)
-
-    if platform.system() == 'Darwin' and os.path.exists(os.path.abspath(TERTIARY_config['data'])):
-        mea_config['tertiary'] = _row(TERTIARY_config)
+    for idx, name in enumerate(section_names):
+        cfg = configfile[name]
+        if not os.path.exists(os.path.abspath(cfg['data'])):
+            continue
+        row = _row(cfg)
+        row['_section'] = name
+        mea_config[_tier_key(idx)] = row
 
     if not mea_config:
         mea_config['primary'] = {'data': '', 'raw': '', 'analysis': '', 'h5': '', 'meta': '',
@@ -92,6 +116,11 @@ def reset_config(config_path):
 config_path = ir.files(retinanalysis) / os.path.join("config", "config.ini")
 mea_config = load_config(config_path)
 
+# Source tiers that are actually mounted, in config-file order. Everything
+# below iterates this instead of a hard-coded primary/secondary/tertiary
+# triple, so adding a section to config.ini is enough to add a volume.
+_SOURCE_TIERS = list(mea_config)
+
 # ---------------------------------------------------------------------------
 # Local file cache (highest-priority tier)
 #
@@ -109,7 +138,7 @@ mea_config = load_config(config_path)
 # ---------------------------------------------------------------------------
 def _first_nonempty_tier_value(key: str, _config: dict) -> str:
     """Return the first non-empty value of `key` across tiers, or ''."""
-    for tier in ('primary', 'secondary', 'tertiary'):
+    for tier in _SOURCE_TIERS:
         if tier in _config and _config[tier].get(key):
             return _config[tier][key]
     return ''
@@ -170,22 +199,18 @@ def _classify_tier(path: str) -> str:
 
 
 _TIER_KIND = {}
-for _tier in ('primary', 'secondary', 'tertiary'):
+for _tier in _SOURCE_TIERS:
     if _tier in mea_config:
         _TIER_KIND[_tier] = _classify_tier(
             mea_config[_tier].get('data', ''))
 
 # Compose priority: local cache → local source tiers → unknown → network.
-# Within each group, config order (primary → secondary → tertiary) is
-# preserved so users still have control over relative ordering of
-# same-kind tiers. The labels (DEFAULT/SECONDARY/TERTIARY) become a
-# *secondary* sort key behind local-vs-network.
-_local_first = [t for t in ('primary', 'secondary', 'tertiary')
-                if _TIER_KIND.get(t) == 'local']
-_unknown_tiers = [t for t in ('primary', 'secondary', 'tertiary')
-                   if _TIER_KIND.get(t) == 'unknown']
-_network_tiers = [t for t in ('primary', 'secondary', 'tertiary')
-                   if _TIER_KIND.get(t) == 'network']
+# Within each group, config-file order is preserved so users still have
+# control over relative ordering of same-kind tiers. The section labels
+# become a *secondary* sort key behind local-vs-network.
+_local_first = [t for t in _SOURCE_TIERS if _TIER_KIND.get(t) == 'local']
+_unknown_tiers = [t for t in _SOURCE_TIERS if _TIER_KIND.get(t) == 'unknown']
+_network_tiers = [t for t in _SOURCE_TIERS if _TIER_KIND.get(t) == 'network']
 _TIER_PRIORITY = (['local_cache'] + _local_first
                    + _unknown_tiers + _network_tiers)
 
@@ -377,6 +402,46 @@ def find_path(kind, *parts):
                 _record_network_resolution(candidate)
             return candidate
     return fallback
+
+
+def tier_dirs(kind):
+    """Every existing root for ``kind``, in read-priority order.
+
+    ``find_path`` answers "where is this one file"; this answers "which
+    volumes should I sweep". Duplicate roots (two tiers pointing at the same
+    tree) collapse to one entry.
+    """
+    if kind not in ('data', 'raw', 'analysis', 'h5', 'meta', 'tags', 'query'):
+        raise ValueError(f"Unknown path kind: {kind}")
+    roots = []
+    for tier in _TIER_PRIORITY:
+        if tier == 'local_cache' or tier not in mea_config:
+            continue
+        root = mea_config[tier].get(kind, '')
+        if root and os.path.isdir(root) and root not in roots:
+            roots.append(root)
+    return roots
+
+
+def ingest_source_dirs():
+    """``(h5, meta, tags)`` root triples for every mounted tier.
+
+    ``populate_database`` walks these in order so a date that only lives on a
+    secondary drive still gets ingested. A tier missing any of the three
+    roots is dropped, and tiers resolving to the same triple collapse.
+    """
+    triples = []
+    for tier in _TIER_PRIORITY:
+        if tier == 'local_cache' or tier not in mea_config:
+            continue
+        row = mea_config[tier]
+        triple = tuple(row.get(k, '') for k in ('h5', 'meta', 'tags'))
+        if not all(os.path.isdir(p) for p in triple if p):
+            continue
+        if not all(triple) or triple in triples:
+            continue
+        triples.append(triple)
+    return triples
 
 
 # Write target for ad-hoc outputs (figures, processed dataframes, derived
