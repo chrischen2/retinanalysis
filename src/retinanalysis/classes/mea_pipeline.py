@@ -6,6 +6,7 @@ from retinanalysis.classes.stim import (MEAStimBlock,
                                         MEAStimGroup,
                                         create_mea_stim_group)
 from retinanalysis.classes.analysis_chunk import AnalysisChunk
+from retinanalysis.analyze import detect_ss_version
 from retinanalysis.utils.vision_utils import cluster_match, get_spike_xarr
 import os
 from typing import (List,
@@ -612,7 +613,7 @@ class MEAPipeline:
 
 def create_mea_pipeline(
         exp_name: str, datafile_name: str | List[str], analysis_chunk_name: Optional[str] = None,
-        typing_file: Optional[str] = None, ss_version: str = 'kilosort2.5',
+        typing_file: Optional[str] = None, ss_version: Optional[str] = None,
         ls_params: Optional[list] = None, b_load_fd: bool = False,
         b_LED: bool = False, verbose: bool = True,
         ei_corr_cutoff: float = 0.8, ei_match_method: str = 'all',
@@ -661,9 +662,30 @@ def create_mea_pipeline(
     if isinstance(datafile_name, list) and len(datafile_name) == 1:
         datafile_name = datafile_name[0]
 
+    # Resolve the sort version instead of assuming one. SS_VERSION_PRIORITY
+    # takes kilosort2.5 when it is present and falls back to kilosort2 —
+    # older dates only ever got a kilosort2 sort, so the old hard default
+    # made them unloadable. The sorted-data tree and the analysis tree are
+    # resolved separately because they are different volumes and can carry
+    # different versions.
+    def _resolve_ss(kind, **kw):
+        if ss_version is not None:
+            return ss_version
+        try:
+            return detect_ss_version(exp_name, kind = kind, **kw)
+        except (FileNotFoundError, ValueError) as e:
+            if verbose:
+                print(f'Could not detect {kind} sort version ({e}); '
+                      f'falling back to kilosort2.5')
+            return 'kilosort2.5'
+
+    first_datafile = (datafile_name[0] if isinstance(datafile_name, list)
+                      else datafile_name)
+    resp_ss_version = _resolve_ss('data', datafile_name = first_datafile)
+
     if isinstance(datafile_name, list):
         s = create_mea_stim_group(exp_name, datafile_name, b_LED=b_LED, ls_params = ls_params, verbose = verbose)
-        r = create_mea_response_group(exp_name, datafile_name, ss_version = ss_version, b_LED=b_LED, b_load_fd = b_load_fd, verbose = verbose)
+        r = create_mea_response_group(exp_name, datafile_name, ss_version = resp_ss_version, b_LED=b_LED, b_load_fd = b_load_fd, verbose = verbose)
 
     elif isinstance(datafile_name, str):
         # Pin the user's chunk choice into MEAStimBlock so its constructor
@@ -671,7 +693,7 @@ def create_mea_pipeline(
         # or crash when the auto-pick's analysis dir isn't on disk).
         s = MEAStimBlock(exp_name, datafile_name, b_LED=b_LED, ls_params = ls_params,
                           verbose = verbose, analysis_chunk_name = analysis_chunk_name)
-        r = MEAResponseBlock(exp_name, datafile_name, ss_version, b_LED=b_LED, b_load_fd = b_load_fd, verbose = verbose)
+        r = MEAResponseBlock(exp_name, datafile_name, resp_ss_version, b_LED=b_LED, b_load_fd = b_load_fd, verbose = verbose)
 
     assert s is not None, 'Unable to create stim block or stim group for given parameters'
     assert r is not None, 'Unable to create response block or response group for given parameters'
@@ -681,7 +703,8 @@ def create_mea_pipeline(
         if verbose:
             print(f'Using {analysis_chunk_name} for AnalysisChunk\n')
 
-    ac = AnalysisChunk(exp_name, analysis_chunk_name, ss_version, verbose = verbose)
+    chunk_ss_version = _resolve_ss('analysis', chunk_name = analysis_chunk_name)
+    ac = AnalysisChunk(exp_name, analysis_chunk_name, chunk_ss_version, verbose = verbose)
     pipeline = MEAPipeline(
         stim = s, resp = r, analysis_chunk = ac, typing_file = typing_file, verbose = verbose,
         ei_corr_cutoff = ei_corr_cutoff,

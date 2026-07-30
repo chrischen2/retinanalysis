@@ -222,21 +222,34 @@ class MEAStimBlock(StimBlock):
 
         # Find the minimum distance between target protocol and each chunk
         minimum_distance = np.minimum(protocolstart_to_noisestop, protocolstop_to_noisestart)
-        
-        # Instantiate nearest_noise_chunk so that if minimum_distance is None, we still have a
-        # variable to return
+
+        # Prefer noise recorded BEFORE the protocol. A chunk that ran afterwards
+        # has an intervening protocol's worth of adaptation between it and the
+        # data being typed, even when the clock distance is shorter — so rank
+        # all preceding chunks first, each group nearest-first. lexsort takes
+        # the last key as primary.
+        precedes = noise_run_stop.values <= target_run_start.values
+        order = np.lexsort((minimum_distance, ~precedes))
+
+        chunk_names_by_row = noise_runs['chunk_name'].values
+
+        # Candidate chunks in preference order, first occurrence of each kept.
+        candidates, seen = [], set()
+        for idx in order:
+            name = chunk_names_by_row[idx]
+            if name in seen:
+                continue
+            seen.add(name)
+            candidates.append((name, minimum_distance[idx], bool(precedes[idx])))
+
+        # Instantiate nearest_noise_chunk so that if nothing resolves we still
+        # have a variable to return
         nearest_noise_chunk = None
+        min_val = None
+        chose_preceding = None
 
-        # Iterate through minimum distances until we find the nearest chunk with a sorting file
-        for _ in minimum_distance:
-
-            # Use min val to pull the nearest noise chunk
-            min_val = min(minimum_distance)
-            nearest_noise_chunk = noise_runs[(protocolstart_to_noisestop == min_val)]
-            if nearest_noise_chunk.empty:
-                nearest_noise_chunk = noise_runs[(protocolstop_to_noisestart == min(minimum_distance))]
-
-            nearest_noise_chunk = nearest_noise_chunk.reset_index(drop = True).loc[0, 'chunk_name']
+        # Walk candidates until we find one that actually has a typing file
+        for nearest_noise_chunk, min_val, chose_preceding in candidates:
 
             # Check if this chunk has a typing file
             # New way to check for typing files... avoids missing typing files in database.
@@ -262,20 +275,20 @@ class MEAStimBlock(StimBlock):
             except (FileNotFoundError, NotADirectoryError, OSError, IndexError):
                 typing_files = []
 
-            # If there's no typing file, remove the minimum value and try again
-            if len(typing_files) == 0:
-                min_index = np.argmin(minimum_distance)
-                minimum_distance = np.delete(minimum_distance, min_index)
-            # If there is a typing file, break the for loop there
-            else:
+            # If there is a typing file, this is our chunk.
+            if len(typing_files) > 0:
                 break
-        
-        # Check if we looped through all the values. If so, no sorting files found
-        if minimum_distance.size == 0:
+        else:
+            # Exhausted every candidate without finding a typing file.
+            nearest_noise_chunk = None
+
+        if nearest_noise_chunk is None:
             print(f"Warning, none of the noise chunks in this experiment have typing files, {nearest_noise_chunk} is None\n")
         else:
             if self.verbose:
-                print(f"Nearest noise chunk for {self.datafile_name} is {nearest_noise_chunk} with distance {min_val:.0f} minutes.\n")
+                print(f"Nearest noise chunk for {self.datafile_name} is "
+                      f"{nearest_noise_chunk}, {min_val:.0f} minutes "
+                      f"{'before' if chose_preceding else 'after'} it.\n")
 
         return nearest_noise_chunk
         

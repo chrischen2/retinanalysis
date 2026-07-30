@@ -227,9 +227,32 @@ def experiment_tree(exp_names: Sequence[str] | str) -> pd.DataFrame:
                 .set_index(['exp_name', 'protocol', 'datafile_name'])[cols])
 
 
+def _tree_css(font_percent: int, max_height: str) -> str:
+    """Scoped stylesheet for the rendered tree table.
+
+    Everything is namespaced under ``.ra-tree`` so it cannot leak onto other
+    tables in the notebook. The header is sticky (so protocol/column names
+    stay put while scrolling a long date) and takes its background from the
+    Jupyter theme variable, which keeps it readable in dark mode.
+    """
+    return f"""<style>
+.ra-tree {{ font-size: {font_percent}%; max-height: {max_height}; overflow: auto; }}
+.ra-tree table {{ border-collapse: collapse; width: auto; }}
+.ra-tree th, .ra-tree td {{ padding: 1px 10px 1px 4px; line-height: 1.3;
+                            white-space: nowrap; }}
+.ra-tree thead th {{ position: sticky; top: 0; z-index: 1;
+                     background: var(--jp-layout-color0, #fff); }}
+.ra-tree tbody th {{ font-weight: 600; text-align: left; vertical-align: top; }}
+.ra-tree td {{ text-align: right; }}
+.ra-tree td:first-of-type {{ text-align: left; }}
+</style>"""
+
+
 def browse_experiment_tree(exp_names: Optional[Iterable[str]] = None,
                            value: Optional[str] = None,
-                           is_mea: Optional[bool] = True):
+                           is_mea: Optional[bool] = True,
+                           font_percent: int = 70,
+                           max_height: str = '32em'):
     """Dropdown of experiment dates; picking one renders its block tree.
 
     Parameters
@@ -241,6 +264,13 @@ def browse_experiment_tree(exp_names: Optional[Iterable[str]] = None,
     is_mea : bool or None
         Which dates to list when ``exp_names`` is not given. ``None`` lists
         patch dates too, though those render nothing (no per-block datafile).
+    font_percent : int
+        Table font size as a percentage of the notebook's. The table is
+        dense and mostly short strings, so the default 70 fits a whole date
+        on screen without scrolling; raise it if that reads too small.
+    max_height : str
+        CSS height at which the table starts scrolling internally rather
+        than pushing the rest of the notebook down.
 
     Returns the widget box, and displays it as a side effect.
     """
@@ -288,10 +318,10 @@ def browse_experiment_tree(exp_names: Optional[Iterable[str]] = None,
             f'<b>{exp_name}</b> — {len(tree)} block(s), '
             f'{n_protocols} distinct protocol(s)'
             + (f' <small>({note})</small>' if note else ''))
-        table.value = (
-            '<div style="max-height:32em; overflow:auto">'
-            + tree.to_html(border=0, na_rep='—')
-            + '</div>')
+        table.value = (_tree_css(font_percent, max_height)
+                       + '<div class="ra-tree">'
+                       + tree.to_html(border=0, na_rep='—')
+                       + '</div>')
 
     dropdown.observe(lambda change: render(change['new']), 'value')
     render(value)
