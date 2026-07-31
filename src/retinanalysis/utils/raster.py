@@ -353,3 +353,199 @@ def plot_raster_with_psth(
             ax_p.axvline(x, color='red', lw=0.6, ls=ls, alpha=0.7)
 
     return ax_r, ax_p
+
+
+# ---------------------------------------------------------------------------
+# Population raster across epochs: has the block drifted?
+# ---------------------------------------------------------------------------
+
+def epoch_raster_data(response_block, cell_type: str,
+                      cell_ids: Optional[Iterable[int]] = None):
+    """``(cell_ids, spikes_by_cell, n_epochs)`` for one cell type.
+
+    ``spikes_by_cell[i][e]`` is the ms spike-time array for cell ``i`` in epoch
+    ``e``. Cells come back sorted by id so a row means the same cell in every
+    epoch panel — which is the whole point when comparing early against late.
+    """
+    ids, spikes = _gather_cell_spike_times(response_block, cell_type,
+                                           cell_ids=cell_ids)
+    if not ids:
+        return [], [], 0
+    order = np.argsort(np.asarray(ids))
+    ids = [int(ids[i]) for i in order]
+    spikes = [spikes[i] for i in order]
+    n_epochs = max((len(s) for s in spikes), default=0)
+    return ids, spikes, n_epochs
+
+
+def plot_epoch_rasters(response_block, cell_type: str,
+                       n_first: int = 3, n_last: int = 3,
+                       cell_ids: Optional[Iterable[int]] = None,
+                       t_start_ms: float = 0.0,
+                       t_end_ms: Optional[float] = None,
+                       pre_time_ms: Optional[float] = None,
+                       stim_time_ms: Optional[float] = None,
+                       color: Optional[str] = None,
+                       max_yticks: int = 12,
+                       title: Optional[str] = None):
+    """Population raster for the first and last epochs of a block.
+
+    One panel per epoch, y is cell (labelled by cell id), x is time within the
+    epoch. The top row is the first ``n_first`` epochs and the bottom row the
+    last ``n_last``, so a response that faded, or a unit that dropped out
+    partway through the block, shows up as a row that is dense on top and
+    empty underneath. When the block is short enough that the two ends would
+    overlap, every epoch is drawn once in a single row instead.
+
+    Cell order is by id and identical in every panel, so a row can be read
+    straight across.
+
+    Returns the Figure, or None when no cell of this type has spikes.
+    """
+    ids, spikes, n_epochs = epoch_raster_data(response_block, cell_type,
+                                              cell_ids=cell_ids)
+    if not ids or n_epochs == 0:
+        print(f'No cells of type {cell_type} with spike times.')
+        return None
+
+    # Overlapping ends would draw the same epoch twice and imply a comparison
+    # that isn't there, so short blocks collapse to one row of everything.
+    if n_first + n_last >= n_epochs:
+        rows = [(list(range(n_epochs)), f'all {n_epochs} epochs')]
+    else:
+        rows = [(list(range(n_first)), f'first {n_first} epochs'),
+                (list(range(n_epochs - n_last, n_epochs)), f'last {n_last} epochs')]
+
+    if t_end_ms is None:
+        finite = [float(np.max(arr)) for cell in spikes for arr in cell
+                  if arr is not None and len(arr)]
+        t_end_ms = max(finite) if finite else 1.0
+
+    color = color or color_for_celltype(cell_type)
+    n_cols = max(len(idx) for idx, _ in rows)
+
+    fig, axs = plt.subplots(
+        len(rows), n_cols, squeeze=False, sharex=True, sharey=True,
+        figsize=(2.5 * n_cols + 1.0, 0.045 * len(ids) * len(rows) + 1.6 * len(rows)))
+
+    step = max(1, int(np.ceil(len(ids) / max_yticks)))
+    for r, (epoch_idx, row_label) in enumerate(rows):
+        for c in range(n_cols):
+            ax = axs[r][c]
+            if c >= len(epoch_idx):
+                ax.set_axis_off()
+                continue
+            epoch = epoch_idx[c]
+
+            # One LineCollection for the whole panel: a plot call per spike is
+            # unusably slow at a hundred cells times a few thousand spikes.
+            segments = []
+            for row, cell in enumerate(spikes):
+                if epoch >= len(cell) or cell[epoch] is None:
+                    continue
+                for t in np.asarray(cell[epoch], dtype=float):
+                    if t_start_ms <= t <= t_end_ms:
+                        segments.append([(t, row + 0.1), (t, row + 0.9)])
+            ax.add_collection(LineCollection(segments, colors=color,
+                                             linewidths=0.5))
+
+            if pre_time_ms is not None and stim_time_ms is not None:
+                for x in (pre_time_ms, pre_time_ms + stim_time_ms):
+                    ax.axvline(x, color=NEUTRAL_GRAY, linestyle='--',
+                               linewidth=0.7, alpha=0.7)
+
+            ax.set_xlim(t_start_ms, t_end_ms)
+            ax.set_ylim(0, len(ids))
+            ax.set_title(f'epoch {epoch}', fontsize=8)
+            if c == 0:
+                ax.set_yticks(np.arange(0, len(ids), step) + 0.5)
+                ax.set_yticklabels([ids[i] for i in range(0, len(ids), step)],
+                                   fontsize=7)
+                ax.set_ylabel(f'{row_label}\ncell ID', fontsize=8)
+            if r == len(rows) - 1:
+                ax.set_xlabel('Time in epoch (ms)', fontsize=8)
+
+    fig.suptitle(title or f'{cell_type} — {len(ids)} cells, {n_epochs} epochs')
+    fig.tight_layout()
+    return fig
+
+
+# Bookkeeping labels, not cell types: cells the EI match dropped, and cells the
+# typing file never classified. Both are worth being able to look at, but
+# neither should be what the selector opens on — 'Unmatched' is usually the
+# largest group in the block.
+_NON_TYPE_LABELS = {'Unmatched', 'Unknown'}
+
+
+def _cell_type_options(response_block, cell_types: Optional[Sequence[str]],
+                       minimum_n: int) -> List[Tuple[str, str]]:
+    """``(label, cell_type)`` pairs, densest real type first, basics on show."""
+    df = response_block.df_spike_times
+    if 'cell_type' not in df.columns:
+        response_block.add_cell_types()
+        df = response_block.df_spike_times
+
+    options = []
+    for cell_type, rows in df.groupby('cell_type'):
+        if cell_types is not None and cell_type not in cell_types:
+            continue
+        n_cells = len(rows)
+        if n_cells < minimum_n:
+            continue
+        # Mean spikes per cell per epoch — the one number that says whether
+        # this type is worth opening.
+        per_epoch = [len(arr) for cell in rows['spike_times']
+                     for arr in cell if arr is not None]
+        mean_spikes = float(np.mean(per_epoch)) if per_epoch else 0.0
+        options.append((str(cell_type) in _NON_TYPE_LABELS, n_cells,
+                        f'{cell_type} · {n_cells} cells · '
+                        f'{mean_spikes:.0f} spikes/cell/epoch',
+                        str(cell_type)))
+
+    options.sort(key=lambda t: (t[0], -t[1]))
+    return [(label, cell_type) for _, _, label, cell_type in options]
+
+
+def browse_epoch_rasters(response_block, cell_types: Optional[Sequence[str]] = None,
+                         minimum_n: int = 3, n_first: int = 3, n_last: int = 3,
+                         pre_time_ms: Optional[float] = None,
+                         stim_time_ms: Optional[float] = None,
+                         t_end_ms: Optional[float] = None,
+                         dpi: int = 110, **kwargs):
+    """Dropdown over cell types, showing one type's epoch rasters at a time.
+
+    The label carries what you need to choose without opening anything: how
+    many cells the type has and how hard they fire per epoch. Each type is
+    rendered on first selection and cached after, so a type you never open
+    costs nothing — which matters here because a dense type is a few hundred
+    thousand ticks to draw.
+
+    Falls back to rendering every type inline when ipywidgets is missing.
+    Returns the widget, or None on the fallback path.
+    """
+    from retinanalysis.utils.browse import figure_to_png, png_browser
+
+    options = _cell_type_options(response_block, cell_types, minimum_n)
+    if not options:
+        print(f'No cell type has {minimum_n} or more cells with spike times.')
+        return None
+
+    def _render(cell_type):
+        fig = plot_epoch_rasters(
+            response_block, cell_type, n_first=n_first, n_last=n_last,
+            pre_time_ms=pre_time_ms, stim_time_ms=stim_time_ms,
+            t_end_ms=t_end_ms, **kwargs)
+        return None, figure_to_png(fig, dpi=dpi)
+
+    box = png_browser(options, _render, description='Cell type:',
+                      empty_message='No cell types to browse.')
+    if box is not None:
+        return box
+
+    for _, cell_type in options:
+        plot_epoch_rasters(response_block, cell_type, n_first=n_first,
+                           n_last=n_last, pre_time_ms=pre_time_ms,
+                           stim_time_ms=stim_time_ms, t_end_ms=t_end_ms,
+                           **kwargs)
+        plt.show()
+    return None

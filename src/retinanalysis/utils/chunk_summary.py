@@ -516,87 +516,44 @@ def browse_chunk_summaries(chunks: Dict, cell_types: Optional[Sequence[str]] = N
     available. Returns the widget (already displayed), or None on the
     fallback path.
     """
-    import io
-
     import matplotlib.pyplot as plt
     from IPython.display import display
 
     from retinanalysis.SCutils.explore import scroll_table
+    from retinanalysis.utils.browse import figure_to_png, png_browser
 
     if not chunks:
         print('No chunks to browse.')
         return None
 
-    try:
-        import ipywidgets as widgets
-    except ImportError:
-        print('ipywidgets not available — rendering every chunk inline.')
-        for key, chunk in chunks.items():
-            print(f'=== {key} ({getattr(chunk, "ss_version", "?")}) ===')
-            display(cell_type_summary(chunk, typing_file=typing_file,
-                                      minimum_n=minimum_n))
-            plot_chunk_panels(chunk, cell_types=cell_types,
-                              typing_file=typing_file, minimum_n=minimum_n,
-                              isi_xlim_ms=isi_xlim_ms, log_x=log_x, title=key)
-            plt.show()
-        return None
-
-    cache: Dict[str, tuple] = {}
-
     def _render(key):
-        """(table html, png bytes) for one chunk, computed at most once."""
-        if key in cache:
-            return cache[key]
-
+        """(table html, png bytes) for one chunk."""
         chunk = chunks[key]
         summary = cell_type_summary(chunk, typing_file=typing_file,
                                     minimum_n=minimum_n)
         table_html = scroll_table(
             summary.reset_index(), height=table_height, show=False,
             num_cols=[c for c in summary.columns if c != 'cell_type'])
-
         fig = plot_chunk_panels(
             chunk, cell_types=cell_types, typing_file=typing_file,
             minimum_n=minimum_n, isi_xlim_ms=isi_xlim_ms, log_x=log_x,
             title=f'{key} ({getattr(chunk, "ss_version", "?")})')
-
-        png = b''
-        if fig is not None:
-            buf = io.BytesIO()
-            fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight')
-            # Close it, or the figure also lands in the cell's inline output
-            # and the point of selecting one chunk is lost.
-            plt.close(fig)
-            png = buf.getvalue()
-
-        cache[key] = (table_html, png)
-        return cache[key]
+        return table_html, figure_to_png(fig, dpi=dpi)
 
     options = [(_chunk_label(k, c, cell_types, minimum_n), k)
                for k, c in chunks.items()]
-    dropdown = widgets.Dropdown(
-        options=options, description='Chunk:',
-        style={'description_width': 'initial'},
-        layout=widgets.Layout(width='max-content'))
-    table = widgets.HTML()
-    image = widgets.Image(format='png',
-                          layout=widgets.Layout(max_width='100%'))
-    note = widgets.HTML()
+    box = png_browser(options, _render, description='Chunk:',
+                      empty_message='No chunks to browse.')
+    if box is not None:
+        return box
 
-    def _show(key):
-        table_html, png = _render(key)
-        table.value = table_html
-        image.value = png
-        # An empty PNG means plot_chunk_panels found nothing worth drawing.
-        note.value = ('' if png else
-                      f'<em>No cell type in {key} has {minimum_n} or more '
-                      f'cells — nothing to plot.</em>')
-
-    # HTML/Image widgets rather than an Output: Output + clear_output(wait=True)
-    # duplicates renders here, the same reason db_summary avoids it.
-    dropdown.observe(lambda ch: _show(ch['new']), names='value')
-    _show(dropdown.value)
-
-    box = widgets.VBox([dropdown, table, note, image])
-    display(box)
-    return box
+    # No ipywidgets: render every chunk inline rather than showing nothing.
+    for key, chunk in chunks.items():
+        print(f'=== {key} ({getattr(chunk, "ss_version", "?")}) ===')
+        display(cell_type_summary(chunk, typing_file=typing_file,
+                                  minimum_n=minimum_n))
+        plot_chunk_panels(chunk, cell_types=cell_types,
+                          typing_file=typing_file, minimum_n=minimum_n,
+                          isi_xlim_ms=isi_xlim_ms, log_x=log_x, title=key)
+        plt.show()
+    return None

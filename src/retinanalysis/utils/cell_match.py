@@ -373,9 +373,14 @@ def plot_match_qc(pipeline, df_diag: Optional[pd.DataFrame] = None,
     # ---- distribution -----------------------------------------------------
     ax = fig.add_subplot(gs[0, :])
     edges = np.linspace(0, 1, bins + 1)
-    ax.hist([rejected['best_corr'].dropna(), matched['best_corr'].dropna()],
-            bins=edges, stacked=True, color=[rejected_color, matched_color],
-            label=[f'unmatched (n={len(rejected)})', f'matched (n={len(matched)})'])
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    # Two lines rather than stacked bars: the distributions overlap heavily
+    # above the cutoff, and stacking hid how much unmatched mass sits up there.
+    for values, color, label in (
+            (matched['best_corr'], matched_color, f'matched (n={len(matched)})'),
+            (rejected['best_corr'], rejected_color, f'unmatched (n={len(rejected)})')):
+        counts, _ = np.histogram(values.dropna().to_numpy(), bins=edges)
+        ax.plot(centers, counts, color=color, linewidth=1.8, label=label)
     ax.axvline(cutoff, color=NEUTRAL_GRAY, linestyle='--', linewidth=1.2)
     ax.text(cutoff, ax.get_ylim()[1], f' cutoff {cutoff:g}', color=NEUTRAL_GRAY,
             va='top', ha='left', fontsize=8)
