@@ -445,6 +445,10 @@ def get_noise_chunks_sorted_by_distance(df_exp_summary: pd.DataFrame, datafile_n
     the clock distance happens to be shorter. Set False to rank purely on
     absolute time distance in either direction, the previous behaviour.
 
+    Candidates are restricted to the protocol's own ``prep_label`` when
+    ``df_exp_summary`` carries that column, so a day with two pieces of retina
+    never pairs a protocol with the other prep's noise.
+
     Returns:
     noise_chunk_names List[str]: chunk names (i.e. 'chunk3') in preference order
 
@@ -456,12 +460,26 @@ def get_noise_chunks_sorted_by_distance(df_exp_summary: pd.DataFrame, datafile_n
     prot_start_time = prot_row['start_time'].values[0]
     prot_end_time = prot_row['end_time'].values[0]
 
-    noise_chunk_names = df_exp_summary.query('protocol_name == @noise_protocol_name')['chunk_name'].unique()
+    # Restrict candidates to the protocol's own preparation. A recording day
+    # can hold more than one piece of retina, and a noise chunk from a
+    # different prep types nothing in this one however close in time it sits —
+    # the cells are not the same cells. MEAStimBlock.get_nearest_noise has
+    # always filtered this way; without it here the two chunk-selection paths
+    # disagree on multi-prep days, and the mosaic judged in a notebook can
+    # come from a different prep than the analysis runs on.
+    noise_rows_all = df_exp_summary.query('protocol_name == @noise_protocol_name')
+    if 'prep_label' in df_exp_summary.columns:
+        prep_label = prot_row['prep_label'].values[0]
+        noise_rows_all = noise_rows_all.query('prep_label == @prep_label')
+
+    # A noise block with no sorting chunk carries a null chunk_name, which is
+    # not a path and cannot be loaded.
+    noise_chunk_names = noise_rows_all['chunk_name'].dropna().unique()
     noise_chunk_distances = []
     noise_chunk_precedes = []
 
     for chunk_name in noise_chunk_names:
-        noise_rows = df_exp_summary.query('chunk_name == @chunk_name and protocol_name == @noise_protocol_name')
+        noise_rows = noise_rows_all.query('chunk_name == @chunk_name')
         noise_start_time = noise_rows['start_time'].values[0]
         noise_end_time = noise_rows['end_time'].values[-1]
         precedes = noise_start_time < prot_start_time

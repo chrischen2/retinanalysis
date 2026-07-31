@@ -225,7 +225,7 @@ def cluster_match(ref_object: AnalysisChunk | MEAResponseBlock | MEAResponseGrou
                         test_b = test_object.d_timecourses[test_ids[max_ind]]['blue']
 
                         ref_rgb = np.concatenate([ref_r, ref_g, ref_b])
-                        test_rgb = np.concatenate([test_r, ref_g, test_b])
+                        test_rgb = np.concatenate([test_r, test_g, test_b])
                         np.nan_to_num(ref_rgb, copy=False, nan=0.001, neginf=0.001, posinf=0.001)
                         np.nan_to_num(test_rgb, copy = False, nan=0.001, neginf=0.001, posinf=0.001)
 
@@ -585,9 +585,11 @@ def ei_corr(ref_object: AnalysisChunk | MEAResponseBlock | MEAResponseGroup,
             ref_to_remove = [np.argsort(val)[-n_removed_channels:] for val in max_ref_vals]
             ref_eis = [np.delete(ei, ref_to_remove[idx], axis = 0) for idx, ei in enumerate(ref_eis)]
 
-        # Set any EI value where the ei is less than 1.5* its standard deviation to 0
-        for idx, ei in enumerate(ref_eis):
-            ref_eis[idx][abs(ei) < (ei.std()*1.5)] = 0
+        # Set any EI value where the ei is less than 1.5* its standard deviation to 0.
+        # np.where rather than an in-place write: with n_removed_channels=0 the
+        # list above still holds the objects' own arrays, so writing in place
+        # would zero the stored d_EIs for the rest of the session.
+        ref_eis = [np.where(abs(ei) < (ei.std()*1.5), 0, ei) for ei in ref_eis]
 
         # For 'full' method: flatten each 512 x 201 ei array into a vector
         # and stack flattened eis into a numpy array
@@ -620,9 +622,8 @@ def ei_corr(ref_object: AnalysisChunk | MEAResponseBlock | MEAResponseGroup,
             test_to_remove = [np.argsort(val)[-n_removed_channels:] for val in max_test_vals]
             test_eis = [np.delete(ei, test_to_remove[idx], axis = 0) for idx, ei in enumerate(test_eis)]
 
-        # Set the EI value where the EI is less than 1.5* its standard deviation to 0
-        for idx, ei in enumerate(test_eis):
-            test_eis[idx][abs(ei) < (ei.std()*1.5)] = 0
+        # Same as the reference side: threshold out of place so d_EIs survives.
+        test_eis = [np.where(abs(ei) < (ei.std()*1.5), 0, ei) for ei in test_eis]
 
         # For 'full' method: flatten each 512 x 201 ei array into a vector
         # and stack flattened eis into a numpy array
