@@ -549,3 +549,276 @@ def browse_epoch_rasters(response_block, cell_types: Optional[Sequence[str]] = N
                            **kwargs)
         plt.show()
     return None
+
+
+# ---------------------------------------------------------------------------
+# Spike count per epoch: did the block hold up?
+# ---------------------------------------------------------------------------
+
+def epoch_count_matrix(response_block, cell_type: str,
+                       cell_ids: Optional[Iterable[int]] = None,
+                       t_start_ms: float = 0.0,
+                       t_end_ms: Optional[float] = None):
+    """``(cell_ids, counts)`` where ``counts`` is ``(n_cells, n_epochs)``.
+
+    Spike count per cell per epoch, optionally restricted to a time window
+    within the epoch. Rows are ordered by cell id, matching
+    :func:`plot_epoch_rasters` so the two figures can be read together.
+    """
+    from .protocol_qc import per_epoch_spike_counts
+
+    ids, spikes, n_epochs = epoch_raster_data(response_block, cell_type,
+                                              cell_ids=cell_ids)
+    if not ids or n_epochs == 0:
+        return [], np.zeros((0, 0))
+
+    counts = np.zeros((len(ids), n_epochs), dtype=float)
+    for row, cell in enumerate(spikes):
+        per_epoch = per_epoch_spike_counts(cell, t_start_ms=t_start_ms,
+                                           t_end_ms=t_end_ms)
+        counts[row, :len(per_epoch)] = per_epoch[:n_epochs]
+    return ids, counts
+
+
+# Fixed marker order, paired with the fixed color order. Shape is a second,
+# fully colorblind-safe identity channel: the cell-type palette has one
+# adjacent pair (OnS/OffS) that only just clears the deuteranopia threshold,
+# and three hues below 3:1 contrast on white, so color alone cannot carry
+# identity here.
+_SERIES_MARKERS = ['o', 's', '^', 'D', 'v', 'P', 'X', '*']
+
+# Past 8 series adjacent colors blur whatever the palette, so the tail is
+# dropped rather than given a generated hue.
+_MAX_SERIES = 8
+
+
+def plot_epoch_spike_counts(response_block, cell_types: Optional[Sequence[str]] = None,
+                            minimum_n: int = 3,
+                            include_non_types: bool = False,
+                            t_start_ms: float = 0.0,
+                            t_end_ms: Optional[float] = None,
+                            title: Optional[str] = None):
+    """Mean spikes per cell against epoch index, one line per cell type.
+
+    Two stacked panels over the same x axis, because the two questions need
+    different units and putting them on one axis would mean a second y scale:
+
+    - **Top, absolute** — mean spikes per cell per epoch. This is the raw
+      answer to "how much did each type fire in each epoch", but types differ
+      by an order of magnitude in rate, so a sparse type sits flat near zero
+      and its shape is unreadable.
+    - **Bottom, relative** — the same series divided by each type's own mean
+      across epochs, so every type starts from 1.0 and the panel shows *change*
+      rather than rate. This is where drift and adaptation are legible, and
+      it is the only way to compare a 400-spike type against a 40-spike one
+      without a second axis.
+
+    Shaded bands are the standard error across cells within a type. Every
+    series carries a distinct marker shape as well as its color, and the
+    legend names each: three of the cell-type hues fall below 3:1 contrast
+    against white and the OnS/OffS pair only just clears the deuteranopia
+    threshold, so identity must not rest on hue alone.
+
+    ``Unmatched`` and ``Unknown`` are left out unless ``include_non_types``
+    is set. They are bookkeeping labels rather than populations — averaging
+    over "every cell the EI match dropped" is not a quantity about anything —
+    and on a typical block ``Unmatched`` is the largest group, so it would
+    dominate a panel it has no business being in.
+
+    Returns the Figure, or None when no type clears ``minimum_n``.
+    """
+    from .style import apply_publication_style, colors_for_celltypes
+
+    apply_publication_style()
+
+    options = _cell_type_options(response_block, cell_types, minimum_n)
+    if not include_non_types:
+        options = [(lbl, ct) for lbl, ct in options if ct not in _NON_TYPE_LABELS]
+    if len(options) > _MAX_SERIES:
+        dropped = [ct for _, ct in options[_MAX_SERIES:]]
+        print(f'Showing the {_MAX_SERIES} densest types; dropped {dropped}.')
+        options = options[:_MAX_SERIES]
+    if not options:
+        print(f'No cell type has {minimum_n} or more cells with spike times.')
+        return None
+
+    series = []
+    for _, cell_type in options:
+        ids, counts = epoch_count_matrix(response_block, cell_type,
+                                         t_start_ms=t_start_ms, t_end_ms=t_end_ms)
+        if not ids:
+            continue
+        mean = counts.mean(axis=0)
+        sem = (counts.std(axis=0, ddof=1) / np.sqrt(counts.shape[0])
+               if counts.shape[0] > 1 else np.zeros_like(mean))
+        series.append((cell_type, len(ids), mean, sem))
+
+    if not series:
+        print('No cell type had spike times to count.')
+        return None
+
+    n_epochs = max(len(m) for _, _, m, _ in series)
+    epochs = np.arange(n_epochs)
+
+    # One map for the whole set, so an uncanonical type (Amacrine, OnMystery)
+    # gets its own unused Okabe-Ito slot. Resolving per series instead hands
+    # every unmapped type the same fallback, and they render identically.
+    colors = colors_for_celltypes([ct for ct, _, _, _ in series])
+
+    fig, axs = plt.subplots(2, 1, sharex=True, figsize=(7.6, 6.0))
+    for ax, relative in zip(axs, (False, True)):
+        for s_idx, (cell_type, n_cells, mean, sem) in enumerate(series):
+            color = colors[cell_type]
+            # Each type's own mean over epochs is the denominator, so 1.0 means
+            # "this type's typical epoch" rather than any cross-type baseline.
+            scale = mean.mean() if relative and mean.mean() > 0 else 1.0
+            y, err = mean / scale, sem / scale
+            x = np.arange(len(y))
+            ax.plot(x, y, color=color, linewidth=2.0,
+                    marker=_SERIES_MARKERS[s_idx % len(_SERIES_MARKERS)],
+                    markersize=5, markeredgewidth=0,
+                    label=f'{cell_type} (n={n_cells})')
+            ax.fill_between(x, y - err, y + err, color=color, alpha=0.18,
+                            linewidth=0)
+
+        if relative:
+            ax.axhline(1.0, color=NEUTRAL_GRAY, linewidth=0.8)
+            ax.set_ylabel("Relative to the type's own mean")
+            ax.set_xlabel('Epoch index')
+        else:
+            ax.set_ylabel('Mean spikes per cell')
+
+        ax.set_xlim(-0.5, n_epochs - 0.5 + 0.06 * n_epochs)
+        ax.set_xticks(epochs if n_epochs <= 25 else None)
+        ax.grid(True, linewidth=0.5, alpha=0.35)
+        ax.set_axisbelow(True)
+
+    axs[0].legend(bbox_to_anchor=[1.02, 1], loc='upper left')
+    fig.suptitle(title or f'Spikes per epoch — '
+                          f'{getattr(response_block, "datafile_name", "block")}')
+    fig.tight_layout()
+    return fig
+
+
+def plot_epoch_count_heatmap(response_block, cell_type: str,
+                             normalize: str = 'cell',
+                             cell_ids: Optional[Iterable[int]] = None,
+                             t_start_ms: float = 0.0,
+                             t_end_ms: Optional[float] = None,
+                             max_yticks: int = 20,
+                             vmax_ratio: float = 4.0,
+                             title: Optional[str] = None):
+    """Every cell's spike count in every epoch, as a cell × epoch image.
+
+    The whole distribution over cells that the mean in
+    :func:`plot_epoch_spike_counts` averages away — whether a dip is the
+    population easing off together, or three cells dropping out while the rest
+    hold steady. Rows are cells (ordered by id, as in the rasters), columns are
+    epochs.
+
+    An image rather than a 3-D surface on purpose. The data is a value on a
+    grid of two discrete axes, and a surface would hide short rows behind tall
+    ones, make values unreadable off the height axis, and imply that neighbouring
+    cell ids are near each other in some meaningful sense. A heatmap shows every
+    cell at once with no occlusion.
+
+    ``normalize='cell'`` (default) divides each row by that cell's own mean
+    across epochs and colors the log of that ratio on a diverging scale
+    centered at 1× — blue below, vermillion above, neutral where nothing
+    changed. This is what makes epoch structure visible; raw counts are
+    dominated by cells simply having different firing rates. The scale is
+    logarithmic so that halving and doubling sit the same distance from the
+    midpoint; ``vmax_ratio`` sets the ends (4.0 → a quarter to four times).
+    ``normalize=None`` shows raw counts on a single-hue sequential ramp
+    instead.
+
+    Returns the Figure, or None when the type has no cells with spikes.
+    """
+    from .style import apply_publication_style, diverging_cmap
+
+    apply_publication_style()
+
+    ids, counts = epoch_count_matrix(response_block, cell_type, cell_ids=cell_ids,
+                                     t_start_ms=t_start_ms, t_end_ms=t_end_ms)
+    if not len(ids):
+        print(f'No cells of type {cell_type} with spike times.')
+        return None
+
+    if normalize == 'cell':
+        # Silent cells would divide by zero; they stay at the midpoint, which
+        # is honest — a cell with no spikes did not change across epochs.
+        denom = counts.mean(axis=1, keepdims=True)
+        ratio = np.divide(counts, denom, out=np.ones_like(counts),
+                          where=denom > 0)
+        # Log ratio, so halving and doubling are the same distance from the
+        # midpoint. On a linear ratio scale everything below 1 is squeezed
+        # into a third of the range and a silenced cell looks much like a
+        # merely quiet one.
+        floor = 2.0 ** -(np.log2(vmax_ratio) + 2)
+        image = np.log2(np.maximum(ratio, floor))
+        cmap = diverging_cmap()
+        vmax = float(np.log2(vmax_ratio))
+        vmin = -vmax
+        cbar_label = "Spikes relative to the cell's own mean"
+    else:
+        image, cmap = counts, 'Blues'
+        vmin, vmax = 0.0, float(counts.max()) if counts.size else 1.0
+        cbar_label = 'Spikes in epoch'
+
+    fig, ax = plt.subplots(figsize=(0.35 * counts.shape[1] + 4.0,
+                                    0.06 * len(ids) + 2.2))
+    im = ax.imshow(image, aspect='auto', interpolation='nearest',
+                   cmap=cmap, vmin=vmin, vmax=vmax)
+
+    step = max(1, int(np.ceil(len(ids) / max_yticks)))
+    ax.set_yticks(np.arange(0, len(ids), step))
+    ax.set_yticklabels([ids[i] for i in range(0, len(ids), step)], fontsize=7)
+    ax.set_ylabel('Cell ID')
+    ax.set_xlabel('Epoch index')
+    if counts.shape[1] <= 25:
+        ax.set_xticks(np.arange(counts.shape[1]))
+    ax.set_title(title or f'{cell_type} — {len(ids)} cells, '
+                          f'{counts.shape[1]} epochs')
+
+    cbar = fig.colorbar(im, ax=ax, pad=0.02)
+    if normalize == 'cell':
+        # Ticks in ratio, not log2 — nobody wants to read "-1" for "half".
+        ticks = np.arange(np.floor(vmin), np.ceil(vmax) + 1)
+        cbar.set_ticks(ticks)
+        cbar.set_ticklabels([f'{2.0 ** t:g}×' for t in ticks])
+    cbar.set_label(cbar_label, fontsize=8)
+    cbar.ax.tick_params(labelsize=7)
+    fig.tight_layout()
+    return fig
+
+
+def browse_epoch_count_heatmaps(response_block,
+                                cell_types: Optional[Sequence[str]] = None,
+                                minimum_n: int = 3, dpi: int = 110, **kwargs):
+    """Dropdown over cell types, one cell × epoch heatmap at a time.
+
+    Same selector as :func:`browse_epoch_rasters` — labels carry the cell count
+    and mean spikes per cell per epoch, real types sort ahead of ``Unmatched``
+    and ``Unknown``, and each type renders once then caches.
+    """
+    from retinanalysis.utils.browse import figure_to_png, png_browser
+
+    options = _cell_type_options(response_block, cell_types, minimum_n)
+    if not options:
+        print(f'No cell type has {minimum_n} or more cells with spike times.')
+        return None
+
+    def _render(cell_type):
+        return None, figure_to_png(
+            plot_epoch_count_heatmap(response_block, cell_type, **kwargs),
+            dpi=dpi)
+
+    box = png_browser(options, _render, description='Cell type:',
+                      empty_message='No cell types to browse.')
+    if box is not None:
+        return box
+
+    for _, cell_type in options:
+        plot_epoch_count_heatmap(response_block, cell_type, **kwargs)
+        plt.show()
+    return None

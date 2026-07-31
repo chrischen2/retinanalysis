@@ -71,10 +71,34 @@ def color_for_celltype(cell_type: str, fallback_index: int = 0) -> str:
     return OKABE_ITO[fallback_index % len(OKABE_ITO)]
 
 
+# Colors for types outside the canonical map — Amacrine, OnMystery, whatever a
+# new typing file introduces. Every Okabe-Ito slot is already spoken for by
+# CELLTYPE_COLORS, so without these the fallback below is empty and *every*
+# uncanonical type renders the same gray, which is not an identity at all.
+#
+# These two are checked, not chosen by eye: against the four main types they
+# clear the chroma floor, the normal-vision floor (worst adjacent ΔE 18.3) and
+# the CVD separation band. NEUTRAL_GRAY fails both chroma and normal-vision
+# against blue, which is why it is the last resort rather than the first.
+EXTENSION_COLORS: List[str] = [
+    '#7F3C8D',  # purple
+    '#DC267F',  # magenta
+]
+
+
 def colors_for_celltypes(cell_types: Sequence[str]) -> Dict[str, str]:
-    """Build a ``{cell_type: hex}`` map honoring the canonical assignments."""
+    """Build a ``{cell_type: hex}`` map honoring the canonical assignments.
+
+    Types outside :data:`CELLTYPE_COLORS` draw from unused Okabe-Ito slots
+    first, then :data:`EXTENSION_COLORS`, and only fall back to gray once
+    those run out. Resolve a whole set through this rather than calling
+    :func:`color_for_celltype` per type — that returns the same fallback color
+    for every uncanonical type, so they come out indistinguishable.
+    """
     out: Dict[str, str] = {}
-    fallback_iter = (c for c in OKABE_ITO if c not in CELLTYPE_COLORS.values())
+    pool = [c for c in OKABE_ITO if c not in CELLTYPE_COLORS.values()]
+    pool += [c for c in EXTENSION_COLORS if c not in CELLTYPE_COLORS.values()]
+    fallback_iter = iter(pool)
     for ct in cell_types:
         if ct in CELLTYPE_COLORS:
             out[ct] = CELLTYPE_COLORS[ct]
@@ -142,3 +166,22 @@ def apply_publication_style():
         'lines.solid_capstyle': 'round',
         'image.cmap': 'cividis',
     })
+
+
+def diverging_cmap(name: str = 'ra_diverging'):
+    """Blue ↔ neutral gray ↔ vermillion, for values with a meaningful midpoint.
+
+    Use when zero (or 1.0, or "no change") means something and the two
+    directions mean opposite things — a cell firing more than usual versus
+    less. Sequential ramps are for magnitude alone and can't show that.
+
+    The two poles are the Okabe-Ito blue and vermillion already used for OFF
+    and ON parasols, so the figure stays inside one palette, and they read as
+    opposite because one is cool and one warm. The midpoint is neutral gray,
+    not a third hue: a hue there would read as its own category rather than as
+    "nothing happening".
+    """
+    from matplotlib.colors import LinearSegmentedColormap
+
+    return LinearSegmentedColormap.from_list(
+        name, ['#0072B2', '#8fb8d0', '#e8e6e3', '#e0a179', '#D55E00'])
