@@ -75,7 +75,17 @@ def get_roi_dict(location: List[float], distance_x: float, distance_y: float):
 def cluster_match(ref_object: AnalysisChunk | MEAResponseBlock | MEAResponseGroup,
                   test_object: AnalysisChunk | MEAResponseBlock | MEAResponseGroup,
                 corr_cutoff: float = 0.8, method: str = 'all', use_isi: bool = False,
-                use_timecourse: bool = False, n_removed_channels: int = 1, verbose: bool = True):
+                use_timecourse: bool = False, n_removed_channels: int = 1, verbose: bool = True,
+                return_diagnostics: bool = False):
+        """EI-based match from every ``ref_object`` cell to a ``test_object`` cell.
+
+        With ``return_diagnostics`` a third value comes back: a DataFrame with
+        one row per reference cell recording the candidate it settled on, that
+        candidate's correlation, the runner-up it had to beat, and — for cells
+        that did not match — which gate rejected it. Reported from inside the
+        decision itself, so a QC plot built on it cannot drift away from what
+        the matcher actually did.
+        """
 
         ref_ids = ref_object.cell_ids
         test_ids = test_object.cell_ids
@@ -106,6 +116,23 @@ def cluster_match(ref_object: AnalysisChunk | MEAResponseBlock | MEAResponseGrou
         bad_match_count = 0
         isi_corr = 1
         rgb_corr = 1
+
+        # Diagnostics are recorded at each exit of the loop below rather than
+        # reconstructed afterwards, so they always describe the real decision.
+        diagnostics = []
+
+        def _record(ref_cell, reason, best_test_id = None,
+                    best_corr = np.nan, runner_up = np.nan):
+            if not return_diagnostics:
+                return
+            diagnostics.append({
+                'noise_id': int(ref_cell),
+                'best_test_id': None if best_test_id is None else int(best_test_id),
+                'best_corr': float(best_corr),
+                'runner_up_corr': float(runner_up),
+                'matched': reason == 'matched',
+                'reason': reason,
+            })
 
         if verbose:
             # to avoid circular imports, we're only importing classes inside the utils when needed for checking. Annoying but 
@@ -153,20 +180,29 @@ def cluster_match(ref_object: AnalysisChunk | MEAResponseBlock | MEAResponseGrou
                                  np.argmax(arr_space_corr[idx,:]),
                                  np.argmax(arr_power_corr[idx,:])])
                         
+            # Best candidate before the ambiguity filter, kept for diagnostics
+            # so a rejected cell still reports what it was closest to.
+            raw_best = int(np.argmax(max_corrs))
+            raw_corr, raw_runner = float(max_corrs[raw_best]), float(next_max_corrs[raw_best])
+            raw_test_id = test_ids[max_inds[raw_best]]
+
             # Eliminate correlations where the next best correlation is within 90% (currently hard-coded...)
             if any(corr_filter):
+                kept_next_corrs = next_max_corrs[corr_filter]
                 max_corrs = max_corrs[corr_filter]
                 max_inds = max_inds[corr_filter]
             else:
                 # If all correlations have been eliminated using this technique, the call cannot be matched
                 bad_match_count += 1
+                _record(ref_cell, 'ambiguous_forward', raw_test_id, raw_corr, raw_runner)
                 continue
-                
+
             # Pull the index of the highest remaing correlation
             best_match = np.argmax(max_corrs)
 
             # Pull that correlation value
             max_corr = max_corrs[best_match]
+            runner_up = float(kept_next_corrs[best_match])
 
             # Pull the index of that correlation value
             max_ind = max_inds[best_match]     
@@ -195,11 +231,12 @@ def cluster_match(ref_object: AnalysisChunk | MEAResponseBlock | MEAResponseGrou
             
             if any(rev_corr_filter):
                 max_rev_corrs = max_rev_corrs[rev_corr_filter]
-                max_rev_inds = max_rev_inds[rev_corr_filter] 
+                max_rev_inds = max_rev_inds[rev_corr_filter]
             else:
                 bad_match_count += 1
+                _record(ref_cell, 'ambiguous_reverse', test_ids[max_ind], max_corr, runner_up)
                 continue
-            
+
             best_rev_match = np.argmax(max_rev_corrs)
             max_rev_ind = max_rev_inds[best_rev_match]
             max_rev_corr = max_rev_corrs[best_rev_match]
@@ -207,6 +244,7 @@ def cluster_match(ref_object: AnalysisChunk | MEAResponseBlock | MEAResponseGrou
             # Kick out the cell if the best reverse correlation is higher
             if max_rev_corr > max_corr:
                 bad_match_count += 1
+                _record(ref_cell, 'claimed_by_other', test_ids[max_ind], max_corr, runner_up)
                 continue
 
             # If maximum correlation is above the cutoff set in the function, proceed
@@ -253,7 +291,9 @@ def cluster_match(ref_object: AnalysisChunk | MEAResponseBlock | MEAResponseGrou
                 # If the isi_correlation or the rgb_correlation is below 0.3, throw out the cell
                 if  isi_corr < 0.3 or rgb_corr < 0.3:
                     bad_match_count += 1
-                
+                    _record(ref_cell, 'isi_or_timecourse_gate',
+                            test_ids[max_ind], max_corr, runner_up)
+
                 # Kick out the cell if the best reverse correlation cell isn't the reference cell
                 # This isn't redundant with the max_rev_corr > max_corr check above... it's possible
                 # that the max_rev_corr is actually lower, because the reverse correlation was kicked
@@ -262,13 +302,17 @@ def cluster_match(ref_object: AnalysisChunk | MEAResponseBlock | MEAResponseGrou
                 # cell), and so that correlation was kicked out when we ran the process in reverse).
                 elif ref_ids[max_rev_ind] != ref_cell:
                     bad_match_count += 1
+                    _record(ref_cell, 'not_reciprocal',
+                            test_ids[max_ind], max_corr, runner_up)
                 else:
                     match_dict[ref_cell] = test_ids[max_ind]
-                    match_count += 1    
+                    match_count += 1
                     corr_dict[ref_cell] = max_corr
+                    _record(ref_cell, 'matched', test_ids[max_ind], max_corr, runner_up)
 
             else:
                 bad_match_count += 1
+                _record(ref_cell, 'below_cutoff', test_ids[max_ind], max_corr, runner_up)
 
         if verbose:        
             percent_good = match_count/len(ref_ids)
@@ -286,6 +330,13 @@ def cluster_match(ref_object: AnalysisChunk | MEAResponseBlock | MEAResponseGrou
             pass
         else:
             print(f"WARNING: Duplicate matches detected. Keys {[key for key, value in duplicate_dict.items()]} have duplicate values")
+
+        if return_diagnostics:
+            import pandas as pd
+            return match_dict, corr_dict, pd.DataFrame(
+                diagnostics,
+                columns=['noise_id', 'best_test_id', 'best_corr',
+                         'runner_up_corr', 'matched', 'reason'])
 
         return match_dict, corr_dict
 

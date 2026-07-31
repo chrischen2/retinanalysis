@@ -33,6 +33,7 @@ from ..config.settings import OUTPUT_DIR
 __all__ = [
     'compute_ei_stats', 'build_cell_match_table', 'save_cell_match',
     'load_cell_match', 'cell_match_csv_path',
+    'match_diagnostics', 'plot_match_qc',
 ]
 
 
@@ -279,3 +280,181 @@ def load_cell_match(
         if col not in out.columns:
             out[col] = np.nan
     return out[CELL_MATCH_COLUMNS]
+
+
+# ---------------------------------------------------------------------------
+# Match QC: is the EI cluster match believable?
+# ---------------------------------------------------------------------------
+
+# Every way cluster_match can reject a candidate, in the order it tests them.
+# Kept here so the plot legend stays stable even when a run happens not to
+# produce one of the outcomes.
+REJECT_REASONS = [
+    'below_cutoff',
+    'ambiguous_forward',
+    'ambiguous_reverse',
+    'claimed_by_other',
+    'not_reciprocal',
+    'isi_or_timecourse_gate',
+]
+
+
+def match_diagnostics(pipeline) -> pd.DataFrame:
+    """One row per noise cell: the candidate it settled on, and the verdict.
+
+    Re-runs the pipeline's own cluster match with diagnostics turned on, using
+    the config cached on the pipeline, so the numbers describe the match the
+    pipeline is actually carrying. Costs one more EI correlation pass — the
+    matrices aren't kept after the pipeline is built.
+
+    Columns: ``noise_id``, ``best_test_id``, ``best_corr``,
+    ``runner_up_corr``, ``matched``, ``reason``.
+    """
+    from retinanalysis.utils.vision_utils import cluster_match
+
+    config = dict(getattr(pipeline, 'ei_match_config', {}))
+    _, _, df = cluster_match(pipeline.analysis_chunk, pipeline.resp,
+                             verbose=False, return_diagnostics=True, **config)
+    return df
+
+
+def _electrode_amplitude(ei: np.ndarray) -> np.ndarray:
+    """Peak |EI| per electrode — the vector the 'space' correlation compares."""
+    return np.max(np.abs(np.asarray(ei, dtype=float)), axis=1)
+
+
+def plot_match_qc(pipeline, df_diag: Optional[pd.DataFrame] = None,
+                  n_examples: int = 3, bins: int = 40, dpi_hint: bool = False):
+    """How well the noise chunk and the protocol datafile line up, cell by cell.
+
+    Top panel: the distribution of each noise cell's best EI correlation
+    against the protocol datafile, split into cells that matched and cells
+    that didn't, with the acceptance cutoff drawn on. A healthy pairing is
+    strongly bimodal — a bulk of real matches up near 1 and a separate bulk of
+    cells with no counterpart down near 0. Mass piled up just under the cutoff
+    means the threshold, not the data, is deciding.
+
+    Below it, example pairs: each panel overlays the peak-|EI|-per-electrode
+    profile of a noise cell and of the protocol cell it was compared against.
+    Matched examples span the accepted correlation range; rejected examples are
+    the near misses — the highest-correlation cells that still failed a gate —
+    since those are the ones worth arguing about. The panel titles name the
+    gate that rejected each.
+
+    Note the panels draw raw EIs, while the correlation behind the number was
+    computed on a denoised version with the largest electrode dropped, so a
+    pair can look slightly more alike here than its coefficient suggests.
+
+    Returns ``(fig, df_diag)``.
+    """
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils.style import (NEUTRAL_GRAY, OKABE_ITO,
+                                           apply_publication_style)
+
+    apply_publication_style()
+
+    if df_diag is None:
+        df_diag = match_diagnostics(pipeline)
+    if df_diag.empty:
+        print('No diagnostics to plot — cluster matching was skipped '
+              '(the protocol is part of the sorting chunk).')
+        return None, df_diag
+
+    matched_color, rejected_color = OKABE_ITO[5], OKABE_ITO[6]
+    cutoff = float(getattr(pipeline, 'ei_match_config', {}).get('corr_cutoff', 0.8))
+
+    matched = df_diag[df_diag['matched']]
+    rejected = df_diag[~df_diag['matched']]
+
+    fig = plt.figure(figsize=(10.5, 3.0 + 2.1 * n_examples))
+    gs = fig.add_gridspec(1 + n_examples, 2, height_ratios=[1.5] + [1] * n_examples,
+                          hspace=0.75, wspace=0.22)
+
+    # ---- distribution -----------------------------------------------------
+    ax = fig.add_subplot(gs[0, :])
+    edges = np.linspace(0, 1, bins + 1)
+    ax.hist([rejected['best_corr'].dropna(), matched['best_corr'].dropna()],
+            bins=edges, stacked=True, color=[rejected_color, matched_color],
+            label=[f'unmatched (n={len(rejected)})', f'matched (n={len(matched)})'])
+    ax.axvline(cutoff, color=NEUTRAL_GRAY, linestyle='--', linewidth=1.2)
+    ax.text(cutoff, ax.get_ylim()[1], f' cutoff {cutoff:g}', color=NEUTRAL_GRAY,
+            va='top', ha='left', fontsize=8)
+    ax.set_xlabel("Best EI correlation to the protocol datafile, per noise cell")
+    ax.set_ylabel('Cells')
+    ax.set_xlim(0, 1)
+    ax.legend(loc='upper left')
+    ax.grid(True, linewidth=0.5, alpha=0.35)
+    ax.set_axisbelow(True)
+
+    n_ref = len(df_diag)
+    counts = rejected['reason'].value_counts()
+    subtitle = ', '.join(f'{r} {counts[r]}' for r in REJECT_REASONS if r in counts)
+    ax.set_title(f'{pipeline.analysis_chunk.exp_name} '
+                 f'{pipeline.analysis_chunk.chunk_name} → '
+                 f'{getattr(pipeline.resp, "datafile_name", "protocol")}  •  '
+                 f'{len(matched)}/{n_ref} matched\nrejected: {subtitle or "none"}',
+                 fontsize=9)
+
+    # ---- examples ---------------------------------------------------------
+    # Matched: spread over the accepted range, so the panels show a strong
+    # match and a marginal one rather than three near-identical good ones.
+    m_sorted = matched.sort_values('best_corr', ascending=False)
+    if len(m_sorted):
+        picks = np.unique(np.linspace(0, len(m_sorted) - 1, n_examples).astype(int))
+        m_examples = m_sorted.iloc[picks]
+    else:
+        m_examples = m_sorted
+
+    # Rejected: one example per failure mode, commonest mode first, each the
+    # highest-correlation cell that mode threw out. Picking purely by
+    # correlation would show the same gate three times and hide the one doing
+    # most of the rejecting.
+    by_reason = []
+    for reason in rejected['reason'].value_counts().index:
+        worst = rejected[rejected['reason'] == reason].sort_values(
+            'best_corr', ascending=False)
+        by_reason.append(worst.iloc[0])
+    r_examples = (pd.DataFrame(by_reason).head(n_examples) if by_reason
+                  else rejected.head(0))
+
+    for row in range(n_examples):
+        for col, (examples, color, kind) in enumerate(
+                ((m_examples, matched_color, 'matched'),
+                 (r_examples, rejected_color, 'rejected'))):
+            ax = fig.add_subplot(gs[row + 1, col])
+            if row >= len(examples):
+                ax.set_axis_off()
+                continue
+
+            rec = examples.iloc[row]
+            noise_id, test_id = int(rec['noise_id']), rec['best_test_id']
+            ref_ei = pipeline.analysis_chunk.d_EIs.get(noise_id)
+            test_ei = (None if pd.isna(test_id)
+                       else pipeline.resp.d_EIs.get(int(test_id)))
+
+            if ref_ei is None or test_ei is None:
+                ax.text(0.5, 0.5, '(EI unavailable)', transform=ax.transAxes,
+                        ha='center', va='center', fontsize=8)
+                ax.set_axis_off()
+                continue
+
+            # Noise cell drawn wide underneath, protocol cell thin on top: for
+            # a good match the two are nearly identical, and equal weights
+            # would just hide one under the other.
+            ref_amp, test_amp = _electrode_amplitude(ref_ei), _electrode_amplitude(test_ei)
+            ax.plot(ref_amp, color=NEUTRAL_GRAY, linewidth=2.4, alpha=0.5,
+                    solid_capstyle='round', label=f'noise {noise_id}')
+            ax.plot(test_amp, color=color, linewidth=0.9,
+                    label=f'protocol {int(test_id)}')
+            ax.set_xlim(0, max(len(ref_amp), len(test_amp)))
+            ax.set_xlabel('Electrode')
+            if col == 0:
+                ax.set_ylabel('Peak |EI|')
+            ax.legend(fontsize=7, loc='upper right', frameon=False)
+
+            note = ('' if kind == 'matched' else f'  •  {rec["reason"]}')
+            ax.set_title(f'r = {rec["best_corr"]:.3f}  '
+                         f'(runner-up {rec["runner_up_corr"]:.3f}){note}',
+                         fontsize=8, loc='left', color=color)
+
+    return fig, df_diag
