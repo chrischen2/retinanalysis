@@ -21,6 +21,30 @@ import matplotlib.pyplot as plt
 SAMPLE_RATE = 20000
 
 
+def _match_axes_limits(axes_groups) -> None:
+    """Give every axis in ``axes_groups`` the union of their x and y limits.
+
+    Each axis keeps its own direction: mosaic axes run y downwards (canvas
+    coordinates), and flipping that to match an ascending axis would mirror
+    the picture rather than rescale it.
+    """
+    axes = [ax for group in axes_groups if group is not None
+            for ax in np.ravel(group)]
+    if not axes:
+        return
+
+    x_lo = min(min(ax.get_xlim()) for ax in axes)
+    x_hi = max(max(ax.get_xlim()) for ax in axes)
+    y_lo = min(min(ax.get_ylim()) for ax in axes)
+    y_hi = max(max(ax.get_ylim()) for ax in axes)
+
+    for ax in axes:
+        x0, x1 = ax.get_xlim()
+        y0, y1 = ax.get_ylim()
+        ax.set_xlim((x_lo, x_hi) if x0 <= x1 else (x_hi, x_lo))
+        ax.set_ylim((y_lo, y_hi) if y0 <= y1 else (y_hi, y_lo))
+
+
 class MEAPipeline:
     """
     MEA Pipeline object primarily meant as a container for the MEAStimBlock, MEAResponseBlock, and AnalysisChunk
@@ -570,6 +594,108 @@ class MEAPipeline:
         
         return all_ax
 
+
+    def plot_rf_comparison(self, cell_types: Optional[List[str]] = None,
+                           minimum_n: int = 3, b_zoom: bool = True, **kwargs):
+        """Protocol-matched RFs and noise-chunk RFs, drawn on identical axes.
+
+        The two mosaics are meant to be compared, and comparing them requires
+        the same scale on both. Left to themselves each figure zooms to its own
+        cells, so the protocol mosaic — drawn from the subset that survived
+        cluster matching — lands on a tighter window than the noise mosaic and
+        the same population appears to have spread out. This takes the union of
+        both windows and applies it to every axis in both figures, so a
+        difference you can see is a difference in the data.
+
+        Returns ``(protocol_axes, noise_axes)``.
+        """
+        protocol_axes = self.plot_rfs(cell_types=cell_types, minimum_n=minimum_n,
+                                      b_zoom=b_zoom, **kwargs)
+        noise_axes = self.analysis_chunk.plot_rfs(
+            cell_types=cell_types, minimum_n=minimum_n, b_zoom=b_zoom, **kwargs)
+
+        _match_axes_limits([protocol_axes, noise_axes])
+
+        for axes, label in ((protocol_axes, 'protocol'), (noise_axes, 'noise chunk')):
+            if axes is None:
+                continue
+            fig = np.ravel(axes)[0].get_figure()
+            existing = fig._suptitle.get_text() if fig._suptitle else ''
+            fig.suptitle(f'{existing} — {label}' if existing else label)
+
+        return protocol_axes, noise_axes
+
+    def inspect(self, cell_types: Optional[List[str]] = None, minimum_n: int = 3,
+                n_first: int = 3, n_last: int = 3, dpi: int = 110):
+        """Every check on this dataset, in one tabbed view.
+
+        The four questions worth asking before an analysis rests on a dataset,
+        each its own tab:
+
+        - **Cluster match** — do the noise chunk and the protocol datafile
+          describe the same cells, and where the match failed, why.
+        - **RFs** — do the matched cells still form the mosaic they were typed
+          from. Both mosaics on identical axes.
+        - **Rasters** — the raw spikes, first epochs against last.
+        - **Spikes/epoch** — the same thing counted, per type and per cell.
+
+        Tabs render on first look and are kept after, so the expensive ones
+        (the match re-runs an EI correlation pass; a dense raster is a few
+        hundred thousand ticks) cost nothing until you open them.
+
+        Returns the Tab widget, or None without ipywidgets — in which case
+        call the underlying functions directly; each is public.
+        """
+        from retinanalysis.utils.browse import figure_to_png, lazy_tabs
+        from retinanalysis.utils.cell_match import plot_match_qc
+        from retinanalysis.utils.raster import (browse_epoch_count_heatmaps,
+                                                browse_epoch_rasters,
+                                                plot_epoch_spike_counts)
+
+        import ipywidgets as widgets  # noqa: F401  (fail early, before any render)
+        from IPython.display import display
+
+        block_params = getattr(self.stim, 'd_epoch_block_params', {}) or {}
+
+        def _image(fig):
+            png = figure_to_png(fig, dpi=dpi)
+            if not png:
+                return widgets.HTML('<em>Nothing to plot.</em>')
+            return widgets.Image(format='png', value=png,
+                                 layout=widgets.Layout(max_width='100%'))
+
+        def _render(index):
+            if index == 0:
+                fig, _ = plot_match_qc(self)
+                return _image(fig)
+            if index == 1:
+                protocol_axes, noise_axes = self.plot_rf_comparison(
+                    cell_types=cell_types, minimum_n=minimum_n)
+                images = [_image(np.ravel(a)[0].get_figure())
+                          for a in (protocol_axes, noise_axes) if a is not None]
+                return widgets.VBox(images) if images else widgets.HTML(
+                    '<em>No RFs to compare.</em>')
+            if index == 2:
+                browse_epoch_rasters(
+                    self.resp, cell_types=cell_types, minimum_n=minimum_n,
+                    n_first=n_first, n_last=n_last,
+                    pre_time_ms=block_params.get('preTime'),
+                    stim_time_ms=block_params.get('stimTime'), dpi=dpi)
+                return None
+            # Spikes per epoch: the all-types summary, then the per-type
+            # heatmap browser under it.
+            display(_image(plot_epoch_spike_counts(
+                self.resp, cell_types=cell_types, minimum_n=minimum_n)))
+            browse_epoch_count_heatmaps(self.resp, cell_types=cell_types,
+                                        minimum_n=minimum_n, dpi=dpi)
+            return None
+
+        name = (f'{self.analysis_chunk.exp_name} / '
+                f'{getattr(self.resp, "datafile_name", "block")}')
+        return lazy_tabs(
+            ['Cluster match', 'RFs', 'Rasters', 'Spikes/epoch'], _render,
+            description=f'<b>{name}</b> — noise chunk '
+                        f'{self.analysis_chunk.chunk_name}')
 
     def export_to_pkl(self, file_path: str):
         """

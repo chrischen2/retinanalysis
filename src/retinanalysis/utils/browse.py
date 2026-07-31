@@ -91,3 +91,53 @@ def png_browser(options: Sequence[Tuple[str, object]],
     box = widgets.VBox([dropdown, html, note, image])
     display(box)
     return box
+
+
+def lazy_tabs(titles, render, description: str = ''):
+    """Tabbed views, each built on first look and kept after.
+
+    ``render(index)`` returns the widget for that tab. It is called the first
+    time a tab is selected, never before — so a tab holding a slow figure
+    costs nothing until someone opens it, and opening it twice costs once.
+
+    Returns the displayed ``Tab`` widget, or None without ipywidgets.
+    """
+    from IPython.display import display
+
+    try:
+        import ipywidgets as widgets
+    except ImportError:
+        print('ipywidgets not available — cannot build the tabbed view.')
+        return None
+
+    placeholders = [widgets.VBox([widgets.HTML('<em>loading…</em>')])
+                    for _ in titles]
+    tab = widgets.Tab(children=placeholders)
+    for i, title in enumerate(titles):
+        tab.set_title(i, title)
+
+    built = set()
+
+    def _build(index):
+        if index in built:
+            return
+        built.add(index)
+        children = list(tab.children)
+        out = widgets.Output()
+        # The view is captured into an Output rather than returned as a
+        # widget: the per-cell-type browsers display themselves, and this is
+        # the one place that needs to catch that rather than re-plumb them.
+        with out:
+            widget = render(index)
+            if widget is not None:
+                display(widget)
+        children[index] = out
+        tab.children = tuple(children)
+
+    tab.observe(lambda change: _build(change['new']), names='selected_index')
+    _build(0)
+
+    if description:
+        display(widgets.HTML(description))
+    display(tab)
+    return tab

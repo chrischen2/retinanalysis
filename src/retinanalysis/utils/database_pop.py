@@ -575,6 +575,14 @@ def gen_meta_list(data_dir: str, meta_dir: str, tags_dir: str) -> list:
                     meta_list.append([meta_file, full_path, tags_file])
     
     # that should be all of the single cell. Now for MEA, we want to find dir in NAS_DATA_DIR
+    #
+    # A date whose metadata json is here but whose sorted-data directory is on
+    # no mounted volume is skipped. That is the normal state of things, not a
+    # failure: metadata is small and gets copied around freely, while sorted
+    # output is large and lives wherever there was room. Collected and counted
+    # rather than printed per date — on a full meta dir this was dozens of
+    # lines of "Could not find" that read like errors and buried the real ones.
+    no_data_dir = []
     for item in os.listdir(meta_dir):
         # Skip macOS AppleDouble sibling files (e.g. ._2019-01-15_G.json).
         if item.startswith('._'):
@@ -588,9 +596,15 @@ def gen_meta_list(data_dir: str, meta_dir: str, tags_dir: str) -> list:
             # json, so search every configured tier rather than just the
             # top-priority DATA_DIR.
             if not os.path.isdir(find_path('data', item[:-5])):
-                print(f"Could not find data directory for {item}")
+                no_data_dir.append(item[:-5])
                 continue
             meta_list.append([os.path.join(meta_dir, item), item[:-5], tags_file])
+
+    if no_data_dir:
+        shown = ', '.join(sorted(no_data_dir)[:6])
+        more = f' (+{len(no_data_dir) - 6} more)' if len(no_data_dir) > 6 else ''
+        print(f'Skipped {len(no_data_dir)} date(s) with metadata but no sorted '
+              f'data on any mounted volume: {shown}{more}')
     return meta_list
 
 

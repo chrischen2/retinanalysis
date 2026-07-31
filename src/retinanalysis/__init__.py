@@ -284,6 +284,7 @@ _ATTR_TO_MODULE = {
     'purge_database': 'retinanalysis.utils.database_utils',
     'purge_experiments': 'retinanalysis.utils.database_utils',
     'recording_counts': 'retinanalysis.utils.db_summary',
+    'recording_summary': 'retinanalysis.utils.db_summary',
     'regen_stimulus': 'retinanalysis.regen',
     'reload_celltypefiles': 'retinanalysis.utils.database_pop',
     'reload_experiment_data': 'retinanalysis.utils.database_utils',

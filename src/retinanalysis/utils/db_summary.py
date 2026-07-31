@@ -26,6 +26,7 @@ import retinanalysis.config.schema as schema
 
 __all__ = [
     'short_protocol',
+    'recording_summary',
     'recording_counts',
     'species_counts',
     'mea_protocol_counts',
@@ -80,6 +81,36 @@ def species_counts() -> pd.DataFrame:
     return merged.pivot_table(index='species', columns='rig',
                               values='exp_name', aggfunc='nunique',
                               fill_value=0)
+
+
+def recording_summary() -> pd.DataFrame:
+    """The whole census in one table: experiments per species per rig, plus totals.
+
+    ``recording_counts`` is exactly the column sums of ``species_counts``, so
+    showing both is showing the same numbers twice. This is the two of them
+    joined: species down the rows, rig across the columns, a ``total`` column
+    and a ``total`` row.
+
+    Species are ordered by total descending, with ``(not recorded)`` pinned
+    last however large it is — it is the absence of a label rather than a
+    species, and on the patch side it is most of the corpus, so sorting it to
+    the top would put the least informative row first.
+    """
+    counts = species_counts()
+    if counts.empty:
+        return counts
+
+    out = counts.copy()
+    out['total'] = out.sum(axis=1)
+
+    unrecorded = [i for i in out.index if str(i).startswith('(')]
+    named = [i for i in out.index if i not in unrecorded]
+    named.sort(key=lambda i: -out.loc[i, 'total'])
+    out = out.loc[named + unrecorded]
+
+    out.loc['total'] = out.sum()
+    out.index.name = 'species'
+    return out.astype(int)
 
 
 def mea_protocol_counts() -> pd.DataFrame:
