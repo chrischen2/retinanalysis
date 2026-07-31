@@ -41,6 +41,7 @@ __all__ = [
     'plot_firing_rate_distribution',
     'plot_spike_count_distribution',
     'plot_chunk_panels',
+    'browse_chunk_summaries',
 ]
 
 # Fallback STA frame interval, in ms, for chunks whose Vision params don't
@@ -477,3 +478,125 @@ def plot_chunk_panels(chunk, cell_types: Optional[Sequence[str]] = None,
 
     fig.suptitle(title or f'{chunk.exp_name} {chunk.chunk_name}')
     return fig
+
+
+def _chunk_label(key: str, chunk, cell_types: Optional[Sequence[str]],
+                 minimum_n: int) -> str:
+    """Dropdown label: which chunk, which sort, and how much is in it."""
+    ids = _ids_by_type(chunk, cell_types=cell_types, minimum_n=minimum_n)
+    n_cells = sum(len(v) for v in ids.values())
+    version = getattr(chunk, 'ss_version', '?')
+    if not ids:
+        return f'{key} · {version} · nothing above minimum_n'
+    return (f'{key} · {version} · {n_cells} cells in '
+            f'{len(ids)} type{"s" if len(ids) != 1 else ""}')
+
+
+def browse_chunk_summaries(chunks: Dict, cell_types: Optional[Sequence[str]] = None,
+                           typing_file: Optional[str] = None,
+                           minimum_n: int = 3,
+                           isi_xlim_ms: float = 200.0,
+                           log_x: bool = True,
+                           table_height: int = 240,
+                           dpi: int = 110):
+    """Dropdown over loaded chunks, showing one chunk's summary at a time.
+
+    Takes the ``chunks`` dict that ``plot_mosaics_for_datasets(...,
+    return_chunks=True)`` hands back. Looping over it instead emits a table
+    plus a tall three-row figure per chunk, which stops being readable past
+    about three datasets — this collapses that to one selector and one view.
+
+    Each chunk is rendered on first selection and then cached as a PNG, so
+    flipping back to one you've already looked at is instant and a chunk you
+    never select costs nothing. The dropdown label carries the sort version
+    and how many cells cleared ``minimum_n``, which is usually enough to skip
+    the thin ones without opening them.
+
+    Falls back to rendering every chunk inline when ipywidgets isn't
+    available. Returns the widget (already displayed), or None on the
+    fallback path.
+    """
+    import io
+
+    import matplotlib.pyplot as plt
+    from IPython.display import display
+
+    from retinanalysis.SCutils.explore import scroll_table
+
+    if not chunks:
+        print('No chunks to browse.')
+        return None
+
+    try:
+        import ipywidgets as widgets
+    except ImportError:
+        print('ipywidgets not available — rendering every chunk inline.')
+        for key, chunk in chunks.items():
+            print(f'=== {key} ({getattr(chunk, "ss_version", "?")}) ===')
+            display(cell_type_summary(chunk, typing_file=typing_file,
+                                      minimum_n=minimum_n))
+            plot_chunk_panels(chunk, cell_types=cell_types,
+                              typing_file=typing_file, minimum_n=minimum_n,
+                              isi_xlim_ms=isi_xlim_ms, log_x=log_x, title=key)
+            plt.show()
+        return None
+
+    cache: Dict[str, tuple] = {}
+
+    def _render(key):
+        """(table html, png bytes) for one chunk, computed at most once."""
+        if key in cache:
+            return cache[key]
+
+        chunk = chunks[key]
+        summary = cell_type_summary(chunk, typing_file=typing_file,
+                                    minimum_n=minimum_n)
+        table_html = scroll_table(
+            summary.reset_index(), height=table_height, show=False,
+            num_cols=[c for c in summary.columns if c != 'cell_type'])
+
+        fig = plot_chunk_panels(
+            chunk, cell_types=cell_types, typing_file=typing_file,
+            minimum_n=minimum_n, isi_xlim_ms=isi_xlim_ms, log_x=log_x,
+            title=f'{key} ({getattr(chunk, "ss_version", "?")})')
+
+        png = b''
+        if fig is not None:
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight')
+            # Close it, or the figure also lands in the cell's inline output
+            # and the point of selecting one chunk is lost.
+            plt.close(fig)
+            png = buf.getvalue()
+
+        cache[key] = (table_html, png)
+        return cache[key]
+
+    options = [(_chunk_label(k, c, cell_types, minimum_n), k)
+               for k, c in chunks.items()]
+    dropdown = widgets.Dropdown(
+        options=options, description='Chunk:',
+        style={'description_width': 'initial'},
+        layout=widgets.Layout(width='max-content'))
+    table = widgets.HTML()
+    image = widgets.Image(format='png',
+                          layout=widgets.Layout(max_width='100%'))
+    note = widgets.HTML()
+
+    def _show(key):
+        table_html, png = _render(key)
+        table.value = table_html
+        image.value = png
+        # An empty PNG means plot_chunk_panels found nothing worth drawing.
+        note.value = ('' if png else
+                      f'<em>No cell type in {key} has {minimum_n} or more '
+                      f'cells — nothing to plot.</em>')
+
+    # HTML/Image widgets rather than an Output: Output + clear_output(wait=True)
+    # duplicates renders here, the same reason db_summary avoids it.
+    dropdown.observe(lambda ch: _show(ch['new']), names='value')
+    _show(dropdown.value)
+
+    box = widgets.VBox([dropdown, table, note, image])
+    display(box)
+    return box

@@ -135,6 +135,7 @@ _ATTR_TO_MODULE = {
     'available_protocols': 'retinanalysis.regen',
     'bandwidth_scope': 'retinanalysis.utils.bandwidth',
     'browse_cells_qc': 'retinanalysis.utils.visual_qc',
+    'browse_chunk_summaries': 'retinanalysis.utils.chunk_summary',
     'browse_experiment_tree': 'retinanalysis.utils.db_summary',
     'build_cell_match_table': 'retinanalysis.utils.cell_match',
     'build_tuple': 'retinanalysis.utils.database_pop',
