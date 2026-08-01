@@ -360,12 +360,17 @@ def plot_raster_with_psth(
 # ---------------------------------------------------------------------------
 
 def epoch_raster_data(response_block, cell_type: str,
-                      cell_ids: Optional[Iterable[int]] = None):
+                      cell_ids: Optional[Iterable[int]] = None,
+                      epoch_range: Optional[Tuple[int, int]] = None):
     """``(cell_ids, spikes_by_cell, n_epochs)`` for one cell type.
 
     ``spikes_by_cell[i][e]`` is the ms spike-time array for cell ``i`` in epoch
     ``e``. Cells come back sorted by id so a row means the same cell in every
     epoch panel — which is the whole point when comparing early against late.
+
+    ``epoch_range`` is a ``(start, stop)`` half-open slice. Pass the range an
+    analysis actually uses and the panels show those epochs, so what you look
+    at is what the numbers were computed from.
     """
     ids, spikes = _gather_cell_spike_times(response_block, cell_type,
                                            cell_ids=cell_ids)
@@ -374,6 +379,8 @@ def epoch_raster_data(response_block, cell_type: str,
     order = np.argsort(np.asarray(ids))
     ids = [int(ids[i]) for i in order]
     spikes = [spikes[i] for i in order]
+    if epoch_range is not None:
+        spikes = [list(s)[epoch_range[0]:epoch_range[1]] for s in spikes]
     n_epochs = max((len(s) for s in spikes), default=0)
     return ids, spikes, n_epochs
 
@@ -381,6 +388,7 @@ def epoch_raster_data(response_block, cell_type: str,
 def plot_epoch_rasters(response_block, cell_type: str,
                        n_first: int = 3, n_last: int = 3,
                        cell_ids: Optional[Iterable[int]] = None,
+                       epoch_range: Optional[Tuple[int, int]] = None,
                        t_start_ms: float = 0.0,
                        t_end_ms: Optional[float] = None,
                        pre_time_ms: Optional[float] = None,
@@ -403,7 +411,9 @@ def plot_epoch_rasters(response_block, cell_type: str,
     Returns the Figure, or None when no cell of this type has spikes.
     """
     ids, spikes, n_epochs = epoch_raster_data(response_block, cell_type,
-                                              cell_ids=cell_ids)
+                                              cell_ids=cell_ids,
+                                              epoch_range=epoch_range)
+    epoch_offset = epoch_range[0] if epoch_range else 0
     if not ids or n_epochs == 0:
         print(f'No cells of type {cell_type} with spike times.')
         return None
@@ -456,7 +466,7 @@ def plot_epoch_rasters(response_block, cell_type: str,
 
             ax.set_xlim(t_start_ms, t_end_ms)
             ax.set_ylim(0, len(ids))
-            ax.set_title(f'epoch {epoch}', fontsize=8)
+            ax.set_title(f'epoch {epoch + epoch_offset}', fontsize=8)
             if c == 0:
                 ax.set_yticks(np.arange(0, len(ids), step) + 0.5)
                 ax.set_yticklabels([ids[i] for i in range(0, len(ids), step)],
@@ -522,6 +532,7 @@ def browse_epoch_rasters(response_block, cell_types: Optional[Sequence[str]] = N
                          stim_time_ms: Optional[float] = None,
                          t_end_ms: Optional[float] = None,
                          cell_ids: Optional[Iterable[int]] = None,
+                         epoch_range: Optional[Tuple[int, int]] = None,
                          dpi: int = 110, **kwargs):
     """Dropdown over cell types, showing one type's epoch rasters at a time.
 
@@ -550,7 +561,8 @@ def browse_epoch_rasters(response_block, cell_types: Optional[Sequence[str]] = N
         fig = plot_epoch_rasters(
             response_block, cell_type, n_first=n_first, n_last=n_last,
             pre_time_ms=pre_time_ms, stim_time_ms=stim_time_ms,
-            t_end_ms=t_end_ms, cell_ids=cell_ids, **kwargs)
+            t_end_ms=t_end_ms, cell_ids=cell_ids,
+            epoch_range=epoch_range, **kwargs)
         return None, figure_to_png(fig, dpi=dpi)
 
     box = png_browser(options, _render, description='Cell type:',
@@ -562,7 +574,7 @@ def browse_epoch_rasters(response_block, cell_types: Optional[Sequence[str]] = N
         plot_epoch_rasters(response_block, cell_type, n_first=n_first,
                            n_last=n_last, pre_time_ms=pre_time_ms,
                            stim_time_ms=stim_time_ms, t_end_ms=t_end_ms,
-                           cell_ids=cell_ids, **kwargs)
+                           cell_ids=cell_ids, epoch_range=epoch_range, **kwargs)
         plt.show()
     return None
 
@@ -584,7 +596,9 @@ def epoch_count_matrix(response_block, cell_type: str,
     from .protocol_qc import per_epoch_spike_counts
 
     ids, spikes, n_epochs = epoch_raster_data(response_block, cell_type,
-                                              cell_ids=cell_ids)
+                                              cell_ids=cell_ids,
+                                              epoch_range=epoch_range)
+    epoch_offset = epoch_range[0] if epoch_range else 0
     if not ids or n_epochs == 0:
         return [], np.zeros((0, 0))
 

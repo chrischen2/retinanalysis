@@ -274,6 +274,8 @@ _ATTR_TO_MODULE = {
     'plot_cell_type_grid': 'retinanalysis.utils.cell_type_check',
     'plot_chunk_panels': 'retinanalysis.utils.chunk_summary',
     'plot_ei_map': 'retinanalysis.utils.ei_utils',
+    'figure_to_png': 'retinanalysis.utils.browse',
+    'png_browser': 'retinanalysis.utils.browse',
     'plot_epoch_count_heatmap': 'retinanalysis.utils.raster',
     'plot_epoch_rasters': 'retinanalysis.utils.raster',
     'plot_epoch_spike_counts': 'retinanalysis.utils.raster',
