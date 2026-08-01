@@ -626,7 +626,8 @@ class MEAPipeline:
         return protocol_axes, noise_axes
 
     def inspect(self, cell_types: Optional[List[str]] = None, minimum_n: int = 3,
-                n_first: int = 3, n_last: int = 3, dpi: int = 110):
+                n_first: int = 3, n_last: int = 3, dpi: int = 110,
+                spikes_tab_width: str = '70%'):
         """Every check on this dataset, in one tabbed view.
 
         The four questions worth asking before an analysis rests on a dataset,
@@ -642,6 +643,11 @@ class MEAPipeline:
         Tabs render on first look and are kept after, so the expensive ones
         (the match re-runs an EI correlation pass; a dense raster is a few
         hundred thousand ticks) cost nothing until you open them.
+
+        The spikes-per-epoch tab is scaled to ``spikes_tab_width`` because it
+        stacks a two-panel summary on top of a heatmap that grows with cell
+        count, and at full width the heatmap starts below the fold. Set it to
+        ``'100%'`` for the untouched size.
 
         Returns the Tab widget, or None without ipywidgets — in which case
         call the underlying functions directly; each is public.
@@ -695,7 +701,8 @@ class MEAPipeline:
         return lazy_tabs(
             ['Cluster match', 'RFs', 'Rasters', 'Spikes/epoch'], _render,
             description=f'<b>{name}</b> — noise chunk '
-                        f'{self.analysis_chunk.chunk_name}')
+                        f'{self.analysis_chunk.chunk_name}',
+            widths=[None, None, None, spikes_tab_width])
 
     def export_to_pkl(self, file_path: str):
         """

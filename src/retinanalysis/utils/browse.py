@@ -93,12 +93,17 @@ def png_browser(options: Sequence[Tuple[str, object]],
     return box
 
 
-def lazy_tabs(titles, render, description: str = ''):
+def lazy_tabs(titles, render, description: str = '', widths=None):
     """Tabbed views, each built on first look and kept after.
 
     ``render(index)`` returns the widget for that tab. It is called the first
     time a tab is selected, never before — so a tab holding a slow figure
     costs nothing until someone opens it, and opening it twice costs once.
+
+    ``widths`` optionally gives a CSS width per tab (``None`` to leave one
+    alone), applied to the container rather than to individual images. That
+    catches everything a tab renders, including the per-cell-type browsers,
+    which display themselves and so are never handed back to be resized.
 
     Returns the displayed ``Tab`` widget, or None without ipywidgets.
     """
@@ -123,7 +128,9 @@ def lazy_tabs(titles, render, description: str = ''):
             return
         built.add(index)
         children = list(tab.children)
-        out = widgets.Output()
+        width = widths[index] if widths and index < len(widths) else None
+        out = widgets.Output(layout=widgets.Layout(width=width) if width
+                             else widgets.Layout())
         # The view is captured into an Output rather than returned as a
         # widget: the per-cell-type browsers display themselves, and this is
         # the one place that needs to catch that rather than re-plumb them.
