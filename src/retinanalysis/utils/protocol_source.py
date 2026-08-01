@@ -210,8 +210,22 @@ def parse_protocol_source(protocol_name: str, repo_name: Optional[str] = None,
 
 
 def block_parameters(stim_block, source: Optional[ProtocolSource] = None,
-                     max_levels: int = 8) -> pd.DataFrame:
+                     max_levels: int = 8,
+                     declared_only: bool = True) -> pd.DataFrame:
     """What this block actually ran, one row per recorded parameter.
+
+    ``declared_only`` (the default, and only possible with a ``source``)
+    keeps just the parameters the protocol itself declares. A block records
+    far more than the protocol sets — rig geometry, display calibration, the
+    data file path, Symphony's own bookkeeping — and burying ten protocol
+    parameters in thirty rows of context defeats the point of reading them.
+    Pass ``declared_only=False`` for everything the block carries, which is
+    where ``NDF``, ``micronsPerPixel`` and ``monitorRefreshRate`` live.
+
+    Note that parameters a protocol inherits rather than declares — the
+    ``preTime`` / ``tailTime`` on ``RiekeLabStageProtocol``, say — count as
+    undeclared here, because only the protocol's own ``.m`` is read. They are
+    still in ``stim_block.d_epoch_block_params``.
 
     Values come from the data, never from the ``.m``. A default in the source
     is only what the parameter would have been had nobody touched it, and on
@@ -329,9 +343,23 @@ def block_parameters(stim_block, source: Optional[ProtocolSource] = None,
                                       'n_levels', 'comment'])
     if out.empty:
         return out
+
+    n_undeclared = 0
+    if declared_only and source is not None:
+        declared = set(source.epoch_parameters)
+        if len(source.parameters):
+            declared |= set(source.parameters.query('not hidden')['parameter'])
+        kept = out[out['parameter'].isin(declared)]
+        n_undeclared = len(out) - len(kept)
+        out = kept
+
     # Condition axes first — they are what an analysis is built around.
-    return out.sort_values(['epoch_specific', 'parameter'],
-                           ascending=[False, True]).reset_index(drop=True)
+    out = out.sort_values(['epoch_specific', 'parameter'],
+                          ascending=[False, True]).reset_index(drop=True)
+    # Reported rather than printed: condition_keys and epoch_condition_table
+    # both call this, so a print here fires several times per cell.
+    out.attrs['n_undeclared'] = n_undeclared
+    return out
 
 
 def condition_keys(stim_block, source: Optional[ProtocolSource] = None) -> List[str]:
