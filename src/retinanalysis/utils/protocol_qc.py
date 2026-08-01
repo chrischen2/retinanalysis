@@ -58,6 +58,9 @@ __all__ = [
     'protocol_qc_csv_path',
     'resolve_protocol_subdir',
     'load_or_compute_protocol_qc',
+    'epoch_population_counts',
+    'suggest_epoch_range',
+    'plot_epoch_range',
 ]
 
 
@@ -359,6 +362,7 @@ def block_qc_metrics(
     psth_sigma_ms: float = 10.0,
     sample_rate_hz: float = 1000.0,
     min_rate_hz: Optional[float] = 1.0,
+    epoch_range: Optional[Tuple[int, int]] = None,
 ) -> pd.DataFrame:
     """Compute QC metrics for every cell in ``response_block.df_spike_times``.
 
@@ -372,15 +376,47 @@ def block_qc_metrics(
     :func:`cell_qc_metrics`). Optional ``cell_types`` filter intersects
     with whatever the response block has labeled. Unlabeled cells are
     kept (cell_type may be NaN).
+
+    ``epoch_range`` is a ``(start, stop)`` half-open slice, normally the
+    range :func:`suggest_epoch_range` picked. Judge cells on the epochs you
+    intend to analyze: a block whose first trials are dead fails every cell
+    on ``silent_run_max`` and ``drift_score`` when scored whole, which
+    reports a property of the block as a property of each cell.
     """
     df = response_block.df_spike_times
     if cell_types is not None:
         want = set(cell_types)
         df = df[df['cell_type'].isin(want)]
+
+    if t_end_ms is None and min_rate_hz is not None:
+        # Without an epoch length the rate gate has nothing to divide by:
+        # epoch_duration_s comes back NaN, mean_rate_hz with it, and the
+        # threshold comparison is False for every cell — so the whole block
+        # fails QC silently and looks like data so bad nothing survived.
+        # Epoch duration is a block property, not a cell one, so infer it once
+        # from the latest spike anywhere in the block. Pass t_end_ms from the
+        # protocol's own preTime + stimTime + tailTime when you have it; this
+        # is a floor, and it is short by however long the last epoch stayed
+        # quiet after its final spike.
+        latest = 0.0
+        for spikes in df['spike_times']:
+            for arr in spikes:
+                a = np.asarray(arr, dtype=float)
+                if a.size:
+                    latest = max(latest, float(a.max()))
+        if latest > 0:
+            t_end_ms = latest
+            print(f'block_qc_metrics: no t_end_ms given; inferring an epoch '
+                  f'length of {latest / 1000:.1f} s from the latest spike in '
+                  f'the block. Pass t_end_ms for an exact rate gate.')
+
     rows = []
     for _, r in df.iterrows():
+        spikes = r['spike_times']
+        if epoch_range is not None:
+            spikes = list(spikes)[epoch_range[0]:epoch_range[1]]
         m = cell_qc_metrics(
-            r['spike_times'],
+            spikes,
             t_start_ms=t_start_ms,
             t_end_ms=t_end_ms,
             psth_sigma_ms=psth_sigma_ms,
@@ -560,3 +596,152 @@ def filter_cells_by_qc(
     out['passes'] = passes.values
     out.attrs['thresholds'] = th.asdict()
     return out
+
+
+# ---------------------------------------------------------------------------
+# Epoch range: where in the block is the recording usable?
+# ---------------------------------------------------------------------------
+
+def epoch_population_counts(response_block, cell_types=None, minimum_n: int = 3,
+                            t_start_ms: float = 0.0,
+                            t_end_ms: Optional[float] = None) -> np.ndarray:
+    """Total spikes per epoch, summed over every cell of the wanted types.
+
+    A population number rather than a per-cell one on purpose: one cell going
+    quiet is a cell-QC question, while the whole population going quiet is an
+    epoch question, and these are the epochs.
+    """
+    df = response_block.df_spike_times
+    if 'cell_type' not in df.columns:
+        response_block.add_cell_types()
+        df = response_block.df_spike_times
+
+    if cell_types is not None:
+        df = df[df['cell_type'].isin(list(cell_types))]
+        keep = [ct for ct, rows in df.groupby('cell_type') if len(rows) >= minimum_n]
+        df = df[df['cell_type'].isin(keep)]
+
+    if df.empty:
+        return np.zeros(0)
+
+    n_epochs = max(len(s) for s in df['spike_times'])
+    totals = np.zeros(n_epochs)
+    for spikes in df['spike_times']:
+        counts = per_epoch_spike_counts(spikes, t_start_ms, t_end_ms)
+        totals[:len(counts)] += counts[:n_epochs]
+    return totals
+
+
+def suggest_epoch_range(response_block, cell_types=None, minimum_n: int = 3,
+                        condition_values=None, min_fraction: float = 0.5,
+                        t_start_ms: float = 0.0,
+                        t_end_ms: Optional[float] = None) -> dict:
+    """Longest run of consecutive epochs where the population fires normally.
+
+    A block often starts before the retina has settled or ends after it has
+    given up, and those epochs are not data. This finds the usable middle: it
+    scores each epoch by total population spikes, normalizes, and returns the
+    longest contiguous run at or above ``min_fraction`` of normal.
+
+    **Normalize within condition, or the experiment looks like dropout.**
+    Pass ``condition_values`` — one value per epoch, from the parameter that
+    alternates — and each epoch is divided by the median of the epochs sharing
+    its condition. Without that, a protocol alternating a bright and a dim
+    epoch shows every other epoch at a fraction of the median, and a
+    threshold on raw rate would throw away one entire condition while
+    reporting it as quality control. With it, a dim epoch is compared against
+    other dim epochs and only a genuinely dead stretch falls out.
+
+    A **contiguous** run, not a mask of every epoch that passes: a block goes
+    bad by drifting, not by scattering, and letting the selection be
+    non-contiguous silently unbalances the conditions.
+
+    Returns a dict with ``start``, ``stop`` (exclusive), ``n_kept``,
+    ``n_epochs``, ``normalized`` (per-epoch score), ``passes`` (bool array)
+    and ``min_fraction``.
+    """
+    totals = epoch_population_counts(response_block, cell_types=cell_types,
+                                     minimum_n=minimum_n, t_start_ms=t_start_ms,
+                                     t_end_ms=t_end_ms)
+    n = totals.size
+    if n == 0:
+        return {'start': 0, 'stop': 0, 'n_kept': 0, 'n_epochs': 0,
+                'normalized': totals, 'passes': np.zeros(0, dtype=bool),
+                'min_fraction': min_fraction}
+
+    normalized = np.ones(n)
+    if condition_values is not None and len(condition_values) >= n:
+        values = np.asarray(condition_values[:n], dtype=object)
+        for value in set(values.tolist()):
+            mask = values == value
+            median = float(np.median(totals[mask])) if mask.any() else 0.0
+            normalized[mask] = totals[mask] / median if median > 0 else 0.0
+    else:
+        median = float(np.median(totals))
+        normalized = totals / median if median > 0 else np.zeros(n)
+
+    passes = normalized >= min_fraction
+
+    # Longest contiguous run of True.
+    best_len = best_start = 0
+    run_start = None
+    for i, ok in enumerate(np.append(passes, False)):
+        if ok and run_start is None:
+            run_start = i
+        elif not ok and run_start is not None:
+            if i - run_start > best_len:
+                best_len, best_start = i - run_start, run_start
+            run_start = None
+
+    return {'start': int(best_start), 'stop': int(best_start + best_len),
+            'n_kept': int(best_len), 'n_epochs': int(n),
+            'normalized': normalized, 'passes': passes,
+            'totals': totals, 'min_fraction': min_fraction}
+
+
+def plot_epoch_range(result: dict, condition_values=None, ax=None,
+                     title: Optional[str] = None):
+    """Per-epoch population score with the chosen range shaded.
+
+    Points are colored by condition when ``condition_values`` is given, which
+    is what shows that the alternation is the experiment rather than a
+    problem — the normalization has put both conditions on the same scale, so
+    a point far below the line is a real dropout in either.
+    """
+    import matplotlib.pyplot as plt
+
+    from .style import NEUTRAL_GRAY, apply_publication_style, colors_for_conditions
+
+    apply_publication_style()
+    if ax is None:
+        _, ax = plt.subplots(figsize=(8.0, 3.2))
+
+    normalized = result['normalized']
+    x = np.arange(len(normalized))
+
+    if condition_values is not None and len(condition_values) >= len(x):
+        values = list(condition_values[:len(x)])
+        levels = sorted(set(values), key=lambda v: (isinstance(v, str), v))
+        colors = colors_for_conditions(levels)
+        for level in levels:
+            mask = np.array([v == level for v in values])
+            ax.plot(x[mask], normalized[mask], 'o', markersize=5,
+                    color=colors[level], label=f'{level}')
+        ax.legend(title='condition', bbox_to_anchor=[1.02, 1], loc='upper left')
+    else:
+        ax.plot(x, normalized, 'o', markersize=5, color=NEUTRAL_GRAY)
+
+    ax.axhline(result['min_fraction'], color=NEUTRAL_GRAY, linewidth=1.0)
+    ax.axhline(1.0, color=NEUTRAL_GRAY, linewidth=0.6, alpha=0.5)
+    if result['n_kept']:
+        ax.axvspan(result['start'] - 0.5, result['stop'] - 0.5,
+                   color='#0072B2', alpha=0.10, linewidth=0)
+
+    ax.set_xlabel('Epoch index')
+    ax.set_ylabel('Population spikes\n(relative to its condition)')
+    ax.set_ylim(bottom=0)
+    ax.set_title(title or f"keeping epochs {result['start']}–{result['stop'] - 1} "
+                          f"({result['n_kept']} of {result['n_epochs']})")
+    ax.grid(True, linewidth=0.5, alpha=0.35)
+    ax.set_axisbelow(True)
+    return ax

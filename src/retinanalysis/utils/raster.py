@@ -478,12 +478,22 @@ _NON_TYPE_LABELS = {'Unmatched', 'Unknown'}
 
 
 def _cell_type_options(response_block, cell_types: Optional[Sequence[str]],
-                       minimum_n: int) -> List[Tuple[str, str]]:
-    """``(label, cell_type)`` pairs, densest real type first, basics on show."""
+                       minimum_n: int,
+                       cell_ids: Optional[Iterable[int]] = None
+                       ) -> List[Tuple[str, str]]:
+    """``(label, cell_type)`` pairs, densest real type first, basics on show.
+
+    ``cell_ids`` restricts the counts as well as the selection, so a label
+    describes the cells that will actually be drawn rather than the whole
+    block — the difference matters once a QC filter has been applied.
+    """
     df = response_block.df_spike_times
     if 'cell_type' not in df.columns:
         response_block.add_cell_types()
         df = response_block.df_spike_times
+
+    if cell_ids is not None:
+        df = df[df['cell_id'].isin({int(c) for c in cell_ids})]
 
     options = []
     for cell_type, rows in df.groupby('cell_type'):
@@ -511,6 +521,7 @@ def browse_epoch_rasters(response_block, cell_types: Optional[Sequence[str]] = N
                          pre_time_ms: Optional[float] = None,
                          stim_time_ms: Optional[float] = None,
                          t_end_ms: Optional[float] = None,
+                         cell_ids: Optional[Iterable[int]] = None,
                          dpi: int = 110, **kwargs):
     """Dropdown over cell types, showing one type's epoch rasters at a time.
 
@@ -520,12 +531,17 @@ def browse_epoch_rasters(response_block, cell_types: Optional[Sequence[str]] = N
     costs nothing — which matters here because a dense type is a few hundred
     thousand ticks to draw.
 
+    ``cell_ids`` restricts to a subset — the cells that survived QC, normally.
+    The dropdown counts shrink with it, so a label says how many cells the
+    panel actually draws.
+
     Falls back to rendering every type inline when ipywidgets is missing.
     Returns the widget, or None on the fallback path.
     """
     from retinanalysis.utils.browse import figure_to_png, png_browser
 
-    options = _cell_type_options(response_block, cell_types, minimum_n)
+    options = _cell_type_options(response_block, cell_types, minimum_n,
+                                 cell_ids=cell_ids)
     if not options:
         print(f'No cell type has {minimum_n} or more cells with spike times.')
         return None
@@ -534,7 +550,7 @@ def browse_epoch_rasters(response_block, cell_types: Optional[Sequence[str]] = N
         fig = plot_epoch_rasters(
             response_block, cell_type, n_first=n_first, n_last=n_last,
             pre_time_ms=pre_time_ms, stim_time_ms=stim_time_ms,
-            t_end_ms=t_end_ms, **kwargs)
+            t_end_ms=t_end_ms, cell_ids=cell_ids, **kwargs)
         return None, figure_to_png(fig, dpi=dpi)
 
     box = png_browser(options, _render, description='Cell type:',
@@ -546,7 +562,7 @@ def browse_epoch_rasters(response_block, cell_types: Optional[Sequence[str]] = N
         plot_epoch_rasters(response_block, cell_type, n_first=n_first,
                            n_last=n_last, pre_time_ms=pre_time_ms,
                            stim_time_ms=stim_time_ms, t_end_ms=t_end_ms,
-                           **kwargs)
+                           cell_ids=cell_ids, **kwargs)
         plt.show()
     return None
 

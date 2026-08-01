@@ -55,6 +55,33 @@ protocol** so each stays focused.
 When the user asks to add analysis for a new protocol, default to a
 new notebook rather than extending an existing one.
 
+**MEA protocol notebooks branch off `demos/meaAnalysisMain.ipynb`.**
+That notebook is the shared front half for every protocol: §1–5 choose a
+dataset, §6 builds a pipeline for one, §7 (`pipeline.inspect()`) checks
+it, §8 breaks out `stim_block` / `response_block` / `analysis_chunk`. It
+stops before interpreting conditions on purpose. A protocol notebook —
+`demos/variableMeanDriftingGrating.ipynb` is the worked example — starts
+from `(EXP_NAME, DATAFILE_NAME)` constants and builds its own pipeline,
+so it runs standalone, then:
+
+1. `ra.parse_protocol_source(dotted_name)` reads the MATLAB `.m` out of
+   the cloned package under `PROTOCOL_REPOS_ROOT`. The `properties` block
+   gives block-level parameters; `epoch.addParameter(...)` names are
+   exactly the condition axes. `ra.compare_with_block(source, stim_block)`
+   puts those beside what the block recorded — the rig routinely ran
+   different values than the `.m` defaults, and names don't always match
+   (`variableMeanDriftingGrating` writes the misspelled `currentBarWdith`).
+2. `ra.suggest_epoch_range(...)` then `ra.block_qc_metrics(...,
+   epoch_range=...)` — **epochs first, then cells**, so a cell isn't
+   scored against a stretch of block you were going to discard.
+
+Two traps worth knowing, both hit while building the first one:
+`block_qc_metrics` needs `t_end_ms` (without it the rate gate is NaN and
+every cell silently fails), and `QCThresholds` defaults assume every epoch
+is the same condition — for an alternating protocol both
+`min_reliability_r` and a flat `min_frac_epochs_above_rate` of 0.8 reject
+healthy cells for responding to the stimulus.
+
 ## Per-experiment batch archive (§9 of chrisMain)
 
 - Driver: `ra.analyze_experiments(dates, protocol_search=...)`. Runs
