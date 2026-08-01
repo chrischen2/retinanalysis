@@ -61,6 +61,7 @@ __all__ = [
     'epoch_population_counts',
     'suggest_epoch_range',
     'plot_epoch_range',
+    'epoch_condition_table',
 ]
 
 
@@ -745,3 +746,53 @@ def plot_epoch_range(result: dict, condition_values=None, ax=None,
     ax.grid(True, linewidth=0.5, alpha=0.35)
     ax.set_axisbelow(True)
     return ax
+
+
+def epoch_condition_table(stim_block, response_block=None, cell_types=None,
+                          minimum_n: int = 3, t_start_ms: float = 0.0,
+                          t_end_ms: Optional[float] = None,
+                          source=None) -> pd.DataFrame:
+    """One row per epoch: the conditions it ran, and how much the retina fired.
+
+    The two halves of an epoch belong together — what was shown and what came
+    back — and putting them in one table is what makes an epoch range
+    choosable by eye. Reading a condition table and a spike-count plot side by
+    side leaves you doing the join in your head.
+
+    Columns: ``epoch``, one per condition axis (whichever parameters vary
+    across epochs), then ``n_spikes`` and ``spikes_per_cell`` when a
+    ``response_block`` is given. Counts are summed over the cells of
+    ``cell_types`` that clear ``minimum_n``, so they describe the population
+    rather than any one cell.
+    """
+    from .protocol_source import block_parameters
+
+    table = block_parameters(stim_block, source=source)
+    keys = table.query('epoch_specific')['parameter'].tolist() if len(table) else []
+
+    df_epochs = getattr(stim_block, 'df_epochs', None)
+    n_epochs = len(df_epochs) if df_epochs is not None else 0
+
+    out = pd.DataFrame({'epoch': np.arange(n_epochs)})
+    for key in keys:
+        if key in df_epochs.columns:
+            out[key] = df_epochs[key].to_numpy()
+        else:
+            out[key] = [d.get(key) for d in df_epochs['epoch_parameters']]
+
+    if response_block is not None:
+        counts = epoch_population_counts(response_block, cell_types=cell_types,
+                                         minimum_n=minimum_n,
+                                         t_start_ms=t_start_ms, t_end_ms=t_end_ms)
+        df = response_block.df_spike_times
+        if cell_types is not None and 'cell_type' in df.columns:
+            df = df[df['cell_type'].isin(list(cell_types))]
+            df = df[df.groupby('cell_type')['cell_id'].transform('size') >= minimum_n]
+        n_cells = max(len(df), 1)
+
+        n = min(len(out), counts.size)
+        out = out.iloc[:n].copy()
+        out['n_spikes'] = counts[:n].astype(int)
+        out['spikes_per_cell'] = (counts[:n] / n_cells).round(1)
+
+    return out

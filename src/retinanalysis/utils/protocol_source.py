@@ -269,11 +269,20 @@ def block_parameters(stim_block, source: Optional[ProtocolSource] = None,
                             source.parameters['comment']))
 
     def _levels(values):
-        """Distinct values, sorted where they are comparable."""
-        unique = []
+        """Distinct values, sorted where they are comparable.
+
+        Deduplicated on ``repr`` rather than equality: several of these
+        parameters are lists (``barWidths``, ``canvasSize``) or numpy arrays,
+        where ``in`` either raises or compares elementwise. Skipping those
+        types instead — the first version did — silently blanked exactly the
+        settings that say what the stimulus swept over.
+        """
+        unique, seen = [], set()
         for v in values:
-            if isinstance(v, (list, tuple, dict)) or v in unique:
+            key = repr(v)
+            if key in seen:
                 continue
+            seen.add(key)
             unique.append(v)
         try:
             return sorted(unique)
@@ -284,7 +293,17 @@ def block_parameters(stim_block, source: Optional[ProtocolSource] = None,
     for name, values in per_epoch.items():
         levels = _levels(values)
         if len(levels) <= 1:
-            continue                      # constant across epochs -> block-level
+            # Recorded per epoch but the same every time — a setting, not an
+            # axis. It still belongs in the table: most of a protocol's
+            # parameters live here, and they are what was on the screen.
+            rows.append({
+                'parameter': name,
+                'value': levels[0] if levels else '',
+                'epoch_specific': False,
+                'n_levels': 1,
+                'comment': comments.get(name, ''),
+            })
+            continue
         rows.append({
             'parameter': name,
             'value': levels if len(levels) <= max_levels else f'{len(levels)} values',
@@ -293,6 +312,7 @@ def block_parameters(stim_block, source: Optional[ProtocolSource] = None,
             'comment': comments.get(name, ''),
         })
 
+    # Block-level record for anything the epochs did not carry.
     epoch_names = set(per_epoch)
     for name, value in block_params.items():
         if name in epoch_names:

@@ -173,6 +173,7 @@ _ATTR_TO_MODULE = {
     'electrode_positions_canvas_px': 'retinanalysis.utils.mosaic_overlay',
     'block_qc_metrics': 'retinanalysis.utils.protocol_qc',
     'cell_qc_metrics': 'retinanalysis.utils.protocol_qc',
+    'epoch_condition_table': 'retinanalysis.utils.protocol_qc',
     'epoch_population_counts': 'retinanalysis.utils.protocol_qc',
     'filter_cells_by_qc': 'retinanalysis.utils.protocol_qc',
     'suggest_epoch_range': 'retinanalysis.utils.protocol_qc',
