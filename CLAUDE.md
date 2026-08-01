@@ -64,12 +64,15 @@ stops before interpreting conditions on purpose. A protocol notebook —
 from `(EXP_NAME, DATAFILE_NAME)` constants and builds its own pipeline,
 so it runs standalone, then:
 
-1. `ra.parse_protocol_source(dotted_name)` reads the MATLAB `.m` out of
-   the cloned package under `PROTOCOL_REPOS_ROOT`. The `properties` block
-   gives block-level parameters; `epoch.addParameter(...)` names are
-   exactly the condition axes. `ra.compare_with_block(source, stim_block)`
-   puts those beside what the block recorded — the rig routinely ran
-   different values than the `.m` defaults, and names don't always match
+1. `ra.block_parameters(stim_block, source=...)` — **values always come
+   from the recorded epochs, never from the `.m`.** A declared default is
+   only what a parameter would have been had nobody touched it, and the rig
+   routinely overrides them (this protocol declares 4 Hz / 800 µm and the
+   analyzed block ran 2 Hz / 2000). Which parameters are condition axes is
+   likewise read off the epochs — the ones that take more than one value.
+   `ra.parse_protocol_source(dotted_name)` is optional and supplies one
+   thing the data can't: the comment saying what each parameter means. It
+   also catches name mismatches via `ra.condition_keys`
    (`variableMeanDriftingGrating` writes the misspelled `currentBarWdith`).
 2. `ra.suggest_epoch_range(...)` then `ra.block_qc_metrics(...,
    epoch_range=...)` — **epochs first, then cells**, so a cell isn't
