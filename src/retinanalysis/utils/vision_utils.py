@@ -369,8 +369,23 @@ def get_ells(analysis_chunk: AnalysisChunk, d_cells_by_type: Dict[str,List[int]]
     
     rf_params = analysis_chunk.rf_params
 
+    # Canonical cell-type colors rather than the positional prop-cycle these
+    # used to take. `C{idx}` colored a type by its position in the dict, so a
+    # type dropping out under minimum_n repainted every type after it, and the
+    # same type came out a different color here than in every other figure in
+    # the package. It also silently changed meaning once
+    # apply_publication_style swapped the cycle to Okabe-Ito, whose first
+    # entry is black — a type rendered as no color at all.
+    #
+    # Only AnalysisChunk.plot_rfs uses these colors; cell_plot_archive,
+    # cell_type_check and mosaic_overlay each take the geometry and re-style
+    # with their own palette.
+    from retinanalysis.utils.style import colors_for_celltypes
+    type_colors = colors_for_celltypes(list(d_cells_by_type.keys()))
+
     d_ells_by_type = dict()
-    for idx, ct in enumerate(d_cells_by_type.keys()):
+    for ct in d_cells_by_type.keys():
+        color = type_colors[ct]
         d_ells_by_id = dict()
         for id in d_cells_by_type[ct]:
             d_ells_by_id[id] = Ellipse(xy=(rf_params[id]['center_x']*scale_factor,
@@ -378,7 +393,7 @@ def get_ells(analysis_chunk: AnalysisChunk, d_cells_by_type: Dict[str,List[int]]
                                     width = rf_params[id]['std_x']*std_scaling*scale_factor,
                                     height = rf_params[id]['std_y']*std_scaling*scale_factor,
                                     angle = rf_params[id]['rot'],
-                                    facecolor= f'C{idx}', edgecolor= f'C{idx}',
+                                    facecolor= color, edgecolor= color,
                                     alpha = 0.7)
 
         d_ells_by_type[ct] = d_ells_by_id
