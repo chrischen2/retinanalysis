@@ -361,7 +361,8 @@ def plot_raster_with_psth(
 
 def epoch_raster_data(response_block, cell_type: str,
                       cell_ids: Optional[Iterable[int]] = None,
-                      epoch_range: Optional[Tuple[int, int]] = None):
+                      epoch_range: Optional[Tuple[int, int]] = None,
+                      epoch_indices: Optional[Sequence[int]] = None):
     """``(cell_ids, spikes_by_cell, n_epochs)`` for one cell type.
 
     ``spikes_by_cell[i][e]`` is the ms spike-time array for cell ``i`` in epoch
@@ -370,7 +371,9 @@ def epoch_raster_data(response_block, cell_type: str,
 
     ``epoch_range`` is a ``(start, stop)`` half-open slice. Pass the range an
     analysis actually uses and the panels show those epochs, so what you look
-    at is what the numbers were computed from.
+    at is what the numbers were computed from. ``epoch_indices`` does the same
+    for a set of epochs no slice can express — one condition of an alternating
+    protocol, say — and takes precedence when both are given.
     """
     ids, spikes = _gather_cell_spike_times(response_block, cell_type,
                                            cell_ids=cell_ids)
@@ -379,7 +382,10 @@ def epoch_raster_data(response_block, cell_type: str,
     order = np.argsort(np.asarray(ids))
     ids = [int(ids[i]) for i in order]
     spikes = [spikes[i] for i in order]
-    if epoch_range is not None:
+    if epoch_indices is not None:
+        idx = [int(i) for i in epoch_indices]
+        spikes = [[s[i] for i in idx if i < len(s)] for s in spikes]
+    elif epoch_range is not None:
         spikes = [list(s)[epoch_range[0]:epoch_range[1]] for s in spikes]
     n_epochs = max((len(s) for s in spikes), default=0)
     return ids, spikes, n_epochs
@@ -389,6 +395,7 @@ def plot_epoch_rasters(response_block, cell_type: str,
                        n_first: int = 3, n_last: int = 3,
                        cell_ids: Optional[Iterable[int]] = None,
                        epoch_range: Optional[Tuple[int, int]] = None,
+                       epoch_indices: Optional[Sequence[int]] = None,
                        t_start_ms: float = 0.0,
                        t_end_ms: Optional[float] = None,
                        pre_time_ms: Optional[float] = None,
@@ -412,11 +419,20 @@ def plot_epoch_rasters(response_block, cell_type: str,
     """
     ids, spikes, n_epochs = epoch_raster_data(response_block, cell_type,
                                               cell_ids=cell_ids,
-                                              epoch_range=epoch_range)
-    epoch_offset = epoch_range[0] if epoch_range else 0
+                                              epoch_range=epoch_range,
+                                              epoch_indices=epoch_indices)
     if not ids or n_epochs == 0:
         print(f'No cells of type {cell_type} with spike times.')
         return None
+
+    # Panels are titled by the epoch's index in the block, not its position in
+    # the selection, so a panel can be found again in the epoch table.
+    if epoch_indices is not None:
+        epoch_labels = [int(i) for i in epoch_indices][:n_epochs]
+    elif epoch_range is not None:
+        epoch_labels = list(range(epoch_range[0], epoch_range[0] + n_epochs))
+    else:
+        epoch_labels = list(range(n_epochs))
 
     # Overlapping ends would draw the same epoch twice and imply a comparison
     # that isn't there, so short blocks collapse to one row of everything.
@@ -466,7 +482,7 @@ def plot_epoch_rasters(response_block, cell_type: str,
 
             ax.set_xlim(t_start_ms, t_end_ms)
             ax.set_ylim(0, len(ids))
-            ax.set_title(f'epoch {epoch + epoch_offset}', fontsize=8)
+            ax.set_title(f'epoch {epoch_labels[epoch]}', fontsize=8)
             if c == 0:
                 ax.set_yticks(np.arange(0, len(ids), step) + 0.5)
                 ax.set_yticklabels([ids[i] for i in range(0, len(ids), step)],
@@ -585,6 +601,8 @@ def browse_epoch_rasters(response_block, cell_types: Optional[Sequence[str]] = N
 
 def epoch_count_matrix(response_block, cell_type: str,
                        cell_ids: Optional[Iterable[int]] = None,
+                       epoch_range: Optional[Tuple[int, int]] = None,
+                       epoch_indices: Optional[Sequence[int]] = None,
                        t_start_ms: float = 0.0,
                        t_end_ms: Optional[float] = None):
     """``(cell_ids, counts)`` where ``counts`` is ``(n_cells, n_epochs)``.
@@ -592,13 +610,15 @@ def epoch_count_matrix(response_block, cell_type: str,
     Spike count per cell per epoch, optionally restricted to a time window
     within the epoch. Rows are ordered by cell id, matching
     :func:`plot_epoch_rasters` so the two figures can be read together.
+    ``epoch_range`` / ``epoch_indices`` restrict the columns the same way
+    they do there.
     """
     from .protocol_qc import per_epoch_spike_counts
 
     ids, spikes, n_epochs = epoch_raster_data(response_block, cell_type,
                                               cell_ids=cell_ids,
-                                              epoch_range=epoch_range)
-    epoch_offset = epoch_range[0] if epoch_range else 0
+                                              epoch_range=epoch_range,
+                                              epoch_indices=epoch_indices)
     if not ids or n_epochs == 0:
         return [], np.zeros((0, 0))
 

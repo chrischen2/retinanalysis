@@ -364,6 +364,7 @@ def block_qc_metrics(
     sample_rate_hz: float = 1000.0,
     min_rate_hz: Optional[float] = 1.0,
     epoch_range: Optional[Tuple[int, int]] = None,
+    epoch_indices: Optional[Sequence[int]] = None,
 ) -> pd.DataFrame:
     """Compute QC metrics for every cell in ``response_block.df_spike_times``.
 
@@ -383,6 +384,14 @@ def block_qc_metrics(
     intend to analyze: a block whose first trials are dead fails every cell
     on ``silent_run_max`` and ``drift_score`` when scored whole, which
     reports a property of the block as a property of each cell.
+
+    ``epoch_indices`` selects an arbitrary set of epochs by index instead,
+    for the case a contiguous slice cannot express: on a protocol that
+    alternates conditions, the epochs of one condition are every other one.
+    Scoring "does this cell fire" needs the condition the cell is *meant* to
+    fire in, otherwise the gate charges a cell for going quiet when the
+    stimulus told it to. Indices are into the block's full epoch list and
+    take precedence over ``epoch_range``.
     """
     df = response_block.df_spike_times
     if cell_types is not None:
@@ -411,10 +420,15 @@ def block_qc_metrics(
                   f'length of {latest / 1000:.1f} s from the latest spike in '
                   f'the block. Pass t_end_ms for an exact rate gate.')
 
+    if epoch_indices is not None:
+        epoch_indices = [int(i) for i in epoch_indices]
+
     rows = []
     for _, r in df.iterrows():
         spikes = r['spike_times']
-        if epoch_range is not None:
+        if epoch_indices is not None:
+            spikes = [spikes[i] for i in epoch_indices if i < len(spikes)]
+        elif epoch_range is not None:
             spikes = list(spikes)[epoch_range[0]:epoch_range[1]]
         m = cell_qc_metrics(
             spikes,
