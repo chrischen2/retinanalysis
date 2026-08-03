@@ -78,12 +78,50 @@ so it runs standalone, then:
    epoch_range=...)` — **epochs first, then cells**, so a cell isn't
    scored against a stretch of block you were going to discard.
 
+3. Optionally, the response in place: `ra.cell_activity_in_window(...)` +
+   `ra.plot_mosaic_activity(...)` draw one epoch's per-cell firing rate on
+   the RF mosaic beside the raster it was counted from, over a
+   reconstructed stimulus frame (§5 of `variableMeanDriftingGrating`).
+
 Two traps worth knowing, both hit while building the first one:
 `block_qc_metrics` needs `t_end_ms` (without it the rate gate is NaN and
 every cell silently fails), and `QCThresholds` defaults assume every epoch
 is the same condition — for an alternating protocol both
 `min_reliability_r` and a flat `min_frac_epochs_above_rate` of 0.8 reject
 healthy cells for responding to the stimulus.
+
+## Overlaying a stimulus on the mosaic
+
+**RF mosaic and stimulus co-register with no fitted parameter.** The STA is
+measured in the stimulus's own frame: `get_rf_params` returns centers in
+stixels (already y-flipped for `imshow`), and `pixels_per_stixel =
+canvasSize[0]/numXChecks` scales them to canvas pixels, which is the same
+unit MATLAB specifies the stimulus in (`canvasSize/2`, `um2pix`). Draw the
+frame at `extent=(0, canvas_w, canvas_h, 0)` and it lines up. **Only the
+electrode overlay needs `rig_calibration`** — that one maps physical chip µm
+onto the canvas and has genuine unknowns.
+
+When porting a `createPresentation` to Python:
+
+- **Distrust the `.m` property comments; read the code beside them.**
+  `variableMeanDriftingGrating` labels `barWidths` and `apertureDiameter`
+  `(pix)`, but both go through `um2pix` — they are microns, and the aperture
+  is a diameter, not the radius its comment claims.
+- **`um2pix` rounds** (`round(um / micronsPerPixel)`). A 50 µm bar at
+  3.8 µm/px is 13 px, not 13.16, and the spatial frequency follows the
+  rounded value.
+- **`p.setBackgroundColor(0)` means outside the aperture is black, not
+  mean.** The mean-colored rectangle carrying the circular mask is only as
+  big as the aperture, so cells beyond it saw darkness — their rate is not a
+  response to the stimulus.
+- Stage's `Grating` takes `color = 2*mean`, giving luminance
+  `mean*(1 + contrast*sin(...))`. The protocol's `phaseShift` exists to put a
+  zero crossing at the quad center, so write the frame as a sine measured
+  **from the canvas center** rather than reproducing that arithmetic against
+  Stage's own (unavailable) texture-coordinate convention.
+
+`ra.grating_frame` / `ra.grating_geometry`
+(`regen/variable_mean_drifting_grating.py`) are the worked example.
 
 ## Per-experiment batch archive (§9 of chrisMain)
 

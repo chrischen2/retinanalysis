@@ -269,6 +269,351 @@ def _select_cells_by_type(analysis_chunk,
     return d_by_type, sorted(d_by_type.keys())
 
 
+def cell_activity_in_window(pipeline, epoch_index: int,
+                            window_s: Tuple[float, float],
+                            cell_types: Optional[Iterable[str]] = None,
+                            cell_ids: Optional[Iterable[int]] = None,
+                            std_scaling: float = 1.6):
+    """Firing rate per cell in one epoch and time window, placed on the canvas.
+
+    The join every "activity over the mosaic" figure needs: spike times are
+    keyed by the protocol block's cell ids, receptive fields by the noise
+    chunk's, and the two are different numbering. The ``noise_id`` coordinate
+    that ``get_spike_xarr`` carries is the cluster match between them — the
+    same relation as ``pipeline.match_dict``, already aligned to the spike
+    array — so the rate and the receptive field of a row always describe one
+    cell. Cells that never matched a noise cluster have nothing to place and
+    are returned with ``center_x`` NaN rather than dropped, so a caller can
+    report how many it could not draw instead of quietly showing fewer cells
+    than it was asked for.
+
+    Parameters
+    ----------
+    pipeline : MEAPipeline
+        Supplies the response block, the analysis chunk holding ``rf_params``,
+        and the id mapping between them.
+    epoch_index : int
+        Position of the epoch in the block, as the epoch table numbers them.
+    window_s : (start, end)
+        Time window within the epoch, in seconds from the epoch start. Rates
+        are spikes in the window divided by its duration.
+    cell_types : sequence[str], optional
+        Restrict to these types. Default: every type in the block.
+    cell_ids : sequence[int], optional
+        Restrict to these protocol cell ids — pass the QC survivors here.
+    std_scaling : float
+        Receptive-field ellipse size in σ units, matching :func:`get_ells`.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per cell: ``cell_id`` (protocol), ``noise_id``, ``cell_type``,
+        ``n_spikes``, ``rate_hz``, ``center_x``/``center_y`` (canvas pixels),
+        ``width``/``height``/``angle`` (the ellipse, canvas pixels), and
+        ``spike_times_s`` — the spikes inside the window, in seconds from the
+        epoch start, so a raster can be drawn from the same table that colored
+        the mosaic.
+    """
+    import pandas as pd
+
+    from retinanalysis.utils.vision_utils import get_spike_xarr
+
+    t0, t1 = (float(w) for w in window_s)
+    if not t1 > t0:
+        raise ValueError(f'window_s must be (start, end) with end > start; '
+                         f'got {window_s}')
+    duration_s = t1 - t0
+
+    response_block = pipeline.resp
+    analysis_chunk = pipeline.analysis_chunk
+
+    cell_ids = list(cell_ids) if cell_ids is not None else None
+    cell_types = list(cell_types) if cell_types is not None else None
+    xarr = get_spike_xarr(response_block, protocol_ids=cell_ids,
+                          cell_types=cell_types)
+    if epoch_index not in xarr.coords['epoch'].values:
+        raise IndexError(f'epoch {epoch_index} is not in this block '
+                         f'(0..{int(xarr.coords["epoch"].values.max())})')
+    epoch = xarr.sel(epoch=epoch_index)
+
+    rf_params = getattr(analysis_chunk, 'rf_params', {}) or {}
+    pps = analysis_chunk.pixels_per_stixel
+
+    rows = []
+    for idx in range(epoch.sizes['cell_id']):
+        one = epoch.isel(cell_id=idx)
+        spikes_ms = np.asarray(one.values.item(), dtype=float)
+        # Spike times are milliseconds from the epoch start throughout the
+        # package; the window is stated in seconds because that is what a
+        # person reads off a raster.
+        in_window = spikes_ms[(spikes_ms >= t0 * 1000.0)
+                              & (spikes_ms <= t1 * 1000.0)]
+
+        noise_id = int(one.coords['noise_id'].item())
+        p = rf_params.get(noise_id)
+        row = {
+            'cell_id': int(one.coords['cell_id'].item()),
+            'noise_id': noise_id,
+            'cell_type': str(one.coords['cell_type'].item()),
+            'n_spikes': int(in_window.size),
+            'rate_hz': in_window.size / duration_s,
+            'spike_times_s': in_window / 1000.0,
+        }
+        if p is None:
+            row.update(center_x=np.nan, center_y=np.nan,
+                       width=np.nan, height=np.nan, angle=np.nan)
+        else:
+            row.update(
+                center_x=float(p['center_x']) * pps,
+                center_y=float(p['center_y']) * pps,
+                width=float(p['std_x']) * std_scaling * pps,
+                height=float(p['std_y']) * std_scaling * pps,
+                angle=float(p['rot']),
+            )
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def plot_mosaic_activity(pipeline, epoch_index: int,
+                         window_s: Tuple[float, float],
+                         stim_frame: Optional[np.ndarray] = None,
+                         cell_types: Optional[Iterable[str]] = None,
+                         cell_ids: Optional[Iterable[int]] = None,
+                         std_scaling: float = 1.6,
+                         cmap: str = 'plasma',
+                         stim_cmap: str = 'gray',
+                         stim_vmin: Optional[float] = None,
+                         stim_vmax: Optional[float] = None,
+                         rate_vmax: Optional[float] = None,
+                         rate_pct: float = 95.0,
+                         aperture_diameter_px: Optional[float] = None,
+                         zoom: bool = True,
+                         pad_frac: float = 0.06,
+                         raster_marker_size: float = 1.2,
+                         title: Optional[str] = None,
+                         figsize: Optional[Tuple[float, float]] = None):
+    """Where the population fired, on the stimulus that drove it.
+
+    Two panels of the same epoch and the same seconds. On the left, the
+    mosaic over a reconstructed stimulus frame, each receptive field filled
+    by its firing rate in the window and outlined in its cell type's color.
+    On the right, the spikes those rates were counted from, one row per cell,
+    sorted within each type by rate so the fill gradient on the left and the
+    density gradient on the right run the same way.
+
+    **The two panels are the argument for each other.** A rate map alone
+    cannot show whether a bright cell fired steadily or in one burst, and a
+    raster alone cannot show whether the responding cells sit under the
+    grating or out in the black surround. Read together they answer both, for
+    a window short enough to hold a few stimulus cycles.
+
+    The stimulus frame is passed in rather than rendered here, because what a
+    frame *is* differs per protocol. For ``variableMeanDriftingGrating`` it
+    comes from :func:`retinanalysis.regen.variable_mean_drifting_grating
+    .grating_frame`, which returns exactly the canvas-pixel array this
+    expects. Omit it and the panel is just the mosaic.
+
+    Parameters
+    ----------
+    pipeline : MEAPipeline
+    epoch_index : int
+        The epoch to show, numbered as the epoch table numbers it.
+    window_s : (start, end)
+        Seconds from the epoch start. This is the whole time axis of the
+        raster and the interval the rates are computed over.
+    stim_frame : np.ndarray, optional
+        A canvas-pixel image, indexed ``[y, x]`` with y downwards. Drawn at
+        the canvas extent, which is the coordinate system the receptive
+        fields are already in.
+    cell_types, cell_ids : optional
+        Restrict the population, as in :func:`cell_activity_in_window`.
+    cmap : str
+        Sequential colormap for firing rate. The default is bright at the top
+        end, which is what keeps cells legible over a dark stimulus frame.
+    stim_vmin, stim_vmax : float, optional
+        Display range for the frame. Default: the frame's own range. These
+        protocols run at mean intensities as low as 0.03, so a fixed 0–1
+        scale renders the stimulus as an unbroken black rectangle; scaling to
+        the frame shows the geometry, and the title still reports the true
+        intensities. Pass ``0`` and ``1`` for absolute luminance.
+    rate_vmax : float, optional
+        Top of the rate color scale. Default: the ``rate_pct`` percentile of
+        the rates in this window.
+    rate_pct : float
+        Percentile setting the top of the color scale when ``rate_vmax`` is
+        not given. Cells above it are drawn in the top color and the colorbar
+        is marked with an arrow.
+    aperture_diameter_px : float, optional
+        Draw a circle of this diameter at the canvas center, marking the
+        stimulus aperture. Cells outside it saw the background rather than
+        the stimulus, which is the first thing to check before reading a low
+        rate as a weak response.
+    zoom : bool
+        Frame the mosaic panel on the cells rather than the whole canvas.
+    raster_marker_size : float
+        Point size for the raster ticks. Lower it for dense populations.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    from matplotlib.lines import Line2D
+
+    from retinanalysis.utils.style import (NEUTRAL_GRAY, apply_publication_style,
+                                           colors_for_celltypes)
+
+    apply_publication_style()
+
+    activity = cell_activity_in_window(
+        pipeline, epoch_index, window_s,
+        cell_types=cell_types, cell_ids=cell_ids, std_scaling=std_scaling,
+    )
+    if activity.empty:
+        raise ValueError('No cells matched the requested types and ids.')
+
+    t0, t1 = (float(w) for w in window_s)
+
+    # Panel order follows the caller's cell_types when given, so a figure
+    # keeps the same type order as the tables beside it.
+    if cell_types is not None:
+        order = [ct for ct in cell_types if (activity['cell_type'] == ct).any()]
+    else:
+        order = sorted(activity['cell_type'].unique())
+    type_colors = colors_for_celltypes(order)
+
+    drawable = activity[activity['center_x'].notna()]
+    n_no_rf = len(activity) - len(drawable)
+
+    # Firing rates across a population are strongly skewed — a handful of
+    # cells fire an order of magnitude above the median — so scaling the
+    # colormap to the maximum leaves almost every cell in the bottom of the
+    # range and the map reads as uniformly dark. The default tops out at a
+    # high percentile instead and the colorbar is drawn with an arrow, so the
+    # cells above it are marked as clipped rather than passed off as equal to
+    # the ceiling.
+    saturated = False
+    if rate_vmax is None:
+        rate_vmax = float(np.percentile(activity['rate_hz'], rate_pct))
+        saturated = bool((activity['rate_hz'] > rate_vmax).any())
+    else:
+        saturated = bool((activity['rate_hz'] > float(rate_vmax)).any())
+    if rate_vmax <= 0:                    # a window where almost nothing fired
+        rate_vmax = max(float(activity['rate_hz'].max()), 1.0)
+        saturated = False
+    norm = plt.Normalize(vmin=0.0, vmax=float(rate_vmax))
+    rate_cmap = plt.get_cmap(cmap)
+
+    canvas_w, canvas_h = pipeline.analysis_chunk.canvas_size
+
+    if figsize is None:
+        figsize = (13.5, 5.4)
+    fig, (ax_mosaic, ax_raster) = plt.subplots(
+        1, 2, figsize=figsize, gridspec_kw={'width_ratios': [1.0, 1.15]})
+
+    # --- Left: stimulus + mosaic ------------------------------------------
+    if stim_frame is not None:
+        ax_mosaic.imshow(stim_frame, cmap=stim_cmap,
+                         vmin=stim_vmin, vmax=stim_vmax,
+                         extent=(0.0, float(canvas_w), float(canvas_h), 0.0),
+                         interpolation='nearest', zorder=0)
+
+    if aperture_diameter_px:
+        ax_mosaic.add_patch(Ellipse(
+            xy=(canvas_w / 2.0, canvas_h / 2.0),
+            width=float(aperture_diameter_px), height=float(aperture_diameter_px),
+            facecolor='none', edgecolor='white', linestyle='--',
+            linewidth=0.8, alpha=0.6, zorder=1))
+
+    # Quietest first, so the cells that carry the response end up on top
+    # rather than hidden under a neighbor that did nothing.
+    for _, cell in drawable.sort_values('rate_hz').iterrows():
+        edge = type_colors.get(cell['cell_type'], NEUTRAL_GRAY)
+        ax_mosaic.add_patch(Ellipse(
+            xy=(cell['center_x'], cell['center_y']),
+            width=cell['width'], height=cell['height'], angle=cell['angle'],
+            facecolor=rate_cmap(norm(cell['rate_hz'])),
+            edgecolor=edge, linewidth=0.7, alpha=0.85, zorder=2))
+
+    if zoom and len(drawable):
+        radii = np.maximum(drawable['width'], drawable['height']).to_numpy() / 2
+        x_lo = float((drawable['center_x'].to_numpy() - radii).min())
+        x_hi = float((drawable['center_x'].to_numpy() + radii).max())
+        y_lo = float((drawable['center_y'].to_numpy() - radii).min())
+        y_hi = float((drawable['center_y'].to_numpy() + radii).max())
+        pad = pad_frac * max(x_hi - x_lo, y_hi - y_lo)
+        x_lo, x_hi, y_lo, y_hi = x_lo - pad, x_hi + pad, y_lo - pad, y_hi + pad
+    else:
+        x_lo, x_hi, y_lo, y_hi = 0.0, float(canvas_w), 0.0, float(canvas_h)
+    ax_mosaic.set_xlim(x_lo, x_hi)
+    ax_mosaic.set_ylim(y_hi, y_lo)          # canvas y runs downwards
+    ax_mosaic.set_aspect('equal')
+    ax_mosaic.set_xlabel('canvas x (pix)')
+    ax_mosaic.set_ylabel('canvas y (pix)')
+
+    cbar = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=rate_cmap),
+                        ax=ax_mosaic, fraction=0.046, pad=0.02,
+                        extend='max' if saturated else 'neither')
+    cbar.set_label(f'rate over {t0:g}–{t1:g} s (Hz)')
+
+    # Under the panel rather than inside it: a corner legend lands on the
+    # mosaic, and these populations reach the corners.
+    ax_mosaic.legend(
+        handles=[Line2D([0], [0], marker='o', linestyle='none', markersize=6,
+                        markerfacecolor='none', markeredgecolor=type_colors[ct],
+                        label=f'{ct} (n={int((activity["cell_type"] == ct).sum())})')
+                 for ct in order],
+        loc='upper center', bbox_to_anchor=(0.5, -0.13), ncol=min(len(order), 4),
+        fontsize=8, frameon=False)
+
+    # --- Right: the spikes those rates came from --------------------------
+    ordered = pd.concat(
+        [activity[activity['cell_type'] == ct].sort_values('rate_hz')
+         for ct in order],
+        ignore_index=True) if order else activity
+
+    boundaries, row = [], 0
+    for ct in order:
+        block = ordered[ordered['cell_type'] == ct]
+        color = type_colors.get(ct, NEUTRAL_GRAY)
+        for _, cell in block.iterrows():
+            spikes = cell['spike_times_s']
+            if len(spikes):
+                ax_raster.plot(spikes, np.full(len(spikes), row), '|',
+                               color=color, markersize=raster_marker_size * 3,
+                               markeredgewidth=raster_marker_size)
+            row += 1
+        boundaries.append((ct, row, len(block)))
+        if ct != order[-1]:
+            ax_raster.axhline(row - 0.5, color=NEUTRAL_GRAY,
+                              linewidth=0.5, alpha=0.5)
+
+    ax_raster.set_xlim(t0, t1)
+    ax_raster.set_ylim(-0.5, max(row - 0.5, 0.5))
+    ax_raster.set_xlabel('time in epoch (s)')
+    ax_raster.set_ylabel('cell, by type then rate')
+    # Label each type block at its middle rather than every cell on the axis.
+    ticks, labels, start = [], [], 0
+    for ct, end, n in boundaries:
+        if n:
+            ticks.append((start + end - 1) / 2.0)
+            labels.append(ct)
+        start = end
+    ax_raster.set_yticks(ticks)
+    ax_raster.set_yticklabels(labels, fontsize=8)
+
+    if title is None:
+        title = (f'epoch {epoch_index}, {t0:g}–{t1:g} s — '
+                 f'{len(drawable)} cells on the mosaic')
+        if n_no_rf:
+            title += f' ({n_no_rf} more with no matched RF, in the raster only)'
+    fig.suptitle(title)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    return fig
+
+
 def plot_stim_with_mosaic(
     stim_frame: np.ndarray,
     analysis_chunk,
