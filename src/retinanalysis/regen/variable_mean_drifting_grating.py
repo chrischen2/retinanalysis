@@ -50,6 +50,14 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
+from retinanalysis.utils.stimulus_frame import (
+    apply_circular_aperture,
+    canvas_offsets,
+    grating_luminance,
+    project_on_axis,
+    um_to_pixels,
+)
+
 
 __all__ = [
     'grating_geometry',
@@ -64,11 +72,6 @@ def _epoch_params(stim_block, epoch_index: int) -> Dict:
         raise IndexError(f'epoch {epoch_index} is outside the block '
                          f'(0..{len(df) - 1})')
     return dict(df['epoch_parameters'].iloc[epoch_index])
-
-
-def _um2pix(um: float, microns_per_pixel: float) -> int:
-    """The LcrVideo device's µm → pixel conversion, rounding included."""
-    return int(np.round(float(um) / float(microns_per_pixel)))
 
 
 def grating_geometry(stim_block, epoch_index: int) -> Dict:
@@ -106,13 +109,13 @@ def grating_geometry(stim_block, epoch_index: int) -> Dict:
     bar_um = float(p.get('currentBarWdith', p.get('currentBarWidth')))
     aperture_um = float(p['apertureDiameter'])
 
-    bar_px = _um2pix(bar_um, mpp)
+    bar_px = um_to_pixels(bar_um, mpp)
     if bar_px <= 0:
         raise ValueError(f'bar width {bar_um} µm rounds to {bar_px} pixels at '
                          f'{mpp} µm/pixel — too fine for this display')
     # MATLAB: round(um2pix(apertureDiameter/2))*2 — halved, converted, doubled,
     # so the diameter in pixels is always even.
-    aperture_px = _um2pix(aperture_um / 2.0, mpp) * 2
+    aperture_px = um_to_pixels(aperture_um / 2.0, mpp) * 2
 
     return {
         'canvas_w': canvas_w,
@@ -171,45 +174,31 @@ def grating_frame(stim_block, epoch_index: int, time_s: float = 0.0,
         caller can label the frame without recomputing it.
     """
     g = geometry or grating_geometry(stim_block, epoch_index)
-    step = max(1, int(downsample))
 
-    xs = np.arange(0, g['canvas_w'], step, dtype=float) + 0.5 * step
-    ys = np.arange(0, g['canvas_h'], step, dtype=float) + 0.5 * step
-    x, y = np.meshgrid(xs, ys)
+    # Everything is measured from the canvas center: that is where the grating
+    # and the aperture are positioned, and where the protocol's phase offset
+    # puts a zero crossing — which is why no phase term is needed here beyond
+    # the drift.
+    dx, dy = canvas_offsets(g['canvas_w'], g['canvas_h'], downsample=downsample)
+    axis = project_on_axis(dx, dy, g['orientation_deg'])
 
-    # Everything is measured from the canvas center: that is where the
-    # grating and the aperture are positioned, and where the phase offset
-    # puts a zero crossing.
-    dx = x - g['center_x']
-    dy = y - g['center_y']
+    grating = grating_luminance(
+        axis,
+        spatial_freq_cyc_per_px=g['spatial_freq_cyc_per_px'],
+        mean_intensity=g['mean_intensity'],
+        contrast=g['contrast'],
+        phase_rad=2 * np.pi * g['temporal_freq_hz'] * float(time_s),
+        profile=g['spatial_class'],
+    )
 
-    # Canvas y runs downwards, so a positive orientation reads clockwise on
-    # the display. The projection onto the grating axis is what varies; the
-    # perpendicular direction is constant along a bar.
-    theta = np.deg2rad(g['orientation_deg'])
-    axis = dx * np.cos(theta) + dy * np.sin(theta)
-
-    phase = (2 * np.pi * g['spatial_freq_cyc_per_px'] * axis
-             + 2 * np.pi * g['temporal_freq_hz'] * float(time_s))
-    wave = np.sin(phase)
-    if g['spatial_class'].lower().startswith('square'):
-        wave = np.sign(wave)
-
-    # Stage's Grating carries color = 2*mean and a texture spanning
-    # (1 ± contrast)/2, so the luminance is mean*(1 + contrast*wave).
-    grating = g['mean_intensity'] * (1.0 + g['contrast'] * wave)
-
-    # Background first, then the mean-colored aperture square, then the
-    # grating inside the circle — the order the presentation stacks them.
-    frame = np.zeros_like(grating)
-    radius = g['aperture_diameter_px'] / 2.0
-    if radius > 0:
-        square = (np.abs(dx) <= radius) & (np.abs(dy) <= radius)
-        frame[square] = g['mean_intensity']
-        inside = (dx ** 2 + dy ** 2) <= radius ** 2
-        frame[inside] = grating[inside]
-    else:
-        frame = grating
+    # Background, then the mean-colored aperture square, then the grating
+    # inside the circle — the order the presentation stacks them.
+    frame = apply_circular_aperture(
+        grating, dx, dy,
+        diameter_px=g['aperture_diameter_px'],
+        surround_intensity=g['mean_intensity'],
+        background_intensity=0.0,
+    )
 
     # The display cannot show what it cannot show; a high mean and high
     # contrast together clip at the top.

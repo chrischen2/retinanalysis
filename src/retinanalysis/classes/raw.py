@@ -390,15 +390,28 @@ def plot_sorting_qc(
     -------
     matplotlib Axes
     """
-    # Load epoch_idx if needed (caches inside rt)
-    if rt.epoch_idx != epoch_idx:
+    # Load epoch_idx if needed (caches inside rt). A caller that already
+    # pulled a sub-window with rt.load_window() — the cheap path over a
+    # network mount, where a full 60 s epoch is ~1 GB — keeps it, provided
+    # the window covers what was asked for. Anything else reloads the whole
+    # epoch, which is what a bare rt gives you.
+    loaded_s = (rt.data.shape[1] / rt.sample_rate) if rt.data is not None else 0.0
+    covers = (rt.data is not None
+              and rt.epoch_idx == epoch_idx
+              and rt.window_start_s <= start_time + 1e-9
+              and (end_time is None
+                   or end_time <= rt.window_start_s + loaded_s + 1e-9))
+    if not covers:
         rt.load_epoch_index(epoch_idx, verbose=False)
 
     # Resolve target cell's primary electrode (raw channel index)
     electrode_idx = primary_electrode_of_cell(rb, cell_id)
 
     raw_ts = rt.data[electrode_idx, :]
-    time = np.arange(len(raw_ts)) / rt.sample_rate
+    # Spike times are absolute within the epoch, so the trace's time axis has
+    # to be too — it starts at window_start_s, which is 0 for a full epoch.
+    offset_samples = int(round(rt.window_start_s * rt.sample_rate))
+    time = (np.arange(len(raw_ts)) + offset_samples) / rt.sample_rate
     if end_time is None:
         end_time = time[-1]
     mask = np.where((time >= start_time) & (time <= end_time))[0]
@@ -424,7 +437,9 @@ def plot_sorting_qc(
         sts_ms = df_st.at[idx[0], 'spike_times'][epoch_idx]
         if len(sts_ms) == 0:
             return np.array([], dtype=int)
+        # ms in the epoch -> absolute sample -> index into the loaded array.
         s = np.round(np.asarray(sts_ms) * rt.sample_rate / 1000).astype(int)
+        s -= offset_samples
         s = s[(s >= mask[0]) & (s <= mask[-1])] - sample_offset
         return s
 

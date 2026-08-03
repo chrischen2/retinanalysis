@@ -103,9 +103,12 @@ def make_spatial_noise(df_epochs: pd.DataFrame, center_row: Optional[int]=None,
 
 
 def lcr_video_device_um_to_pix(um_value: float, micronsPerPixel: float) -> int:
-    # Rounding like in LCRVideoDevice.m
-    pix_value = np.round(um_value / micronsPerPixel).astype(int)
-    return pix_value
+    # Rounding like in LCRVideoDevice.m. Kept under this name for the callers
+    # already using it; the implementation lives in utils.stimulus_frame, which
+    # is numpy-only so protocol reconstruction code can use it without pulling
+    # in this module's OpenCV and DataJoint imports.
+    from retinanalysis.utils.stimulus_frame import um_to_pixels
+    return um_to_pixels(um_value, micronsPerPixel)
 
 
 def get_spatial_noise_frames(numXStixels: int, 

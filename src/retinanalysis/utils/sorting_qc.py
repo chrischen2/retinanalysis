@@ -120,38 +120,85 @@ def sample_sorting_qc_cells(
         # visual_qc.csv is optional; missing one is fine on first-time runs.
         pass
 
-    if 'cell_type' in pool.columns and cell_types:
-        pool = pool.loc[pool['cell_type'].isin(list(cell_types))]
+    return sample_cells_by_type(
+        pool, cell_types=cell_types, n_cells_per_type=n_cells_per_type,
+        rate_col=rate_col, sample_strategy=sample_strategy,
+        random_seed=random_seed,
+    )
 
+
+def sample_cells_by_type(
+    pool: pd.DataFrame,
+    *,
+    cell_types: Optional[Sequence[str]] = None,
+    n_cells_per_type: int = 3,
+    rate_col: str = 'mean_rate_hz',
+    sample_strategy: str = 'random',
+    random_seed: Optional[int] = None,
+) -> pd.DataFrame:
+    """Take ``n_cells_per_type`` cells from each type in an already-built pool.
+
+    The selection half of :func:`sample_sorting_qc_cells`, split out because
+    the pool does not have to come from disk. That function reads the
+    ``qc.csv`` an archive run wrote; a notebook that computes its QC table in
+    memory and never archives it — which is the normal shape of a
+    protocol-specific notebook — has the same table already and only needs the
+    sampling. Pass ``qc.query('passes')`` or any frame with ``cell_id`` and
+    ``cell_type``.
+
+    Sorting QC is the case that makes the strategy matter. ``'random'``
+    (default) samples uniformly, which is what you want here: the
+    highest-firing cells are systematically the large, well-isolated units
+    that are easy to sort, so reviewing them tells you least about whether
+    the sort is trustworthy. ``'top_rate'`` is for deliberately digging into
+    the most active cells, and needs no seed to be reproducible.
+
+    Parameters
+    ----------
+    pool : pandas.DataFrame
+        Candidate cells. Needs ``cell_id``; ``cell_type`` to sample per type.
+    cell_types : sequence[str], optional
+        Types to draw from, and the order of the result. Default: every type
+        present, sorted.
+    n_cells_per_type : int
+        Cells per type. Types with fewer contribute all of theirs.
+    random_seed : int, optional
+        Seed for ``'random'``. ``None`` draws a fresh sample each call.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The sampled rows, grouped by type in ``cell_types`` order.
+    """
     if sample_strategy not in ('random', 'top_rate'):
         raise ValueError(
             f'sample_strategy must be "random" or "top_rate", got {sample_strategy!r}')
 
-    # Sample per cell type (in the cell_types order so output is grouped).
-    rng = np.random.default_rng(random_seed)
-    if cell_types and 'cell_type' in pool.columns:
-        keep_rows = []
-        for ct in cell_types:
-            sub = pool.loc[pool['cell_type'] == ct]
-            if sub.empty:
-                continue
-            n = min(n_cells_per_type, len(sub))
-            if sample_strategy == 'top_rate' and rate_col in sub.columns:
-                picked = sub.sort_values(rate_col, ascending=False).head(n)
-            else:
-                # Random: numpy choice over the row indices for determinism
-                # when random_seed is provided.
-                idx = rng.choice(len(sub), size=n, replace=False)
-                picked = sub.iloc[np.sort(idx)]
-            keep_rows.append(picked)
-        sample = pd.concat(keep_rows, ignore_index=True) if keep_rows else pool.head(0)
-    else:
-        n = min(n_cells_per_type, len(pool))
-        if sample_strategy == 'top_rate' and rate_col in pool.columns:
-            sample = pool.sort_values(rate_col, ascending=False).head(n)
+    has_type = 'cell_type' in pool.columns
+    if has_type:
+        if cell_types is None:
+            cell_types = sorted(pool['cell_type'].dropna().unique())
         else:
-            idx = rng.choice(len(pool), size=n, replace=False) if n > 0 else []
-            sample = pool.iloc[np.sort(idx)] if n > 0 else pool.head(0)
+            cell_types = list(cell_types)
+        pool = pool.loc[pool['cell_type'].isin(cell_types)]
+
+    rng = np.random.default_rng(random_seed)
+
+    def _take(sub: pd.DataFrame) -> pd.DataFrame:
+        n = min(n_cells_per_type, len(sub))
+        if n <= 0:
+            return sub.head(0)
+        if sample_strategy == 'top_rate' and rate_col in sub.columns:
+            return sub.sort_values(rate_col, ascending=False).head(n)
+        # Choose over row positions so a given seed reproduces the sample.
+        return sub.iloc[np.sort(rng.choice(len(sub), size=n, replace=False))]
+
+    if has_type and cell_types:
+        picked = [_take(pool.loc[pool['cell_type'] == ct]) for ct in cell_types]
+        picked = [p for p in picked if not p.empty]
+        sample = pd.concat(picked, ignore_index=True) if picked else pool.head(0)
+    else:
+        sample = _take(pool)
 
     keep = [c for c in ('cell_id', 'cell_type', rate_col, 'n_epochs')
             if c in sample.columns]
