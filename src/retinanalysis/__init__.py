@@ -178,6 +178,7 @@ _ATTR_TO_MODULE = {
     'filter_cells_by_qc': 'retinanalysis.utils.protocol_qc',
     'suggest_epoch_range': 'retinanalysis.utils.protocol_qc',
     'plot_epoch_range': 'retinanalysis.utils.protocol_qc',
+    'plot_qc_mosaic': 'retinanalysis.utils.protocol_qc',
     'parse_protocol_source': 'retinanalysis.utils.protocol_source',
     'protocol_source_path': 'retinanalysis.utils.protocol_source',
     'block_parameters': 'retinanalysis.utils.protocol_source',

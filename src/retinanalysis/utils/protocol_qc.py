@@ -61,6 +61,7 @@ __all__ = [
     'epoch_population_counts',
     'suggest_epoch_range',
     'plot_epoch_range',
+    'plot_qc_mosaic',
     'epoch_condition_table',
 ]
 
@@ -760,6 +761,139 @@ def plot_epoch_range(result: dict, condition_values=None, ax=None,
     ax.grid(True, linewidth=0.5, alpha=0.35)
     ax.set_axisbelow(True)
     return ax
+
+
+def plot_qc_mosaic(pipeline, qc, cell_types=None, std_scaling: float = 1.6,
+                   ncols: int = 4, typing_file: Optional[str] = None,
+                   title: Optional[str] = None):
+    """The mosaic with the QC decision drawn on it: kept filled, dropped open.
+
+    A pass/fail table says how many cells a gate removed; it does not say
+    *where* they were. Those are different failures. A gate that drops weak
+    cells scattered through the mosaic has thinned the population evenly and
+    the survivors still tile the array; a gate that empties one corner has
+    removed a region of retina, and any population average afterwards is an
+    average over the part that stayed. Only the mosaic separates the two.
+
+    One panel per cell type, every RF at ``std_scaling`` σ, on identical axes
+    so the panels are comparable. Cells in ``qc`` that never matched a noise
+    cluster have no receptive field to draw and are counted in the figure
+    title rather than silently dropped from the picture.
+
+    Parameters
+    ----------
+    pipeline : MEAPipeline
+        Supplies ``match_dict`` (noise id → protocol id) and the analysis
+        chunk the RFs live in.
+    qc : pandas.DataFrame
+        Output of :func:`filter_cells_by_qc` — needs ``cell_id`` (protocol
+        ids), ``cell_type`` and the boolean ``passes``.
+    cell_types : sequence[str], optional
+        Panels to draw, in this order. Default: every type in ``qc``.
+    ncols : int
+        Panels per row.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Ellipse
+
+    from .style import NEUTRAL_GRAY, apply_publication_style, colors_for_celltypes
+    from .vision_utils import get_ells
+
+    apply_publication_style()
+
+    analysis_chunk = pipeline.analysis_chunk
+    rf_params = getattr(analysis_chunk, 'rf_params', {}) or {}
+    # match_dict is keyed noise id → protocol id; the QC table speaks protocol.
+    to_noise = {int(v): int(k) for k, v in pipeline.match_dict.items()}
+
+    if cell_types is None:
+        cell_types = [ct for ct in qc['cell_type'].dropna().unique()]
+    cell_types = [ct for ct in cell_types if (qc['cell_type'] == ct).any()]
+    if not cell_types:
+        raise ValueError('None of the requested cell types are in the QC table.')
+
+    type_colors = colors_for_celltypes(list(cell_types))
+
+    # {cell_type: {'kept': {noise_id: protocol_id}, 'dropped': {...}}}, plus a
+    # count of the cells that have no RF to draw.
+    drawn, n_no_rf = {}, 0
+    for ct in cell_types:
+        rows = qc[qc['cell_type'] == ct]
+        groups = {}
+        for label in ('kept', 'dropped'):
+            wanted = rows[rows['passes'] == (label == 'kept')]['cell_id'].astype(int)
+            ids = {}
+            for pid in wanted:
+                nid = to_noise.get(int(pid))
+                if nid is None or nid not in rf_params:
+                    n_no_rf += 1
+                    continue
+                ids[nid] = int(pid)
+            groups[label] = ids
+        drawn[ct] = groups
+
+    # Geometry once, in canvas pixels, through the same path every other
+    # mosaic in the package uses.
+    by_type = {f'{ct}|{label}': list(ids)
+               for ct, groups in drawn.items()
+               for label, ids in groups.items() if ids}
+    d_ells, _ = (get_ells(analysis_chunk, by_type, std_scaling=std_scaling,
+                          units='pixels') if by_type else ({}, None))
+
+    canvas_w, canvas_h = analysis_chunk.canvas_size
+    ncols = max(1, min(int(ncols), len(cell_types)))
+    nrows = int(np.ceil(len(cell_types) / ncols))
+    panel_w = 3.6
+    fig, axes = plt.subplots(nrows, ncols, squeeze=False,
+                             figsize=(panel_w * ncols,
+                                      panel_w * (canvas_h / canvas_w) * nrows + 0.6))
+
+    for ax, ct in zip(axes.ravel(), cell_types):
+        color = type_colors.get(ct, NEUTRAL_GRAY)
+        for label in ('dropped', 'kept'):      # kept on top
+            for ell in d_ells.get(f'{ct}|{label}', {}).values():
+                keep = label == 'kept'
+                ax.add_patch(Ellipse(
+                    xy=ell.center, width=ell.width, height=ell.height,
+                    angle=ell.angle,
+                    facecolor=color if keep else 'none',
+                    edgecolor=color,
+                    alpha=0.55 if keep else 0.9,
+                    linewidth=0.9 if keep else 0.7,
+                    linestyle='-' if keep else ':',
+                    zorder=3 if keep else 2))
+        n_kept, n_drop = (len(drawn[ct]['kept']), len(drawn[ct]['dropped']))
+        ax.set_xlim(0, canvas_w)
+        ax.set_ylim(canvas_h, 0)               # canvas y runs downwards
+        ax.set_aspect('equal')
+        ax.set_title(f'{ct} — {n_kept} kept, {n_drop} dropped',
+                     fontsize=9, color=color)
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    for ax in axes.ravel()[len(cell_types):]:
+        ax.set_axis_off()
+
+    fig.legend(handles=[
+        Line2D([0], [0], marker='o', linestyle='none', markersize=8,
+               markerfacecolor=NEUTRAL_GRAY, markeredgecolor=NEUTRAL_GRAY,
+               alpha=0.55, label='kept'),
+        Line2D([0], [0], marker='o', linestyle='none', markersize=8,
+               markerfacecolor='none', markeredgecolor=NEUTRAL_GRAY,
+               label='dropped')],
+        loc='lower center', ncol=2, frameon=False, fontsize=9)
+
+    suptitle = title or f'{std_scaling:g} σ receptive fields, by QC outcome'
+    if n_no_rf:
+        suptitle += f'  ({n_no_rf} cells with no matched RF not drawn)'
+    fig.suptitle(suptitle)
+    fig.tight_layout(rect=(0, 0.06, 1, 1))
+    return fig
 
 
 def epoch_condition_table(stim_block, response_block=None, cell_types=None,
