@@ -765,7 +765,8 @@ def plot_epoch_range(result: dict, condition_values=None, ax=None,
 
 def plot_qc_mosaic(pipeline, qc, cell_types=None, std_scaling: float = 1.6,
                    ncols: int = 4, typing_file: Optional[str] = None,
-                   title: Optional[str] = None):
+                   title: Optional[str] = None, zoom: bool = True,
+                   pad_frac: float = 0.04):
     """The mosaic with the QC decision drawn on it: kept filled, dropped open.
 
     A pass/fail table says how many cells a gate removed; it does not say
@@ -775,10 +776,12 @@ def plot_qc_mosaic(pipeline, qc, cell_types=None, std_scaling: float = 1.6,
     removed a region of retina, and any population average afterwards is an
     average over the part that stayed. Only the mosaic separates the two.
 
-    One panel per cell type, every RF at ``std_scaling`` σ, on identical axes
-    so the panels are comparable. Cells in ``qc`` that never matched a noise
-    cluster have no receptive field to draw and are counted in the figure
-    title rather than silently dropped from the picture.
+    One panel per cell type, every RF at ``std_scaling`` σ. All panels get the
+    same window, which is what lets you compare where a type's survivors sit
+    against another's; per-panel autoscaling would put each type's own
+    footprint in the same box and hide exactly that. Cells in ``qc`` that
+    never matched a noise cluster have no receptive field to draw and are
+    counted in the figure title rather than silently dropped from the picture.
 
     Parameters
     ----------
@@ -792,6 +795,16 @@ def plot_qc_mosaic(pipeline, qc, cell_types=None, std_scaling: float = 1.6,
         Panels to draw, in this order. Default: every type in ``qc``.
     ncols : int
         Panels per row.
+    zoom : bool
+        Frame the shared window on the cells rather than on the whole canvas.
+        How much this crops depends on the chunk — a population filling the
+        display barely moves, one sitting in a corner goes from speck to
+        mosaic. The window can extend past the canvas edge, since a cell whose
+        σ ellipse runs off the display is still drawn whole. ``False`` restores
+        the full canvas, the frame to use when where the cells sat on the
+        display is itself the point.
+    pad_frac : float
+        Margin around the zoomed window, as a fraction of its larger side.
 
     Returns
     -------
@@ -846,12 +859,28 @@ def plot_qc_mosaic(pipeline, qc, cell_types=None, std_scaling: float = 1.6,
                           units='pixels') if by_type else ({}, None))
 
     canvas_w, canvas_h = analysis_chunk.canvas_size
+
+    # The window every panel shares. Zoomed, it is the box holding all the
+    # drawn RFs of every type — both groups, since a gate that emptied a
+    # region is only visible if the region is still in frame.
+    x_lo, x_hi, y_lo, y_hi = 0.0, float(canvas_w), 0.0, float(canvas_h)
+    all_ells = [e for ells in d_ells.values() for e in ells.values()]
+    if zoom and all_ells:
+        radii = np.array([max(e.width, e.height) / 2 for e in all_ells])
+        cx = np.array([e.center[0] for e in all_ells])
+        cy = np.array([e.center[1] for e in all_ells])
+        x_lo, x_hi = float((cx - radii).min()), float((cx + radii).max())
+        y_lo, y_hi = float((cy - radii).min()), float((cy + radii).max())
+        pad = pad_frac * max(x_hi - x_lo, y_hi - y_lo)
+        x_lo, x_hi, y_lo, y_hi = x_lo - pad, x_hi + pad, y_lo - pad, y_hi + pad
+
     ncols = max(1, min(int(ncols), len(cell_types)))
     nrows = int(np.ceil(len(cell_types) / ncols))
     panel_w = 3.6
+    panel_aspect = (y_hi - y_lo) / (x_hi - x_lo) if x_hi > x_lo else 1.0
     fig, axes = plt.subplots(nrows, ncols, squeeze=False,
                              figsize=(panel_w * ncols,
-                                      panel_w * (canvas_h / canvas_w) * nrows + 0.6))
+                                      panel_w * panel_aspect * nrows + 0.6))
 
     for ax, ct in zip(axes.ravel(), cell_types):
         color = type_colors.get(ct, NEUTRAL_GRAY)
@@ -868,8 +897,8 @@ def plot_qc_mosaic(pipeline, qc, cell_types=None, std_scaling: float = 1.6,
                     linestyle='-' if keep else ':',
                     zorder=3 if keep else 2))
         n_kept, n_drop = (len(drawn[ct]['kept']), len(drawn[ct]['dropped']))
-        ax.set_xlim(0, canvas_w)
-        ax.set_ylim(canvas_h, 0)               # canvas y runs downwards
+        ax.set_xlim(x_lo, x_hi)
+        ax.set_ylim(y_hi, y_lo)                # canvas y runs downwards
         ax.set_aspect('equal')
         ax.set_title(f'{ct} — {n_kept} kept, {n_drop} dropped',
                      fontsize=9, color=color)
