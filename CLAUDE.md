@@ -82,6 +82,26 @@ so it runs standalone, then:
    `ra.plot_mosaic_activity(...)` draw one epoch's per-cell firing rate on
    the RF mosaic beside the raster it was counted from, over a
    reconstructed stimulus frame (§5 of `variableMeanDriftingGrating`).
+4. Sorting QC on the raw trace (§6): `ra.load_raw_window(response_block,
+   epoch, (t0, t1))` reads one window shared by every cell — and returns
+   `None` with a printed reason instead of raising when the NAS holding the
+   raw `.bin` isn't mounted — then `ra.browse_sorting_qc(raw, ...)` puts a
+   dropdown over `ra.sample_cells_by_type(qc.query('passes'), ...)`. Pass
+   the QC survivors as `candidate_cell_ids` or the legend fills with
+   unmatched clusters.
+5. Phase alignment for any drifting-grating protocol (§7):
+   `ra.phase_alignment_by_condition(pipeline, stim_block, epochs_kept,
+   CONDITION_KEYS, n_shuffles=...)` runs `drift_phase_response` +
+   `phase_period_scan` once per condition — **never pool epochs of
+   different geometry**, drift phase is measured from stimulus onset — and
+   returns `(phase_by_condition, summary)`. `ra.describe_phase_alignment`
+   reports which conditions beat their shuffled null and the per-type
+   residual as a latency; `ra.browse_phase_alignment` draws them. Another
+   protocol reuses all of it by passing its own `geometry_fn`.
+
+Condition labels (figure titles, dropdown entries, printouts) go through
+`ra.condition_label(CONDITION_KEYS, values)`, which takes a groupby tuple
+or an epoch row — otherwise one notebook grows four spellings of one label.
 
 Two traps worth knowing, both hit while building the first one:
 `block_qc_metrics` needs `t_end_ms` (without it the rate gate is NaN and

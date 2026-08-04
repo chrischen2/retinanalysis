@@ -44,6 +44,7 @@ __all__ = [
     'parse_protocol_source',
     'block_parameters',
     'condition_keys',
+    'condition_label',
     'ProtocolSource',
 ]
 
@@ -380,3 +381,41 @@ def condition_keys(stim_block, source: Optional[ProtocolSource] = None) -> List[
             print(f'Declared per-epoch but not varying in this block: {missing} '
                   f'— one level only, or recorded under another name.')
     return keys
+
+
+def condition_label(keys, values, sep: str = ', ', assign: str = ' ',
+                    fmt: str = 'g') -> str:
+    """One condition as text: ``'currentBarWdith 150, currentMean 0.3'``.
+
+    Every figure title, dropdown entry and printed line that names a condition
+    needs the same string, and building it inline is how a notebook ends up
+    with four spellings of one label. ``values`` is whatever holds the levels —
+    a tuple in the order of ``keys`` (what ``groupby`` hands back), or a dict or
+    Series to look them up in (an epoch row).
+
+    ``assign`` is the separator inside a pair; ``' '`` reads better in a title
+    and ``' = '`` in a printout. Values that ``fmt`` cannot format — strings,
+    None — are written as they are rather than raising.
+    """
+    from collections.abc import Mapping
+
+    keys = [keys] if isinstance(keys, str) else list(keys)
+
+    # A Series or a dict is keyed; a tuple from groupby is positional. Both
+    # arrive here, and a tuple has an ``.index`` method, so test for the
+    # keyed shapes rather than for the absence of one.
+    if isinstance(values, Mapping) or hasattr(values, 'iloc'):
+        levels = [values[k] for k in keys]
+    elif isinstance(values, str) or not hasattr(values, '__len__'):
+        levels = [values]
+    else:
+        levels = list(values)
+
+    parts = []
+    for key, level in zip(keys, levels):
+        try:
+            text = format(level, fmt)
+        except (TypeError, ValueError):
+            text = str(level)
+        parts.append(f'{key}{assign}{text}')
+    return sep.join(parts)

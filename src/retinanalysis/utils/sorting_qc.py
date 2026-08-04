@@ -29,8 +29,9 @@ import matplotlib.pyplot as plt
 from ..config.settings import OUTPUT_DIR
 
 
-__all__ = ['sample_sorting_qc_cells', 'sample_and_plot_sorting_qc',
-           'sorting_qc_gui']
+__all__ = ['sample_sorting_qc_cells', 'sample_cells_by_type',
+           'load_raw_window', 'browse_sorting_qc',
+           'sample_and_plot_sorting_qc', 'sorting_qc_gui']
 
 
 def _resolve_protocol_subdir(response_block, protocol_subdir, datafile_name,
@@ -203,6 +204,169 @@ def sample_cells_by_type(
     keep = [c for c in ('cell_id', 'cell_type', rate_col, 'n_epochs')
             if c in sample.columns]
     return sample[keep].reset_index(drop=True)
+
+
+def load_raw_window(
+    response_block,
+    epoch_index: int,
+    window_s: Tuple[float, float],
+    *,
+    verbose: bool = True,
+    on_missing: str = 'warn',
+):
+    """Open the raw ``.bin`` and read one window of one epoch, once.
+
+    The window is what makes raw-trace QC affordable: ``load_window`` keeps
+    every electrode but only the requested samples, so a second of a 60 s epoch
+    is ~15 MB rather than ~920 MB, and every cell inspected in that window
+    shares the one read. That matters because the raw files are canonical on
+    the NAS.
+
+    Which is also why this returns ``None`` instead of raising when they are
+    not reachable. Raw is the only thing in a protocol notebook that needs the
+    NAS mounted, and an unmounted volume should cost the reader one printed
+    line, not a traceback in the middle of a notebook whose other sections all
+    ran. Pass ``on_missing='raise'`` in a script, where silence is worse.
+
+    Parameters
+    ----------
+    response_block : MEAResponseBlock
+        Identifies the experiment and datafile whose ``.bin`` to open.
+    epoch_index : int
+        Block position of the epoch, the same numbering the rest of the
+        notebook uses.
+    window_s : (start, end)
+        Seconds within that epoch. About a second is what a raw trace can
+        actually show — 20 000 samples/s of jagged voltage is already more than
+        a screen resolves.
+    verbose : bool
+        Print what was read, where from, and how large it is.
+    on_missing : ``'warn'`` (default) or ``'raise'``
+
+    Returns
+    -------
+    RawTraces or None
+        Loaded and positioned at the window. ``None`` when the raw store is
+        unreachable and ``on_missing='warn'``.
+    """
+    from ..classes.raw import RawTraces
+
+    if on_missing not in ('warn', 'raise'):
+        raise ValueError(f'on_missing must be "warn" or "raise", '
+                         f'got {on_missing!r}')
+
+    start_s, end_s = (float(w) for w in window_s)
+    try:
+        raw = RawTraces(response_block)
+        raw.load_window(int(epoch_index), start_s, end_s)
+    except FileNotFoundError as err:
+        if on_missing == 'raise':
+            raise
+        print(f'No raw data reachable, so sorting QC is skipped — everything '
+              f'that does not read raw still works.\n  {err}')
+        return None
+
+    if verbose:
+        n_electrodes, n_samples = raw.data.shape
+        print(f'epoch {int(epoch_index)}, {start_s:g}–{end_s:g} s from '
+              f'{"network" if raw.is_network else "local"} storage '
+              f'({raw.binpath})\n  {n_electrodes} electrodes x {n_samples} '
+              f'samples ~ {raw.estimate_window_mb(start_s, end_s):.0f} MB, '
+              f'shared by every cell drawn from it')
+    return raw
+
+
+def browse_sorting_qc(
+    raw,
+    response_block,
+    cells,
+    epoch_index: int,
+    *,
+    window_s: Optional[Tuple[float, float]] = None,
+    candidate_cell_ids: Optional[Iterable[int]] = None,
+    rate_col: str = 'mean_rate_hz',
+    figsize: Tuple[float, float] = (13.0, 3.4),
+    description: str = 'Cell:',
+    **plot_kwargs,
+):
+    """Dropdown over cells, each drawn as its raw trace with spike markers.
+
+    One panel per cell, built on selection and cached, so a sample of a dozen
+    costs one figure at a time. The label carries type, id and firing rate,
+    which is what you need to decide whether a messy-looking trace is
+    surprising.
+
+    Reading the panel: the trace is the cell's strongest electrode, red marks
+    are its spikes and other colors are other cells on that same electrode. A
+    clean sort puts every red mark on a visible downward deflection. Clear
+    waveforms with *no* red mark mean spikes are missing or went to a neighbor;
+    red marks on flat baseline mean template hits that are not spikes. Several
+    same-electrode neighbors firing in near-lockstep is the split-cluster
+    signature, which :func:`retinanalysis.utils.dedup.dedup_pipeline` is the
+    tool for.
+
+    Parameters
+    ----------
+    raw : RawTraces
+        From :func:`load_raw_window`, already holding the window. ``None`` is
+        accepted and returns ``None``, so a caller whose NAS is not mounted
+        needs no branch of its own.
+    cells : pandas.DataFrame or iterable[int]
+        The cells to offer. A frame from :func:`sample_cells_by_type` labels
+        each entry with its type and rate; bare ids are labelled by id.
+    window_s : (start, end), optional
+        Seconds within the epoch. Defaults to exactly what ``raw`` holds, which
+        is what you want — asking for more silently triggers a full-epoch
+        reload inside :func:`~retinanalysis.classes.raw.plot_sorting_qc`.
+    candidate_cell_ids : iterable[int], optional
+        Restrict the same-electrode neighbors to these. Pass the QC survivors:
+        the unmatched clusters would bury the panel in legend.
+
+    Returns
+    -------
+    The browser widget, or ``None`` when there is nothing to show.
+    """
+    from ..classes.raw import plot_sorting_qc
+    from .browse import figure_to_png, png_browser
+
+    if raw is None:
+        print('No raw data loaded — nothing to browse.')
+        return None
+
+    if window_s is None:
+        start_s = float(raw.window_start_s)
+        window_s = (start_s, start_s + raw.data.shape[1] / raw.sample_rate)
+    start_s, end_s = (float(w) for w in window_s)
+
+    if isinstance(cells, pd.DataFrame):
+        rows = list(cells.itertuples())
+        options = []
+        for row in rows:
+            cell_id = int(row.cell_id)
+            label = f'cell {cell_id}'
+            cell_type = getattr(row, 'cell_type', None)
+            if cell_type:
+                label = f'{cell_type} {label}'
+            rate = getattr(row, rate_col, None)
+            if rate is not None and np.isfinite(rate):
+                label = f'{label} ({rate:.1f} Hz)'
+            options.append((label, cell_id))
+    else:
+        options = [(f'cell {int(c)}', int(c)) for c in cells]
+
+    candidates = (None if candidate_cell_ids is None
+                  else [int(c) for c in candidate_cell_ids])
+
+    def _render(cell_id):
+        fig, ax = plt.subplots(figsize=figsize)
+        plot_sorting_qc(raw, response_block, int(cell_id), int(epoch_index),
+                        start_time=start_s, end_time=end_s,
+                        candidate_cell_ids=candidates, ax=ax, **plot_kwargs)
+        fig.tight_layout()
+        return None, figure_to_png(fig)
+
+    return png_browser(options, _render, description=description,
+                       empty_message='No cells sampled to inspect.')
 
 
 def _hp_filter(x: np.ndarray, fs: float, cutoff_hz: float = 300.0,

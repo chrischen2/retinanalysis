@@ -45,7 +45,11 @@ import numpy as np
 __all__ = [
     'drift_phase_response',
     'phase_period_scan',
+    'phase_alignment_by_condition',
+    'residual_latency_table',
+    'describe_phase_alignment',
     'plot_phase_alignment',
+    'browse_phase_alignment',
 ]
 
 
@@ -356,6 +360,184 @@ def phase_period_scan(phase_df, geometry: Dict,
     }
 
 
+def phase_alignment_by_condition(pipeline, stim_block, epochs,
+                                 condition_keys: Sequence[str],
+                                 *,
+                                 geometry_fn=None,
+                                 cell_types: Optional[Iterable[str]] = None,
+                                 cell_ids: Optional[Iterable[int]] = None,
+                                 window_s: Optional[Tuple[float, float]] = None,
+                                 min_spikes: int = 30,
+                                 n_shuffles: int = 0,
+                                 epoch_col: str = 'epoch',
+                                 **scan_kwargs) -> Tuple[Dict, 'pd.DataFrame']:
+    """Measure and scan the phase alignment separately for each condition.
+
+    **A phase estimate may only pool epochs that ran the same geometry.** Drift
+    phase is measured from stimulus onset, so epochs of one condition are in
+    register with each other and their F1 vectors add, while a different bar
+    width is a different stimulus with a different prediction. That is the
+    whole reason this is a loop over conditions rather than one call — every
+    protocol that alternates grating parameters needs the same loop.
+
+    Parameters
+    ----------
+    pipeline, stim_block
+        The pipeline supplies spikes and receptive fields; the stimulus block
+        supplies each epoch's recorded parameters, so the geometry comes from
+        the epoch that ran rather than from the protocol's declared defaults.
+    epochs : pandas.DataFrame
+        The analyzed epochs, one row each, with ``epoch_col`` and every name in
+        ``condition_keys`` as columns — an ``epoch_condition_table`` restricted
+        to the epochs being kept.
+    condition_keys : sequence[str]
+        The condition axes to group on, from
+        :func:`~retinanalysis.utils.protocol_source.condition_keys`.
+    geometry_fn : callable, optional
+        ``(stim_block, epoch_index) -> geometry dict``. Defaults to
+        :func:`~retinanalysis.regen.variable_mean_drifting_grating
+        .grating_geometry`; pass another protocol's regenerator to reuse this.
+    n_shuffles : int
+        Shuffled-position null for each condition's scan. On a handful of
+        driven cells a grid search finds a peak in noise, so without this there
+        is nothing to compare a concentration against.
+    **scan_kwargs
+        Passed to :func:`phase_period_scan` (``orientations_deg``,
+        ``period_range_px``, ``min_cells_per_type``, …).
+
+    Returns
+    -------
+    (phase_by_condition, summary)
+        ``phase_by_condition`` maps a condition — always a tuple of levels, in
+        ``condition_keys`` order — to ``(phases, scan, geometry)``. ``summary``
+        is one row per condition: the condition levels, ``n_epochs``, the
+        stimulus's own ``period_px`` / ``orient_deg``, how many cells were
+        driven and how modulated they were, what the phases ``picks_px`` /
+        ``picks_deg``, the concentration ``R``, and ``shuffled_95``.
+    """
+    import pandas as pd
+
+    if geometry_fn is None:
+        from retinanalysis.regen.variable_mean_drifting_grating import (
+            grating_geometry)
+        geometry_fn = grating_geometry
+
+    keys = [condition_keys] if isinstance(condition_keys, str) else list(condition_keys)
+
+    phase_by_condition: Dict[Tuple, Tuple] = {}
+    rows = []
+    for levels, group in epochs.groupby(keys):
+        levels = levels if isinstance(levels, tuple) else (levels,)
+        epoch_indices = group[epoch_col].astype(int).tolist()
+        geometry = geometry_fn(stim_block, epoch_indices[0])
+
+        phases = drift_phase_response(pipeline, epoch_indices, geometry,
+                                      window_s=window_s,
+                                      cell_types=cell_types,
+                                      cell_ids=cell_ids,
+                                      min_spikes=min_spikes)
+        scan = phase_period_scan(phases, geometry, n_shuffles=n_shuffles,
+                                 **scan_kwargs)
+        phase_by_condition[levels] = (phases, scan, geometry)
+
+        # Cells outside the aperture were looking at black, so they are not
+        # part of any claim about the grating.
+        driven = phases[phases['inside_aperture']
+                        & phases['resp_phase_rad'].notna()]
+        rows.append({
+            **dict(zip(keys, levels)),
+            'n_epochs': len(epoch_indices),
+            'period_px': scan['true_period_px'],
+            'orient_deg': scan['true_orientation_deg'],
+            'n_cells': len(driven),
+            'median_f1': driven['f1_strength'].median(),
+            'n_modulated': int((driven['rayleigh_p'] < 0.01).sum()),
+            'picks_px': scan['best_period_px'],
+            'picks_deg': scan['best_orientation_deg'],
+            'R': scan['best_concentration'],
+            'shuffled_95': scan.get('null_95', np.nan),
+        })
+
+    summary = pd.DataFrame(rows).sort_values(keys).reset_index(drop=True)
+    return phase_by_condition, summary
+
+
+def residual_latency_table(scan: Dict, geometry: Dict) -> 'pd.DataFrame':
+    """Per cell type, the mean residual phase read as a response latency.
+
+    The residual holds constant across cells when the prediction holds, and
+    what it holds at is the cell's latency expressed as a phase — so it is a
+    latency **mod one drift cycle** (500 ms at 2 Hz), not an absolute one. ON
+    and OFF cells come out half a cycle apart, which is why this is per type.
+
+    Returns a frame with ``cell_type``, ``n``, ``concentration``,
+    ``mean_residual_deg`` and ``lag_ms``.
+    """
+    import pandas as pd
+
+    cycle_ms = 1000.0 / float(geometry['temporal_freq_hz'])
+    rows = [{
+        'cell_type': cell_type,
+        'n': int(d['n']),
+        'concentration': float(d['concentration']),
+        'mean_residual_deg': float(np.degrees(d['mean_residual_rad'])),
+        'lag_ms': float((-d['mean_residual_rad'] % (2 * np.pi))
+                        / (2 * np.pi) * cycle_ms),
+        'cycle_ms': cycle_ms,
+    } for cell_type, d in scan['by_type'].items()]
+    return pd.DataFrame(rows)
+
+
+def describe_phase_alignment(summary, phase_by_condition,
+                             condition_keys: Sequence[str],
+                             verbose: bool = True) -> Dict:
+    """Which conditions align above their own null, and what latency that implies.
+
+    Two questions, in the order they have to be asked. **Did anything align?**
+    — only a peak that beats its shuffled null is evidence, because the grid
+    search finds a peak in noise when few cells are driven. **If so, at what
+    lag?** — the mean residual per cell type in the best-aligned condition,
+    from :func:`residual_latency_table`.
+
+    Returns ``{'aligned': DataFrame, 'best_condition': tuple or None,
+    'latency': DataFrame or None}``, and prints the same when ``verbose``.
+    """
+    from .protocol_source import condition_label
+
+    keys = [condition_keys] if isinstance(condition_keys, str) else list(condition_keys)
+    aligned = summary[summary['R'] > summary['shuffled_95']]
+
+    if verbose:
+        print(f'{len(aligned)} of {len(summary)} conditions align above the '
+              f'shuffle null:')
+        for _, row in aligned.iterrows():
+            print(f"  {condition_label(keys, row)} — {int(row['n_cells'])} "
+                  f"cells, {int(row['n_modulated'])} of them modulated at "
+                  f"p<0.01; the "
+                  f"phases pick {row['picks_px']:.1f} px at "
+                  f"{row['picks_deg']:.0f}° against a stimulus of "
+                  f"{row['period_px']:.0f} px at {row['orient_deg']:.0f}°  "
+                  f"(R = {row['R']:.2f}, shuffled {row['shuffled_95']:.2f})")
+
+    if summary.empty or not summary['R'].notna().any():
+        return {'aligned': aligned, 'best_condition': None, 'latency': None}
+
+    best_key = tuple(summary.loc[summary['R'].idxmax(), keys].tolist())
+    _, best_scan, best_geometry = phase_by_condition[best_key]
+    latency = residual_latency_table(best_scan, best_geometry)
+
+    if verbose:
+        cycle_ms = latency['cycle_ms'].iloc[0] if len(latency) else float('nan')
+        print(f'\nresidual phase by type at {condition_label(keys, best_key)} '
+              f'(a latency mod {cycle_ms:.0f} ms):')
+        for row in latency.itertuples():
+            print(f'  {row.cell_type:5s} n = {row.n:3d}   '
+                  f'R = {row.concentration:.2f}   mean residual '
+                  f'{row.mean_residual_deg:7.1f}°  ->  {row.lag_ms:.0f} ms')
+
+    return {'aligned': aligned, 'best_condition': best_key, 'latency': latency}
+
+
 def plot_phase_alignment(phase_df, geometry: Dict, scan: Optional[Dict] = None,
                          cell_types: Optional[Iterable[str]] = None,
                          inside_only: bool = True,
@@ -472,3 +654,37 @@ def plot_phase_alignment(phase_df, geometry: Dict, scan: Optional[Dict] = None,
         fig.suptitle(title, y=1.02)
     fig.tight_layout()
     return fig
+
+
+def browse_phase_alignment(phase_by_condition, condition_keys: Sequence[str],
+                           description: str = 'Condition:', **plot_kwargs):
+    """Dropdown over conditions, each drawn by :func:`plot_phase_alignment`.
+
+    The label carries the condition's concentration against its shuffled null,
+    so the one that aligned is findable without rendering the rest — and the
+    ones that did not are worth a look too, since a failed alignment and a
+    resolved-but-offset one look nothing alike.
+
+    Takes the ``phase_by_condition`` mapping from
+    :func:`phase_alignment_by_condition`. Returns the widget, or ``None`` when
+    there is nothing to show.
+    """
+    from .browse import figure_to_png, png_browser
+    from .protocol_source import condition_label
+
+    keys = [condition_keys] if isinstance(condition_keys, str) else list(condition_keys)
+
+    def _render(key):
+        phases, scan, geometry = phase_by_condition[key]
+        fig = plot_phase_alignment(phases, geometry, scan,
+                                   title=condition_label(keys, key),
+                                   **plot_kwargs)
+        return None, figure_to_png(fig)
+
+    options = [
+        (f"{condition_label(keys, key)}   (R {scan['best_concentration']:.2f} "
+         f"vs shuffled {scan.get('null_95', float('nan')):.2f})", key)
+        for key, (_, scan, _) in phase_by_condition.items()
+    ]
+    return png_browser(options, _render, description=description,
+                       empty_message='No conditions scanned.')
