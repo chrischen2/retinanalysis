@@ -813,6 +813,7 @@ def movie_repeat_analysis(
     offline,
     *,
     cycle_sec: float = 15.0,
+    movie_onset_ms: Optional[float] = None,
     drop_first_sec: float = 1.0,
     condition_keys: Optional[Sequence[str]] = None,
     cell_types: Optional[Iterable[str]] = None,
@@ -826,6 +827,21 @@ def movie_repeat_analysis(
     Protocol: ``preTime + stimTime`` where ``stimTime = 2 × cycle_sec``.
     For each cell × condition, build the per-trial PSTH over cycle 1
     and cycle 2 (each ``cycle_sec - drop_first_sec`` long), then report:
+
+    .. warning::
+
+       **The defaults are the protocol's nominal timing, and on a rig whose
+       display does not run at its declared refresh rate that is not when the
+       movie played.** Stage advances its clock by ``1/declaredRefreshRate``
+       per rendered frame, so a display running at 60.31 Hz against a declared
+       60 puts movie onset at 29.843 s rather than ``preTime`` = 30.000 and
+       makes the cycle 14.922 s rather than ``stimTime/2`` = 15.000. Folding
+       cycle 2 onto cycle 1 at the nominal period misaligns them by 78 ms,
+       which lowers ``corr_cycle12`` for a reason that has nothing to do with
+       the retina. Take both numbers from :func:`retinanalysis.repeat_timing`,
+       which reads them off ``frame_times_ms``, and pass them as ``cycle_sec``
+       and ``movie_onset_ms``. ``demos/analyzeEyeMovementTraj.ipynb`` §5
+       measures them and the appendix cell passes them in.
 
     - ``corr``       — Pearson correlation between mean cycle-1 and cycle-2 PSTHs.
     - ``rmse``       — RMS deviation between mean cycle-1 and cycle-2 PSTHs (Hz).
@@ -843,7 +859,11 @@ def movie_repeat_analysis(
     keys = _resolve_condition_keys_from_offline(offline, condition_keys)
     cond_to_epochs = _epoch_indices_by_condition(offline, keys)
 
-    pre_ms = float(offline.timing.get('preTime_ms', 0))
+    # `pre_ms` is where the movie starts. The nominal preTime is only right
+    # when the display ran at its declared refresh rate — see the warning in
+    # the docstring, and pass movie_onset_ms from ra.repeat_timing otherwise.
+    pre_ms = (float(movie_onset_ms) if movie_onset_ms is not None
+              else float(offline.timing.get('preTime_ms', 0)))
     stim_ms = float(offline.timing.get('stimTime_ms', 0))
     cycle_ms = cycle_sec * 1000.0
     drop_ms = drop_first_sec * 1000.0

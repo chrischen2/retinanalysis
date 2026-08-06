@@ -53,11 +53,12 @@ a date can exist on the NAS and still be invisible.
 Notebooks live under `demos/`. Convention: **one notebook per
 protocol** so each stays focused.
 
-- `demos/chrisMain.ipynb` — `EyeMovementTrajectoryAlternatingBackground`
-  (sections 1–12: setup §1–§3, QC §4, visual-QC GUI §5, single-date
-  archive §6, sorting-QC PNGs §7, interactive sorting-QC GUI §8,
-  batch archive §9, offline store §10, per-date analyses §11,
-  cross-date pooling §12).
+- `demos/analyzeEyeMovementTraj.ipynb` — `EyeMovementTrajectoryAlternating
+  Background`. **Rebuilt 2026-08-06 around the population code**; the old
+  `chrisMain.ipynb` content (visual-QC GUI, archives, sorting QC, offline
+  store, single-cell analyses, cross-date pooling) is preserved verbatim as
+  the **appendix**, which keeps its own old §3c–§12 numbering. The new front
+  half is §1–§13; see "Population code for a repeated movie" below.
 - `demos/oneDNoise.ipynb` — `monitorVariableMeanNoiseEpochs` (1-D
   temporal noise around alternating mean intensities; LN-model fits
   via cascadegraph).
@@ -210,6 +211,98 @@ is the same condition — for an alternating protocol both
 `min_reliability_r` and a flat `min_frac_epochs_above_rate` of 0.8 reject
 healthy cells for responding to the stimulus.
 
+**The "dominant axis" gate is a grating idiom, not a general one.** The
+drifting-grating notebook picks the QC gate axis as whichever condition axis
+spreads population rate widest. `EyeMovementTrajectoryAlternatingBackground`
+shows why that can't be automatic: image spreads rate 1.9x against
+background scale's 1.7x, so the rule picks image, scores every cell on the
+six epochs of one image, and puts *both* adaptation states back into the
+gate it existed to keep separate. Only an axis that is an **adaptation
+state** belongs there; a stimulus axis (which image) gates on whether a cell
+liked that image. `analyzeEyeMovementTraj` §4 names `GATE_AXIS` explicitly
+and prints both spreads so the choice is checkable.
+
+## Population code for a repeated movie (`utils/population_code.py`)
+
+`EyeMovementTrajectoryAlternatingBackground` writes its eye-movement walk
+down twice (`xTraj = [xTraj, xTraj]`), so each epoch's `stimTime` is **two
+identical presentations of one movie** after 30 s of adapting background at
+0.1x or 10x the image mean. That internal repeat is the design: it holds the
+stimulus fixed while adaptation state runs, which is worth more than the
+3 repeats per condition the block has. `demos/analyzeEyeMovementTraj.ipynb`
+§5–§12 is the worked example; nothing in the module is protocol-specific
+beyond the timing, which is read off the frames.
+
+1. **The cycle is not `stimTime/2`.** Stage advances its clock by
+   `1/declaredRefreshRate` per rendered frame, so a display running at
+   60.31 Hz against a declared 60 plays the movie 0.52% fast: on
+   20230502C/data018 the movie starts at **29.843 s** (not `preTime` =
+   30.000) and one cycle is **14.922 s** (not 15.000). Folding cycle 2 onto
+   cycle 1 at the nominal period misaligns them by 78 ms — three to four
+   times a parasol cell's whole response timescale — and the resulting drop
+   in correlation looks exactly like the recovery being measured. This is
+   the same class of error as the grating's drift frequency.
+   `ra.repeat_timing(stim_block, n_cycles=2)` takes both numbers from
+   `frame_times_ms`; `ra.estimate_cycle_period` recovers the cycle from the
+   spikes alone (14922.1 ms against the frames' 14922.0) as the independent
+   check. **`movie_repeat_analysis` in `protocols/eye_movement_alt_bg.py`
+   still defaults to the nominal timing** — the offline store carries only
+   the protocol's own numbers — so pass it `cycle_sec` and `movie_onset_ms`
+   from `repeat_timing`.
+2. **Timescales are measured, not chosen.** `ra.response_timescale` returns a
+   `ResponseTimescale` whose `.sigma_ms()` and `.vp_cost_per_s()` feed
+   everything downstream. The estimator is **cross-trial coherence** — the
+   reproducible fraction of power at each frequency — cut off where it meets
+   a noise floor taken from the cell's own spectrum above 100 Hz. A
+   time-domain autocorrelation width does **not** work here and was tried
+   first: the reproducible slow envelope puts the ACF's area at long lags, so
+   two thirds of cells never reached 1/e in 400 ms and the rest returned the
+   bin width. Read the cutoff off the **per-type mean** spectrum, not the
+   median of per-cell ones — one cell over 3 repeats has a noise floor an
+   order of magnitude above a mean over 90, so per-cell cutoffs are
+   systematically early (126–206 ms per-cell against 53–88 ms per-type).
+   Comes out parasol σ 20–21 ms, midget σ 28–33 ms.
+3. **`ra.repeat_response` is the one array everything reads**:
+   `(cell, epoch, cycle, movie time)` in Hz, per-cell-type smoothing, 5 ms
+   bins, ~143 MB for 250 cells x 24 epochs. Gaussian in `mode='nearest'`,
+   never `'wrap'` — the loop repeats a trajectory, it is not periodic.
+4. **`ra.population_similarity` is the headline.** Cross-condition
+   correlation of the vectorised `(cell x time)` trial means, divided by each
+   condition's own repeat reliability (`rho_corrected`). Reliability comes
+   from every distinct pair of single trials plus Spearman-Brown to n, which
+   at n=3 enumerates every split without having to choose unequal halves.
+   Three normalisations, all reported: `raw` (inflated by across-cell rate
+   offsets), `centered` (the one to lead with), `shape` (z-scored per cell —
+   gain removed, so this is what separates "adaptation changed the gain" from
+   "adaptation changed the response"). `match_cells='min'` subsamples every
+   type to the smallest, since a correlation over 94 cells and one over 26
+   are not the same estimator.
+5. **`ra.population_spike_distance` needs its control read with it.** VP
+   distance mixes rate and timing by construction, and at cost 0 it *is* the
+   count difference. `d_excess_count_only` is the same statistic under that
+   count-only metric; on this block `d_excess` is about half of it and both
+   fall by the same factor between cycles, so **the decline is rate
+   convergence seen through a timing metric**, not independent evidence about
+   timing. `shape`-normalised correlation is where to look for that.
+6. **`ra.time_resolved_similarity` divides the cycle evenly** (`n_sections`,
+   default 3) rather than taking a fixed 5 s width — the cycle is 14.922 s,
+   so 5 s sections would drop a third of every cycle. Sections k of cycle 1
+   and cycle 2 share their stimulus content, which is what makes the axis
+   time-since-step rather than position-in-movie.
+
+**Never pool images** (`group_keys` defaults to every condition key but the
+contrast, and the plots draw images as individual lines under the mean). Two
+independent reasons: a different image is a different movie, and
+`setBackgroundColor` **clips at 1.0**, so the nominal 10x background was
+delivered as 10.0x for `00152` but 7.0x for `01769`/`03760` and only 2.8x for
+`00459`. The condition label is the same for all four; the stimulus is not.
+
+**Do not put arrays or DataFrames in a pandas `.attrs`.** pandas propagates
+`attrs` and compares them for equality on concat, so a frame parked there
+turns a later `groupby(...).describe()` into "The truth value of a DataFrame
+is ambiguous". Scalars, strings and lists are fine and are used throughout;
+`response_timescale` returns a dataclass for exactly this reason.
+
 ## Overlaying a stimulus on the mosaic
 
 **RF mosaic and stimulus co-register with no fitted parameter.** The STA is
@@ -243,7 +336,7 @@ When porting a `createPresentation` to Python:
 `ra.grating_frame` / `ra.grating_geometry`
 (`regen/variable_mean_drifting_grating.py`) are the worked example.
 
-## Per-experiment batch archive (§9 of chrisMain)
+## Per-experiment batch archive (appendix §9 of analyzeEyeMovementTraj)
 
 - Driver: `ra.analyze_experiments(dates, protocol_search=...)`. Runs
   end-to-end (build pipeline → calibration → QC → mosaic → per-cell
@@ -254,7 +347,7 @@ When porting a `createPresentation` to Python:
   user prefers this over auto-detect "does the PNG exist?" logic —
   don't reintroduce implicit skipping.
 
-## Standard workflow (chrisMain §4 → §9)
+## Standard workflow (analyzeEyeMovementTraj appendix §4 → §9)
 
 Per-experiment archive + visual review is intentionally **iterative**.
 The notebook lays out the conceptual order (visual QC sits before
@@ -315,7 +408,7 @@ experiment's `index.csv`).
 explicitly asks. Always wire downstream code through
 `select_good_cells()` so the visual-QC step remains optional.
 
-## Offline data store (§10 of chrisMain)
+## Offline data store (appendix §10 of analyzeEyeMovementTraj)
 
 Once a date has been through automated + visual QC, the *interesting*
 data for downstream analysis is small (spike times + condition table +
