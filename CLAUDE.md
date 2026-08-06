@@ -122,7 +122,31 @@ so it runs standalone, then:
    residual as a latency; `ra.browse_phase_alignment` draws them. Another
    protocol reuses all of it by passing its own `geometry_fn`.
 
-6. Recovery after the luminance step (§8): every epoch of this protocol *is*
+6. Cycle averages, aligned by position (§8): `ra.cell_mean_psth` /
+   `ra.browse_cell_psths` for per-cell trial-averaged PSTHs, then
+   `ra.cycle_average` folds on the drift cycle and `ra.aligned_cycle_average`
+   rotates each cell by `pi/2 - 2*pi*f_s*a` before averaging within type.
+   **Never average folds without that rotation** — cells half a spatial period
+   apart are antiphase, and the OnM type mean keeps 0.10 of the single-cell
+   modulation unaligned against 0.90 aligned. `ra.plot_cycle_alignment` shows
+   the diagonal straightening (blocked by cell type: ON and OFF cross-hatch);
+   `ra.cycle_evolution` / `ra.plot_cycle_evolution` do it per time window,
+   defaulting to `normalize='fraction'` because in Hz the modulation shrinks
+   as the rate adapts and z-scored it is flat by construction.
+
+   **The nominal temporal frequency is wrong and it matters.** Stage advances
+   the grating one increment per rendered frame sized from the *declared*
+   refresh rate; this rig runs 60.31 Hz against a declared 60, so a nominal
+   2 Hz grating drifts at 2.0099. `ra.estimate_drift_frequency` recovers it
+   from spikes (agreeing with the recorded frame times to 0.03%). Folding at
+   2.0000 discards 44% of the modulation (pooled vector strength 0.285 vs
+   0.506), accumulates 215° over a 60 s epoch, and — because windows differ in
+   width — inverts §9's conclusion: full-phase decoding appears to *decline*
+   0.94→0.54 when corrected it rises and saturates. Pass `drift_freq_hz` to
+   `phase_binned_response`. §7 still uses the nominal value from `geometry`,
+   so its F1 strengths are underestimates.
+
+7. Recovery after the luminance step (§9): every epoch of this protocol *is*
    a step, since the mean alternates epoch to epoch (~0.93 s gap between,
    `preTime` 0). `ra.phase_binned_response(pipeline, stim_block, epochs,
    windows_s=ra.recovery_windows(...))` does one pass over the spikes and
@@ -145,11 +169,13 @@ so it runs standalone, then:
    - **`spatial_structure_index` divides by the late-vs-shuffle margin**, so
      it returns NaN with a reason when a condition never beats its shuffle
      rather than emitting values like -9.
-   Findings on 20230502C/data017: at 150 µm/0.3 rate falls 27.7→10.1 Hz while
-   F1 rises 0.38→0.64 (τ 12.8 s, t50 12.4 s); full-phase decoding is at
-   ceiling from 0–2 s and *declines*; what recovers is polarity-blind
-   decoding (0.28→0.45) and OnM's 2nd-order coherence (0.42→0.70) while its
-   1st-order coherence is flat at 0.93. 50 µm is unresolved at every time.
+   Findings on 20230502C/data017 (folded at 2.0099 Hz): at 150 µm/0.3 rate
+   falls 27.7→10.1 Hz while F1 rises 0.38→0.67 (τ 15.4 s, t50 14.2 s).
+   Spike-count-matched decoding rises monotonically 0.47→0.92 — that is the
+   endpoint to quote, since unmatched saturates near 0.95 by 7.5 s.
+   Polarity-blind goes 0.29→0.62, OnM 2nd-order coherence 0.42→0.69, while
+   its 1st-order coherence is flat at 0.93 from the first window. 50 µm is
+   unresolved at every time.
 
 Condition labels (figure titles, dropdown entries, printouts) go through
 `ra.condition_label(CONDITION_KEYS, values)`, which takes a groupby tuple

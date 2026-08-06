@@ -65,6 +65,7 @@ import pandas as pd
 __all__ = [
     'PhaseBinnedResponse',
     'corrected_resultant',
+    'estimate_drift_frequency',
     'recovery_windows',
     'phase_binned_response',
     'phase_modulation',
@@ -106,6 +107,113 @@ def corrected_resultant(vector, n):
         unbiased = (n * r2 - 1.0) / (n - 1.0)
     out = np.sqrt(np.clip(unbiased, 0.0, None))
     return np.where(n >= 2, out, np.nan)
+
+
+def estimate_drift_frequency(pipeline, stim_block, epoch_indices, *,
+                             geometry: Optional[Dict] = None,
+                             cell_types: Optional[Iterable[str]] = None,
+                             cell_ids: Optional[Iterable[int]] = None,
+                             rel_range: float = 0.02,
+                             n_candidates: int = 1201,
+                             min_spikes: int = 400,
+                             verbose: bool = True) -> Dict:
+    """Recover the grating's true drift frequency from the spikes.
+
+    **The nominal frequency is usually not the real one, and on a 60 s epoch
+    the difference is not small.** Stage advances the grating's phase once per
+    rendered frame, by an increment computed from the *declared* refresh rate;
+    the display then runs at whatever rate it actually runs at. On this rig
+    the recorded frame times give 60.31 Hz against a declared 60, so a
+    nominal 2 Hz grating drifts at 2.01 Hz — and folding 60 s of spikes at
+    2.0000 Hz accumulates 214° of phase error from start to end, which
+    destroys about half the measured modulation and, in a per-window cycle
+    average, imitates a latency that drifts with adaptation.
+
+    This scans candidate frequencies for the one maximising pooled vector
+    strength. Each cell's F1 is computed at every candidate and the magnitudes
+    averaged across cells, so cells at different positions — which are in
+    different phases and would cancel if summed — all contribute.
+
+    Parameters
+    ----------
+    epoch_indices : sequence[int]
+        Epochs of one condition. Longer epochs sharpen the estimate: the
+        resolvable frequency difference is roughly ``1 / total_duration``.
+    rel_range : float
+        Search ``nominal * (1 +/- rel_range)``. The default 2% comfortably
+        covers a frame-rate mismatch, which is a fraction of a percent.
+    min_spikes : int
+        Cells below this (pooled over the epochs) are left out of the average.
+
+    Returns
+    -------
+    dict
+        ``drift_freq_hz`` (the estimate), ``nominal_hz``, ``ratio``,
+        ``strength_at_estimate``, ``strength_at_nominal``,
+        ``implied_frame_rate_hz``, ``phase_error_deg_per_epoch``, plus the
+        ``candidates`` and ``strength`` arrays for plotting.
+    """
+    from ..regen.variable_mean_drifting_grating import grating_geometry
+    from .mosaic_overlay import cell_activity_in_window
+
+    epochs = [int(e) for e in epoch_indices]
+    g = geometry or grating_geometry(stim_block, epochs[0])
+    nominal = float(g['temporal_freq_hz'])
+    pre_s = float(g['pre_time_ms']) / 1000.0
+    stim_s = float(g['stim_time_ms']) / 1000.0
+
+    per_cell: Dict[int, List[np.ndarray]] = {}
+    for e in epochs:
+        table = cell_activity_in_window(pipeline, e, (pre_s, pre_s + stim_s),
+                                        cell_types=cell_types, cell_ids=cell_ids)
+        for row in table.itertuples():
+            per_cell.setdefault(int(row.cell_id), []).append(
+                np.asarray(row.spike_times_s, dtype=float) - pre_s)
+
+    usable = [v for v in per_cell.values()
+              if sum(x.size for x in v) >= int(min_spikes)]
+    if not usable:
+        raise ValueError(f'no cell reached {min_spikes} spikes across '
+                         f'{len(epochs)} epochs; lower min_spikes')
+
+    fs = np.linspace(nominal * (1 - rel_range), nominal * (1 + rel_range),
+                     int(n_candidates))
+    score = np.zeros(fs.size)
+    for spikes in usable:
+        acc = np.zeros(fs.size, dtype=complex)
+        n = 0
+        for s in spikes:
+            if s.size:
+                acc += np.exp(1j * 2 * np.pi * np.outer(fs, s)).sum(axis=1)
+                n += s.size
+        if n:
+            score += np.abs(acc) / n
+    score /= len(usable)
+
+    best = float(fs[int(np.argmax(score))])
+    at_nominal = float(np.interp(nominal, fs, score))
+    out = {
+        'drift_freq_hz': best,
+        'nominal_hz': nominal,
+        'ratio': best / nominal,
+        'strength_at_estimate': float(score.max()),
+        'strength_at_nominal': at_nominal,
+        'implied_frame_rate_hz': (float(g.get('monitor_refresh_hz', 60.0))
+                                  * best / nominal),
+        'phase_error_deg_per_epoch': 360.0 * (best - nominal) * stim_s,
+        'n_cells': len(usable),
+        'candidates': fs,
+        'strength': score,
+    }
+    if verbose:
+        print(f'drift frequency {best:.4f} Hz against a nominal {nominal:g} '
+              f'({out["ratio"]:.5f}x), from {len(usable)} cells\n'
+              f'  pooled vector strength {at_nominal:.3f} at nominal, '
+              f'{score.max():.3f} at the estimate\n'
+              f'  folding at the nominal value would accumulate '
+              f'{out["phase_error_deg_per_epoch"]:.0f} deg over one '
+              f'{stim_s:g} s epoch')
+    return out
 
 
 def recovery_windows(edges_s: Sequence[float] = (0, 2, 5, 10, 20, 30, 45, 60)):
@@ -176,6 +284,14 @@ class PhaseBinnedResponse:
     geometry: Dict
     n_phase_bins: int
     condition: Dict = field(default_factory=dict)
+    # The frequency the folding actually used. Not always the geometry's
+    # nominal value — see estimate_drift_frequency — so it is recorded here
+    # rather than re-derived, and every consumer reads this field.
+    drift_freq_hz: float = float('nan')
+
+    @property
+    def cycle_s(self) -> float:
+        return 1.0 / float(self.drift_freq_hz)
 
     @property
     def window_centers(self) -> np.ndarray:
@@ -205,6 +321,7 @@ def phase_binned_response(
     inside_aperture_only: bool = True,
     std_scaling: float = 1.6,
     geometry: Optional[Dict] = None,
+    drift_freq_hz: Optional[float] = None,
     verbose: bool = True,
 ) -> PhaseBinnedResponse:
     """Bin one condition's spikes by drift phase, per cycle and per window.
@@ -265,7 +382,14 @@ def phase_binned_response(
                 f'so only epochs of one condition are in register — group '
                 f'them by condition and call this once per group.')
 
-    freq = float(g['temporal_freq_hz'])
+    # The nominal frequency is the default, not the truth. Stage advances the
+    # grating once per rendered frame using the declared refresh rate, so a
+    # display running fast drifts the grating fast — 2 Hz becomes 2.01 Hz here,
+    # which is 214 deg of accumulated phase over a 60 s epoch and about half
+    # the modulation thrown away. Pass the output of
+    # estimate_drift_frequency() to fold at the frequency the retina saw.
+    freq = float(g['temporal_freq_hz'] if drift_freq_hz is None
+                 else drift_freq_hz)
     pre_s = float(g['pre_time_ms']) / 1000.0
     stim_s = float(g['stim_time_ms']) / 1000.0
     cycle_s = 1.0 / freq
@@ -370,11 +494,15 @@ def phase_binned_response(
         n_phase_bins=int(n_phase_bins),
         condition={'bar_width_um': g['bar_width_um'],
                    'mean_intensity': g['mean_intensity']},
+        drift_freq_hz=freq,
     )
 
     if verbose:
         dropped = int(keep.sum()) - n_cells
         per_win = np.bincount(pbr.sample_window, minlength=n_win)
+        if drift_freq_hz is not None:
+            print(f'folding at {freq:.4f} Hz (nominal '
+                  f'{g["temporal_freq_hz"]:g})')
         print(f'{n_cells} cells x {n_win} windows, '
               f'{g["bar_width_um"]:g} um bars at mean {g["mean_intensity"]:g}, '
               f'{len(epochs)} epochs\n'
