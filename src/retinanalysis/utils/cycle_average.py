@@ -61,6 +61,9 @@ __all__ = [
     'browse_cycle_alignment',
     'cycle_evolution',
     'plot_cycle_evolution',
+    'response_template',
+    'flag_template_outliers',
+    'plot_template_match',
 ]
 
 
@@ -536,22 +539,51 @@ def cycle_evolution(pbr, *, cell_types: Optional[Sequence[str]] = None,
     return result
 
 
+def _pick_cross_sections(n_windows: int, n_wanted: int) -> np.ndarray:
+    """Evenly spaced window indices, always including the first and the last."""
+    n_wanted = int(max(2, min(n_wanted, n_windows)))
+    return np.unique(np.linspace(0, n_windows - 1, n_wanted).round().astype(int))
+
+
 def plot_cycle_evolution(evolution: Dict, *,
                          cmap: str = 'RdBu_r',
                          n_cycles_shown: int = 2,
                          cbar_label: str = 'modulation, fraction of own mean',
+                         cross_sections: Optional[Sequence[int]] = None,
+                         n_cross_sections: int = 5,
+                         cross_section_cmap: str = 'viridis',
+                         share_curve_y: bool = True,
                          figsize: Optional[Tuple[float, float]] = None,
                          title: str = ''):
-    """Phase against time since the step, one panel per cell type.
+    """Phase against time since the step, one column per cell type.
 
-    A vertical band that darkens downward is the recovery: the response stays
-    at one phase — it has to, the alignment put it there — while its depth
-    grows. A band that *drifts* sideways instead would mean the latency is
-    changing with adaptation, which is a different and more interesting claim
-    and is what this panel is able to show that a single F1 number is not.
+    **Top row, the heat map.** A vertical band that darkens downward is the
+    recovery: the response stays at one phase — it has to, the alignment put
+    it there — while its depth grows. A band that *drifts* sideways instead
+    would mean the latency is changing with adaptation, which is a different
+    and more interesting claim, and is what this panel shows that a single F1
+    number cannot.
+
+    **Bottom row, cross-sections through it.** The heat map is good at "does
+    the band stay put" and bad at "by how much did it grow" — colour is hard
+    to read quantitatively, and the 98th-percentile scale hides whatever sits
+    above it. These are the same rows drawn as tuning curves, a few time
+    snippets from early (dark) to late (bright), so amplitude is on an axis
+    with numbers on it. The curves share a y-axis across cell types, so a type
+    that barely modulates looks like one — but a thinly sampled type divides
+    by a near-zero mean and can reach values that squash everything else onto
+    a sliver of the axis (OffP, 3 cells, does exactly that here). That is
+    itself worth seeing once; ``share_curve_y=False`` then gives each type its
+    own scale.
+
+    Which rows they come from is marked by a coloured tick at the left edge of
+    the heat map, in the same colour as the curve — otherwise the two panels
+    are two unrelated pictures. Pass ``cross_sections`` explicitly to choose
+    the windows, or ``n_cross_sections`` to change how many the automatic
+    choice takes (evenly spaced, always including the first and the last).
     """
     import matplotlib.pyplot as plt
-    from .style import apply_publication_style
+    from .style import NEUTRAL_GRAY, apply_publication_style
 
     apply_publication_style()
     types = [k for k in evolution if not k.startswith('_')]
@@ -560,30 +592,416 @@ def plot_cycle_evolution(evolution: Dict, *,
     t = np.asarray(evolution['_t'], dtype=float)
     K = np.asarray(evolution[types[0]]).shape[1]
 
+    if cross_sections is None:
+        picks = _pick_cross_sections(len(t), n_cross_sections)
+    else:
+        picks = np.asarray([int(i) for i in cross_sections], dtype=int)
+        bad = picks[(picks < 0) | (picks >= len(t))]
+        if bad.size:
+            raise IndexError(f'cross_sections {bad.tolist()} are outside the '
+                             f'{len(t)} windows in this evolution')
+    pick_colors = plt.get_cmap(cross_section_cmap)(
+        np.linspace(0.05, 0.9, picks.size))
+
     if figsize is None:
-        figsize = (3.2 * len(types) + 1.2, 3.6)
-    fig, axes = plt.subplots(1, len(types), squeeze=False, figsize=figsize,
-                             sharey=True)
+        figsize = (3.2 * len(types) + 1.2, 6.4)
+    fig, axes = plt.subplots(2, len(types), squeeze=False, figsize=figsize,
+                             gridspec_kw={'height_ratios': [1.35, 1.0]})
     stacked = np.concatenate([np.asarray(evolution[ct]).ravel() for ct in types])
     vmax = float(np.nanpercentile(np.abs(stacked), 98)) or 1.0
+
+    # Phase axis for the curves, tiled to match the heat map above it so the
+    # two rows read against one shared x.
+    deg = np.arange(K * n_cycles_shown) * 360.0 / K
 
     # Time is a categorical row index, not a linear axis: the windows are
     # deliberately uneven in a recovery, and drawing them to scale would give
     # the first seconds a sliver while the question is about them.
-    for ax, ct in zip(axes[0], types):
-        img = np.tile(np.asarray(evolution[ct]), (1, n_cycles_shown))
-        ax.imshow(img, aspect='auto', cmap=cmap, vmin=-vmax, vmax=vmax,
+    for col, ct in enumerate(types):
+        rows = np.asarray(evolution[ct], dtype=float)
+        ax = axes[0][col]
+        ax.imshow(np.tile(rows, (1, n_cycles_shown)),
+                  aspect='auto', cmap=cmap, vmin=-vmax, vmax=vmax,
                   extent=(0, 360 * n_cycles_shown, len(t), 0),
                   interpolation='nearest')
         ax.set_xticks(np.arange(0, 360 * n_cycles_shown + 1, 180))
-        ax.set_xlabel('drift phase (deg)')
+        ax.set_xlim(0, 360 * n_cycles_shown)
         ax.set_title(ct, fontsize=10)
-    axes[0][0].set_yticks(np.arange(len(t)) + 0.5)
+        # Rows are windows, and only the first column carries their times.
+        # Left as default the other columns tick at raw row indices, which
+        # read as seconds and are not.
+        ax.set_yticks(np.arange(len(t)) + 0.5)
+        ax.tick_params(labelbottom=False, labelleft=False)
+        # Tie each curve below to the row it was taken from.
+        for c, i in zip(pick_colors, picks):
+            ax.plot([0], [i + 0.5], marker='>', markersize=5, color=c,
+                    clip_on=False, zorder=5)
+
+        ax = axes[1][col]
+        for c, i in zip(pick_colors, picks):
+            ax.plot(deg, np.tile(rows[i], n_cycles_shown), lw=1.3, color=c,
+                    label=f'{t[i]:g} s')
+        ax.axhline(0, color=NEUTRAL_GRAY, lw=0.5)
+        ax.set_xticks(np.arange(0, 360 * n_cycles_shown + 1, 180))
+        ax.set_xlim(0, 360 * n_cycles_shown)
+        ax.set_xlabel('drift phase (deg)')
+        if col:
+            ax.tick_params(labelleft=False)
+
+    axes[0][0].tick_params(labelleft=True)
     axes[0][0].set_yticklabels([f'{v:g}' for v in t], fontsize=7)
     axes[0][0].set_ylabel('time since step (s, window centre)')
+    axes[1][0].set_ylabel(cbar_label)
+
+    if share_curve_y:
+        # From the rows actually drawn, not all of them: the limit only has to
+        # hold the curves on the page.
+        drawn = np.concatenate([np.asarray(evolution[ct], dtype=float)[picks].ravel()
+                                for ct in types])
+        lo, hi = float(np.nanmin(drawn)), float(np.nanmax(drawn))
+        pad = 0.08 * max(hi - lo, 1e-9)
+        for ax in axes[1]:
+            ax.set_ylim(lo - pad, hi + pad)
+    else:
+        for col in range(1, len(types)):
+            axes[1][col].tick_params(labelleft=True)
+    axes[1][0].legend(fontsize=6.5, ncol=2, title='window centre',
+                      title_fontsize=6.5, frameon=False)
+
     fig.colorbar(axes[0][-1].images[0], ax=axes[0][-1], fraction=0.05, pad=0.03,
                  label=cbar_label)
     if title:
         fig.suptitle(title)
-    fig.tight_layout(rect=(0, 0, 1, 0.94) if title else None)
+    fig.tight_layout(rect=(0, 0, 1, 0.95) if title else None)
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# 5. A response template per cell type, and cells that do not match it
+# ---------------------------------------------------------------------------
+
+def _zscore_rows(x):
+    mu = x.mean(axis=1, keepdims=True)
+    sd = x.std(axis=1, keepdims=True)
+    return (x - mu) / np.where(sd == 0, np.nan, sd)
+
+
+def _aligned_folds(pbr, cycle_mask):
+    """Position-rotated, z-scored fold per cell over the selected cycles."""
+    K = pbr.n_phase_bins
+    x = pbr.counts[cycle_mask].sum(axis=0).T.astype(float)      # (cells, K)
+    shifts = position_phase_shift(pbr)
+    out = np.empty_like(x)
+    for i, s in enumerate(shifts):
+        out[i] = np.roll(x[i], -int(s) % K)
+    return _zscore_rows(out)
+
+
+def _row_corr(a, b):
+    """Pearson correlation row by row, NaN-safe."""
+    a = a - np.nanmean(a, axis=1, keepdims=True)
+    b = b - np.nanmean(b, axis=1, keepdims=True)
+    na = np.sqrt(np.nansum(a * a, axis=1))
+    nb = np.sqrt(np.nansum(b * b, axis=1))
+    with np.errstate(invalid='ignore', divide='ignore'):
+        return np.nansum(a * b, axis=1) / np.where((na * nb) == 0, np.nan, na * nb)
+
+
+def response_template(pbr, *, window: Optional[int] = None,
+                      cell_types: Optional[Sequence[str]] = None,
+                      min_cells: int = 5,
+                      n_splits: int = 25,
+                      min_spikes: int = 50,
+                      random_seed: Optional[int] = 0):
+    """A canonical cycle response per cell type, and how well each cell matches it.
+
+    Every cell of a type saw the same grating — shifted in space by where its
+    receptive field sits, and in time by the drift. §8's rotation removes the
+    spatial shift, so what is left should be one waveform shared by the type,
+    differing between cells only in amplitude and in whatever latency spread
+    there is. That makes a **template** well defined, and a cell that does not
+    match it is worth looking at.
+
+    **The template is built leave-one-out.** A cell that contributed to the
+    template it is scored against is partly correlated with itself, which
+    matters enormously at n = 4 and still matters at n = 80. Each cell is
+    scored against the mean of every *other* cell of its type.
+
+    **Two ways to fail, and they mean different things.** ``template_r``
+    compares the cell as aligned; ``shape_r`` is the best correlation over all
+    circular rotations, with ``phase_offset_deg`` saying which one won.
+
+    - Low on both — the cell's response is not this type's response. Bad sort,
+      wrong type, or not driven.
+    - Low ``template_r`` but high ``shape_r`` — the right waveform at the wrong
+      phase. That is not a broken cell, it is a cell in the wrong *place*: an
+      offset near 180° is a polarity flip (suspect the type label), and an
+      arbitrary offset points at the receptive-field position being wrong,
+      which usually means a bad cluster match between the noise chunk and the
+      protocol block rather than anything about the cell.
+
+    **``self_r`` is the ceiling.** Split the cycles in half at random and
+    correlate the two halves: that is how repeatable the cell's own response
+    is, and no match to any template can exceed it. A cell with low
+    ``template_r`` *and* low ``self_r`` is merely noisy; low ``template_r``
+    with high ``self_r`` is reliably different, which is the interesting case
+    and the one worth inspecting rather than deleting.
+    ``*_corrected`` divides by ``sqrt(self_r)`` so a quiet cell is not
+    penalised for being quiet.
+
+    Returns
+    -------
+    (templates, match, summary)
+        ``templates`` maps cell type to its full (not leave-one-out) mean
+        fold, z-scored, length ``n_phase_bins``. ``match`` is one row per
+        cell. ``summary`` is one row per type, with ``pc1_frac`` — the share
+        of variance the first principal component of the folds explains,
+        which is the honest answer to *is there a template here at all*:
+        near 1 means the type has one waveform, near 1/n means it does not
+        and no per-cell verdict from it is worth anything.
+    """
+    rng = np.random.default_rng(random_seed)
+    K = pbr.n_phase_bins
+    sel = (np.ones(pbr.counts.shape[0], dtype=bool) if window is None
+           else pbr.sample_window == int(window))
+    n_cyc = int(sel.sum())
+    if n_cyc < 4:
+        raise ValueError(f'need at least 4 cycles to split; got {n_cyc}')
+
+    folds = _aligned_folds(pbr, sel)
+    spikes = pbr.counts[sel].sum(axis=(0, 1))
+    types = pbr.cells['cell_type'].to_numpy()
+    present = ([ct for ct in cell_types if (types == ct).any()]
+               if cell_types is not None else sorted(set(types)))
+
+    # Split-half reliability, averaged over random halves of the cycles.
+    idx = np.flatnonzero(sel)
+    acc = np.zeros(folds.shape[0])
+    n_ok = np.zeros(folds.shape[0])
+    for _ in range(int(n_splits)):
+        perm = rng.permutation(idx.size)
+        a = np.zeros(pbr.counts.shape[0], bool)
+        b = np.zeros(pbr.counts.shape[0], bool)
+        a[idx[perm[:idx.size // 2]]] = True
+        b[idx[perm[idx.size // 2:]]] = True
+        r = _row_corr(_aligned_folds(pbr, a), _aligned_folds(pbr, b))
+        ok = np.isfinite(r)
+        acc[ok] += r[ok]
+        n_ok[ok] += 1
+    with np.errstate(invalid='ignore', divide='ignore'):
+        self_r = acc / np.where(n_ok == 0, np.nan, n_ok)
+
+    templates, rows, summary_rows = {}, [], []
+    for ct in present:
+        m = np.flatnonzero(types == ct)
+        X = folds[m]
+        usable = m.size >= int(min_cells)
+
+        full = np.nanmean(X, axis=0)
+        templates[ct] = ((full - np.nanmean(full)) / np.nanstd(full)
+                         if np.nanstd(full) > 0 else full)
+
+        # Leave-one-out template: (total - self) / (n - 1).
+        if m.size >= 2:
+            tot = np.nansum(X, axis=0)
+            loo = _zscore_rows((tot - X) / (m.size - 1))
+            fixed = _row_corr(X, loo)
+            best = np.full(m.size, np.nan)
+            off = np.zeros(m.size, dtype=int)
+            for k in range(K):
+                c = _row_corr(np.roll(X, k, axis=1), loo)
+                upd = np.isfinite(c) & ~(c <= best)
+                best[upd] = c[upd]
+                off[upd] = k
+        else:
+            fixed = np.full(m.size, np.nan)
+            best = np.full(m.size, np.nan)
+            off = np.zeros(m.size, dtype=int)
+
+        # How one-dimensional is this type's set of folds?
+        good = np.isfinite(X).all(axis=1)
+        if good.sum() >= 2:
+            sv = np.linalg.svd(X[good], compute_uv=False)
+            pc1 = float(sv[0] ** 2 / np.sum(sv ** 2))
+        else:
+            pc1 = np.nan
+
+        deg = ((off * 360.0 / K) + 180.0) % 360.0 - 180.0
+        sr = self_r[m]
+        with np.errstate(invalid='ignore', divide='ignore'):
+            denom = np.sqrt(np.clip(sr, 1e-6, None))
+        for j, i in enumerate(m):
+            rows.append({
+                'cell_id': int(pbr.cells['cell_id'].iloc[i]),
+                'cell_type': ct,
+                'axis_px': float(pbr.cells['axis_px'].iloc[i]),
+                'n_spikes': float(spikes[i]),
+                'self_r': float(sr[j]),
+                'template_r': float(fixed[j]),
+                'shape_r': float(best[j]),
+                'phase_offset_deg': float(deg[j]),
+                'template_r_corrected': float(fixed[j] / denom[j]),
+                'shape_r_corrected': float(best[j] / denom[j]),
+                'enough_spikes': bool(spikes[i] >= int(min_spikes)),
+                'type_usable': bool(usable),
+            })
+        summary_rows.append({
+            'cell_type': ct, 'n_cells': int(m.size),
+            'median_self_r': float(np.nanmedian(sr)),
+            'median_template_r': float(np.nanmedian(fixed)),
+            'median_shape_r': float(np.nanmedian(best)),
+            'pc1_frac': pc1,
+            'usable': usable,
+        })
+
+    import pandas as pd
+    match = pd.DataFrame(rows)
+    summary = pd.DataFrame(summary_rows)
+    match.attrs['condition'] = pbr.condition
+    summary.attrs['condition'] = pbr.condition
+    summary.attrs['n_cycles'] = n_cyc
+    return templates, match, summary
+
+
+def flag_template_outliers(match, *, min_shape_r: float = 0.5,
+                           max_phase_offset_deg: Optional[float] = None,
+                           use_corrected: bool = True,
+                           min_self_r: float = 0.0,
+                           verbose: bool = True):
+    """Mark cells whose response does not have their type's waveform.
+
+    **One criterion decides it**, so a rejection has one cause: the cell's
+    reliable response must correlate with its type's leave-one-out template at
+    ``min_shape_r`` **allowing any phase** — that is, it must have the right
+    *shape*. Phase disagreement is reported next to it rather than folded into
+    the same number, because the two have different causes and only one of
+    them is about the cell (see :func:`response_template`). Set
+    ``max_phase_offset_deg`` to reject on phase as well, knowing that at a
+    type whose phases do not track position it will reject most of the type
+    for a population-level reason.
+
+    Cells of a type flagged ``type_usable=False`` — too few cells for a
+    template — are **kept and marked**, not dropped. There is no evidence
+    about them either way, and silently deleting a whole small type is worse
+    than carrying it with a caveat.
+
+    Returns ``match`` with ``passes_template``, ``reject_reason`` and
+    ``phase_ok`` added. It does not filter anything; the caller decides.
+    """
+    out = match.copy()
+    col = 'shape_r_corrected' if use_corrected else 'shape_r'
+    shape = out[col].to_numpy(dtype=float)
+    self_r = out['self_r'].to_numpy(dtype=float)
+    usable = out['type_usable'].to_numpy(dtype=bool)
+    enough = out['enough_spikes'].to_numpy(dtype=bool)
+
+    phase_ok = (np.ones(len(out), dtype=bool) if max_phase_offset_deg is None
+                else np.abs(out['phase_offset_deg'].to_numpy(dtype=float))
+                <= float(max_phase_offset_deg))
+
+    reason = np.full(len(out), '', dtype=object)
+    bad_shape = usable & enough & np.isfinite(shape) & (shape < min_shape_r)
+    reason[bad_shape] = 'shape'
+    quiet = usable & ~enough
+    reason[quiet] = 'too few spikes'
+    noisy = usable & enough & (self_r < float(min_self_r))
+    reason[noisy] = 'unreliable'
+    bad_phase = usable & enough & ~bad_shape & ~phase_ok
+    reason[bad_phase] = 'phase'
+    reason[~usable] = 'type too small to template'
+
+    passes = usable & enough & phase_ok & np.isfinite(shape) \
+        & (shape >= min_shape_r) & (self_r >= float(min_self_r))
+    out['passes_template'] = passes
+    out['phase_ok'] = phase_ok
+    out['reject_reason'] = reason
+
+    if verbose:
+        print(f'template QC on {col} >= {min_shape_r}'
+              + ('' if max_phase_offset_deg is None
+                 else f', |phase offset| <= {max_phase_offset_deg:g} deg'))
+        for ct, sub in out.groupby('cell_type'):
+            if not sub['type_usable'].iloc[0]:
+                print(f'  {ct:5} {len(sub):3d} cells — no template '
+                      f'(type too small); all kept, none endorsed')
+                continue
+            kept = int(sub['passes_template'].sum())
+            counts = sub.loc[~sub['passes_template'], 'reject_reason'] \
+                        .value_counts().to_dict()
+            detail = ', '.join(f'{v} {k}' for k, v in counts.items())
+            print(f'  {ct:5} {kept:3d}/{len(sub):3d} kept'
+                  + (f'   ({detail})' if detail else ''))
+        # The cells worth a human look: reliably different, not merely noisy.
+        odd = out[(~out['passes_template']) & (out['reject_reason'] == 'shape')
+                  & (out['self_r'] > 0.8)]
+        if len(odd):
+            print(f'  {len(odd)} rejected cells are highly repeatable '
+                  f'(self_r > 0.8) — reliably different rather than noisy, '
+                  f'so look at them before deleting them')
+    return out
+
+
+def plot_template_match(templates, match, *, cell_types=None,
+                        min_shape_r: float = 0.5,
+                        figsize: Optional[Tuple[float, float]] = None):
+    """Templates, the reliability-vs-match plane, and where the misfits sit.
+
+    **Left**: each type's template. **Middle**: every cell as
+    ``self_r`` (how repeatable it is) against ``template_r`` (how well it
+    matches as aligned), which separates *noisy* from *reliably different* —
+    the bottom-left is noise, the bottom-right is a cell that reproduces a
+    response its type does not share. **Right**: the phase offset that would
+    rescue each poorly-matched cell; a spike at ±180° is polarity, a spread is
+    receptive-field positions that are wrong.
+    """
+    import matplotlib.pyplot as plt
+    from .style import NEUTRAL_GRAY, apply_publication_style, colors_for_celltypes
+
+    apply_publication_style()
+    present = ([ct for ct in cell_types if ct in templates]
+               if cell_types is not None else sorted(templates))
+    colors = colors_for_celltypes(present)
+    if figsize is None:
+        figsize = (13.0, 3.8)
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+
+    K = len(next(iter(templates.values())))
+    deg = np.arange(K) * 360.0 / K
+    for ct in present:
+        n = int((match['cell_type'] == ct).sum())
+        axes[0].plot(deg, templates[ct], lw=1.6, color=colors.get(ct, NEUTRAL_GRAY),
+                     label=f'{ct} (n={n})')
+    axes[0].axhline(0, color=NEUTRAL_GRAY, lw=0.5)
+    axes[0].set_xlabel('drift phase (deg)')
+    axes[0].set_ylabel('z-scored rate')
+    axes[0].set_title('type template', fontsize=10)
+    axes[0].legend(fontsize=7)
+
+    for ct in present:
+        s = match[match['cell_type'] == ct]
+        axes[1].scatter(s['self_r'], s['template_r'], s=14, alpha=0.75,
+                        color=colors.get(ct, NEUTRAL_GRAY), label=ct)
+    axes[1].axhline(min_shape_r, color=NEUTRAL_GRAY, ls='--', lw=0.8)
+    axes[1].set_xlabel('self_r (split-half reliability)')
+    axes[1].set_ylabel('template_r (as aligned)')
+    axes[1].set_title('noisy (left) vs reliably different (lower right)',
+                      fontsize=10)
+
+    poor = match[match['template_r'] < min_shape_r]
+    for ct in present:
+        s = poor[poor['cell_type'] == ct]
+        if len(s):
+            axes[2].scatter(s['phase_offset_deg'], s['shape_r'], s=16, alpha=0.8,
+                            color=colors.get(ct, NEUTRAL_GRAY), label=ct)
+    for x in (-180, 0, 180):
+        axes[2].axvline(x, color=NEUTRAL_GRAY, lw=0.6,
+                        ls='-' if x == 0 else '--')
+    axes[2].set_xlim(-190, 190)
+    axes[2].set_xlabel('phase offset that best matches (deg)')
+    axes[2].set_ylabel('shape_r at that offset')
+    axes[2].set_title(f'the {len(poor)} cells below template_r '
+                      f'{min_shape_r}', fontsize=10)
+    if len(poor):
+        axes[2].legend(fontsize=7)
+    fig.tight_layout()
     return fig
