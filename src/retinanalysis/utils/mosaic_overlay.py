@@ -269,6 +269,62 @@ def _select_cells_by_type(analysis_chunk,
     return d_by_type, sorted(d_by_type.keys())
 
 
+def raster_sort_order(cells, sort_by: str = 'position',
+                      axis_deg: float = 0.0,
+                      center_xy: Optional[Tuple[float, float]] = None,
+                      rates=None) -> np.ndarray:
+    """Positional order for raster rows.
+
+    ``'position'`` projects each receptive field onto the drift axis and sorts
+    along it, which is the ordering that makes a drifting grating legible: the
+    stimulus reaches neighbouring positions at successively later phases, so
+    the population response becomes a diagonal band travelling down the panel
+    once the cells are in spatial order. Sorted by firing rate or by cell id
+    the same spikes look like unstructured noise, because the row ordering
+    scrambles the one axis the stimulus varies along.
+
+    Parameters
+    ----------
+    cells : pandas.DataFrame
+        Needs ``center_x``/``center_y`` for ``'position'``, ``cell_id`` for
+        ``'cell_id'``.
+    sort_by : ``'position'``, ``'rate'`` or ``'cell_id'``
+    axis_deg : float
+        Orientation of the axis to project onto, degrees. Pass the stimulus's
+        own ``orientation_deg``; 0 is canvas x.
+    center_xy : (x, y), optional
+        Origin of the projection. Only shifts every position by a constant, so
+        it does not change the order — accepted so callers can pass the canvas
+        centre without it mattering.
+    rates : array-like, optional
+        Required for ``sort_by='rate'``.
+
+    Returns
+    -------
+    np.ndarray
+        Positional indices into ``cells``, ascending.
+    """
+    if sort_by == 'position':
+        cx, cy = center_xy if center_xy is not None else (0.0, 0.0)
+        theta = np.deg2rad(float(axis_deg))
+        dx = cells['center_x'].to_numpy(dtype=float) - float(cx)
+        dy = cells['center_y'].to_numpy(dtype=float) - float(cy)
+        key = dx * np.cos(theta) + dy * np.sin(theta)
+        # Cells with no matched RF have no position; park them at the end
+        # rather than letting NaN scatter them through the sort.
+        key = np.where(np.isfinite(key), key, np.inf)
+    elif sort_by == 'rate':
+        if rates is None:
+            raise ValueError("sort_by='rate' needs rates")
+        key = np.asarray(rates, dtype=float)
+    elif sort_by == 'cell_id':
+        key = cells['cell_id'].to_numpy(dtype=float)
+    else:
+        raise ValueError(f"sort_by must be 'position', 'rate' or 'cell_id'; "
+                         f"got {sort_by!r}")
+    return np.argsort(key, kind='stable')
+
+
 def cell_activity_in_window(pipeline, epoch_index: int,
                             window_s: Tuple[float, float],
                             cell_types: Optional[Iterable[str]] = None,
@@ -390,6 +446,8 @@ def plot_mosaic_activity(pipeline, epoch_index: int,
                          aperture_diameter_px: Optional[float] = None,
                          zoom: bool = True,
                          pad_frac: float = 0.06,
+                         raster_sort_by: str = 'position',
+                         raster_axis_deg: float = 0.0,
                          raster_marker_size: float = 1.2,
                          title: Optional[str] = None,
                          figsize: Optional[Tuple[float, float]] = None):
@@ -451,6 +509,12 @@ def plot_mosaic_activity(pipeline, epoch_index: int,
         rate as a weak response.
     zoom : bool
         Frame the mosaic panel on the cells rather than the whole canvas.
+    raster_sort_by : ``'position'`` (default), ``'rate'`` or ``'cell_id'``
+        Row order within each cell type. ``'position'`` sorts along
+        ``raster_axis_deg``, which is what makes a drifting stimulus legible
+        as a diagonal band; see :func:`raster_sort_order`.
+    raster_axis_deg : float
+        Axis to sort positions along. Pass the stimulus ``orientation_deg``.
     raster_marker_size : float
         Point size for the raster ticks. Lower it for dense populations.
 
@@ -569,10 +633,19 @@ def plot_mosaic_activity(pipeline, epoch_index: int,
         fontsize=8, frameon=False)
 
     # --- Right: the spikes those rates came from --------------------------
-    ordered = pd.concat(
-        [activity[activity['cell_type'] == ct].sort_values('rate_hz')
-         for ct in order],
-        ignore_index=True) if order else activity
+    # Rows in spatial order along the drift axis by default: the grating
+    # reaches successive positions at successively later phases, so a real
+    # response is a diagonal band travelling down the panel. Sorted by rate
+    # the same spikes carry no visible structure.
+    blocks = []
+    for ct in order:
+        sub = activity[activity['cell_type'] == ct]
+        idx = raster_sort_order(sub, sort_by=raster_sort_by,
+                                axis_deg=raster_axis_deg,
+                                center_xy=(canvas_w / 2.0, canvas_h / 2.0),
+                                rates=sub['rate_hz'].to_numpy())
+        blocks.append(sub.iloc[idx])
+    ordered = pd.concat(blocks, ignore_index=True) if blocks else activity
 
     boundaries, row = [], 0
     for ct in order:
@@ -593,7 +666,9 @@ def plot_mosaic_activity(pipeline, epoch_index: int,
     ax_raster.set_xlim(t0, t1)
     ax_raster.set_ylim(-0.5, max(row - 0.5, 0.5))
     ax_raster.set_xlabel('time in epoch (s)')
-    ax_raster.set_ylabel('cell, by type then rate')
+    ax_raster.set_ylabel({'position': 'cell, by type then position across bars',
+                          'rate': 'cell, by type then rate',
+                          'cell_id': 'cell, by type then id'}[raster_sort_by])
     # Label each type block at its middle rather than every cell on the axis.
     ticks, labels, start = [], [], 0
     for ct, end, n in boundaries:

@@ -296,8 +296,10 @@ def browse_sorting_qc(
     which is what you need to decide whether a messy-looking trace is
     surprising.
 
-    Reading the panel: the trace is the cell's strongest electrode, red marks
-    are its spikes and other colors are other cells on that same electrode. A
+    Reading the panel: the trace is the cell's strongest electrode, high-passed
+    at 300 Hz so the drift does not sit under the marks (``hp_cutoff_hz=None``
+    for the unfiltered trace); red marks are its spikes and other colors are
+    other cells on that same electrode. A
     clean sort puts every red mark on a visible downward deflection. Clear
     waveforms with *no* red mark mean spikes are missing or went to a neighbor;
     red marks on flat baseline mean template hits that are not spikes. Several
@@ -338,6 +340,14 @@ def browse_sorting_qc(
         window_s = (start_s, start_s + raw.data.shape[1] / raw.sample_rate)
     start_s, end_s = (float(w) for w in window_s)
 
+    # A spike is ~1 ms wide. Much past a second of it and every waveform is
+    # one pixel, so the panel renders but cannot be read — which looks like a
+    # sorting problem rather than a plotting one.
+    if end_s - start_s > 1.5:
+        print(f'{end_s - start_s:g} s in one panel is too wide to judge '
+              f'individual waveforms — pass window_s to zoom into about a '
+              f'second of it.')
+
     if isinstance(cells, pd.DataFrame):
         rows = list(cells.itertuples())
         options = []
@@ -371,15 +381,13 @@ def browse_sorting_qc(
 
 def _hp_filter(x: np.ndarray, fs: float, cutoff_hz: float = 300.0,
                order: int = 3) -> np.ndarray:
-    """Zero-phase Butterworth high-pass — what the sorter sees during sorting.
+    """Deprecated alias for :func:`retinanalysis.classes.raw.highpass_trace`.
 
-    Without this, the raw trace's low-frequency drift moves the apparent
-    spike "height" around and the spike-time markers can look like
-    they're stuck at the drift level instead of at the spike trough.
+    Both trace views want the same filter for the same reason, so it lives
+    beside the traces. Kept as a name because the GUI's HP slider calls it.
     """
-    from scipy.signal import butter, sosfiltfilt
-    sos = butter(order, cutoff_hz, btype='highpass', fs=fs, output='sos')
-    return sosfiltfilt(sos, x).astype(np.float32)
+    from ..classes.raw import highpass_trace
+    return highpass_trace(x, fs=fs, cutoff_hz=cutoff_hz, order=order)
 
 
 def _plot_epoch_trace_with_raster(

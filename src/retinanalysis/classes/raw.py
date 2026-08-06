@@ -46,12 +46,13 @@ class RawTraces:
         # mirrored there. None ⇒ neither tier had it.
         binpath = find_raw_path(rb.exp_name, rb.datafile_name)
         if binpath is None:
+            from retinanalysis.config.settings import raw_tier_report
             raise FileNotFoundError(
                 f"Raw .bin folder for {rb.exp_name}/{rb.datafile_name} not "
                 f"found on any configured tier. Raw files are canonical on "
-                f"the NAS (/Volumes/data) — mount it and retry. Cells §7/§8 "
-                f"of chrisMain.ipynb (sorting QC) are the only ones that "
-                f"need raw; the rest of the notebook works without it."
+                f"the NAS (/Volumes/data). Sorting QC is the only thing that "
+                f"needs raw; everything else works without it.\n"
+                f"{raw_tier_report(rb.exp_name, rb.datafile_name)}"
             )
         self.binpath = binpath
         self.d_timing = rb.d_timing
@@ -311,6 +312,26 @@ def primary_electrode_of_cell(rb: MEAResponseBlock, cell_id: int) -> int:
     return int(np.argmax(np.max(np.abs(ei), axis=1)))
 
 
+def highpass_trace(x: np.ndarray, fs: float, cutoff_hz: float = 300.0,
+                   order: int = 3) -> np.ndarray:
+    """Zero-phase Butterworth high-pass — what the sorter saw when it sorted.
+
+    Sorting QC asks whether each spike mark sits on a real waveform, and on an
+    unfiltered trace it cannot be answered by eye: the low-frequency drift is
+    tens of counts, comparable to a spike, so it moves the baseline under the
+    marks and the spikes themselves are buried in a band of it. Filtering
+    flattens the baseline, and then a mark either lands in a trough or visibly
+    does not.
+
+    Zero-phase (``sosfiltfilt``) matters more than the cutoff: a causal filter
+    would delay the trough away from the spike sample and manufacture exactly
+    the misalignment this section exists to detect.
+    """
+    from scipy.signal import butter, sosfiltfilt
+    sos = butter(order, cutoff_hz, btype='highpass', fs=fs, output='sos')
+    return sosfiltfilt(sos, x).astype(np.float32)
+
+
 def cells_sharing_electrode(
     rb: MEAResponseBlock,
     electrode_idx: int,
@@ -355,6 +376,7 @@ def plot_sorting_qc(
     end_time: Optional[float] = 2.0,
     candidate_cell_ids: Optional[Iterable[int]] = None,
     max_other_cells: int = 6,
+    hp_cutoff_hz: Optional[float] = 300.0,
     target_color: str = 'tab:red',
     other_cmap: str = 'tab10',
     ax: Optional[plt.Axes] = None,
@@ -384,6 +406,11 @@ def plot_sorting_qc(
     max_other_cells : int
         Cap on how many other cells get drawn (sorted by EI peak amp).
         Useful when a hot electrode has 10+ matched cells.
+    hp_cutoff_hz : float or None
+        High-pass the displayed trace at this cutoff, as
+        :func:`highpass_trace` describes. ``None`` shows the trace unfiltered,
+        which is the honest view of what is on the electrode but not a view
+        the spike marks can be judged against.
     ax : matplotlib Axes, optional
 
     Returns
@@ -408,6 +435,20 @@ def plot_sorting_qc(
     electrode_idx = primary_electrode_of_cell(rb, cell_id)
 
     raw_ts = rt.data[electrode_idx, :]
+    # Filter the whole loaded array, then window it: filtering the window
+    # instead would put the filter's edge transient inside the plot.
+    filt_label = 'raw'
+    if hp_cutoff_hz:
+        try:
+            raw_ts = highpass_trace(raw_ts.astype(np.float32),
+                                    fs=float(rt.sample_rate),
+                                    cutoff_hz=float(hp_cutoff_hz))
+            filt_label = f'{int(hp_cutoff_hz)} Hz HP'
+        except Exception as exc:
+            print(f'High-pass failed ({exc!r}); showing the unfiltered trace, '
+                  f'on which spike marks sit at the drift level rather than '
+                  f'in the troughs.')
+
     # Spike times are absolute within the epoch, so the trace's time axis has
     # to be too — it starts at window_start_s, which is 0 for a full epoch.
     offset_samples = int(round(rt.window_start_s * rt.sample_rate))
@@ -426,7 +467,7 @@ def plot_sorting_qc(
 
     ax.plot(win_time, win_trace, color='0.25', lw=0.6, zorder=1)
     ax.set_xlabel('time (s)')
-    ax.set_ylabel('raw signal')
+    ax.set_ylabel(f'signal ({filt_label})')
 
     # Pull spike times (ms) for the target cell within the window
     def _spike_samples_in_window(cid: int) -> np.ndarray:
@@ -507,6 +548,7 @@ def plot_sorting_qc_grid(
     start_time: float = 0.0,
     candidate_cell_ids: Optional[Iterable[int]] = None,
     max_other_cells: int = 6,
+    hp_cutoff_hz: Optional[float] = 300.0,
 ):
     """Grid: rows = cells, cols = epochs. Loads each epoch's raw data once."""
     cell_ids = list(cell_ids)
@@ -527,6 +569,7 @@ def plot_sorting_qc_grid(
                     start_time=start_time, end_time=start_time + window_s,
                     candidate_cell_ids=candidate_cell_ids,
                     max_other_cells=max_other_cells,
+                    hp_cutoff_hz=hp_cutoff_hz,
                     ax=ax, show_legend=(j == 0),
                 )
             except Exception as exc:

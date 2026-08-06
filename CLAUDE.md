@@ -38,6 +38,16 @@ tier, so anything that needs to sweep all volumes must go through
 `ra.find_path(kind, *parts)` (one file) or `ra.tier_dirs(kind)` (all roots
 for a kind) rather than listing `ra.ANALYSIS_DIR` directly.
 
+**Tiers are discovered once, at `import retinanalysis`.** A section whose
+root did not exist then is dropped from `mea_config` for the life of the
+process, so a volume mounted afterwards is not merely unsearched — it is
+unknown, and `find_raw_path` reports "not found on any configured tier"
+with the NAS sitting mounted. `ra.reload_config()` re-reads `config.ini`,
+rediscovers the mounts, and re-resolves the `ra.DATA_DIR`-style constants
+(which `ra.__getattr__` memoizes) without a kernel restart. This is the
+first thing to check whenever raw data is "missing" — the raw `.bin` for
+a date can exist on the NAS and still be invisible.
+
 ## Demos / notebooks
 
 Notebooks live under `demos/`. Convention: **one notebook per
@@ -82,13 +92,26 @@ so it runs standalone, then:
    `ra.plot_mosaic_activity(...)` draw one epoch's per-cell firing rate on
    the RF mosaic beside the raster it was counted from, over a
    reconstructed stimulus frame (§5 of `variableMeanDriftingGrating`).
+   `ra.animate_mosaic_activity(...)` is the moving version (§5b) — same
+   panels, plus a time axis, which is the only way to see the response
+   travel across the mosaic with the bars. **Three clocks**: spike times run
+   from the epoch start, `grating_frame` wants seconds from stimulus onset
+   (they differ by `preTime`, hence the `pre_time_ms` argument), and the
+   retina answers late. `latency_ms=0` leaves that lag visible on purpose;
+   on 20230502C/data017 epoch 7 the OnM population tracks the luminance over
+   its own RFs at r=0.63, +35 ms. Rate colour scale and stimulus display
+   range are fixed across frames — a per-frame rescale would encode nothing.
 4. Sorting QC on the raw trace (§6): `ra.load_raw_window(response_block,
    epoch, (t0, t1))` reads one window shared by every cell — and returns
    `None` with a printed reason instead of raising when the NAS holding the
    raw `.bin` isn't mounted — then `ra.browse_sorting_qc(raw, ...)` puts a
    dropdown over `ra.sample_cells_by_type(qc.query('passes'), ...)`. Pass
    the QC survivors as `candidate_cell_ids` or the legend fills with
-   unmatched clusters.
+   unmatched clusters. Two things the panel needs to be readable at all:
+   the trace is high-passed at 300 Hz (`ra.highpass_trace`, zero-phase so
+   the trough stays on the spike sample) because the drift is spike-sized
+   and otherwise sits under the marks, and the window is **about a second**
+   — 5 s is 100k samples in ~1300 px and every waveform becomes one pixel.
 5. Phase alignment for any drifting-grating protocol (§7):
    `ra.phase_alignment_by_condition(pipeline, stim_block, epochs_kept,
    CONDITION_KEYS, n_shuffles=...)` runs `drift_phase_response` +
@@ -99,9 +122,45 @@ so it runs standalone, then:
    residual as a latency; `ra.browse_phase_alignment` draws them. Another
    protocol reuses all of it by passing its own `geometry_fn`.
 
+6. Recovery after the luminance step (§8): every epoch of this protocol *is*
+   a step, since the mean alternates epoch to epoch (~0.93 s gap between,
+   `preTime` 0). `ra.phase_binned_response(pipeline, stim_block, epochs,
+   windows_s=ra.recovery_windows(...))` does one pass over the spikes and
+   feeds `ra.phase_modulation` (F1/F2 vs F0), `ra.decode_phase`
+   (`'full'` / `'mod_pi'` / `'polarity_blind'`), `ra.mosaic_coherence`,
+   `ra.split_half_reliability`, `ra.pathway_decoding`, `ra.fit_recovery` and
+   `ra.spatial_structure_index`. **It refuses to pool epochs of different
+   geometry** — same rule as §7.
+
+   Four traps this encodes, all of which will manufacture a recovery:
+   - **Vector strength is biased up ~`sqrt(pi/4n)`** and rate falls 3–8x
+     across an epoch, so the bias grows where the effect is claimed. Use
+     `ra.corrected_resultant`; `phase_modulation(debias=False)` shows the
+     size of it (150 µm/0.3: 0.402→0.377, negligible; 50 µm/0.3 late:
+     0.163→0.107, most of the number).
+   - **A per-window spike threshold selects cells** — the set is chosen once
+     over the whole epoch and held fixed.
+   - **Decoders see more spikes early**; `match_spike_counts=True` thins to
+     the sparsest window.
+   - **`spatial_structure_index` divides by the late-vs-shuffle margin**, so
+     it returns NaN with a reason when a condition never beats its shuffle
+     rather than emitting values like -9.
+   Findings on 20230502C/data017: at 150 µm/0.3 rate falls 27.7→10.1 Hz while
+   F1 rises 0.38→0.64 (τ 12.8 s, t50 12.4 s); full-phase decoding is at
+   ceiling from 0–2 s and *declines*; what recovers is polarity-blind
+   decoding (0.28→0.45) and OnM's 2nd-order coherence (0.42→0.70) while its
+   1st-order coherence is flat at 0.93. 50 µm is unresolved at every time.
+
 Condition labels (figure titles, dropdown entries, printouts) go through
 `ra.condition_label(CONDITION_KEYS, values)`, which takes a groupby tuple
 or an epoch row — otherwise one notebook grows four spellings of one label.
+
+**Rasters sort by RF position along the drift axis by default**
+(`ra.raster_sort_order`, used by `plot_mosaic_activity` and
+`animate_mosaic_activity` via `raster_sort_by=`/`raster_axis_deg=`). A
+drifting stimulus reaches successive positions at successively later phases,
+so in spatial order the response is a visible diagonal band; sorted by rate
+or cell id the same spikes look like noise.
 
 Two traps worth knowing, both hit while building the first one:
 `block_qc_metrics` needs `t_end_ms` (without it the rate gate is NaN and

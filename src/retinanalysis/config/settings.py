@@ -144,20 +144,26 @@ def _first_nonempty_tier_value(key: str, _config: dict) -> str:
     return ''
 
 
-LOCAL_CACHE_ROOT = (
-    os.environ.get('RA_LOCAL_CACHE_ROOT', '')
-    or _first_nonempty_tier_value('local_cache', mea_config)
-    or os.path.join(os.path.expanduser('~'), '.cache', 'retinanalysis')
-)
-mea_config['local_cache'] = {
-    'data':     os.path.join(LOCAL_CACHE_ROOT, 'data'),
-    'raw':      os.path.join(LOCAL_CACHE_ROOT, 'raw'),
-    'analysis': os.path.join(LOCAL_CACHE_ROOT, 'analysis'),
-    # Other kinds are not cached locally — leave blank so find_path()
-    # falls through to the real tiers for h5/meta/tags/query.
-    'h5': '', 'meta': '', 'tags': '', 'query': '', 'user': '',
-    'protocol_repos_root': '', 'output': '', 'local_cache': '',
-}
+def _add_local_cache_tier():
+    """Resolve the cache root and install it as a tier ahead of every source."""
+    global LOCAL_CACHE_ROOT
+    LOCAL_CACHE_ROOT = (
+        os.environ.get('RA_LOCAL_CACHE_ROOT', '')
+        or _first_nonempty_tier_value('local_cache', mea_config)
+        or os.path.join(os.path.expanduser('~'), '.cache', 'retinanalysis')
+    )
+    mea_config['local_cache'] = {
+        'data':     os.path.join(LOCAL_CACHE_ROOT, 'data'),
+        'raw':      os.path.join(LOCAL_CACHE_ROOT, 'raw'),
+        'analysis': os.path.join(LOCAL_CACHE_ROOT, 'analysis'),
+        # Other kinds are not cached locally — leave blank so find_path()
+        # falls through to the real tiers for h5/meta/tags/query.
+        'h5': '', 'meta': '', 'tags': '', 'query': '', 'user': '',
+        'protocol_repos_root': '', 'output': '', 'local_cache': '',
+    }
+
+
+_add_local_cache_tier()
 
 # ---------------------------------------------------------------------------
 # Tier kind classification (local vs network) — auto-detected from the
@@ -198,21 +204,40 @@ def _classify_tier(path: str) -> str:
     return 'unknown'
 
 
-_TIER_KIND = {}
-for _tier in _SOURCE_TIERS:
-    if _tier in mea_config:
-        _TIER_KIND[_tier] = _classify_tier(
-            mea_config[_tier].get('data', ''))
+def _classify_all_tiers():
+    """Rebuild the tier-kind map and the read-priority orders from what is mounted.
 
-# Compose priority: local cache → local source tiers → unknown → network.
-# Within each group, config-file order is preserved so users still have
-# control over relative ordering of same-kind tiers. The section labels
-# become a *secondary* sort key behind local-vs-network.
-_local_first = [t for t in _SOURCE_TIERS if _TIER_KIND.get(t) == 'local']
-_unknown_tiers = [t for t in _SOURCE_TIERS if _TIER_KIND.get(t) == 'unknown']
-_network_tiers = [t for t in _SOURCE_TIERS if _TIER_KIND.get(t) == 'network']
-_TIER_PRIORITY = (['local_cache'] + _local_first
-                   + _unknown_tiers + _network_tiers)
+    Split out of module scope so :func:`reload_config` can redo it. A tier
+    that was unmounted when the package was imported is absent from
+    ``mea_config`` entirely, so none of this can be derived once and reused.
+    """
+    global _TIER_KIND, _local_first, _unknown_tiers, _network_tiers
+    global _TIER_PRIORITY, _RAW_TIER_PRIORITY
+
+    _TIER_KIND = {}
+    for tier in _SOURCE_TIERS:
+        if tier in mea_config:
+            _TIER_KIND[tier] = _classify_tier(mea_config[tier].get('data', ''))
+
+    # Compose priority: local cache → local source tiers → unknown → network.
+    # Within each group, config-file order is preserved so users still have
+    # control over relative ordering of same-kind tiers. The section labels
+    # become a *secondary* sort key behind local-vs-network.
+    _local_first = [t for t in _SOURCE_TIERS if _TIER_KIND.get(t) == 'local']
+    _unknown_tiers = [t for t in _SOURCE_TIERS if _TIER_KIND.get(t) == 'unknown']
+    _network_tiers = [t for t in _SOURCE_TIERS if _TIER_KIND.get(t) == 'network']
+    _TIER_PRIORITY = (['local_cache'] + _local_first
+                      + _unknown_tiers + _network_tiers)
+    # Raw .bin files are the exception to "prefer local". They are ~30 GB per
+    # experiment and are kept canonical on the NAS — local SSDs only mirror a
+    # few recent dates. Resolving raw against the network tier first means a
+    # connected NAS always wins, even if a partial SSD copy happens to be
+    # present. Falls back to local tiers when NAS is not mounted so the few
+    # dates that *are* on SSD still work.
+    _RAW_TIER_PRIORITY = _network_tiers + _unknown_tiers + _local_first
+
+
+_classify_all_tiers()
 
 
 # ---------------------------------------------------------------------------
@@ -287,15 +312,6 @@ def _pick_top_tier():
     raise RuntimeError("No valid config paths found.")
 
 
-# Raw .bin files are the exception to "prefer local". They are ~30 GB per
-# experiment and are kept canonical on the NAS — local SSDs only mirror a
-# few recent dates. Resolving raw against the network tier first means a
-# connected NAS always wins, even if a partial SSD copy happens to be
-# present. Falls back to local tiers when NAS is not mounted so the few
-# dates that *are* on SSD still work.
-_RAW_TIER_PRIORITY = _network_tiers + _unknown_tiers + _local_first
-
-
 def _pick_raw_tier():
     for tier in _RAW_TIER_PRIORITY:
         if tier in mea_config and mea_config[tier].get('raw'):
@@ -303,29 +319,39 @@ def _pick_raw_tier():
     return None
 
 
-_top = _pick_top_tier()
-DATA_DIR = _top['data']
-ANALYSIS_DIR = _top['analysis']
-H5_DIR = _top['h5']
-META_DIR = _top['meta']
-TAGS_DIR = _top['tags']
-QUERY_DIR = _top['query']
-USER = _top['user']
+def _bind_tier_paths():
+    """Point the module-level path constants at the top mounted tier of each kind."""
+    global _top, _raw_top, PROTOCOL_REPOS_ROOT
+    global DATA_DIR, ANALYSIS_DIR, H5_DIR, META_DIR, TAGS_DIR, QUERY_DIR
+    global USER, RAW_DIR
 
-_raw_top = _pick_raw_tier()
-RAW_DIR = _raw_top['raw'] if _raw_top is not None else ''
+    _top = _pick_top_tier()
+    DATA_DIR = _top['data']
+    ANALYSIS_DIR = _top['analysis']
+    H5_DIR = _top['h5']
+    META_DIR = _top['meta']
+    TAGS_DIR = _top['tags']
+    QUERY_DIR = _top['query']
+    USER = _top['user']
 
-# Root directory holding locally-cloned protocol packages (turner-package, manookin-package,
-# riekelab-package-master, ...). Used by retinanalysis.regen to find resource files (.iml,
-# .mat libraries) and protocol source code. Empty string if not configured / not present.
-PROTOCOL_REPOS_ROOT = next(
-    (mea_config[tier]['protocol_repos_root']
-     for tier in _TIER_PRIORITY
-     if tier in mea_config
-     and mea_config[tier].get('protocol_repos_root')
-     and os.path.isdir(mea_config[tier]['protocol_repos_root'])),
-    '',
-)
+    _raw_top = _pick_raw_tier()
+    RAW_DIR = _raw_top['raw'] if _raw_top is not None else ''
+
+    # Root directory holding locally-cloned protocol packages (turner-package,
+    # manookin-package, riekelab-package-master, ...). Used by
+    # retinanalysis.regen to find resource files (.iml, .mat libraries) and
+    # protocol source code. Empty string if not configured / not present.
+    PROTOCOL_REPOS_ROOT = next(
+        (mea_config[tier]['protocol_repos_root']
+         for tier in _TIER_PRIORITY
+         if tier in mea_config
+         and mea_config[tier].get('protocol_repos_root')
+         and os.path.isdir(mea_config[tier]['protocol_repos_root'])),
+        '',
+    )
+
+
+_bind_tier_paths()
 
 
 def find_protocol_repo(repo_name):
@@ -366,6 +392,37 @@ def find_raw_path(exp_name, datafile_name):
                 _record_network_resolution(candidate)
             return candidate
     return None
+
+
+def raw_tier_report(exp_name, datafile_name) -> str:
+    """Explain, tier by tier, why :func:`find_raw_path` came up empty.
+
+    The failure worth distinguishing is a tier configured but *not mounted at
+    import*: it is missing from ``mea_config`` entirely, so a NAS mounted since
+    then is not merely unsearched, it is unknown. That reads identically to a
+    genuinely absent file unless the report says so.
+    """
+    configfile = ConfigParser()
+    configfile.read(str(config_path))
+    mounted_roots = {mea_config[t].get('raw', '') for t in _RAW_TIER_PRIORITY
+                     if t in mea_config}
+
+    lines, unmounted = ['Where it looked:'], []
+    for name in _platform_sections(configfile):
+        root = configfile[name].get('raw', '')
+        if not root:
+            continue
+        if root in mounted_roots:
+            lines.append(f'  {name}: no {exp_name}/{datafile_name} under {root}')
+        else:
+            unmounted.append(name)
+            lines.append(f'  {name}: not searched — {root} was not mounted '
+                         f'when retinanalysis was imported')
+    if unmounted:
+        lines.append('Mounted one of those since? Tiers are discovered at '
+                     'import, so run ra.reload_config() and retry — no kernel '
+                     'restart needed.')
+    return '\n'.join(lines)
 
 
 def find_path(kind, *parts):
@@ -452,9 +509,86 @@ def ingest_source_dirs():
 #      secondary → tertiary), which avoids writing onto the read-only
 #      lab server unless the user explicitly set it there.
 #   3. `~/retinanalysis_output` — portable default.
-OUTPUT_DIR = (
-    os.environ.get('RA_OUTPUT_DIR', '')
-    or _first_nonempty_tier_value('output', mea_config)
-    or os.path.join(os.path.expanduser('~'), 'retinanalysis_output')
-)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+def _bind_output_dir():
+    global OUTPUT_DIR
+    OUTPUT_DIR = (
+        os.environ.get('RA_OUTPUT_DIR', '')
+        or _first_nonempty_tier_value('output', mea_config)
+        or os.path.join(os.path.expanduser('~'), 'retinanalysis_output')
+    )
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+_bind_output_dir()
+
+
+def _invalidate_lazy_path_constants() -> None:
+    """Drop ``ra``'s memoized copies of this module's path constants.
+
+    ``retinanalysis.__getattr__`` writes each resolved name into the package
+    globals, so ``ra.DATA_DIR`` is read from settings exactly once per process.
+    Deleting the cached entry sends the next access back through the registry.
+    """
+    names = ('DATA_DIR', 'ANALYSIS_DIR', 'RAW_DIR', 'H5_DIR', 'META_DIR',
+             'TAGS_DIR', 'QUERY_DIR', 'OUTPUT_DIR', 'USER',
+             'PROTOCOL_REPOS_ROOT')
+    for name in names:
+        retinanalysis.__dict__.pop(name, None)
+
+
+def reload_config(verbose: bool = True) -> dict:
+    """Re-read config.ini and rediscover which volumes are mounted.
+
+    Everything about tiers is decided when ``retinanalysis`` is imported: a
+    section whose root does not exist is dropped from ``mea_config`` outright,
+    so a volume mounted afterwards is invisible for the life of the process —
+    including to :func:`find_raw_path`, which is how a mounted NAS still
+    reports "not found on any configured tier". Mounting a drive mid-session is
+    ordinary, and a kernel holding a built pipeline is expensive to restart, so
+    this rebuilds the tier state in place instead.
+
+    It rebinds module state, not what other modules already imported. Code that
+    did ``from ...settings import OUTPUT_DIR`` keeps its old value; the
+    resolver functions — ``find_path``, ``find_raw_path``, ``tier_dirs`` — read
+    the globals on each call and so pick the new tiers up immediately. The
+    ``ra.DATA_DIR``-style constants are re-resolved too, since ``ra``'s lazy
+    ``__getattr__`` caches whatever it hands out and would otherwise keep
+    serving the pre-mount value. Call it as ``ra.reload_config()``.
+
+    Returns
+    -------
+    dict
+        ``{'mounted': [...], 'added': [...], 'removed': [...]}``, tiers named
+        by their config.ini section.
+    """
+    global mea_config, _SOURCE_TIERS
+
+    def _sections(cfg):
+        return {t: cfg[t].get('_section', t) for t in cfg
+                if t != 'local_cache'}
+
+    before = _sections(mea_config)
+    mea_config = load_config(config_path)
+    _SOURCE_TIERS = list(mea_config)
+    _add_local_cache_tier()
+    _classify_all_tiers()
+    _bind_tier_paths()
+    _bind_output_dir()
+    _invalidate_lazy_path_constants()
+    after = _sections(mea_config)
+
+    added = [after[t] for t in after if t not in before]
+    removed = [before[t] for t in before if t not in after]
+    result = {'mounted': list(after.values()),
+              'added': added, 'removed': removed}
+    if verbose:
+        order = ' -> '.join(f'{after.get(t, t)} [{_TIER_KIND.get(t, "?")}]'
+                            for t in _SOURCE_TIERS)
+        print(f'{len(after)} volume(s) mounted, read in priority order: {order}')
+        if added:
+            print(f'  newly visible: {", ".join(added)}')
+        if removed:
+            print(f'  no longer mounted: {", ".join(removed)}')
+        if not added and not removed:
+            print('  unchanged — nothing was mounted or unmounted since import')
+    return result
