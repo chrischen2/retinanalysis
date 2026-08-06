@@ -43,6 +43,7 @@ import numpy as np
 
 
 __all__ = [
+    'with_drift_freq',
     'drift_phase_response',
     'phase_period_scan',
     'phase_alignment_by_condition',
@@ -72,12 +73,36 @@ def _axis_position(center_x, center_y, geometry: Dict,
     return dx * np.cos(theta) + dy * np.sin(theta)
 
 
+def with_drift_freq(geometry: Dict, drift_freq_hz: Optional[float]) -> Dict:
+    """A copy of ``geometry`` folding at ``drift_freq_hz`` instead of the nominal.
+
+    The temporal frequency reaches every phase calculation through the
+    geometry dict, so replacing it there is enough to correct all of them at
+    once — the F1 sums in :func:`drift_phase_response` and the cycle length
+    :func:`residual_latency_table` divides by.
+
+    Worth correcting because the declared frequency is usually not the
+    delivered one: Stage advances the grating one increment per rendered frame
+    sized from the *declared* refresh rate, and the display runs at its own.
+    :func:`~retinanalysis.utils.spatial_recovery.estimate_drift_frequency`
+    recovers the real value from the spikes. ``None`` returns the geometry
+    unchanged.
+    """
+    if drift_freq_hz is None:
+        return geometry
+    out = dict(geometry)
+    out['nominal_temporal_freq_hz'] = float(geometry['temporal_freq_hz'])
+    out['temporal_freq_hz'] = float(drift_freq_hz)
+    return out
+
+
 def drift_phase_response(pipeline, epoch_indices, geometry: Dict,
                          window_s: Optional[Tuple[float, float]] = None,
                          cell_types: Optional[Iterable[str]] = None,
                          cell_ids: Optional[Iterable[int]] = None,
                          min_spikes: int = 30,
-                         std_scaling: float = 1.6):
+                         std_scaling: float = 1.6,
+                         drift_freq_hz: Optional[float] = None):
     """Each cell's F1 phase, and the phase the grating predicts at its position.
 
     Parameters
@@ -109,6 +134,11 @@ def drift_phase_response(pipeline, epoch_indices, geometry: Dict,
         rather than dropped, so the caller can say how many were too quiet.
     std_scaling : float
         Receptive-field ellipse size in σ units, as elsewhere.
+    drift_freq_hz : float, optional
+        Fold at this frequency instead of the geometry's nominal one — see
+        :func:`with_drift_freq`. On a 60 s epoch a fraction of a percent of
+        frequency error costs most of the measured F1, so this is worth
+        supplying rather than trusting the declared value.
 
     Returns
     -------
@@ -129,6 +159,7 @@ def drift_phase_response(pipeline, epoch_indices, geometry: Dict,
     if not epochs:
         raise ValueError('epoch_indices is empty')
 
+    geometry = with_drift_freq(geometry, drift_freq_hz)
     pre_s = float(geometry.get('pre_time_ms', 0.0)) / 1000.0
     if window_s is None:
         window_s = (pre_s, pre_s + float(geometry['stim_time_ms']) / 1000.0)
@@ -370,6 +401,7 @@ def phase_alignment_by_condition(pipeline, stim_block, epochs,
                                  min_spikes: int = 30,
                                  n_shuffles: int = 0,
                                  epoch_col: str = 'epoch',
+                                 drift_freq_hz: Optional[float] = None,
                                  **scan_kwargs) -> Tuple[Dict, 'pd.DataFrame']:
     """Measure and scan the phase alignment separately for each condition.
 
@@ -401,6 +433,15 @@ def phase_alignment_by_condition(pipeline, stim_block, epochs,
         Shuffled-position null for each condition's scan. On a handful of
         driven cells a grid search finds a peak in noise, so without this there
         is nothing to compare a concentration against.
+    drift_freq_hz : float, optional
+        Fold every condition at this frequency rather than each geometry's
+        nominal one. All conditions ran on the same display, so one estimate
+        from :func:`~retinanalysis.utils.spatial_recovery
+        .estimate_drift_frequency` applies to all of them. Leaving it ``None``
+        keeps the declared value and, over a 60 s epoch, most of the F1 with
+        it — the *period and orientation* the scan picks are unaffected, since
+        that is a spatial fit at fixed temporal frequency, but every strength
+        and every residual latency is.
     **scan_kwargs
         Passed to :func:`phase_period_scan` (``orientations_deg``,
         ``period_range_px``, ``min_cells_per_type``, …).
@@ -429,7 +470,12 @@ def phase_alignment_by_condition(pipeline, stim_block, epochs,
     for levels, group in epochs.groupby(keys):
         levels = levels if isinstance(levels, tuple) else (levels,)
         epoch_indices = group[epoch_col].astype(int).tolist()
-        geometry = geometry_fn(stim_block, epoch_indices[0])
+        # Correct the geometry once, here, so the frequency every consumer
+        # reads is the corrected one: the F1 sums below, the cycle length
+        # `residual_latency_table` turns a residual into milliseconds with,
+        # and the copy stored in `phase_by_condition` for the figures.
+        geometry = with_drift_freq(geometry_fn(stim_block, epoch_indices[0]),
+                                   drift_freq_hz)
 
         phases = drift_phase_response(pipeline, epoch_indices, geometry,
                                       window_s=window_s,
@@ -470,8 +516,22 @@ def residual_latency_table(scan: Dict, geometry: Dict) -> 'pd.DataFrame':
     latency **mod one drift cycle** (500 ms at 2 Hz), not an absolute one. ON
     and OFF cells come out half a cycle apart, which is why this is per type.
 
+    **Sign.** ``stim_phase`` is the drift phase at which luminance peaks over
+    that cell, and a cell firing ``tau`` later has its mean spike phase that
+    much further on, so ``residual = +2*pi*f*tau`` — a positive residual is a
+    positive lag. Reporting ``-residual`` instead returns the complement,
+    ``cycle - tau``, which for a real retinal latency lands near a full cycle
+    and reads as though the response preceded the stimulus.
+
+    This is only legible once the fold uses the *delivered* drift frequency:
+    at the nominal one the residual is averaged over a phase that drifts
+    across the epoch, so it is not an estimate of anything and its sign is
+    arbitrary. See :func:`with_drift_freq`.
+
     Returns a frame with ``cell_type``, ``n``, ``concentration``,
-    ``mean_residual_deg`` and ``lag_ms``.
+    ``mean_residual_deg``, ``lag_ms`` (in ``[0, cycle)``) and
+    ``lag_ms_signed`` (wrapped to +/- half a cycle, so a lag just under a
+    full cycle reads as the small negative it is).
     """
     import pandas as pd
 
@@ -481,8 +541,10 @@ def residual_latency_table(scan: Dict, geometry: Dict) -> 'pd.DataFrame':
         'n': int(d['n']),
         'concentration': float(d['concentration']),
         'mean_residual_deg': float(np.degrees(d['mean_residual_rad'])),
-        'lag_ms': float((-d['mean_residual_rad'] % (2 * np.pi))
+        'lag_ms': float((d['mean_residual_rad'] % (2 * np.pi))
                         / (2 * np.pi) * cycle_ms),
+        'lag_ms_signed': float(_wrap_pi(d['mean_residual_rad'])
+                               / (2 * np.pi) * cycle_ms),
         'cycle_ms': cycle_ms,
     } for cell_type, d in scan['by_type'].items()]
     return pd.DataFrame(rows)
@@ -533,7 +595,9 @@ def describe_phase_alignment(summary, phase_by_condition,
         for row in latency.itertuples():
             print(f'  {row.cell_type:5s} n = {row.n:3d}   '
                   f'R = {row.concentration:.2f}   mean residual '
-                  f'{row.mean_residual_deg:7.1f}°  ->  {row.lag_ms:.0f} ms')
+                  f'{row.mean_residual_deg:7.1f}°  ->  {row.lag_ms:.0f} ms'
+                  + (f' (= {row.lag_ms_signed:.0f} ms)'
+                     if row.lag_ms > cycle_ms / 2 else ''))
 
     return {'aligned': aligned, 'best_condition': best_key, 'latency': latency}
 

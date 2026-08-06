@@ -184,6 +184,7 @@ _ATTR_TO_MODULE = {
     'grating_frame': 'retinanalysis.regen.variable_mean_drifting_grating',
     'grating_geometry': 'retinanalysis.regen.variable_mean_drifting_grating',
     'drift_phase_response': 'retinanalysis.utils.response_phase',
+    'with_drift_freq': 'retinanalysis.utils.response_phase',
     'phase_period_scan': 'retinanalysis.utils.response_phase',
     'phase_alignment_by_condition': 'retinanalysis.utils.response_phase',
     'residual_latency_table': 'retinanalysis.utils.response_phase',

@@ -143,8 +143,23 @@ so it runs standalone, then:
    0.506), accumulates 215° over a 60 s epoch, and — because windows differ in
    width — inverts §9's conclusion: full-phase decoding appears to *decline*
    0.94→0.54 when corrected it rises and saturates. Pass `drift_freq_hz` to
-   `phase_binned_response`. §7 still uses the nominal value from `geometry`,
-   so its F1 strengths are underestimates.
+   `phase_binned_response`, and to `phase_alignment_by_condition` /
+   `drift_phase_response` (which route it through `ra.with_drift_freq`, since
+   the frequency reaches every phase calculation via the geometry dict).
+   **`DRIFT_FREQ_HZ` is estimated once in §7** and reused by §8 and §9 — one
+   display, one estimate.
+
+   In §7 the correction doubles median F1 at 150 µm/0.3 (0.29→0.58) and fixes
+   the dim coarse condition's period (52→79.4 px against a true 78, though
+   still at its null). It leaves the *picked period and orientation* of the
+   resolvable condition alone (77.5 px at 0° either way) — a frequency error
+   moves every cell's phase together, so the slope across position survives.
+   **The latency is the diagnostic**: `residual_latency_table` had the sign
+   inverted (it reported `cycle - tau`), which the smeared nominal-frequency
+   residual hid. Fixed and corrected, OnM comes out at +68 ms and OnP +84 ms,
+   matching in sign and order the +35 ms §5b gets by cross-correlation; at
+   the nominal frequency the same cells give −66 ms, a response preceding its
+   stimulus, which is how to notice the frequency is wrong.
 
 7. Recovery after the luminance step (§9): every epoch of this protocol *is*
    a step, since the mean alternates epoch to epoch (~0.93 s gap between,
