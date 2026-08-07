@@ -224,9 +224,9 @@ def browse_cell_psths(cells, t, psth, *, cell_types: Optional[Sequence[str]] = N
             ax.plot(t, psth[i], color=('crimson' if is_outlier else
                                        colors.get(ct, NEUTRAL_GRAY)),
                     lw=1.0 if is_outlier else 0.7)
+            title_kwargs = {'color': 'crimson'} if is_outlier else {}
             ax.set_title(f'{cid}' + (' — OUTLIER' if is_outlier else ''),
-                         fontsize=7, pad=1.5,
-                         color='crimson' if is_outlier else None)
+                         fontsize=7, pad=1.5, **title_kwargs)
             ax.tick_params(labelsize=6)
         for ax in flat[-n_cols:]:
             if ax.axes is not None:

@@ -1,7 +1,10 @@
 import numpy as np
 import pandas as pd
 
-from retinanalysis.utils.cycle_average import summarize_template_outliers
+from retinanalysis.utils.cycle_average import (
+    browse_cell_psths,
+    summarize_template_outliers,
+)
 
 
 def _row(cell_id, condition, passes, *, evaluable=True, cell_type='OnM'):
@@ -45,3 +48,27 @@ def test_cross_condition_template_qc_validates_inputs():
         assert 'min_conditions' in str(exc)
     else:
         raise AssertionError('expected min_conditions validation')
+
+
+def test_psth_browser_accepts_an_empty_outlier_list(monkeypatch):
+    import matplotlib.pyplot as plt
+    import retinanalysis.utils.browse as browse
+
+    def render_first(options, render, **kwargs):
+        return render(options[0][1])
+
+    def close_figure(fig):
+        plt.close(fig)
+        return b'png'
+
+    monkeypatch.setattr(browse, 'png_browser', render_first)
+    monkeypatch.setattr(browse, 'figure_to_png', close_figure)
+    cells = pd.DataFrame({'cell_id': [1], 'cell_type': ['OnM']})
+
+    body, png = browse_cell_psths(
+        cells, np.array([0.0, 1.0]), np.array([[1.0, 2.0]]),
+        outlier_cell_ids=[], n_cols=1,
+    )
+
+    assert body is None
+    assert png == b'png'
