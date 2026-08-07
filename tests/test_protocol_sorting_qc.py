@@ -75,10 +75,11 @@ def test_waveform_similarity_and_competing_cluster_overlap():
 
 def test_quantitative_qc_separates_missed_from_misassigned():
     raw, ks, missed, misassigned = _synthetic()
+    repository_map = ks.channel_positions + np.array([100.0, 200.0])
     result = analyze_unit_sorting_qc(
         raw, ks, 0, n_local_channels=4, min_empirical_spikes=10,
         threshold_sigma=4.0, similarity_percentile=2,
-        min_spatial_overlap=0.1)
+        min_spatial_overlap=0.1, electrode_map_xy=repository_map)
     by_sample = result.events.set_index('candidate_sample').status
     assert by_sample.loc[missed] == 'missed_detection'
     assert by_sample.loc[misassigned] == 'misassigned'
@@ -97,10 +98,13 @@ def test_quantitative_qc_separates_missed_from_misassigned():
     assert len(ax.patches) == 3
     plt.close(fig)
     fig, axes = plot_sampled_detected_spikes({123: result})
-    assert axes.shape == (1, 3)
+    assert axes.shape == (1, 4)
     assert 'cell 123' in axes[0, 0].get_title()
-    assert len(axes[0, 1].lines) > 1
-    assert 'similarity' in axes[0, 2].get_title().lower()
+    assert 'suspicious' in axes[0, 1].get_title().lower()
+    assert len(axes[0, 2].lines) > 1
+    assert 'similarity' in axes[0, 3].get_title().lower()
+    np.testing.assert_array_equal(
+        result.electrode_map_xy, repository_map)
     plt.close(fig)
 
 

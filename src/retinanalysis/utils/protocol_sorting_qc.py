@@ -184,6 +184,7 @@ class UnitSortingQC:
     target_cluster: int
     local_channel_positions: np.ndarray
     local_channel_xy: Optional[np.ndarray]
+    electrode_map_xy: Optional[np.ndarray]
     raw_channel_ids: np.ndarray
     nearby_clusters: np.ndarray
     empirical_templates: Dict[int, np.ndarray]
@@ -464,6 +465,7 @@ def analyze_unit_sorting_qc(
     refractory_censored_ms: float = 0.3,
     min_spatial_overlap: float = 0.20,
     max_competitors: int = 12,
+    electrode_map_xy: Optional[np.ndarray] = None,
 ) -> UnitSortingQC:
     """Quantify missed detection, misassignment, collision, and RP violations.
 
@@ -611,11 +613,27 @@ def analyze_unit_sorting_qc(
         'segment_n_samples': int(len(local)),
         'segment_duration_s': float(len(local) / fs),
     }
+    full_xy = None
+    local_xy = None
+    if electrode_map_xy is not None:
+        candidate_xy = np.asarray(electrode_map_xy, dtype=float)
+        if candidate_xy.ndim != 2 or candidate_xy.shape[1] < 2:
+            raise ValueError('electrode_map_xy must be n_electrodes × 2')
+        if raw_ids.max() >= len(candidate_xy):
+            raise IndexError(
+                f'electrode map has {len(candidate_xy)} rows but raw channel '
+                f'{raw_ids.max()} was selected')
+        full_xy = candidate_xy[:, :2].copy()
+        local_xy = full_xy[raw_ids]
+    elif ks.channel_positions is not None:
+        full_xy = ks.channel_positions.copy()
+        local_xy = ks.channel_positions[positions].copy()
+
     return UnitSortingQC(
         target_cluster=target_cluster,
         local_channel_positions=positions,
-        local_channel_xy=(None if ks.channel_positions is None
-                          else ks.channel_positions[positions].copy()),
+        local_channel_xy=local_xy,
+        electrode_map_xy=full_xy,
         raw_channel_ids=raw_ids,
         nearby_clusters=nearby.cluster_id.to_numpy(dtype=int),
         empirical_templates=templates_empirical,
@@ -674,6 +692,7 @@ def analyze_protocol_sorting_qc(
     *,
     window_s: Tuple[float, float] = (0.0, 60.0),
     kilosort_dir=None,
+    electrode_map_xy=None,
     vision_id_offset: int = 1,
     verbose: bool = True,
     **analysis_kwargs,
@@ -694,6 +713,9 @@ def analyze_protocol_sorting_qc(
         kilosort_dir = (Path(DATA_DIR) / response_block.exp_name
                         / response_block.datafile_name / response_block.ss_version)
     ks = load_kilosort_output(kilosort_dir)
+    if electrode_map_xy is None:
+        electrode_map_xy = np.asarray(
+            response_block.vcd.get_electrode_map(), dtype=float)
     raw = RawTraces(response_block)
     start_s, end_s = (float(v) for v in window_s)
     raw.load_window(int(epoch_index), start_s, end_s, verbose=False)
@@ -711,7 +733,8 @@ def analyze_protocol_sorting_qc(
                   f'Kilosort cluster {cluster_id}')
         result = analyze_unit_sorting_qc(
             raw_segment, ks, cluster_id,
-            segment_start_sample=segment_start, **analysis_kwargs)
+            segment_start_sample=segment_start,
+            electrode_map_xy=electrode_map_xy, **analysis_kwargs)
         result.summary['cell_id'] = cell_id
         result.summary['cell_type'] = type_map.get(cell_id, '')
         result.summary['epoch_index'] = int(epoch_index)
@@ -857,16 +880,15 @@ def plot_sampled_detected_spikes(
     results: Mapping[int, UnitSortingQC],
     *,
     max_waveforms_per_class: int = 30,
-    figsize_per_cell: Tuple[float, float] = (15.0, 3.0),
+    figsize_per_cell: Tuple[float, float] = (19.0, 3.2),
 ):
-    """Spatial footprint, assigned spikes, and target similarity per cell.
+    """Array-map target/suspicious spikes, assignments, and similarity.
 
-    Each row is one sampled cell. The left panel places its median raw
-    waveform on the physical 2-D position of every selected electrode, using
-    one common amplitude scale so propagation and footprint are visible. The
-    middle panel overlays individual Kilosort-assigned spikes on the strongest
-    electrode and labels the cell ID/type/channel. The right panel shows the
-    multichannel cosine similarity to the target empirical template.
+    The first two panels use the canonical Vision electrode map supplied by
+    ``response_block.vcd.get_electrode_map()``. They place the assigned target
+    median and the median suspicious event on the actual array, with every
+    electrode visible for context. The remaining panels show assigned spikes
+    on the strongest electrode and multichannel target similarity.
 
     "Raw threshold candidate" has a precise meaning here: a liberal threshold
     crossing proposed from the strongest channel without consulting Kilosort
@@ -886,7 +908,7 @@ def plot_sampled_detected_spikes(
             'browse_sampled_detected_spikes for multiple sampled clusters')
     items = list(results.items())
     fig, axes = plt.subplots(
-        len(items), 3, squeeze=False,
+        len(items), 4, squeeze=False,
         figsize=(float(figsize_per_cell[0]),
                  float(figsize_per_cell[1]) * len(items)))
     colors = {
@@ -907,6 +929,65 @@ def plot_sampled_detected_spikes(
             return indices
         return np.sort(rng.choice(indices, size=limit, replace=False))
 
+    def _spatial_waveform(ax, waveform, result, title, *,
+                          event_waveforms=None, event_colors=None):
+        xy = result.local_channel_xy
+        layout_note = ''
+        if xy is None:
+            n_cols = int(np.ceil(np.sqrt(len(result.raw_channel_ids))))
+            xy = np.column_stack((np.arange(len(result.raw_channel_ids)) % n_cols,
+                                  np.arange(len(result.raw_channel_ids)) // n_cols))
+            layout_note = ' (index-grid fallback)'
+        xy = np.asarray(xy, dtype=float)
+        full_xy = result.electrode_map_xy
+        if full_xy is not None:
+            full_xy = np.asarray(full_xy, dtype=float)
+            ax.scatter(full_xy[:, 0], full_xy[:, 1], s=2.5, color='0.85',
+                       zorder=0, rasterized=True)
+        if waveform is None:
+            ax.scatter(xy[:, 0], xy[:, 1], s=12, facecolors='none',
+                       edgecolors='0.35')
+            ax.text(0.5, 0.5, 'no missed, misassigned,\nor collision events',
+                    transform=ax.transAxes, ha='center', va='center', fontsize=8)
+        else:
+            unique_x = np.unique(xy[:, 0])
+            unique_y = np.unique(xy[:, 1])
+            spacings = np.r_[np.diff(unique_x), np.diff(unique_y)]
+            spacings = np.abs(spacings[np.abs(spacings) > 0])
+            pitch = float(np.min(spacings)) if len(spacings) else 1.0
+            global_amp = float(np.max(np.abs(waveform))) or 1.0
+            if event_waveforms is not None and len(event_waveforms):
+                global_amp = max(
+                    global_amp, float(np.max(np.abs(event_waveforms))) or 1.0)
+            latencies = np.argmax(np.abs(waveform), axis=0)
+            latency_norm = Normalize(
+                float(latencies.min()),
+                float(max(latencies.max(), latencies.min() + 1)))
+            cmap = plt.get_cmap('viridis')
+            trace_x = np.linspace(-0.38 * pitch, 0.38 * pitch,
+                                  waveform.shape[0])
+            for channel, (x_pos, y_pos) in enumerate(xy):
+                if event_waveforms is not None:
+                    for event_index, event in enumerate(event_waveforms):
+                        event_color = (event_colors[event_index]
+                                       if event_colors is not None else '0.45')
+                        event_y = (event[:, channel] / global_amp
+                                   * 0.38 * pitch)
+                        ax.plot(x_pos + trace_x, y_pos + event_y,
+                                color=event_color, lw=0.45, alpha=0.18)
+                trace_y = waveform[:, channel] / global_amp * 0.38 * pitch
+                ax.plot(x_pos + trace_x, y_pos + trace_y,
+                        color=cmap(latency_norm(latencies[channel])), lw=1.15)
+                ax.text(x_pos, y_pos - 0.46 * pitch,
+                        str(int(result.raw_channel_ids[channel])),
+                        ha='center', va='top', fontsize=5.5, color='0.3')
+            ax.scatter(xy[:, 0], xy[:, 1], s=7, color='black', zorder=3)
+        ax.set_aspect('equal', adjustable='datalim')
+        ax.invert_yaxis()
+        ax.set_title(title + layout_note)
+        ax.set_xlabel('electrode x (µm); labels = raw channel')
+        ax.set_ylabel('electrode y (µm)')
+
     for row, (cell_id, result) in enumerate(items):
         target = result.empirical_templates[result.target_cluster]
         peak_channel = int(np.argmax(np.ptp(target, axis=0)))
@@ -916,46 +997,35 @@ def plot_sampled_detected_spikes(
         cell_type = str(result.summary.get('cell_type', ''))
         cell_color = type_colors.get(cell_type, '#0072B2')
 
-        # A. Median assigned waveform at each electrode's physical location.
-        ax = axes[row, 0]
-        xy = result.local_channel_xy
-        layout_note = ''
-        if xy is None:
-            n_cols = int(np.ceil(np.sqrt(len(result.raw_channel_ids))))
-            xy = np.column_stack((np.arange(len(result.raw_channel_ids)) % n_cols,
-                                  np.arange(len(result.raw_channel_ids)) // n_cols))
-            layout_note = ' (index-grid fallback)'
-        xy = np.asarray(xy, dtype=float)
-        unique_x = np.unique(xy[:, 0])
-        unique_y = np.unique(xy[:, 1])
-        dx = np.min(np.diff(unique_x)) if len(unique_x) > 1 else 1.0
-        dy = np.min(np.diff(unique_y)) if len(unique_y) > 1 else dx
-        pitch = float(max(min(abs(dx), abs(dy)), np.finfo(float).eps))
-        global_amp = float(np.max(np.abs(target))) or 1.0
-        latencies = np.argmax(np.abs(target), axis=0)
-        latency_norm = Normalize(float(latencies.min()),
-                                 float(max(latencies.max(), latencies.min() + 1)))
-        cmap = plt.get_cmap('viridis')
-        trace_x = np.linspace(-0.35 * pitch, 0.35 * pitch, target.shape[0])
-        for channel, (x_pos, y_pos) in enumerate(xy):
-            trace_y = target[:, channel] / global_amp * 0.35 * pitch
-            ax.plot(x_pos + trace_x, y_pos + trace_y,
-                    color=cmap(latency_norm(latencies[channel])), lw=1.2)
-            ax.text(x_pos, y_pos - 0.43 * pitch,
-                    str(int(result.raw_channel_ids[channel])),
-                    ha='center', va='top', fontsize=6, color='0.35')
-        ax.scatter(xy[:, 0], xy[:, 1], s=8, color='black', zorder=3)
-        ax.set_aspect('equal', adjustable='datalim')
-        ax.invert_yaxis()
-        ax.set_title(f'cell {cell_id} ({cell_type}) — 2-D electrode footprint'
-                     f'{layout_note}')
-        ax.set_xlabel('electrode x (µm); labels = raw channel')
-        ax.set_ylabel('electrode y (µm)')
+        # A/B. Target and suspicious spikes on the repository electrode map.
+        _spatial_waveform(
+            axes[row, 0], target, result,
+            f'cell {cell_id} ({cell_type}) — assigned target median')
+        suspicious_statuses = [
+            'missed_detection', 'misassigned', 'possible_collision']
+        suspicious_mask = result.events['status'].isin(
+            suspicious_statuses).to_numpy()
+        suspicious_waveforms = result.candidate_waveforms[suspicious_mask]
+        suspicious_median = (np.median(suspicious_waveforms, axis=0)
+                             if len(suspicious_waveforms) else None)
+        status_counts = result.events.loc[suspicious_mask, 'status'].value_counts()
+        count_label = ', '.join(
+            f'{name.replace("_", " ")}={int(count)}'
+            for name, count in status_counts.items())
+        shown_suspicious = _limited(np.flatnonzero(suspicious_mask))
+        shown_waveforms = result.candidate_waveforms[shown_suspicious]
+        shown_colors = [colors[str(result.events.iloc[index]['status'])]
+                        for index in shown_suspicious]
+        _spatial_waveform(
+            axes[row, 1], suspicious_median, result,
+            f'suspicious events + median (n={len(suspicious_waveforms)}'
+            + (f'; {count_label}' if count_label else '') + ')',
+            event_waveforms=shown_waveforms, event_colors=shown_colors)
 
-        # B. All assigned spikes overlaid on the strongest electrode.
+        # C. All assigned spikes overlaid on the strongest electrode.
         assigned = result.assigned_waveforms[:, :, peak_channel]
         chosen = _limited(np.arange(len(assigned)))
-        ax = axes[row, 1]
+        ax = axes[row, 2]
         if len(chosen):
             ax.plot(time_ms, assigned[chosen].T, color=cell_color, lw=0.5,
                     alpha=0.22)
@@ -968,8 +1038,8 @@ def plot_sampled_detected_spikes(
                   [f'cell {cell_id} — {cell_type} (n={len(assigned)})'],
                   fontsize=7, loc='best')
 
-        # C. Similarity uses every local channel, not only the peak channel.
-        ax = axes[row, 2]
+        # D. Similarity uses every local channel, not only the peak channel.
+        ax = axes[row, 3]
         status_order = ['assigned_target', 'missed_detection', 'misassigned',
                         'possible_collision', 'background/competitor']
         y_labels = ['KS assigned target', 'raw candidate: assigned target',
@@ -995,11 +1065,11 @@ def plot_sampled_detected_spikes(
         ax.set_xlabel('multichannel cosine similarity to target template')
         ax.set_title('Similarity to target (raw threshold candidates)')
         ax.legend(fontsize=7, loc='lower right')
-        for panel in axes[row, 1:]:
+        for panel in axes[row, 2:]:
             panel.grid(alpha=0.15, linewidth=0.5)
-        axes[row, 1].set_xlabel('time from waveform peak (ms)')
+        axes[row, 2].set_xlabel('time from waveform peak (ms)')
 
-    fig.suptitle('Sampled cells — spatial waveform, assigned spikes, and target similarity',
+    fig.suptitle('Sampled cell — target and suspicious spikes on the MEA map',
                  y=1.001)
     fig.tight_layout()
     return fig, axes
