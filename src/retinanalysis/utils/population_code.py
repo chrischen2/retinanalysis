@@ -83,6 +83,11 @@ __all__ = [
     'plot_population_similarity',
     'plot_excess_distance',
     'plot_time_resolved_similarity',
+    'summarize_eye_movement_cell_type_recovery',
+    'fit_eye_movement_cell_type_recovery',
+    'compare_eye_movement_cell_type_timescales',
+    'plot_eye_movement_cell_type_comparison',
+    'plot_eye_movement_cell_type_across_dates',
     'save_eye_movement_results',
     'load_eye_movement_many',
     'summarize_eye_movement_dates',
@@ -1641,6 +1646,266 @@ def plot_time_resolved_similarity(tr: pd.DataFrame, *,
 _EYE_MOVEMENT_PROC = 'emtraj'
 
 
+def summarize_eye_movement_cell_type_recovery(
+    trajectory: pd.DataFrame,
+    *,
+    exp_name: Optional[str] = None,
+    normalize: str = 'centered',
+    metric: str = 'rho_corrected',
+    late_points: int = 2,
+) -> pd.DataFrame:
+    """Reduce images within date and normalize each cell-type trajectory.
+
+    The raw endpoint is already corrected by the population's repeat
+    reliability.  For combining dates, the recovery shape is additionally
+    scaled within each retina and cell type: the earliest point is 0 and the
+    mean of the last ``late_points`` is 1.  This affine scaling leaves an
+    exponential time constant unchanged while preventing a retina with a
+    larger similarity range from carrying more weight.
+    """
+    required = {'cell_type', 't_since_movie_s', metric}
+    missing = required.difference(trajectory.columns)
+    if missing:
+        raise KeyError(f'eye-movement trajectory missing: {sorted(missing)}')
+    data = trajectory.copy()
+    if 'normalize' in data:
+        data = data[data['normalize'] == normalize]
+    if 'exp_name' not in data:
+        if exp_name is None:
+            raise ValueError('exp_name is required when trajectory has no exp_name column')
+        data['exp_name'] = str(exp_name)
+    elif exp_name is not None:
+        data['exp_name'] = data['exp_name'].fillna(str(exp_name)).astype(str)
+    if data.empty:
+        return pd.DataFrame()
+
+    keys = ['exp_name', 'cell_type', 't_since_movie_s']
+    grouped = data.groupby(keys, as_index=False, dropna=False)
+    summary = grouped[metric].agg(['mean', 'sem', 'count']).reset_index()
+    summary = summary.rename(columns={
+        'mean': metric, 'sem': f'{metric}_sem', 'count': 'n_observations'})
+    if 'n_cells' in data:
+        counts = grouped['n_cells'].max().rename(columns={'n_cells': 'n_cells'})
+        summary = summary.merge(counts, on=keys, how='left')
+    else:
+        summary['n_cells'] = np.nan
+
+    pieces = []
+    for _, group in summary.groupby(['exp_name', 'cell_type'], sort=False,
+                                     dropna=False):
+        group = group.sort_values('t_since_movie_s').copy()
+        first = float(group[metric].iloc[0])
+        late = float(group[metric].tail(max(1, int(late_points))).mean())
+        scale = late - first
+        if np.isfinite(scale) and abs(scale) > 1e-12:
+            group['recovery_fraction'] = (group[metric] - first) / scale
+            group['recovery_fraction_sem'] = group[f'{metric}_sem'] / abs(scale)
+        else:
+            group['recovery_fraction'] = np.nan
+            group['recovery_fraction_sem'] = np.nan
+        group['recovery_baseline'] = first
+        group['recovery_late_mean'] = late
+        group['recovery_scale'] = scale
+        group['normalization'] = f'first=0; mean(last {max(1, int(late_points))})=1'
+        pieces.append(group)
+    return pd.concat(pieces, ignore_index=True)
+
+
+def fit_eye_movement_cell_type_recovery(
+    summary: pd.DataFrame,
+    *,
+    metric: str = 'recovery_fraction',
+    skip_first_s: float = 0.0,
+    n_boot: int = 250,
+    random_seed: Optional[int] = 0,
+) -> pd.DataFrame:
+    """Fit one descriptive recovery timescale per retina and cell type."""
+    from .spatial_recovery import fit_recovery
+    import warnings
+
+    required = {'exp_name', 'cell_type', 't_since_movie_s', metric}
+    missing = required.difference(summary.columns)
+    if missing:
+        raise KeyError(f'eye-movement recovery summary missing: {sorted(missing)}')
+    rows = []
+    for (exp_name, cell_type), group in summary.groupby(
+            ['exp_name', 'cell_type'], sort=True, dropna=False):
+        base = {
+            'exp_name': str(exp_name), 'cell_type': str(cell_type),
+            'metric': metric,
+            'n_cells': int(np.nanmax(group['n_cells']))
+            if 'n_cells' in group and group['n_cells'].notna().any() else 0,
+            'n_observations': int(group.get(
+                'n_observations', pd.Series(dtype=float)).sum()),
+        }
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                fit = fit_recovery(
+                    group['t_since_movie_s'].to_numpy(),
+                    group[metric].to_numpy(), skip_first_s=skip_first_s,
+                    n_boot=n_boot, random_seed=random_seed)
+            base.update({
+                'tau_s': fit['tau_s'], 'tau_ci_low': fit['tau_ci'][0],
+                'tau_ci_high': fit['tau_ci'][1],
+                'tau_bounded': fit['tau_bounded'], 't50_s': fit['t50_s'],
+                't50_ci_low': fit['t50_ci'][0],
+                't50_ci_high': fit['t50_ci'][1],
+                'r_squared': fit['r_squared'], 'n_points': fit['n_points'],
+                'fit_error': '',
+            })
+        except Exception as exc:
+            base.update({
+                'tau_s': np.nan, 'tau_ci_low': np.nan, 'tau_ci_high': np.nan,
+                'tau_bounded': False, 't50_s': np.nan,
+                't50_ci_low': np.nan, 't50_ci_high': np.nan,
+                'r_squared': np.nan, 'n_points': 0, 'fit_error': str(exc),
+            })
+        rows.append(base)
+    return pd.DataFrame(rows)
+
+
+def compare_eye_movement_cell_type_timescales(
+    fits: pd.DataFrame,
+    *,
+    cell_types: Tuple[str, str] = ('OnM', 'OnP'),
+) -> pd.DataFrame:
+    """Return paired within-retina OnM-versus-OnP timescale differences."""
+    a, b = (str(v) for v in cell_types)
+    required = {'exp_name', 'cell_type', 'tau_s', 't50_s'}
+    missing = required.difference(fits.columns)
+    if missing:
+        raise KeyError(f'eye-movement recovery fits missing: {sorted(missing)}')
+    rows = []
+    selected = fits[fits['cell_type'].isin([a, b])]
+    for exp_name, group in selected.groupby('exp_name', sort=True):
+        by_type = group.drop_duplicates('cell_type').set_index('cell_type')
+        if a not in by_type.index or b not in by_type.index:
+            continue
+        row = {'exp_name': str(exp_name), 'cell_type_a': a, 'cell_type_b': b}
+        for metric in ('tau_s', 't50_s'):
+            av, bv = float(by_type.at[a, metric]), float(by_type.at[b, metric])
+            row[f'{metric}_{a}'] = av
+            row[f'{metric}_{b}'] = bv
+            row[f'{metric}_diff_{a}_minus_{b}'] = av - bv
+            row[f'{metric}_ratio_{a}_over_{b}'] = (
+                av / bv if np.isfinite(bv) and bv != 0 else np.nan)
+        row[f'n_cells_{a}'] = int(by_type.at[a, 'n_cells'])
+        row[f'n_cells_{b}'] = int(by_type.at[b, 'n_cells'])
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def plot_eye_movement_cell_type_comparison(
+    summary: pd.DataFrame,
+    fits: pd.DataFrame,
+    *,
+    cell_types: Tuple[str, str] = ('OnM', 'OnP'),
+    figsize: Tuple[float, float] = (11.0, 4.0),
+):
+    """Plot one date's normalized trajectory and OnM/OnP fit summaries."""
+    import matplotlib.pyplot as plt
+    from .style import apply_publication_style, colors_for_celltypes
+
+    types = [str(v) for v in cell_types]
+    data = summary[summary['cell_type'].isin(types)].copy()
+    fit_data = fits[fits['cell_type'].isin(types)].copy()
+    if data.empty:
+        raise ValueError('No eye-movement recovery rows match the cell types.')
+    apply_publication_style()
+    colors = colors_for_celltypes(types)
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+    for ct in types:
+        d = data[data['cell_type'] == ct].sort_values('t_since_movie_s')
+        if d.empty:
+            continue
+        n_cells = (int(d.n_cells.max())
+                   if 'n_cells' in d and d.n_cells.notna().any() else 0)
+        axes[0].errorbar(
+            d['t_since_movie_s'], d['recovery_fraction'],
+            yerr=d.get('recovery_fraction_sem'), fmt='-o', ms=4, capsize=2,
+            color=colors[ct], label=f'{ct} (n={n_cells})')
+    axes[0].axhline(1, color='0.75', ls='--', lw=0.8)
+    axes[0].set(xlabel='time since movie onset (s)',
+                ylabel='within-date recovery (first=0, late=1)',
+                title='A. normalized recovery trajectory')
+    axes[0].legend(fontsize=8)
+
+    x, width = np.arange(len(types), dtype=float), 0.34
+    for offset, metric in ((-width / 2, 'tau_s'), (width / 2, 't50_s')):
+        vals = [float(fit_data.loc[fit_data.cell_type == ct, metric].iloc[0])
+                if (fit_data.cell_type == ct).any() else np.nan for ct in types]
+        axes[1].bar(x + offset, vals, width=width, alpha=0.8,
+                    color=[colors[ct] for ct in types],
+                    hatch='' if metric == 'tau_s' else '//',
+                    label=metric.replace('_s', ''))
+    axes[1].set_xticks(x, types)
+    axes[1].set(ylabel='time (s)', title='B. fitted recovery timescale')
+    axes[1].legend(fontsize=8)
+    dates = sorted(str(v) for v in data.exp_name.dropna().unique())
+    prefix = f'{dates[0]} — ' if len(dates) == 1 else ''
+    fig.suptitle(f'{prefix}{types[0]} versus {types[1]}', y=1.03)
+    fig.tight_layout()
+    return fig, axes
+
+
+def plot_eye_movement_cell_type_across_dates(
+    summary: pd.DataFrame,
+    fits: pd.DataFrame,
+    *,
+    cell_types: Tuple[str, str] = ('OnM', 'OnP'),
+    figsize: Tuple[float, float] = (14.0, 4.0),
+):
+    """Plot equally weighted date trajectories and paired fit timescales."""
+    import matplotlib.pyplot as plt
+    from .style import apply_publication_style, colors_for_celltypes
+
+    types = [str(v) for v in cell_types]
+    data = summary[summary['cell_type'].isin(types)].copy()
+    fit_data = fits[fits['cell_type'].isin(types)].copy()
+    if data.empty:
+        raise ValueError('No saved eye-movement recovery rows match the cell types.')
+    apply_publication_style()
+    colors = colors_for_celltypes(types)
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+    for ct in types:
+        d = data[data.cell_type == ct]
+        for _, date in d.groupby('exp_name', sort=True):
+            date = date.sort_values('t_since_movie_s')
+            axes[0].plot(date.t_since_movie_s, date.recovery_fraction,
+                         color=colors[ct], alpha=0.22, lw=0.8)
+        by_time = d.groupby('t_since_movie_s').recovery_fraction
+        mean, sem = by_time.mean(), by_time.sem()
+        axes[0].plot(mean.index, mean, '-o', color=colors[ct], lw=2, ms=4,
+                     label=f'{ct} ({d.exp_name.nunique()} dates)')
+        axes[0].fill_between(mean.index, mean - sem, mean + sem,
+                             color=colors[ct], alpha=0.14, linewidth=0)
+    axes[0].axhline(1, color='0.75', ls='--', lw=0.8)
+    axes[0].set(xlabel='time since movie onset (s)',
+                ylabel='within-date recovery (first=0, late=1)',
+                title='A. date-normalized trajectories')
+    axes[0].legend(fontsize=8)
+
+    for ax, metric, title in zip(
+            axes[1:], ('tau_s', 't50_s'),
+            ('B. paired tau by date', 'C. paired t50 by date')):
+        wide = fit_data.pivot_table(index='exp_name', columns='cell_type',
+                                    values=metric, aggfunc='first')
+        wide = (wide.dropna(subset=types) if set(types) <= set(wide)
+                else wide.iloc[0:0])
+        for _, row in wide.iterrows():
+            ax.plot([0, 1], [row[types[0]], row[types[1]]], '-o',
+                    color='0.65', lw=0.8, ms=3)
+        ax.scatter([0, 1], [wide[ct].mean() if ct in wide else np.nan
+                            for ct in types], s=55,
+                   color=[colors[ct] for ct in types], zorder=4)
+        ax.set_xticks([0, 1], types)
+        ax.set(ylabel='time (s)', title=f'{title} (n={len(wide)} paired dates)')
+    fig.suptitle('EyeMovementTrajectory — cell-type recovery across dates', y=1.03)
+    fig.tight_layout()
+    return fig, axes
+
+
 def save_eye_movement_results(
     exp_name: str,
     *,
@@ -1648,6 +1913,11 @@ def save_eye_movement_results(
     cycle_interaction: pd.DataFrame,
     spike_distance: pd.DataFrame,
     trajectory: pd.DataFrame,
+    cell_type_recovery: Optional[pd.DataFrame] = None,
+    cell_type_fits: Optional[pd.DataFrame] = None,
+    cell_type_comparison: Optional[pd.DataFrame] = None,
+    response_timescale_by_type: Optional[pd.DataFrame] = None,
+    response_timescale_per_cell: Optional[pd.DataFrame] = None,
     extra_analysis: Optional[Mapping[str, object]] = None,
     metadata: Optional[Mapping] = None,
     figures: Optional[Mapping[str, object]] = None,
@@ -1664,6 +1934,20 @@ def save_eye_movement_results(
         'trajectory': trajectory.copy(),
         **dict(extra_analysis or {}),
     }
+    optional = {
+        'cell_type_recovery': cell_type_recovery,
+        'cell_type_recovery_fits': cell_type_fits,
+        'cell_type_recovery_comparison': cell_type_comparison,
+        'response_timescale_by_type': response_timescale_by_type,
+        'response_timescale_per_cell': response_timescale_per_cell,
+    }
+    analysis.update({k: v.copy() if isinstance(v, pd.DataFrame) else v
+                     for k, v in optional.items() if v is not None})
+    saved_types = sorted({
+        str(v) for table in analysis.values() if isinstance(table, pd.DataFrame)
+        and 'cell_type' in table for v in table['cell_type'].dropna().unique()
+        if str(v) != 'all'
+    })
     meta = {
         'analysis_name': 'EyeMovementTrajectoryAlternatingBackground',
         'normalization': {
@@ -1672,8 +1956,19 @@ def save_eye_movement_results(
             'spike_distance': 'excess over within-condition variability, per spike',
             'cross_date_weighting': 'one mean per retina/date',
         },
+        'saved_cell_types': saved_types,
         **dict(metadata or {}),
     }
+    if cell_type_recovery is not None and not cell_type_recovery.empty:
+        typed = cell_type_recovery
+        counts = (typed.groupby('cell_type')['n_cells'].max().dropna()
+                  .astype(int).to_dict()
+                  if {'cell_type', 'n_cells'} <= set(typed) else {})
+        meta['cell_type_recovery'] = {
+            'cell_types': sorted(str(v) for v in typed.cell_type.dropna().unique()),
+            'n_cells_by_type': counts,
+            'normalization': 'within retina/type: first=0, late mean=1',
+        }
     return save_analysis_bundle(
         _EYE_MOVEMENT_PROC, str(exp_name), analysis,
         metadata=meta, figures=figures, output_root=output_root,
@@ -1690,7 +1985,11 @@ def load_eye_movement_many(
 
     bundles = load_analysis_many(
         _EYE_MOVEMENT_PROC, exp_names=exp_names, output_root=output_root)
-    names = ('similarity', 'cycle_interaction', 'spike_distance', 'trajectory')
+    names = (
+        'similarity', 'cycle_interaction', 'spike_distance', 'trajectory',
+        'cell_type_recovery', 'cell_type_recovery_fits',
+        'cell_type_recovery_comparison', 'response_timescale_by_type',
+        'response_timescale_per_cell', 'similarity_common_timescale')
     out = {}
     for name in names:
         parts = []
@@ -1831,11 +2130,28 @@ def save_eye_movement_cross_date_summary(
         'analysis_name': 'EyeMovementTrajectory cross-date summary',
         'dates': dates,
         'n_dates': len(dates),
+        'cell_types': sorted({
+            str(v) for table in combined.values()
+            if isinstance(table, pd.DataFrame) and 'cell_type' in table
+            for v in table['cell_type'].dropna().unique() if str(v) != 'all'}),
+        'paired_cell_type_dates': int(combined.get(
+            'cell_type_recovery_comparison', pd.DataFrame())
+            .get('exp_name', pd.Series(dtype=object)).nunique()),
         'normalization': (
             'similarity/trajectory noise-corrected within date; spike distance '
             'per-spike excess; images/cells reduced within date before date mean'),
         **dict(metadata or {}),
     }
+    typed = combined.get('cell_type_recovery', pd.DataFrame())
+    if not typed.empty:
+        coverage = {}
+        for cell_type, group in typed.groupby('cell_type'):
+            item = {'n_dates': int(group.exp_name.nunique())}
+            if 'n_cells' in group and group.n_cells.notna().any():
+                item.update(n_cells_min=int(group.n_cells.min()),
+                            n_cells_max=int(group.n_cells.max()))
+            coverage[str(cell_type)] = item
+        meta['cell_type_coverage'] = coverage
     return save_analysis_summary(
         _EYE_MOVEMENT_PROC, analysis, metadata=meta, figures=figures,
         output_root=output_root, verbose=verbose)

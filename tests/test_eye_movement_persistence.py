@@ -4,6 +4,8 @@ import pandas as pd
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
+from retinanalysis.utils.analysis_results import load_analysis_bundle
+
 from retinanalysis.utils.population_code import (
     load_eye_movement_many,
     plot_eye_movement_across_dates,
@@ -51,13 +53,28 @@ def _tables(offset=0.0):
 def test_eye_movement_date_and_cross_date_bundles(tmp_path):
     for exp, offset in [('20230101C', 0.0), ('20230202C', 0.05)]:
         sim, cycle, dist, traj = _tables(offset)
+        recovery = pd.DataFrame({
+            'cell_type': ['OnP', 'OnM'], 't_since_movie_s': [2.5, 2.5],
+            'rho_corrected': [0.2, 0.3], 'recovery_fraction': [0.0, 0.0],
+        })
+        fits = pd.DataFrame({
+            'cell_type': ['OnP', 'OnM'], 'tau_s': [9.0, 5.0],
+            't50_s': [6.2, 3.5], 'n_cells': [30, 18],
+        })
+        comparison = pd.DataFrame({
+            'cell_type_a': ['OnM'], 'cell_type_b': ['OnP'],
+            'tau_s_diff_OnM_minus_OnP': [-4.0],
+        })
         save_eye_movement_results(
             exp, similarity=sim, cycle_interaction=cycle,
             spike_distance=dist, trajectory=traj,
+            cell_type_recovery=recovery, cell_type_fits=fits,
+            cell_type_comparison=comparison,
             output_root=tmp_path, verbose=False)
 
     combined = load_eye_movement_many(output_root=tmp_path)
     assert combined['similarity']['exp_name'].nunique() == 2
+    assert combined['cell_type_recovery_fits']['exp_name'].nunique() == 2
     reduced = summarize_eye_movement_dates(combined)
     assert reduced['similarity_by_date']['exp_name'].nunique() == 2
 
@@ -70,4 +87,7 @@ def test_eye_movement_date_and_cross_date_bundles(tmp_path):
     assert paths['folder'] == (tmp_path / 'protocol_analysis' / 'emtraj'
                                / 'summary')
     assert (paths['folder'] / 'plots' / 'cross_date.png').is_file()
+    pooled = load_analysis_bundle('emtraj', summary=True, output_root=tmp_path)
+    assert pooled['meta']['paired_cell_type_dates'] == 2
+    assert pooled['meta']['cell_types'] == ['OnM', 'OnP']
     plt.close(fig)
