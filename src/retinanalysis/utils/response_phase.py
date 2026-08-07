@@ -293,11 +293,13 @@ def phase_period_scan(phase_df, geometry: Dict,
     Returns
     -------
     dict
-        ``periods_px``, ``orientations_deg``, ``concentration`` (an
-        ``[orientation, period]`` array), ``best_period_px``,
+        ``periods_px`` / ``periods_um``, ``orientations_deg``,
+        ``concentration`` (an ``[orientation, period]`` array),
+        ``best_period_px`` / ``best_period_um``,
         ``best_orientation_deg``, ``best_concentration``, ``n_cells``,
         ``period_curve`` (concentration at the best orientation),
-        ``true_period_px``, ``true_orientation_deg``, ``by_type`` —
+        ``true_period_px`` / ``true_period_um``, ``true_orientation_deg``,
+        ``by_type`` —
         ``{cell_type: {'n', 'concentration', 'mean_residual_rad'}}`` evaluated
         at the true geometry — and, when ``n_shuffles`` is set,
         ``null_concentration`` (the shuffled maxima), ``null_p`` and
@@ -378,14 +380,19 @@ def phase_period_scan(phase_df, geometry: Dict,
     return {
         **null,
         'periods_px': periods,
+        'periods_um': periods * float(geometry['microns_per_pixel']),
         'orientations_deg': orientations,
         'concentration': concentration,
         'best_period_px': float(periods[best[1]]),
+        'best_period_um': float(
+            periods[best[1]] * float(geometry['microns_per_pixel'])),
         'best_orientation_deg': float(orientations[best[0]]),
         'best_concentration': float(concentration[best]),
         'period_curve': concentration[best[0]],
         'n_cells': int(len(df)),
         'true_period_px': float(true_period),
+        'true_period_um': float(
+            true_period * float(geometry['microns_per_pixel'])),
         'true_orientation_deg': float(geometry['orientation_deg']),
         'by_type': by_type,
     }
@@ -452,9 +459,11 @@ def phase_alignment_by_condition(pipeline, stim_block, epochs,
         ``phase_by_condition`` maps a condition — always a tuple of levels, in
         ``condition_keys`` order — to ``(phases, scan, geometry)``. ``summary``
         is one row per condition: the condition levels, ``n_epochs``, the
-        stimulus's own ``period_px`` / ``orient_deg``, how many cells were
-        driven and how modulated they were, what the phases ``picks_px`` /
-        ``picks_deg``, the concentration ``R``, and ``shuffled_95``.
+        stimulus's own ``period_um`` / ``orient_deg`` (with ``period_px``
+        retained for computation and backward compatibility), how many cells were
+        driven and how modulated they were, what the phases ``picks_um`` /
+        ``picks_deg`` (also retaining ``picks_px``), the concentration ``R``,
+        and ``shuffled_95``.
     """
     import pandas as pd
 
@@ -494,11 +503,13 @@ def phase_alignment_by_condition(pipeline, stim_block, epochs,
             **dict(zip(keys, levels)),
             'n_epochs': len(epoch_indices),
             'period_px': scan['true_period_px'],
+            'period_um': scan['true_period_um'],
             'orient_deg': scan['true_orientation_deg'],
             'n_cells': len(driven),
             'median_f1': driven['f1_strength'].median(),
             'n_modulated': int((driven['rayleigh_p'] < 0.01).sum()),
             'picks_px': scan['best_period_px'],
+            'picks_um': scan['best_period_um'],
             'picks_deg': scan['best_orientation_deg'],
             'R': scan['best_concentration'],
             'shuffled_95': scan.get('null_95', np.nan),
@@ -576,9 +587,9 @@ def describe_phase_alignment(summary, phase_by_condition,
             print(f"  {condition_label(keys, row)} — {int(row['n_cells'])} "
                   f"cells, {int(row['n_modulated'])} of them modulated at "
                   f"p<0.01; the "
-                  f"phases pick {row['picks_px']:.1f} px at "
+                  f"phases pick {row['picks_um']:.1f} µm at "
                   f"{row['picks_deg']:.0f}° against a stimulus of "
-                  f"{row['period_px']:.0f} px at {row['orient_deg']:.0f}°  "
+                  f"{row['period_um']:.0f} µm at {row['orient_deg']:.0f}°  "
                   f"(R = {row['R']:.2f}, shuffled {row['shuffled_95']:.2f})")
 
     if summary.empty or not summary['R'].notna().any():
@@ -638,28 +649,34 @@ def plot_phase_alignment(phase_df, geometry: Dict, scan: Optional[Dict] = None,
 
     n_panels = 3 if scan is not None else 2
     fig, axes = plt.subplots(1, n_panels, figsize=figsize)
-    period = 1.0 / float(geometry['spatial_freq_cyc_per_px'])
+    period_px = 1.0 / float(geometry['spatial_freq_cyc_per_px'])
+    um_per_px = float(geometry['microns_per_pixel'])
+    period_um = period_px * um_per_px
     types = list(dict.fromkeys(df['cell_type']))
     colors = dict(zip(types, plt.rcParams['axes.prop_cycle'].by_key()['color']))
 
     # --- 1. phase vs position, against the predicted slope -----------------
     ax = axes[0]
-    span = np.linspace(df['axis_px'].min(), df['axis_px'].max(), 1200)
+    span_px = np.linspace(df['axis_px'].min(), df['axis_px'].max(), 1200)
+    span_um = span_px * um_per_px
     for t in types:
         rows = df[df['cell_type'] == t]
         offset = np.angle(np.exp(1j * rows['residual_rad'].to_numpy()).mean())
-        ax.scatter(rows['axis_px'], np.degrees(_wrap_pi(rows['resp_phase_rad'])),
+        ax.scatter(rows['axis_px'] * um_per_px,
+                   np.degrees(_wrap_pi(rows['resp_phase_rad'])),
                    s=18, alpha=0.8, color=colors[t],
                    label=f'{t} (n={len(rows)})')
-        predicted = _wrap_pi(np.pi / 2 - 2 * np.pi * span / period + offset)
+        predicted = _wrap_pi(
+            np.pi / 2 - 2 * np.pi * span_px / period_px + offset)
         # Break the line where the wrap jumps, so the sawtooth has no risers.
         predicted = np.where(np.abs(np.diff(predicted, prepend=predicted[0])) > np.pi,
                              np.nan, predicted)
-        ax.plot(span, np.degrees(predicted), color=colors[t], lw=1.0, alpha=0.6)
-    ax.set_xlabel('position across the bars (canvas px from center)')
+        ax.plot(span_um, np.degrees(predicted), color=colors[t], lw=1.0,
+                alpha=0.6)
+    ax.set_xlabel('position across the bars (µm from center)')
     ax.set_ylabel('response phase (deg)')
     ax.set_yticks([-180, -90, 0, 90, 180])
-    ax.set_title(f'one cycle per {period:.0f} px period')
+    ax.set_title(f'one cycle per {period_um:.0f} µm period')
     ax.legend(fontsize=7, framealpha=0.85, loc='lower left')
 
     # --- 2. the residual on the mosaic -------------------------------------
@@ -673,20 +690,24 @@ def plot_phase_alignment(phase_df, geometry: Dict, scan: Optional[Dict] = None,
         for t in types])
     order = np.concatenate([np.flatnonzero((df['cell_type'] == t).to_numpy())
                             for t in types])
-    scat = ax.scatter(df['center_x'].to_numpy()[order],
-                      df['center_y'].to_numpy()[order],
+    x_um = ((df['center_x'].to_numpy() - float(geometry['center_x']))
+            * um_per_px)
+    y_um = ((df['center_y'].to_numpy() - float(geometry['center_y']))
+            * um_per_px)
+    scat = ax.scatter(x_um[order], y_um[order],
                       c=np.degrees(centered),
                       s=np.clip(40 * df['f1_strength'].to_numpy()[order]
                                 / max(df['f1_strength'].max(), 1e-9), 6, 60),
                       cmap='twilight_shifted', vmin=-180, vmax=180)
-    ax.add_patch(Circle((geometry['center_x'], geometry['center_y']),
-                        geometry['aperture_diameter_px'] / 2.0,
+    ax.add_patch(Circle((0.0, 0.0), geometry['aperture_diameter_um'] / 2.0,
                         fill=False, color='0.4', ls='--', lw=1.0))
-    ax.set_xlim(0, geometry['canvas_w'])
-    ax.set_ylim(geometry['canvas_h'], 0)
+    ax.set_xlim(-geometry['canvas_w'] * um_per_px / 2.0,
+                geometry['canvas_w'] * um_per_px / 2.0)
+    ax.set_ylim(geometry['canvas_h'] * um_per_px / 2.0,
+                -geometry['canvas_h'] * um_per_px / 2.0)
     ax.set_aspect('equal')
-    ax.set_xlabel('canvas x (px)')
-    ax.set_ylabel('canvas y (px)')
+    ax.set_xlabel('retinal x (µm from center)')
+    ax.set_ylabel('retinal y (µm from center)')
     ax.set_title('residual phase, sized by F1 strength')
     fig.colorbar(scat, ax=ax, label='residual re. type mean (deg)',
                  fraction=0.046)
@@ -694,20 +715,25 @@ def plot_phase_alignment(phase_df, geometry: Dict, scan: Optional[Dict] = None,
     # --- 3. which period the phases prefer ---------------------------------
     if scan is not None:
         ax = axes[2]
-        ax.semilogx(scan['periods_px'], scan['period_curve'], color='0.2')
-        ax.axvline(scan['true_period_px'], color='crimson', ls='--', lw=1.0,
-                   label=f"stimulus {scan['true_period_px']:.0f} px")
-        ax.axvline(scan['best_period_px'], color='steelblue', ls=':', lw=1.2,
-                   label=f"phases pick {scan['best_period_px']:.0f} px")
+        periods_um = scan.get(
+            'periods_um', scan['periods_px'] * um_per_px)
+        true_period_um = scan.get(
+            'true_period_um', scan['true_period_px'] * um_per_px)
+        best_period_um = scan.get(
+            'best_period_um', scan['best_period_px'] * um_per_px)
+        ax.semilogx(periods_um, scan['period_curve'], color='0.2')
+        ax.axvline(true_period_um, color='crimson', ls='--', lw=1.0,
+                   label=f"stimulus {true_period_um:.0f} µm")
+        ax.axvline(best_period_um, color='steelblue', ls=':', lw=1.2,
+                   label=f"phases pick {best_period_um:.0f} µm")
         if 'null_95' in scan:
             ax.axhline(scan['null_95'], color='0.6', lw=0.9,
                        label=f"shuffled positions, 95th pct")
-        ax.set_xlabel('candidate period (canvas px)')
+        ax.set_xlabel('candidate spatial period (µm)')
         ax.set_ylabel('phase concentration')
         ax.set_ylim(0, 1)
-        ticks = np.array([10, 20, 50, 100, 200, 500, 1000])
-        ticks = ticks[(ticks >= scan['periods_px'][0])
-                      & (ticks <= scan['periods_px'][-1])]
+        ticks = np.array([10, 20, 50, 100, 200, 500, 1000, 2000, 5000])
+        ticks = ticks[(ticks >= periods_um[0]) & (ticks <= periods_um[-1])]
         ax.set_xticks(ticks, [str(t) for t in ticks], minor=False)
         ax.set_xticks([], minor=True)
         ax.set_title(f"at {scan['best_orientation_deg']:.0f}°, "
