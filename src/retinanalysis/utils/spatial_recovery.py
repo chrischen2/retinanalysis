@@ -1280,6 +1280,7 @@ def analyze_recovery_conditions(
     condition_keys: Sequence[str],
     windows_s: Sequence[Tuple[float, float]],
     cell_types: Optional[Iterable[str]] = None,
+    cell_ids: Optional[Iterable[int]] = None,
     drift_freq_hz: Optional[float] = None,
     n_phase_bins: int = 12,
     n_shuffles: int = 50,
@@ -1310,6 +1311,7 @@ def analyze_recovery_conditions(
             windows_s=windows_s,
             n_phase_bins=n_phase_bins,
             cell_types=cell_types,
+            cell_ids=cell_ids,
             drift_freq_hz=drift_freq_hz,
             verbose=verbose,
         )
@@ -1511,6 +1513,8 @@ def save_recovery_summary(
     output_root=None,
     metadata: Optional[Dict] = None,
     figures: Optional[Dict] = None,
+    cell_qc: Optional[pd.DataFrame] = None,
+    template_match: Optional[pd.DataFrame] = None,
     verbose: bool = True,
 ) -> Dict:
     """Print existing dates, then save one date as pickle + JSON + plots.
@@ -1534,8 +1538,23 @@ def save_recovery_summary(
         },
         **dict(metadata or {}),
     }
+    analysis = {'recovery_summary': table}
+    if cell_qc is not None:
+        qc = cell_qc.copy()
+        analysis['cell_qc'] = qc
+        if 'excluded_downstream' in qc:
+            rejected = qc.loc[qc['excluded_downstream'].astype(bool),
+                              'cell_id'].astype(int).tolist()
+            meta['cell_qc'] = {
+                'n_candidates': int(len(qc)),
+                'n_retained': int(len(qc) - len(rejected)),
+                'n_excluded': int(len(rejected)),
+                'excluded_cell_ids': rejected,
+            }
+    if template_match is not None:
+        analysis['template_match'] = template_match.copy()
     return save_analysis_bundle(
-        protocol, str(exp_name), {'recovery_summary': table},
+        protocol, str(exp_name), analysis,
         metadata=meta, figures=figures, output_root=output_root,
         verbose=verbose)
 

@@ -331,6 +331,7 @@ _ATTR_TO_MODULE = {
     'cycle_evolution': 'retinanalysis.utils.cycle_average',
     'response_template': 'retinanalysis.utils.cycle_average',
     'flag_template_outliers': 'retinanalysis.utils.cycle_average',
+    'summarize_template_outliers': 'retinanalysis.utils.cycle_average',
     'plot_template_match': 'retinanalysis.utils.cycle_average',
     'plot_cycle_evolution': 'retinanalysis.utils.cycle_average',
     'PhaseBinnedResponse': 'retinanalysis.utils.spatial_recovery',

@@ -63,6 +63,7 @@ __all__ = [
     'plot_cycle_evolution',
     'response_template',
     'flag_template_outliers',
+    'summarize_template_outliers',
     'plot_template_match',
 ]
 
@@ -156,7 +157,8 @@ def cell_mean_psth(pipeline, epoch_indices: Iterable[int], *,
 def browse_cell_psths(cells, t, psth, *, cell_types: Optional[Sequence[str]] = None,
                       geometry: Optional[Dict] = None,
                       n_cols: int = 6, panel_size: Tuple[float, float] = (2.0, 1.3),
-                      share_y: bool = False, description: str = 'Cell type:'):
+                      share_y: bool = False, description: str = 'Cell type:',
+                      outlier_cell_ids: Optional[Iterable[int]] = None):
     """Dropdown over cell types; a grid of one trial-averaged PSTH per cell.
 
     Cells are ordered by position along the drift axis when a ``geometry`` is
@@ -179,6 +181,8 @@ def browse_cell_psths(cells, t, psth, *, cell_types: Optional[Sequence[str]] = N
         print('No cells to show.')
         return None
     colors = colors_for_celltypes(present)
+    outlier_ids = {int(v) for v in (() if outlier_cell_ids is None
+                                    else outlier_cell_ids)}
 
     def _render(ct):
         idx = np.flatnonzero((cells['cell_type'] == ct).to_numpy())
@@ -197,9 +201,17 @@ def browse_cell_psths(cells, t, psth, *, cell_types: Optional[Sequence[str]] = N
         for ax in flat[:n_cols]:
             ax.remove()
         top = fig.add_subplot(n_rows, 1, 1)
-        m = psth[idx].mean(axis=0)
+        accepted = np.asarray([
+            i for i in idx
+            if int(cells.iloc[i]['cell_id']) not in outlier_ids], dtype=int)
+        template_idx = accepted if accepted.size else idx
+        m = psth[template_idx].mean(axis=0)
         top.plot(t, m, color=colors.get(ct, NEUTRAL_GRAY), lw=1.4)
-        top.set_title(f'{ct}: mean of {n} cells', fontsize=9)
+        n_bad = int(sum(int(cells.iloc[i]['cell_id']) in outlier_ids
+                        for i in idx))
+        top.set_title(f'{ct}: retained-cell population template '
+                      f'(n={len(template_idx)}; {n_bad} outlier'
+                      f'{"s" if n_bad != 1 else ""} excluded)', fontsize=9)
         top.set_ylabel('Hz')
 
         for k, ax in enumerate(flat[n_cols:]):
@@ -207,8 +219,14 @@ def browse_cell_psths(cells, t, psth, *, cell_types: Optional[Sequence[str]] = N
                 ax.axis('off')
                 continue
             i = idx[k]
-            ax.plot(t, psth[i], color=colors.get(ct, NEUTRAL_GRAY), lw=0.7)
-            ax.set_title(f'{int(cells.iloc[i]["cell_id"])}', fontsize=7, pad=1.5)
+            cid = int(cells.iloc[i]['cell_id'])
+            is_outlier = cid in outlier_ids
+            ax.plot(t, psth[i], color=('crimson' if is_outlier else
+                                       colors.get(ct, NEUTRAL_GRAY)),
+                    lw=1.0 if is_outlier else 0.7)
+            ax.set_title(f'{cid}' + (' — OUTLIER' if is_outlier else ''),
+                         fontsize=7, pad=1.5,
+                         color='crimson' if is_outlier else None)
             ax.tick_params(labelsize=6)
         for ax in flat[-n_cols:]:
             if ax.axes is not None:
@@ -912,6 +930,9 @@ def flag_template_outliers(match, *, min_shape_r: float = 0.5,
 
     passes = usable & enough & phase_ok & np.isfinite(shape) \
         & (shape >= min_shape_r) & (self_r >= float(min_self_r))
+    evaluable = (usable & enough & np.isfinite(shape)
+                 & (self_r >= float(min_self_r)))
+    out['template_evaluable'] = evaluable
     out['passes_template'] = passes
     out['phase_ok'] = phase_ok
     out['reject_reason'] = reason
@@ -939,6 +960,101 @@ def flag_template_outliers(match, *, min_shape_r: float = 0.5,
                   f'(self_r > 0.8) — reliably different rather than noisy, '
                   f'so look at them before deleting them')
     return out
+
+
+def summarize_template_outliers(match, *, candidate_cell_ids=None,
+                                min_conditions: int = 2,
+                                min_pass_fraction: float = 0.5,
+                                verbose: bool = True):
+    """Turn per-condition template matches into one downstream cell filter.
+
+    A cell is excluded only when it could be judged in at least
+    ``min_conditions`` and it matches its type template in less than
+    ``min_pass_fraction`` of those conditions.  Cells outside the aperture,
+    cells belonging to a type too small to template, and cells without enough
+    spikes are retained: absence of evidence is not treated as an outlier.
+
+    Parameters
+    ----------
+    match : DataFrame
+        Concatenated output of :func:`flag_template_outliers`, with a
+        ``condition`` column.
+    candidate_cell_ids : iterable[int], optional
+        The cells entering template QC. Supplying this preserves candidates
+        that were not evaluable in any condition in the returned summary.
+
+    Returns
+    -------
+    (condition_match, cell_summary)
+        The first table adds ``excluded_downstream`` to every condition row.
+        The second has one row per candidate cell and is the compact QC table
+        intended for date-level persistence.
+    """
+    required = {'cell_id', 'cell_type', 'condition', 'passes_template',
+                'template_evaluable'}
+    missing = required.difference(match.columns)
+    if missing:
+        raise KeyError(f'template match missing columns: {sorted(missing)}')
+    if int(min_conditions) < 1:
+        raise ValueError('min_conditions must be at least 1')
+    if not 0 <= float(min_pass_fraction) <= 1:
+        raise ValueError('min_pass_fraction must be between 0 and 1')
+
+    rows = []
+    for (cid, ct), sub in match.groupby(['cell_id', 'cell_type'], sort=True):
+        scored = sub[sub['template_evaluable'].astype(bool)]
+        n_eval = len(scored)
+        n_pass = int(scored['passes_template'].sum())
+        fraction = n_pass / n_eval if n_eval else np.nan
+        excluded = (n_eval >= int(min_conditions)
+                    and fraction < float(min_pass_fraction))
+        rows.append({
+            'cell_id': int(cid),
+            'cell_type': ct,
+            'n_conditions_seen': int(sub['condition'].nunique()),
+            'n_conditions_evaluable': int(n_eval),
+            'n_conditions_passed': n_pass,
+            'template_pass_fraction': float(fraction),
+            'excluded_downstream': bool(excluded),
+            'qc_status': ('outlier' if excluded else
+                          ('kept_unscored' if n_eval == 0 else 'kept')),
+        })
+    summary = pd.DataFrame(rows)
+
+    if candidate_cell_ids is not None:
+        candidates = pd.DataFrame({
+            'cell_id': sorted({int(v) for v in candidate_cell_ids})})
+        summary = candidates.merge(summary, on='cell_id', how='left')
+        unseen = summary['n_conditions_seen'].isna()
+        summary.loc[unseen, 'cell_type'] = 'unknown'
+        for col in ('n_conditions_seen', 'n_conditions_evaluable',
+                    'n_conditions_passed'):
+            summary[col] = summary[col].fillna(0).astype(int)
+        summary['excluded_downstream'] = \
+            summary['excluded_downstream'].fillna(False).astype(bool)
+        summary.loc[unseen, 'qc_status'] = 'kept_unscored'
+
+    excluded_ids = set(summary.loc[summary['excluded_downstream'],
+                                   'cell_id'].astype(int))
+    annotated = match.copy()
+    annotated['excluded_downstream'] = \
+        annotated['cell_id'].astype(int).isin(excluded_ids)
+    annotated.attrs.update(match.attrs)
+    summary.attrs.update({
+        'min_conditions': int(min_conditions),
+        'min_pass_fraction': float(min_pass_fraction),
+    })
+
+    if verbose:
+        n_unscored = int((summary['qc_status'] == 'kept_unscored').sum())
+        print(f'cross-condition template QC: {len(summary) - len(excluded_ids)}/'
+              f'{len(summary)} cells retained; {len(excluded_ids)} outliers '
+              f'excluded downstream; {n_unscored} retained without enough '
+              'template evidence')
+        if excluded_ids:
+            print('  outlier cell IDs: '
+                  + ', '.join(str(v) for v in sorted(excluded_ids)))
+    return annotated, summary
 
 
 def plot_template_match(templates, match, *, cell_types=None,
@@ -977,10 +1093,22 @@ def plot_template_match(templates, match, *, cell_types=None,
     axes[0].set_title('type template', fontsize=10)
     axes[0].legend(fontsize=7)
 
+    excluded = (match['excluded_downstream'].astype(bool)
+                if 'excluded_downstream' in match else
+                ~match.get('passes_template', pd.Series(True, index=match.index))
+                    .astype(bool))
     for ct in present:
         s = match[match['cell_type'] == ct]
         axes[1].scatter(s['self_r'], s['template_r'], s=14, alpha=0.75,
                         color=colors.get(ct, NEUTRAL_GRAY), label=ct)
+        bad = s[excluded.loc[s.index]]
+        axes[1].scatter(bad['self_r'], bad['template_r'], s=34, marker='x',
+                        color='crimson', linewidths=1.0)
+        for row in bad.itertuples():
+            axes[1].annotate(str(int(row.cell_id)),
+                             (row.self_r, row.template_r), xytext=(3, 3),
+                             textcoords='offset points', fontsize=6,
+                             color='crimson')
     axes[1].axhline(min_shape_r, color=NEUTRAL_GRAY, ls='--', lw=0.8)
     axes[1].set_xlabel('self_r (split-half reliability)')
     axes[1].set_ylabel('template_r (as aligned)')
@@ -1003,5 +1131,12 @@ def plot_template_match(templates, match, *, cell_types=None,
                       f'{min_shape_r}', fontsize=10)
     if len(poor):
         axes[2].legend(fontsize=7)
-    fig.tight_layout()
+    n_excluded = int(excluded.sum())
+    if n_excluded:
+        fig.suptitle(f'population-template QC — downstream outliers labelled '
+                     f'in red (n={n_excluded})', color='crimson', fontsize=10)
+    else:
+        fig.suptitle('population-template QC — no downstream outliers',
+                     fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
     return fig

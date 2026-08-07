@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 matplotlib.use('Agg')
 
+import retinanalysis.utils.spatial_recovery as spatial_recovery
+
 from retinanalysis.utils.spatial_recovery import (
     load_recovery_many,
     normalize_recovery_summary,
@@ -13,6 +15,7 @@ from retinanalysis.utils.spatial_recovery import (
     saved_recovery_stats,
     recovery_summary_table,
 )
+from retinanalysis.utils.analysis_results import load_analysis_bundle
 
 
 def _summary(exp_name, rate, f1, decode):
@@ -50,11 +53,30 @@ def test_normalize_recovery_summary_within_each_date():
 
 
 def test_save_lists_existing_dates_then_loads_combined_dataset(tmp_path, capsys):
+    cell_qc = pd.DataFrame({
+        'cell_id': [1, 2],
+        'excluded_downstream': [False, True],
+        'template_pass_fraction': [1.0, 0.0],
+    })
+    template_match = pd.DataFrame({
+        'cell_id': [1, 2], 'condition': ['a', 'a'],
+        'shape_r': [0.9, 0.1],
+    })
     save_recovery_summary(
         _summary('20230101C', [2.0, 4.0], [0.2, 0.4], [0.25, 0.5]),
-        '20230101C', output_root=tmp_path,
+        '20230101C', output_root=tmp_path, cell_qc=cell_qc,
+        template_match=template_match,
     )
     capsys.readouterr()
+
+    bundle = load_analysis_bundle('vmdg', '20230101C', output_root=tmp_path)
+    pd.testing.assert_frame_equal(bundle['analysis']['cell_qc'], cell_qc)
+    pd.testing.assert_frame_equal(
+        bundle['analysis']['template_match'], template_match)
+    assert bundle['meta']['cell_qc'] == {
+        'n_candidates': 2, 'n_retained': 1, 'n_excluded': 1,
+        'excluded_cell_ids': [2],
+    }
 
     save_recovery_summary(
         _summary('20230202C', [6.0, 3.0], [0.6, 0.3], [0.6, 0.4]),
@@ -137,3 +159,29 @@ def test_recovery_summary_table_builds_stable_condition_window_rows():
     np.testing.assert_allclose(summary['decode_matched_index'], [0.4, 1.0])
     assert summary['n_cells'].tolist() == [2, 2]
     assert summary['n_epochs'].tolist() == [4, 4]
+
+
+def test_recovery_analysis_passes_cleaned_cell_ids_to_every_condition(monkeypatch):
+    seen = []
+
+    def fake_pbr(*args, **kwargs):
+        seen.append(kwargs['cell_ids'])
+        return object()
+
+    monkeypatch.setattr(spatial_recovery, 'phase_binned_response', fake_pbr)
+    for name in ('phase_modulation', 'decode_phase', 'mosaic_coherence',
+                 'split_half_reliability'):
+        monkeypatch.setattr(spatial_recovery, name,
+                            lambda *args, **kwargs: pd.DataFrame())
+
+    epochs = pd.DataFrame({
+        'epoch': [0, 1, 2, 3],
+        'bar': [50, 50, 150, 150],
+        'mean': [0.3, 0.3, 0.3, 0.3],
+    })
+    spatial_recovery.analyze_recovery_conditions(
+        object(), object(), epochs, condition_keys=['bar', 'mean'],
+        windows_s=[(0, 1)], cell_ids=[11, 22], verbose=False,
+    )
+
+    assert seen == [[11, 22], [11, 22]]
