@@ -83,6 +83,11 @@ __all__ = [
     'plot_population_similarity',
     'plot_excess_distance',
     'plot_time_resolved_similarity',
+    'save_eye_movement_results',
+    'load_eye_movement_many',
+    'summarize_eye_movement_dates',
+    'plot_eye_movement_across_dates',
+    'save_eye_movement_cross_date_summary',
 ]
 
 # How each normalisation treats a (cell x time) matrix before it is vectorised
@@ -1627,6 +1632,213 @@ def plot_time_resolved_similarity(tr: pd.DataFrame, *,
     ax.legend(frameon=False, fontsize=8)
     ax.figure.tight_layout()
     return ax.figure
+
+
+# ---------------------------------------------------------------------------
+# Eye-movement per-date persistence and cross-date summaries
+# ---------------------------------------------------------------------------
+
+_EYE_MOVEMENT_PROC = 'emtraj'
+
+
+def save_eye_movement_results(
+    exp_name: str,
+    *,
+    similarity: pd.DataFrame,
+    cycle_interaction: pd.DataFrame,
+    spike_distance: pd.DataFrame,
+    trajectory: pd.DataFrame,
+    extra_analysis: Optional[Mapping[str, object]] = None,
+    metadata: Optional[Mapping] = None,
+    figures: Optional[Mapping[str, object]] = None,
+    output_root=None,
+    verbose: bool = True,
+) -> Dict:
+    """Save one eye-movement date as pickle tables, JSON metadata, and PNGs."""
+    from .analysis_results import save_analysis_bundle
+
+    analysis = {
+        'similarity': similarity.copy(),
+        'cycle_interaction': cycle_interaction.copy(),
+        'spike_distance': spike_distance.copy(),
+        'trajectory': trajectory.copy(),
+        **dict(extra_analysis or {}),
+    }
+    meta = {
+        'analysis_name': 'EyeMovementTrajectoryAlternatingBackground',
+        'normalization': {
+            'similarity': 'noise-corrected within each date',
+            'trajectory': 'noise-corrected within each date',
+            'spike_distance': 'excess over within-condition variability, per spike',
+            'cross_date_weighting': 'one mean per retina/date',
+        },
+        **dict(metadata or {}),
+    }
+    return save_analysis_bundle(
+        _EYE_MOVEMENT_PROC, str(exp_name), analysis,
+        metadata=meta, figures=figures, output_root=output_root,
+        verbose=verbose)
+
+
+def load_eye_movement_many(
+    exp_names: Optional[Iterable[str]] = None,
+    *,
+    output_root=None,
+) -> Dict[str, pd.DataFrame]:
+    """Combine every saved eye-movement table, retaining ``exp_name``."""
+    from .analysis_results import load_analysis_many
+
+    bundles = load_analysis_many(
+        _EYE_MOVEMENT_PROC, exp_names=exp_names, output_root=output_root)
+    names = ('similarity', 'cycle_interaction', 'spike_distance', 'trajectory')
+    out = {}
+    for name in names:
+        parts = []
+        for exp_name, bundle in bundles.items():
+            table = bundle['analysis'].get(name)
+            if isinstance(table, pd.DataFrame):
+                table = table.copy()
+                table['exp_name'] = str(exp_name)
+                parts.append(table)
+        out[name] = (pd.concat(parts, ignore_index=True)
+                     if parts else pd.DataFrame())
+    return out
+
+
+def summarize_eye_movement_dates(
+    combined: Mapping[str, pd.DataFrame],
+) -> Dict[str, pd.DataFrame]:
+    """Reduce images/cells within date before comparing biological replicates."""
+    out = {}
+    sim = combined.get('similarity', pd.DataFrame())
+    if not sim.empty:
+        selected = sim.query("normalize == 'centered'")
+        out['similarity_by_date'] = (selected.groupby(
+            ['exp_name', 'cell_type', 'cycle'], as_index=False)
+            [['rho_corrected', 'rho_cell', 'rate_a_hz', 'rate_b_hz']].mean())
+
+    cycle = combined.get('cycle_interaction', pd.DataFrame())
+    if not cycle.empty:
+        selected = cycle.query("normalize == 'centered'")
+        out['cycle_by_date'] = (selected.groupby(
+            ['exp_name', 'cell_type'], as_index=False)
+            [['rho_cycle_corrected', 'rho_delta', 'delta_ratio']].mean())
+
+    dist = combined.get('spike_distance', pd.DataFrame())
+    if not dist.empty:
+        out['distance_by_date'] = (dist.groupby(
+            ['exp_name', 'cell_type', 'cycle'], as_index=False)
+            [['d_excess', 'd_excess_count_only']].mean())
+
+    traj = combined.get('trajectory', pd.DataFrame())
+    if not traj.empty:
+        selected = traj.query("normalize == 'centered'")
+        out['trajectory_by_date'] = (selected.groupby(
+            ['exp_name', 'cell_type', 't_since_movie_s'], as_index=False)
+            [['rho_corrected']].mean())
+    return out
+
+
+def plot_eye_movement_across_dates(
+    combined: Mapping[str, pd.DataFrame],
+    *,
+    cell_types: Optional[Sequence[str]] = None,
+    figsize: Tuple[float, float] = (14.0, 3.8),
+):
+    """Plot date-normalized eye-movement endpoints with dates weighted equally."""
+    import matplotlib.pyplot as plt
+    from .style import apply_publication_style, colors_for_conditions
+
+    summary = summarize_eye_movement_dates(combined)
+    if not summary:
+        raise ValueError('No saved eye-movement results are available to plot.')
+    available = set()
+    for table in summary.values():
+        if 'cell_type' in table:
+            available.update(str(v) for v in table['cell_type'].dropna().unique())
+    types = (list(cell_types) if cell_types is not None
+             else sorted(t for t in available if t != 'all'))
+    colors = colors_for_conditions(types)
+    apply_publication_style()
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+
+    def draw(ax, table, x, y, ylabel):
+        for ct in types:
+            typed = table[table['cell_type'] == ct]
+            if typed.empty:
+                continue
+            for _, date in typed.groupby('exp_name'):
+                date = date.sort_values(x)
+                ax.plot(date[x], date[y], color=colors[ct], alpha=0.18,
+                        linewidth=0.8)
+            date_means = typed.groupby(['exp_name', x], as_index=False)[y].mean()
+            mean = date_means.groupby(x)[y].mean()
+            sem = date_means.groupby(x)[y].sem()
+            ax.plot(mean.index, mean, '-o', color=colors[ct], linewidth=2,
+                    label=f'{ct} (n={typed.exp_name.nunique()} dates)')
+            ax.fill_between(mean.index, mean - sem, mean + sem,
+                            color=colors[ct], alpha=0.12, linewidth=0)
+        ax.set_xlabel('movie presentation' if x == 'cycle'
+                      else 'time since movie onset (s)')
+        ax.set_ylabel(ylabel)
+        ax.legend(fontsize=7)
+
+    sim = summary.get('similarity_by_date', pd.DataFrame())
+    dist = summary.get('distance_by_date', pd.DataFrame())
+    traj = summary.get('trajectory_by_date', pd.DataFrame())
+    if not sim.empty:
+        draw(axes[0], sim, 'cycle', 'rho_corrected',
+             'noise-corrected cross-history r')
+        axes[0].set_title('population similarity')
+    else:
+        axes[0].set_visible(False)
+    if not dist.empty:
+        draw(axes[1], dist, 'cycle', 'd_excess',
+             'excess distance per spike')
+        axes[1].set_title('spike distance')
+    else:
+        axes[1].set_visible(False)
+    if not traj.empty:
+        draw(axes[2], traj, 't_since_movie_s', 'rho_corrected',
+             'noise-corrected cross-history r')
+        axes[2].set_title('time-resolved similarity')
+    else:
+        axes[2].set_visible(False)
+    fig.suptitle('EyeMovementTrajectory — cross-date summary', y=1.03)
+    fig.tight_layout()
+    return fig, axes
+
+
+def save_eye_movement_cross_date_summary(
+    combined: Mapping[str, pd.DataFrame],
+    *,
+    metadata: Optional[Mapping] = None,
+    figures: Optional[Mapping[str, object]] = None,
+    output_root=None,
+    verbose: bool = True,
+) -> Dict:
+    """Save combined tables, per-date reductions, metadata, and pooled plots."""
+    from .analysis_results import save_analysis_summary
+
+    date_summary = summarize_eye_movement_dates(combined)
+    dates = sorted({
+        str(v) for table in combined.values() if isinstance(table, pd.DataFrame)
+        and 'exp_name' in table
+        for v in table['exp_name'].dropna().unique()
+    })
+    analysis = {**dict(combined), **date_summary}
+    meta = {
+        'analysis_name': 'EyeMovementTrajectory cross-date summary',
+        'dates': dates,
+        'n_dates': len(dates),
+        'normalization': (
+            'similarity/trajectory noise-corrected within date; spike distance '
+            'per-spike excess; images/cells reduced within date before date mean'),
+        **dict(metadata or {}),
+    }
+    return save_analysis_summary(
+        _EYE_MOVEMENT_PROC, analysis, metadata=meta, figures=figures,
+        output_root=output_root, verbose=verbose)
 
 
 # ---------------------------------------------------------------------------

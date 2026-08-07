@@ -75,6 +75,14 @@ __all__ = [
     'pathway_decoding',
     'fit_recovery',
     'spatial_structure_index',
+    'analyze_recovery_conditions',
+    'recovery_summary_table',
+    'normalize_recovery_summary',
+    'saved_recovery_stats',
+    'save_recovery_summary',
+    'save_recovery_cross_date_summary',
+    'load_recovery_many',
+    'plot_recovery_across_dates',
     'plot_recovery_summary',
 ]
 
@@ -1255,6 +1263,362 @@ def spatial_structure_index(decoding: pd.DataFrame, *,
             f'({late_base:.3f}), within {2 * noise:.3f} = 2 shuffle SD, so '
             f'there is no late-adapted signal to normalise to')
     return df
+
+
+# ---------------------------------------------------------------------------
+# 10. Per-date summary, persistence, and cross-date pooling
+# ---------------------------------------------------------------------------
+
+_RECOVERY_PROTOCOL = 'vmdg'
+
+
+def analyze_recovery_conditions(
+    pipeline,
+    stim_block,
+    epochs: pd.DataFrame,
+    *,
+    condition_keys: Sequence[str],
+    windows_s: Sequence[Tuple[float, float]],
+    cell_types: Optional[Iterable[str]] = None,
+    drift_freq_hz: Optional[float] = None,
+    n_phase_bins: int = 12,
+    n_shuffles: int = 50,
+    verbose: bool = True,
+) -> Dict[str, Dict]:
+    """Run the complete spatial-recovery analysis once per condition.
+
+    Conditions are never pooled before analysis: their geometry and phase are
+    distinct. The returned dictionary is the stable input to
+    :func:`recovery_summary_table` and the single-date diagnostic plots.
+    """
+    from .protocol_source import condition_label
+
+    out: Dict[str, Dict] = {}
+    for values, rows in epochs.groupby(list(condition_keys), sort=True):
+        values = values if isinstance(values, tuple) else (values,)
+        label = condition_label(condition_keys, values)
+        epoch_ids = rows['epoch'].astype(int).tolist()
+        if len(epoch_ids) < 2:
+            if verbose:
+                print(f'skipping {label}: {len(epoch_ids)} epoch; '
+                      'need at least 2 for leave-one-epoch-out decoding')
+            continue
+        if verbose:
+            print(f'\n{label}: epochs {epoch_ids}')
+        pbr = phase_binned_response(
+            pipeline, stim_block, epoch_ids,
+            windows_s=windows_s,
+            n_phase_bins=n_phase_bins,
+            cell_types=cell_types,
+            drift_freq_hz=drift_freq_hz,
+            verbose=verbose,
+        )
+        out[label] = {
+            'pbr': pbr,
+            'modulation': phase_modulation(pbr),
+            'modulation_naive': phase_modulation(pbr, debias=False),
+            'full': decode_phase(pbr, mode='full', n_shuffles=n_shuffles),
+            'matched': decode_phase(
+                pbr, mode='full', n_shuffles=0,
+                match_spike_counts=True,
+            ),
+            'polarity_blind': decode_phase(
+                pbr, mode='polarity_blind', n_shuffles=n_shuffles,
+            ),
+            'coherence': mosaic_coherence(pbr),
+            'reliability': split_half_reliability(pbr),
+        }
+    return out
+
+
+def recovery_summary_table(
+    recovery: Dict[str, Dict],
+    *,
+    exp_name: Optional[str] = None,
+) -> pd.DataFrame:
+    """Collapse condition results into one row per condition and time window.
+
+    Raw endpoints and their cross-date-normalized counterparts are retained.
+    The raw values remain available for auditing; pooled plots use only the
+    normalized columns created by :func:`normalize_recovery_summary`.
+    """
+    rows = []
+    for condition, result in recovery.items():
+        pbr = result['pbr']
+        mod = result['modulation']
+        naive = result['modulation_naive']
+        grouped = mod.groupby(['window', 't_start', 't_end', 't_mid'], sort=False)
+        base = grouped.agg(
+            rate_hz=('f0_hz', 'mean'),
+            f1=('m1', 'mean'),
+            f2=('m2', 'mean'),
+            n_f1_resolved=('f1_resolved', 'sum'),
+        ).reset_index()
+        base['f2_over_f1'] = base['f2'] / base['f1']
+        naive_mean = (naive.groupby('window', sort=False)['m1'].mean()
+                      .rename('f1_naive'))
+        base = base.merge(naive_mean, left_on='window', right_index=True,
+                          how='left')
+
+        for key, prefix in (
+            ('full', 'decode_full'),
+            ('matched', 'decode_matched'),
+            ('polarity_blind', 'decode_polblind'),
+        ):
+            dec = result[key].copy()
+            keep = ['window', 'accuracy', 'chance_accuracy']
+            rename = {
+                'accuracy': prefix,
+                'chance_accuracy': f'{prefix}_chance',
+            }
+            for col in ('shuffle_accuracy', 'shuffle_accuracy_sd'):
+                if col in dec:
+                    keep.append(col)
+                    rename[col] = f'{prefix}_{col}'
+            base = base.merge(dec[keep].rename(columns=rename),
+                              on='window', how='left')
+
+        reliability = result['reliability']
+        if not reliability.empty:
+            base = base.merge(
+                reliability[['window', 'reliability', 'reliability_sd']],
+                on='window', how='left',
+            )
+        geometry = getattr(pbr, 'geometry', {}) or {}
+        base.insert(0, 'condition', condition)
+        base.insert(0, 'exp_name', exp_name or '')
+        base['bar_width_um'] = geometry.get('bar_width_um', np.nan)
+        base['mean_intensity'] = geometry.get('mean_intensity', np.nan)
+        base['drift_freq_hz'] = float(getattr(
+            pbr, 'drift_freq_hz', geometry.get('temporal_freq_hz', np.nan)))
+        base['n_cells'] = int(pbr.counts.shape[2])
+        base['n_epochs'] = int(len(pbr.epochs))
+        rows.append(base)
+    if not rows:
+        return pd.DataFrame()
+    return normalize_recovery_summary(pd.concat(rows, ignore_index=True))
+
+
+def normalize_recovery_summary(
+    summary: pd.DataFrame,
+    *,
+    late_windows: int = 1,
+) -> pd.DataFrame:
+    """Normalize each retina and condition before cross-date pooling.
+
+    ``rate_late_fraction`` and ``f1_late_fraction`` divide by that retina's
+    own late-adapted value. Decoder indices subtract each window's own
+    shuffle (or analytical chance for spike-count-matched decoding) and scale
+    by that retina's late shuffle-to-signal margin. Thus 0 means null-level
+    phase information and 1 means that preparation's late state.
+    """
+    if summary.empty:
+        return summary.copy()
+    required = {'exp_name', 'condition', 't_mid', 'rate_hz', 'f1'}
+    missing = required - set(summary.columns)
+    if missing:
+        raise KeyError(f'recovery summary missing columns: {sorted(missing)}')
+
+    pieces = []
+    for _, group in summary.groupby(['exp_name', 'condition'], sort=False,
+                                     dropna=False):
+        g = group.sort_values('t_mid').copy()
+        late = g.tail(int(late_windows))
+        for raw, normalized in (
+            ('rate_hz', 'rate_late_fraction'),
+            ('f1', 'f1_late_fraction'),
+        ):
+            denominator = float(np.nanmean(late[raw]))
+            g[normalized] = (g[raw] / denominator
+                             if np.isfinite(denominator) and denominator != 0
+                             else np.nan)
+
+        for metric in ('decode_full', 'decode_matched', 'decode_polblind'):
+            if metric not in g:
+                continue
+            shuffle = f'{metric}_shuffle_accuracy'
+            chance = f'{metric}_chance'
+            baseline_col = shuffle if shuffle in g else chance
+            if baseline_col not in g:
+                continue
+            baseline = g[baseline_col].to_numpy(dtype=float)
+            late_margin = float(np.nanmean(
+                late[metric].to_numpy(dtype=float)
+                - late[baseline_col].to_numpy(dtype=float)))
+            sd_col = f'{metric}_shuffle_accuracy_sd'
+            resolution_floor = (2.0 * float(np.nanmean(late[sd_col]))
+                                if sd_col in late else 0.0)
+            target = f'{metric}_index'
+            g[target] = ((g[metric].to_numpy(dtype=float) - baseline)
+                         / late_margin
+                         if (np.isfinite(late_margin)
+                             and late_margin > max(resolution_floor, 1e-12))
+                         else np.nan)
+        pieces.append(g)
+    return pd.concat(pieces, ignore_index=True)
+
+
+def load_recovery_many(
+    exp_names: Optional[Iterable[str]] = None,
+    *,
+    protocol: str = _RECOVERY_PROTOCOL,
+    output_root=None,
+) -> pd.DataFrame:
+    """Load and concatenate every saved per-date pickle summary."""
+    from .analysis_results import load_analysis_many
+
+    bundles = load_analysis_many(
+        protocol, exp_names=exp_names, output_root=output_root)
+    tables = []
+    for exp_name, bundle in bundles.items():
+        table = bundle['analysis'].get('recovery_summary')
+        if isinstance(table, pd.DataFrame):
+            table = table.copy()
+            table['exp_name'] = str(exp_name)
+            tables.append(table)
+    if not tables:
+        return pd.DataFrame()
+    return normalize_recovery_summary(pd.concat(tables, ignore_index=True))
+
+
+def saved_recovery_stats(
+    *,
+    protocol: str = _RECOVERY_PROTOCOL,
+    output_root=None,
+) -> pd.DataFrame:
+    """One audit row per date already present in the recovery dataset."""
+    saved = load_recovery_many(protocol=protocol, output_root=output_root)
+    columns = [
+        'exp_name', 'n_rows', 'n_conditions', 'n_windows',
+        'n_cells_min', 'n_cells_max', 'n_epochs',
+    ]
+    if saved.empty:
+        return pd.DataFrame(columns=columns)
+    return (saved.groupby('exp_name', as_index=False)
+            .agg(n_rows=('condition', 'size'),
+                 n_conditions=('condition', 'nunique'),
+                 n_windows=('window', 'nunique'),
+                 n_cells_min=('n_cells', 'min'),
+                 n_cells_max=('n_cells', 'max'),
+                 n_epochs=('n_epochs', 'max'))[columns])
+
+
+def save_recovery_summary(
+    summary: pd.DataFrame,
+    exp_name: str,
+    *,
+    protocol: str = _RECOVERY_PROTOCOL,
+    output_root=None,
+    metadata: Optional[Dict] = None,
+    figures: Optional[Dict] = None,
+    verbose: bool = True,
+) -> Dict:
+    """Print existing dates, then save one date as pickle + JSON + plots.
+
+    One folder per date makes incremental updates safe: adding a new retina
+    does not rewrite any previous date, while rerunning a date deliberately
+    replaces only that date's derived table, metadata, and named plots.
+    """
+    from .analysis_results import save_analysis_bundle
+
+    table = summary.copy()
+    table['exp_name'] = str(exp_name)
+    table = normalize_recovery_summary(table)
+    meta = {
+        'analysis_name': 'variableMeanDriftingGrating spatial recovery',
+        'normalization': {
+            'rate': 'within-date, within-condition / late rate',
+            'f1': 'within-date, within-condition / late F1',
+            'decoding': 'within-date null-to-late index',
+            'biological_replicate': 'retina/date',
+        },
+        **dict(metadata or {}),
+    }
+    return save_analysis_bundle(
+        protocol, str(exp_name), {'recovery_summary': table},
+        metadata=meta, figures=figures, output_root=output_root,
+        verbose=verbose)
+
+
+def save_recovery_cross_date_summary(
+    summary: pd.DataFrame,
+    *,
+    protocol: str = _RECOVERY_PROTOCOL,
+    output_root=None,
+    metadata: Optional[Dict] = None,
+    figures: Optional[Dict] = None,
+    verbose: bool = True,
+) -> Dict:
+    """Save the combined VMDG dataset and multi-date plots in ``summary/``."""
+    from .analysis_results import save_analysis_summary
+
+    table = normalize_recovery_summary(summary)
+    dates = sorted(str(v) for v in table['exp_name'].dropna().unique())
+    meta = {
+        'analysis_name': 'variableMeanDriftingGrating cross-date recovery',
+        'dates': dates,
+        'n_dates': len(dates),
+        'normalization': 'within retina and condition; dates weighted equally',
+        **dict(metadata or {}),
+    }
+    return save_analysis_summary(
+        protocol, {'recovery_summary': table}, metadata=meta,
+        figures=figures, output_root=output_root, verbose=verbose)
+
+
+def plot_recovery_across_dates(
+    summary: pd.DataFrame,
+    *,
+    condition: Optional[str] = None,
+    figsize: Tuple[float, float] = (13.0, 3.6),
+):
+    """Plot normalized recovery trajectories with dates weighted equally.
+
+    Thin lines are individual retinas. The heavy line and SEM summarize dates,
+    not cells, which keeps preparations with larger cell counts from dominating
+    the pooled result.
+    """
+    import matplotlib.pyplot as plt
+    from .style import apply_publication_style
+
+    data = normalize_recovery_summary(summary)
+    if condition is not None:
+        data = data[data['condition'] == condition]
+    if data.empty:
+        raise ValueError('No saved recovery rows match the requested condition.')
+    if condition is None and data['condition'].nunique() != 1:
+        raise ValueError('Multiple conditions are present; pass condition=...')
+
+    apply_publication_style()
+    panels = [
+        ('rate_late_fraction', 'rate / late rate'),
+        ('f1_late_fraction', 'F1 / late F1'),
+        ('decode_matched_index', 'matched decoding index'),
+    ]
+    fig, axes = plt.subplots(1, 3, figsize=figsize, sharex=True)
+    for ax, (metric, ylabel) in zip(axes, panels):
+        if metric not in data or data[metric].notna().sum() == 0:
+            ax.set_visible(False)
+            continue
+        for _, date in data.groupby('exp_name', sort=True):
+            date = date.sort_values('t_mid')
+            ax.plot(date['t_mid'], date[metric], '-o', ms=2,
+                    color='0.65', alpha=0.55, linewidth=0.8)
+        by_time = data.groupby('t_mid')[metric]
+        mean = by_time.mean()
+        sem = by_time.sem()
+        ax.plot(mean.index, mean, '-o', color='black', ms=4,
+                linewidth=2, label=f'mean of {data.exp_name.nunique()} dates')
+        ax.fill_between(mean.index, mean - sem, mean + sem,
+                        color='black', alpha=0.15, linewidth=0)
+        ax.axhline(1.0, color='0.75', linestyle='--', linewidth=0.8)
+        ax.set_xlabel('time since step (s)')
+        ax.set_ylabel(ylabel)
+        ax.legend(fontsize=7)
+    label = condition or str(data['condition'].iloc[0])
+    fig.suptitle(f'cross-date recovery — {label}', y=1.03)
+    fig.tight_layout()
+    return fig, axes
 
 
 # ---------------------------------------------------------------------------

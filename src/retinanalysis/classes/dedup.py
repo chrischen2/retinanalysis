@@ -14,7 +14,14 @@ import pandas as pd
 
 def generate_extended_pairings(pairs: set):
     '''
-    Generates extended pairings for a set of cell ID pairs.
+    Generate connected components for a set of cell ID pairs.
+
+    Duplicate relationships are transitive: when A matches B, B matches C,
+    and C matches D, all four clusters describe one duplicate group even if
+    A and D were never compared directly.  The previous implementation only
+    combined the immediate neighbours of each edge, which split chains longer
+    than three nodes into overlapping, partial groups.
+
     Args:
         - pairs: set of tuples containing cell IDs.
     Returns:
@@ -22,22 +29,22 @@ def generate_extended_pairings(pairs: set):
     '''
     pairs_dict = {}
     for a, b in pairs:
-        if a not in pairs_dict:
-            pairs_dict[a] = set()
-        if b not in pairs_dict:
-            pairs_dict[b] = set()
-        pairs_dict[a].add(b)
-        pairs_dict[b].add(a)
+        pairs_dict.setdefault(a, set()).add(b)
+        pairs_dict.setdefault(b, set()).add(a)
 
     extended = set()
-    for origin in pairs:
-        a, b = origin
-
-        paired_w_a = pairs_dict.get(a, set())
-        paired_w_b = pairs_dict.get(b, set())
-        all_paired = paired_w_a.union(paired_w_b)
-        all_paired_tuple = tuple(sorted(all_paired))
-        extended.add(all_paired_tuple)
+    unseen = set(pairs_dict)
+    while unseen:
+        origin = unseen.pop()
+        component = {origin}
+        stack = [origin]
+        while stack:
+            node = stack.pop()
+            neighbours = pairs_dict[node] - component
+            component.update(neighbours)
+            unseen.difference_update(neighbours)
+            stack.extend(neighbours)
+        extended.add(tuple(sorted(component)))
 
     return extended
 

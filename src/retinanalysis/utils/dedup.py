@@ -314,6 +314,11 @@ def apply_dedup(
     The merged representative keeps its existing ``cell_type`` and
     ``noise_id``; ``d_EIs[representative]`` is unchanged.
 
+    When applied in place, every downstream view is synchronized: deleted
+    IDs are removed from ``cell_ids``, EI/error dictionaries, and pipeline
+    match/correlation mappings; stale binned-spike caches are invalidated;
+    and the audit rows are retained as ``block.dedup_log``.
+
     Parameters
     ----------
     merge_strategy : ``'union'`` (default) | ``'drop'``
@@ -340,7 +345,8 @@ def apply_dedup(
         raise ValueError(
             f"merge_strategy must be 'union' or 'drop', got {merge_strategy!r}")
 
-    block = _resolve_block(pipeline_or_block, side)
+    container = pipeline_or_block
+    block = _resolve_block(container, side)
     df = getattr(block, 'df_spike_times', None)
     if df is None and inplace:
         raise ValueError('Block has no df_spike_times to modify.')
@@ -423,9 +429,70 @@ def apply_dedup(
                     df.at[idx[0], 'spike_times'] = mt
         if drop_ids:
             df = df[~df['cell_id'].astype(int).isin(drop_ids)].reset_index(drop=True)
+
+        # Any precomputed bins describe the old, unmerged spike trains. Drop
+        # them so later analyses rebuild from the merged trains.
+        df = df.drop(columns=['binned_spikes'], errors='ignore')
         block.df_spike_times = df
         block.cell_ids = np.array(
             [int(c) for c in df['cell_id']], dtype=int)
+
+        for attr in ('binned_spikes', 'bin_rate', 'time_bins_ms'):
+            if hasattr(block, attr):
+                delattr(block, attr)
+
+        # Synchronize every cell-keyed response-block dictionary. The kept
+        # representative retains its EI; deleted split clusters must not
+        # reappear in later EI-based analysis or inspection.
+        kept_ids = set(int(c) for c in block.cell_ids)
+        for attr in ('d_EIs', 'd_EI_error'):
+            mapping = getattr(block, attr, None)
+            if isinstance(mapping, dict):
+                setattr(block, attr, {
+                    key: value for key, value in mapping.items()
+                    if int(key) in kept_ids
+                })
+
+        # Pipeline mappings are noise_id -> protocol_id. Remove mappings to
+        # deleted protocol clusters so RF/timecourse helpers cannot resurrect
+        # cells that no longer exist in the response block.
+        if hasattr(container, 'resp') and block is container.resp:
+            match_dict = getattr(container, 'match_dict', None)
+            if isinstance(match_dict, dict):
+                kept_noise_ids = {
+                    key for key, protocol_id in match_dict.items()
+                    if int(protocol_id) in kept_ids
+                }
+                container.match_dict = {
+                    key: protocol_id for key, protocol_id in match_dict.items()
+                    if key in kept_noise_ids
+                }
+                corr_dict = getattr(container, 'corr_dict', None)
+                if isinstance(corr_dict, dict):
+                    container.corr_dict = {
+                        key: value for key, value in corr_dict.items()
+                        if key in kept_noise_ids
+                    }
+
+        # A response block may also carry its own cluster-match view.
+        block_match_dict = getattr(block, 'match_dict', None)
+        if isinstance(block_match_dict, dict):
+            block.match_dict = {
+                key: protocol_id
+                for key, protocol_id in block_match_dict.items()
+                if int(protocol_id) in kept_ids
+            }
+
+        # Preserve the merge/delete lineage on the live block for downstream
+        # inspection and for any later export of the block or pipeline.
+        new_log = pd.DataFrame(log_rows)
+        prior_log = getattr(block, 'dedup_log', None)
+        if isinstance(prior_log, pd.DataFrame) and not prior_log.empty:
+            block.dedup_log = pd.concat(
+                [prior_log, new_log], ignore_index=True,
+            )
+        else:
+            block.dedup_log = new_log
 
     if verbose:
         kept = len(groups)
