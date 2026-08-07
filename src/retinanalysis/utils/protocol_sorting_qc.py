@@ -880,15 +880,16 @@ def plot_sampled_detected_spikes(
     results: Mapping[int, UnitSortingQC],
     *,
     max_waveforms_per_class: int = 30,
+    n_neighbor_electrodes: int = 48,
     figsize_per_cell: Tuple[float, float] = (19.0, 3.2),
 ):
     """Array-map target/suspicious spikes, assignments, and similarity.
 
     The first two panels use the canonical Vision electrode map supplied by
     ``response_block.vcd.get_electrode_map()``. They place the assigned target
-    median and the median suspicious event on the actual array, with every
-    electrode visible for context. The remaining panels show assigned spikes
-    on the strongest electrode and multichannel target similarity.
+    median and suspicious events on the actual array, with only the nearest
+    ``n_neighbor_electrodes`` shown for readable local context. The remaining
+    panels show assigned spikes and multichannel target similarity.
 
     "Raw threshold candidate" has a precise meaning here: a liberal threshold
     crossing proposed from the strongest channel without consulting Kilosort
@@ -942,8 +943,17 @@ def plot_sampled_detected_spikes(
         full_xy = result.electrode_map_xy
         if full_xy is not None:
             full_xy = np.asarray(full_xy, dtype=float)
-            ax.scatter(full_xy[:, 0], full_xy[:, 1], s=2.5, color='0.85',
+            center = np.mean(xy, axis=0)
+            distance = np.linalg.norm(full_xy - center[None, :], axis=1)
+            n_context = min(max(len(xy), int(n_neighbor_electrodes)),
+                            len(full_xy))
+            context_idx = np.argsort(distance)[:n_context]
+            context_xy = full_xy[context_idx]
+            ax.scatter(context_xy[:, 0], context_xy[:, 1],
+                       s=5, color='0.82',
                        zorder=0, rasterized=True)
+        else:
+            context_xy = xy
         if waveform is None:
             ax.scatter(xy[:, 0], xy[:, 1], s=12, facecolors='none',
                        edgecolors='0.35')
@@ -982,8 +992,15 @@ def plot_sampled_detected_spikes(
                         str(int(result.raw_channel_ids[channel])),
                         ha='center', va='top', fontsize=5.5, color='0.3')
             ax.scatter(xy[:, 0], xy[:, 1], s=7, color='black', zorder=3)
-        ax.set_aspect('equal', adjustable='datalim')
-        ax.invert_yaxis()
+        shown_xy = np.vstack([context_xy, xy])
+        x_span = float(np.ptp(shown_xy[:, 0]))
+        y_span = float(np.ptp(shown_xy[:, 1]))
+        pad = 0.08 * max(x_span, y_span, 1.0)
+        ax.set_xlim(float(shown_xy[:, 0].min() - pad),
+                    float(shown_xy[:, 0].max() + pad))
+        ax.set_ylim(float(shown_xy[:, 1].max() + pad),
+                    float(shown_xy[:, 1].min() - pad))
+        ax.set_aspect('equal', adjustable='box')
         ax.set_title(title + layout_note)
         ax.set_xlabel('electrode x (µm); labels = raw channel')
         ax.set_ylabel('electrode y (µm)')
@@ -1119,6 +1136,7 @@ def browse_sampled_detected_spikes(
     results: Mapping[int, UnitSortingQC],
     *,
     max_waveforms_per_class: int = 30,
+    n_neighbor_electrodes: int = 48,
     figure_sink: Optional[Dict[int, object]] = None,
     description: str = 'Sampled cluster:',
 ):
@@ -1139,7 +1157,8 @@ def browse_sampled_detected_spikes(
     def _figure(cell_id):
         fig, _ = plot_sampled_detected_spikes(
             {int(cell_id): results[int(cell_id)]},
-            max_waveforms_per_class=max_waveforms_per_class)
+            max_waveforms_per_class=max_waveforms_per_class,
+            n_neighbor_electrodes=n_neighbor_electrodes)
         return fig
 
     if figure_sink is not None:

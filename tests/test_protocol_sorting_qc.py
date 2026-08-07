@@ -75,7 +75,8 @@ def test_waveform_similarity_and_competing_cluster_overlap():
 
 def test_quantitative_qc_separates_missed_from_misassigned():
     raw, ks, missed, misassigned = _synthetic()
-    repository_map = ks.channel_positions + np.array([100.0, 200.0])
+    repository_map = np.array([
+        [30.0 * x, 30.0 * y] for y in range(10) for x in range(10)])
     result = analyze_unit_sorting_qc(
         raw, ks, 0, n_local_channels=4, min_empirical_spikes=10,
         threshold_sigma=4.0, similarity_percentile=2,
@@ -105,6 +106,7 @@ def test_quantitative_qc_separates_missed_from_misassigned():
     assert 'similarity' in axes[0, 3].get_title().lower()
     np.testing.assert_array_equal(
         result.electrode_map_xy, repository_map)
+    assert len(axes[0, 0].collections[0].get_offsets()) == 48
     plt.close(fig)
 
 
