@@ -21,6 +21,8 @@ The main entry points are:
     sampled protocol cell IDs with one shared raw read.
 ``plot_unit_sorting_qc``
     The four-panel diagnostic page described in the project notebook.
+``plot_sampled_detected_spikes``
+    Raw peak-channel waveform overlays for every sampled protocol cell.
 
 This is sampled QC, not a replacement sorter. Candidate events that look like
 collisions or are nearly tied between templates are reported separately and
@@ -72,6 +74,8 @@ __all__ = [
     'analyze_protocol_sorting_qc',
     'plot_unit_sorting_qc',
     'plot_sorting_qc_summary',
+    'plot_sampled_detected_spikes',
+    'browse_sampled_detected_spikes',
 ]
 
 
@@ -90,6 +94,7 @@ class KilosortOutput:
     templates: np.ndarray
     channel_map: np.ndarray
     spike_templates: Optional[np.ndarray] = None
+    channel_positions: Optional[np.ndarray] = None
     sample_rate_hz: float = 20_000.0
     source: Optional[Path] = None
     _cluster_template_cache: Dict[int, np.ndarray] = field(
@@ -101,6 +106,13 @@ class KilosortOutput:
         self.spike_times = np.asarray(self.spike_times).reshape(-1).astype(np.int64)
         self.spike_clusters = np.asarray(self.spike_clusters).reshape(-1).astype(np.int64)
         self.channel_map = np.asarray(self.channel_map).reshape(-1).astype(np.int64)
+        if self.channel_positions is not None:
+            positions = np.asarray(self.channel_positions, dtype=float)
+            if positions.ndim != 2 or positions.shape[0] != len(self.channel_map) \
+                    or positions.shape[1] < 2:
+                raise ValueError(
+                    'channel_positions must be n_channels × 2 (or wider)')
+            self.channel_positions = positions[:, :2]
         templates = np.asarray(self.templates)
         if templates.ndim != 3:
             raise ValueError(f'templates must be 3-D; got {templates.shape}')
@@ -170,6 +182,7 @@ class UnitSortingQC:
 
     target_cluster: int
     local_channel_positions: np.ndarray
+    local_channel_xy: Optional[np.ndarray]
     raw_channel_ids: np.ndarray
     nearby_clusters: np.ndarray
     empirical_templates: Dict[int, np.ndarray]
@@ -199,6 +212,7 @@ def load_kilosort_output(
         return np.load(path, mmap_mode=mmap_mode)
 
     spike_templates_path = folder / 'spike_templates.npy'
+    channel_positions_path = folder / 'channel_positions.npy'
     return KilosortOutput(
         spike_times=required('spike_times.npy'),
         spike_clusters=required('spike_clusters.npy'),
@@ -206,6 +220,8 @@ def load_kilosort_output(
         channel_map=required('channel_map.npy'),
         spike_templates=(np.load(spike_templates_path, mmap_mode=mmap_mode)
                          if spike_templates_path.is_file() else None),
+        channel_positions=(np.load(channel_positions_path, mmap_mode=mmap_mode)
+                           if channel_positions_path.is_file() else None),
         sample_rate_hz=sample_rate_hz,
         source=folder,
     )
@@ -476,7 +492,7 @@ def analyze_unit_sorting_qc(
     segment_times = ks.spike_times[in_segment] - start
     segment_clusters = ks.spike_clusters[in_segment]
     target_times = segment_times[segment_clusters == target_cluster]
-    assigned_wfs, valid_target_times = extract_multichannel_waveforms(
+    assigned_wfs, _ = extract_multichannel_waveforms(
         local, target_times, pre, post)
     if len(assigned_wfs) < max(3, int(min_empirical_spikes)):
         raise ValueError(
@@ -597,6 +613,8 @@ def analyze_unit_sorting_qc(
     return UnitSortingQC(
         target_cluster=target_cluster,
         local_channel_positions=positions,
+        local_channel_xy=(None if ks.channel_positions is None
+                          else ks.channel_positions[positions].copy()),
         raw_channel_ids=raw_ids,
         nearby_clusters=nearby.cluster_id.to_numpy(dtype=int),
         empirical_templates=templates_empirical,
@@ -832,3 +850,201 @@ def plot_sorting_qc_summary(
     ax.legend(fontsize=8)
     fig.tight_layout()
     return fig, ax
+
+
+def plot_sampled_detected_spikes(
+    results: Mapping[int, UnitSortingQC],
+    *,
+    max_waveforms_per_class: int = 30,
+    figsize_per_cell: Tuple[float, float] = (15.0, 3.0),
+):
+    """Spatial footprint, assigned spikes, and target similarity per cell.
+
+    Each row is one sampled cell. The left panel places its median raw
+    waveform on the physical 2-D position of every selected electrode, using
+    one common amplitude scale so propagation and footprint are visible. The
+    middle panel overlays individual Kilosort-assigned spikes on the strongest
+    electrode and labels the cell ID/type/channel. The right panel shows the
+    multichannel cosine similarity to the target empirical template.
+
+    "Raw threshold candidate" has a precise meaning here: a liberal threshold
+    crossing proposed from the strongest channel without consulting Kilosort
+    labels. Only after proposal is its multichannel waveform compared with the
+    target and nearby-cell templates. This is not a second spike assignment.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import Normalize
+    from matplotlib.lines import Line2D
+    from .style import colors_for_celltypes
+
+    if not results:
+        raise ValueError('results is empty')
+    items = list(results.items())
+    fig, axes = plt.subplots(
+        len(items), 3, squeeze=False,
+        figsize=(float(figsize_per_cell[0]),
+                 float(figsize_per_cell[1]) * len(items)))
+    colors = {
+        'assigned_target': '#009E73',
+        'missed_detection': '#D55E00',
+        'misassigned': '#CC79A7',
+        'possible_collision': '#E69F00',
+        'background/competitor': '0.65',
+    }
+    type_colors = colors_for_celltypes(sorted({
+        str(result.summary.get('cell_type', '')) for _, result in items}))
+    rng = np.random.default_rng(0)
+
+    def _limited(indices):
+        indices = np.asarray(indices, dtype=int)
+        limit = max(1, int(max_waveforms_per_class))
+        if len(indices) <= limit:
+            return indices
+        return np.sort(rng.choice(indices, size=limit, replace=False))
+
+    for row, (cell_id, result) in enumerate(items):
+        target = result.empirical_templates[result.target_cluster]
+        peak_channel = int(np.argmax(np.ptp(target, axis=0)))
+        peak_sample = int(np.argmax(np.abs(target[:, peak_channel])))
+        time_ms = ((np.arange(target.shape[0]) - peak_sample)
+                   / result.sample_rate_hz * 1000.0)
+        cell_type = str(result.summary.get('cell_type', ''))
+        cell_color = type_colors.get(cell_type, '#0072B2')
+
+        # A. Median assigned waveform at each electrode's physical location.
+        ax = axes[row, 0]
+        xy = result.local_channel_xy
+        layout_note = ''
+        if xy is None:
+            n_cols = int(np.ceil(np.sqrt(len(result.raw_channel_ids))))
+            xy = np.column_stack((np.arange(len(result.raw_channel_ids)) % n_cols,
+                                  np.arange(len(result.raw_channel_ids)) // n_cols))
+            layout_note = ' (index-grid fallback)'
+        xy = np.asarray(xy, dtype=float)
+        unique_x = np.unique(xy[:, 0])
+        unique_y = np.unique(xy[:, 1])
+        dx = np.min(np.diff(unique_x)) if len(unique_x) > 1 else 1.0
+        dy = np.min(np.diff(unique_y)) if len(unique_y) > 1 else dx
+        pitch = float(max(min(abs(dx), abs(dy)), np.finfo(float).eps))
+        global_amp = float(np.max(np.abs(target))) or 1.0
+        latencies = np.argmax(np.abs(target), axis=0)
+        latency_norm = Normalize(float(latencies.min()),
+                                 float(max(latencies.max(), latencies.min() + 1)))
+        cmap = plt.get_cmap('viridis')
+        trace_x = np.linspace(-0.35 * pitch, 0.35 * pitch, target.shape[0])
+        for channel, (x_pos, y_pos) in enumerate(xy):
+            trace_y = target[:, channel] / global_amp * 0.35 * pitch
+            ax.plot(x_pos + trace_x, y_pos + trace_y,
+                    color=cmap(latency_norm(latencies[channel])), lw=1.2)
+            ax.text(x_pos, y_pos - 0.43 * pitch,
+                    str(int(result.raw_channel_ids[channel])),
+                    ha='center', va='top', fontsize=6, color='0.35')
+        ax.scatter(xy[:, 0], xy[:, 1], s=8, color='black', zorder=3)
+        ax.set_aspect('equal', adjustable='datalim')
+        ax.invert_yaxis()
+        ax.set_title(f'cell {cell_id} ({cell_type}) — 2-D electrode footprint'
+                     f'{layout_note}')
+        ax.set_xlabel('electrode x (µm); labels = raw channel')
+        ax.set_ylabel('electrode y (µm)')
+
+        # B. All assigned spikes overlaid on the strongest electrode.
+        assigned = result.assigned_waveforms[:, :, peak_channel]
+        chosen = _limited(np.arange(len(assigned)))
+        ax = axes[row, 1]
+        if len(chosen):
+            ax.plot(time_ms, assigned[chosen].T, color=cell_color, lw=0.5,
+                    alpha=0.22)
+            ax.plot(time_ms, np.median(assigned, axis=0), color='black', lw=1.6)
+        ax.axvline(0, color='0.75', lw=0.7, ls=':')
+        raw_channel = int(result.raw_channel_ids[peak_channel])
+        ax.set_title(f'Kilosort-assigned spikes — raw channel {raw_channel}')
+        ax.set_ylabel('raw amplitude')
+        ax.legend([Line2D([0], [0], color=cell_color, lw=1.5)],
+                  [f'cell {cell_id} — {cell_type} (n={len(assigned)})'],
+                  fontsize=7, loc='best')
+
+        # C. Similarity uses every local channel, not only the peak channel.
+        ax = axes[row, 2]
+        status_order = ['assigned_target', 'missed_detection', 'misassigned',
+                        'possible_collision', 'background/competitor']
+        y_labels = ['KS assigned target', 'raw candidate: assigned target',
+                    'raw candidate: no KS event',
+                    'raw candidate: KS assigned another cell',
+                    'raw candidate: collision/ambiguous',
+                    'raw candidate: other waveform']
+        assigned_idx = _limited(np.arange(len(result.assigned_scores)))
+        ax.scatter(result.assigned_scores[assigned_idx],
+                   np.zeros(len(assigned_idx)), s=10, color=cell_color,
+                   alpha=0.45)
+        for level, status in enumerate(status_order, start=1):
+            indices = _limited(np.flatnonzero(
+                result.events['status'].eq(status).to_numpy()))
+            if len(indices):
+                ax.scatter(result.events.iloc[indices]['target_score'],
+                           np.full(len(indices), level), s=11,
+                           color=colors[status], alpha=0.55)
+        ax.axvline(float(result.summary['similarity_threshold']),
+                   color='crimson', lw=1.0, ls='--', label='target threshold')
+        ax.set_xlim(-1.02, 1.02)
+        ax.set_yticks(np.arange(len(y_labels)), y_labels, fontsize=6)
+        ax.set_xlabel('multichannel cosine similarity to target template')
+        ax.set_title('Similarity to target (raw threshold candidates)')
+        ax.legend(fontsize=7, loc='lower right')
+        for panel in axes[row, 1:]:
+            panel.grid(alpha=0.15, linewidth=0.5)
+        axes[row, 1].set_xlabel('time from waveform peak (ms)')
+
+    fig.suptitle('Sampled cells — spatial waveform, assigned spikes, and target similarity',
+                 y=1.001)
+    fig.tight_layout()
+    return fig, axes
+
+
+def browse_sampled_detected_spikes(
+    results: Mapping[int, UnitSortingQC],
+    *,
+    max_waveforms_per_class: int = 30,
+    figure_sink: Optional[Dict[int, object]] = None,
+    description: str = 'Sampled cluster:',
+):
+    """Dropdown showing one sampled cell's three-panel sorting view at a time.
+
+    Labels retain all identities: protocol/Vision cell ID, cell type, and the
+    Kilosort cluster ID used for raw-waveform analysis. ``figure_sink`` can be
+    supplied by a notebook that must also archive one PNG per selection.
+    """
+    import matplotlib.pyplot as plt
+    from .browse import figure_to_png, png_browser
+
+    if not results:
+        print('No sampled sorting-QC results to browse.')
+        return None
+    ordered = [(int(cell_id), result) for cell_id, result in results.items()]
+
+    def _figure(cell_id):
+        fig, _ = plot_sampled_detected_spikes(
+            {int(cell_id): results[int(cell_id)]},
+            max_waveforms_per_class=max_waveforms_per_class)
+        return fig
+
+    if figure_sink is not None:
+        for cell_id, _ in ordered:
+            saved_fig = _figure(cell_id)
+            figure_sink[cell_id] = saved_fig
+            plt.close(saved_fig)
+
+    def _render(cell_id):
+        result = results[int(cell_id)]
+        cell_type = str(result.summary.get('cell_type', ''))
+        html = (f'<b>cell {int(cell_id)} — {cell_type}; '
+                f'Kilosort cluster {result.target_cluster}</b><br>'
+                'Raw threshold candidates are proposed without Kilosort labels; '
+                'the similarity panel classifies them afterward.')
+        return html, figure_to_png(_figure(cell_id))
+
+    options = [
+        (f'cell {cell_id} — {result.summary.get("cell_type", "")}; '
+         f'KS cluster {result.target_cluster}', cell_id)
+        for cell_id, result in ordered
+    ]
+    return png_browser(options, _render, description=description)

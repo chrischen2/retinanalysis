@@ -432,6 +432,8 @@ _ATTR_TO_MODULE = {
     'analyze_protocol_sorting_qc': 'retinanalysis.utils.protocol_sorting_qc',
     'plot_unit_sorting_qc': 'retinanalysis.utils.protocol_sorting_qc',
     'plot_sorting_qc_summary': 'retinanalysis.utils.protocol_sorting_qc',
+    'plot_sampled_detected_spikes': 'retinanalysis.utils.protocol_sorting_qc',
+    'browse_sampled_detected_spikes': 'retinanalysis.utils.protocol_sorting_qc',
     'save_cell_match': 'retinanalysis.utils.cell_match',
     'save_offline_data': 'retinanalysis.utils.offline_store',
     'save_protocol_qc': 'retinanalysis.utils.protocol_qc',
