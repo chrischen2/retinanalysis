@@ -77,12 +77,19 @@ __all__ = [
     'spatial_structure_index',
     'analyze_recovery_conditions',
     'recovery_summary_table',
+    'cell_type_recovery_summary',
+    'fit_cell_type_recovery',
+    'compare_cell_type_timescales',
     'normalize_recovery_summary',
     'saved_recovery_stats',
     'save_recovery_summary',
     'save_recovery_cross_date_summary',
     'load_recovery_many',
+    'load_cell_type_recovery_many',
+    'load_cell_type_recovery_fits_many',
     'plot_recovery_across_dates',
+    'plot_cell_type_recovery_comparison',
+    'plot_cell_type_recovery_across_dates',
     'plot_recovery_summary',
 ]
 
@@ -1401,6 +1408,153 @@ def recovery_summary_table(
     return normalize_recovery_summary(pd.concat(rows, ignore_index=True))
 
 
+def cell_type_recovery_summary(
+    recovery: Dict[str, Dict],
+    *,
+    exp_name: Optional[str] = None,
+    cell_types: Optional[Iterable[str]] = None,
+    late_windows: int = 1,
+) -> pd.DataFrame:
+    """Summarize recovery separately by cell type within one preparation.
+
+    Rate and bias-corrected F1 are first divided by each cell's own late value,
+    then averaged within cell type. This prevents a few high-rate cells from
+    defining a type's trajectory and makes OnM and OnP comparable despite
+    different absolute firing rates. The returned SEM is across cells and is
+    descriptive for this retina; dates remain the replicate for inference.
+    """
+    wanted = None if cell_types is None else {str(v) for v in cell_types}
+    rows = []
+    for condition, result in recovery.items():
+        pbr = result['pbr']
+        mod = result['modulation'].copy()
+        if wanted is not None:
+            mod = mod[mod['cell_type'].astype(str).isin(wanted)]
+        if mod.empty:
+            continue
+
+        ordered = mod.sort_values('t_mid')
+        late = ordered.groupby('cell_id', sort=False).tail(int(late_windows))
+        rate_den = late.groupby('cell_id')['f0_hz'].mean()
+        f1_den = late.groupby('cell_id')['m1'].mean()
+        mod['rate_late_fraction'] = (
+            mod['f0_hz'] / mod['cell_id'].map(rate_den).replace(0, np.nan))
+        mod['f1_late_fraction'] = (
+            mod['m1'] / mod['cell_id'].map(f1_den).replace(0, np.nan))
+
+        grouped = mod.groupby(
+            ['cell_type', 'window', 't_start', 't_end', 't_mid'],
+            sort=False, dropna=False)
+        table = grouped.agg(
+            n_cells=('cell_id', 'nunique'),
+            rate_hz=('f0_hz', 'mean'),
+            rate_hz_sem=('f0_hz', 'sem'),
+            rate_late_fraction=('rate_late_fraction', 'mean'),
+            rate_late_fraction_sem=('rate_late_fraction', 'sem'),
+            n_cells_rate_normalized=('rate_late_fraction', 'count'),
+            f1=('m1', 'mean'),
+            f1_sem=('m1', 'sem'),
+            f1_late_fraction=('f1_late_fraction', 'mean'),
+            f1_late_fraction_sem=('f1_late_fraction', 'sem'),
+            n_cells_f1_normalized=('f1_late_fraction', 'count'),
+            n_f1_resolved=('f1_resolved', 'sum'),
+        ).reset_index()
+        geometry = getattr(pbr, 'geometry', {}) or {}
+        table.insert(0, 'condition', condition)
+        table.insert(0, 'exp_name', exp_name or '')
+        table['bar_width_um'] = geometry.get('bar_width_um', np.nan)
+        table['mean_intensity'] = geometry.get('mean_intensity', np.nan)
+        table['drift_freq_hz'] = float(getattr(
+            pbr, 'drift_freq_hz', geometry.get('temporal_freq_hz', np.nan)))
+        table['n_epochs'] = int(len(pbr.epochs))
+        rows.append(table)
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+
+def fit_cell_type_recovery(
+    summary: pd.DataFrame,
+    *,
+    metric: str = 'f1_late_fraction',
+    skip_first_s: float = 2.0,
+    n_boot: int = 250,
+    random_seed: Optional[int] = 0,
+) -> pd.DataFrame:
+    """Fit one descriptive recovery timescale per date, condition, and type."""
+    required = {'exp_name', 'condition', 'cell_type', 't_mid', metric}
+    missing = required.difference(summary.columns)
+    if missing:
+        raise KeyError(f'cell-type recovery summary missing: {sorted(missing)}')
+    rows = []
+    keys = ['exp_name', 'condition', 'cell_type']
+    for values, group in summary.groupby(keys, sort=True, dropna=False):
+        base = dict(zip(keys, values))
+        base['metric'] = metric
+        base['n_cells'] = int(group['n_cells'].max()) if 'n_cells' in group else 0
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                fit = fit_recovery(
+                    group['t_mid'].to_numpy(), group[metric].to_numpy(),
+                    skip_first_s=skip_first_s, n_boot=n_boot,
+                    random_seed=random_seed)
+            base.update({
+                'tau_s': fit['tau_s'],
+                'tau_ci_low': fit['tau_ci'][0],
+                'tau_ci_high': fit['tau_ci'][1],
+                'tau_bounded': fit['tau_bounded'],
+                't50_s': fit['t50_s'],
+                't50_ci_low': fit['t50_ci'][0],
+                't50_ci_high': fit['t50_ci'][1],
+                'r_squared': fit['r_squared'],
+                'n_points': fit['n_points'],
+                'fit_error': '',
+            })
+        except Exception as exc:
+            base.update({
+                'tau_s': np.nan, 'tau_ci_low': np.nan, 'tau_ci_high': np.nan,
+                'tau_bounded': False, 't50_s': np.nan,
+                't50_ci_low': np.nan, 't50_ci_high': np.nan,
+                'r_squared': np.nan, 'n_points': 0,
+                'fit_error': str(exc),
+            })
+        rows.append(base)
+    return pd.DataFrame(rows)
+
+
+def compare_cell_type_timescales(
+    fits: pd.DataFrame,
+    *,
+    cell_types: Tuple[str, str] = ('OnM', 'OnP'),
+) -> pd.DataFrame:
+    """Paired within-date timescale differences for two cell types."""
+    a, b = (str(v) for v in cell_types)
+    required = {'exp_name', 'condition', 'cell_type', 'tau_s', 't50_s'}
+    missing = required.difference(fits.columns)
+    if missing:
+        raise KeyError(f'cell-type recovery fits missing: {sorted(missing)}')
+    selected = fits[fits['cell_type'].isin([a, b])]
+    rows = []
+    for (exp_name, condition), group in selected.groupby(
+            ['exp_name', 'condition'], sort=True, dropna=False):
+        by_type = group.drop_duplicates('cell_type').set_index('cell_type')
+        if a not in by_type.index or b not in by_type.index:
+            continue
+        row = {'exp_name': exp_name, 'condition': condition,
+               'cell_type_a': a, 'cell_type_b': b}
+        for metric in ('tau_s', 't50_s'):
+            av = float(by_type.at[a, metric])
+            bv = float(by_type.at[b, metric])
+            row[f'{metric}_{a}'] = av
+            row[f'{metric}_{b}'] = bv
+            row[f'{metric}_diff_{a}_minus_{b}'] = av - bv
+            row[f'{metric}_ratio_{a}_over_{b}'] = (
+                av / bv if np.isfinite(bv) and bv != 0 else np.nan)
+        row[f'n_cells_{a}'] = int(by_type.at[a, 'n_cells'])
+        row[f'n_cells_{b}'] = int(by_type.at[b, 'n_cells'])
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def normalize_recovery_summary(
     summary: pd.DataFrame,
     *,
@@ -1483,6 +1637,45 @@ def load_recovery_many(
     return normalize_recovery_summary(pd.concat(tables, ignore_index=True))
 
 
+def _load_recovery_table_many(key, exp_names=None, *, protocol, output_root):
+    from .analysis_results import load_analysis_many
+
+    bundles = load_analysis_many(
+        protocol, exp_names=exp_names, output_root=output_root)
+    tables = []
+    for exp_name, bundle in bundles.items():
+        table = bundle['analysis'].get(key)
+        if isinstance(table, pd.DataFrame):
+            table = table.copy()
+            table['exp_name'] = str(exp_name)
+            tables.append(table)
+    return pd.concat(tables, ignore_index=True) if tables else pd.DataFrame()
+
+
+def load_cell_type_recovery_many(
+    exp_names: Optional[Iterable[str]] = None,
+    *,
+    protocol: str = _RECOVERY_PROTOCOL,
+    output_root=None,
+) -> pd.DataFrame:
+    """Load the per-date, per-cell-type recovery trajectories."""
+    return _load_recovery_table_many(
+        'cell_type_recovery', exp_names, protocol=protocol,
+        output_root=output_root)
+
+
+def load_cell_type_recovery_fits_many(
+    exp_names: Optional[Iterable[str]] = None,
+    *,
+    protocol: str = _RECOVERY_PROTOCOL,
+    output_root=None,
+) -> pd.DataFrame:
+    """Load per-date cell-type timescale fits for paired comparisons."""
+    return _load_recovery_table_many(
+        'cell_type_fits', exp_names, protocol=protocol,
+        output_root=output_root)
+
+
 def saved_recovery_stats(
     *,
     protocol: str = _RECOVERY_PROTOCOL,
@@ -1496,13 +1689,22 @@ def saved_recovery_stats(
     ]
     if saved.empty:
         return pd.DataFrame(columns=columns)
-    return (saved.groupby('exp_name', as_index=False)
+    stats = (saved.groupby('exp_name', as_index=False)
             .agg(n_rows=('condition', 'size'),
                  n_conditions=('condition', 'nunique'),
                  n_windows=('window', 'nunique'),
                  n_cells_min=('n_cells', 'min'),
                  n_cells_max=('n_cells', 'max'),
                  n_epochs=('n_epochs', 'max'))[columns])
+    typed = load_cell_type_recovery_many(
+        protocol=protocol, output_root=output_root)
+    if not typed.empty:
+        type_stats = (typed.groupby('exp_name', as_index=False)
+                      .agg(cell_types=('cell_type',
+                                       lambda x: ', '.join(sorted(set(x)))),
+                           n_cell_types=('cell_type', 'nunique')))
+        stats = stats.merge(type_stats, on='exp_name', how='left')
+    return stats
 
 
 def save_recovery_summary(
@@ -1515,6 +1717,9 @@ def save_recovery_summary(
     figures: Optional[Dict] = None,
     cell_qc: Optional[pd.DataFrame] = None,
     template_match: Optional[pd.DataFrame] = None,
+    cell_type_summary: Optional[pd.DataFrame] = None,
+    cell_type_fits: Optional[pd.DataFrame] = None,
+    cell_type_comparison: Optional[pd.DataFrame] = None,
     verbose: bool = True,
 ) -> Dict:
     """Print existing dates, then save one date as pickle + JSON + plots.
@@ -1553,6 +1758,21 @@ def save_recovery_summary(
             }
     if template_match is not None:
         analysis['template_match'] = template_match.copy()
+    if cell_type_summary is not None:
+        typed = cell_type_summary.copy()
+        typed['exp_name'] = str(exp_name)
+        analysis['cell_type_recovery'] = typed
+        counts = (typed.groupby('cell_type')['n_cells'].max().astype(int)
+                  .to_dict() if {'cell_type', 'n_cells'} <= set(typed) else {})
+        meta['cell_type_recovery'] = {
+            'cell_types': sorted(str(v) for v in typed['cell_type'].unique()),
+            'n_cells_by_type': counts,
+            'normalization': 'each cell divided by its own late value',
+        }
+    if cell_type_fits is not None:
+        analysis['cell_type_fits'] = cell_type_fits.copy()
+    if cell_type_comparison is not None:
+        analysis['cell_type_comparison'] = cell_type_comparison.copy()
     return save_analysis_bundle(
         protocol, str(exp_name), analysis,
         metadata=meta, figures=figures, output_root=output_root,
@@ -1566,6 +1786,9 @@ def save_recovery_cross_date_summary(
     output_root=None,
     metadata: Optional[Dict] = None,
     figures: Optional[Dict] = None,
+    cell_type_summary: Optional[pd.DataFrame] = None,
+    cell_type_fits: Optional[pd.DataFrame] = None,
+    cell_type_comparison: Optional[pd.DataFrame] = None,
     verbose: bool = True,
 ) -> Dict:
     """Save the combined VMDG dataset and multi-date plots in ``summary/``."""
@@ -1580,8 +1803,28 @@ def save_recovery_cross_date_summary(
         'normalization': 'within retina and condition; dates weighted equally',
         **dict(metadata or {}),
     }
+    analysis = {'recovery_summary': table}
+    if cell_type_summary is not None:
+        analysis['cell_type_recovery'] = cell_type_summary.copy()
+        typed = cell_type_summary
+        meta['cell_types'] = sorted(str(v) for v in typed['cell_type'].unique())
+        coverage = {}
+        for cell_type, group in typed.groupby('cell_type'):
+            coverage[str(cell_type)] = {
+                'n_dates': int(group['exp_name'].nunique()),
+                'n_cells_min': int(group['n_cells'].min()),
+                'n_cells_max': int(group['n_cells'].max()),
+            }
+        meta['cell_type_coverage'] = coverage
+    if cell_type_fits is not None:
+        analysis['cell_type_fits'] = cell_type_fits.copy()
+    if cell_type_comparison is not None:
+        analysis['cell_type_comparison'] = cell_type_comparison.copy()
+        meta['n_paired_cell_type_dates'] = int(
+            cell_type_comparison['exp_name'].nunique()
+            if 'exp_name' in cell_type_comparison else 0)
     return save_analysis_summary(
-        protocol, {'recovery_summary': table}, metadata=meta,
+        protocol, analysis, metadata=meta,
         figures=figures, output_root=output_root, verbose=verbose)
 
 
@@ -1636,6 +1879,139 @@ def plot_recovery_across_dates(
         ax.legend(fontsize=7)
     label = condition or str(data['condition'].iloc[0])
     fig.suptitle(f'cross-date recovery — {label}', y=1.03)
+    fig.tight_layout()
+    return fig, axes
+
+
+def plot_cell_type_recovery_comparison(
+    summary: pd.DataFrame,
+    fits: pd.DataFrame,
+    *,
+    condition: str,
+    cell_types: Tuple[str, str] = ('OnM', 'OnP'),
+    figsize: Tuple[float, float] = (11.0, 4.0),
+):
+    """Within-date OnM-versus-OnP trajectories and fitted timescales."""
+    import matplotlib.pyplot as plt
+    from .style import apply_publication_style, colors_for_celltypes
+
+    types = [str(v) for v in cell_types]
+    data = summary[(summary['condition'] == condition)
+                   & summary['cell_type'].isin(types)].copy()
+    fit_data = fits[(fits['condition'] == condition)
+                    & fits['cell_type'].isin(types)].copy()
+    if data.empty:
+        raise ValueError('No cell-type recovery rows match the condition.')
+    apply_publication_style()
+    colors = colors_for_celltypes(types)
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+
+    ax = axes[0]
+    for ct in types:
+        s = data[data['cell_type'] == ct].sort_values('t_mid')
+        if s.empty:
+            continue
+        ax.errorbar(s['t_mid'], s['f1_late_fraction'],
+                    yerr=s.get('f1_late_fraction_sem'), fmt='-o', ms=4,
+                    capsize=2, color=colors[ct],
+                    label=f'{ct} (n={int(s.n_cells.max())})')
+    ax.axhline(1, color='0.75', ls='--', lw=0.8)
+    ax.set_xlabel('time since step (s)')
+    ax.set_ylabel('F1 / cell-own late F1')
+    ax.set_title('A. normalized recovery by cell type')
+    ax.legend(fontsize=8)
+
+    ax = axes[1]
+    x = np.arange(len(types), dtype=float)
+    width = 0.34
+    for offset, metric in ((-width / 2, 'tau_s'),
+                           (width / 2, 't50_s')):
+        vals = []
+        labels = []
+        for ct in types:
+            row = fit_data[fit_data['cell_type'] == ct]
+            vals.append(float(row[metric].iloc[0]) if len(row) else np.nan)
+            labels.append(metric.replace('_s', ''))
+        ax.bar(x + offset, vals, width=width, alpha=0.8,
+               color=[colors[ct] for ct in types],
+               hatch='' if metric == 'tau_s' else '//',
+               label=metric.replace('_s', ''))
+    ax.set_xticks(x, types)
+    ax.set_ylabel('time (s)')
+    ax.set_title('B. fitted recovery timescale')
+    ax.legend(fontsize=8)
+    for i, ct in enumerate(types):
+        row = fit_data[fit_data['cell_type'] == ct]
+        if len(row):
+            ax.text(i, 0, f'R²={row.r_squared.iloc[0]:.2f}', rotation=90,
+                    va='bottom', ha='center', fontsize=7)
+
+    exp_names = sorted(str(v) for v in data['exp_name'].dropna().unique())
+    prefix = f'{exp_names[0]} — ' if len(exp_names) == 1 else ''
+    fig.suptitle(f'{prefix}{condition}: {types[0]} versus {types[1]}', y=1.03)
+    fig.tight_layout()
+    return fig, axes
+
+
+def plot_cell_type_recovery_across_dates(
+    summary: pd.DataFrame,
+    fits: pd.DataFrame,
+    *,
+    condition: str,
+    cell_types: Tuple[str, str] = ('OnM', 'OnP'),
+    figsize: Tuple[float, float] = (14.0, 4.0),
+):
+    """Cross-date trajectories and paired cell-type timescale comparisons."""
+    import matplotlib.pyplot as plt
+    from .style import apply_publication_style, colors_for_celltypes
+
+    types = [str(v) for v in cell_types]
+    data = summary[(summary['condition'] == condition)
+                   & summary['cell_type'].isin(types)].copy()
+    fit_data = fits[(fits['condition'] == condition)
+                    & fits['cell_type'].isin(types)].copy()
+    if data.empty:
+        raise ValueError('No saved cell-type recovery rows match the condition.')
+    apply_publication_style()
+    colors = colors_for_celltypes(types)
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+
+    ax = axes[0]
+    for ct in types:
+        s = data[data['cell_type'] == ct]
+        for _, date in s.groupby('exp_name', sort=True):
+            date = date.sort_values('t_mid')
+            ax.plot(date['t_mid'], date['f1_late_fraction'], '-', lw=0.7,
+                    alpha=0.25, color=colors[ct])
+        by_time = s.groupby('t_mid')['f1_late_fraction']
+        mean, sem = by_time.mean(), by_time.sem()
+        ax.plot(mean.index, mean, '-o', ms=4, lw=2, color=colors[ct],
+                label=f'{ct}, {s.exp_name.nunique()} dates')
+        ax.fill_between(mean.index, mean - sem, mean + sem,
+                        color=colors[ct], alpha=0.15, linewidth=0)
+    ax.axhline(1, color='0.75', ls='--', lw=0.8)
+    ax.set_xlabel('time since step (s)')
+    ax.set_ylabel('F1 / cell-own late F1')
+    ax.set_title('A. date-normalized trajectories')
+    ax.legend(fontsize=8)
+
+    for ax, metric, title in zip(
+            axes[1:], ('tau_s', 't50_s'),
+            ('B. paired tau by date', 'C. paired t50 by date')):
+        wide = fit_data.pivot_table(
+            index='exp_name', columns='cell_type', values=metric, aggfunc='first')
+        wide = wide.dropna(subset=types) if set(types) <= set(wide) else wide.iloc[0:0]
+        for _, row in wide.iterrows():
+            ax.plot([0, 1], [row[types[0]], row[types[1]]], '-o',
+                    color='0.65', lw=0.8, ms=3)
+        means = [wide[ct].mean() if ct in wide else np.nan for ct in types]
+        ax.scatter([0, 1], means, s=55,
+                   color=[colors[ct] for ct in types], zorder=4)
+        ax.set_xticks([0, 1], types)
+        ax.set_ylabel('time (s)')
+        ax.set_title(f'{title} (n={len(wide)} paired dates)')
+
+    fig.suptitle(f'cross-date cell-type recovery — {condition}', y=1.03)
     fig.tight_layout()
     return fig, axes
 

@@ -11,6 +11,7 @@ from retinanalysis.utils.spatial_recovery import (
     load_recovery_many,
     normalize_recovery_summary,
     plot_recovery_across_dates,
+    save_recovery_cross_date_summary,
     save_recovery_summary,
     saved_recovery_stats,
     recovery_summary_table,
@@ -62,10 +63,27 @@ def test_save_lists_existing_dates_then_loads_combined_dataset(tmp_path, capsys)
         'cell_id': [1, 2], 'condition': ['a', 'a'],
         'shape_r': [0.9, 0.1],
     })
+    cell_type_summary = pd.DataFrame({
+        'exp_name': ['20230101C', '20230101C'],
+        'condition': ['a', 'a'], 'cell_type': ['OnM', 'OnP'],
+        'n_cells': [12, 5], 'f1_late_fraction': [1.0, 1.0],
+    })
+    cell_type_fits = pd.DataFrame({
+        'exp_name': ['20230101C', '20230101C'],
+        'condition': ['a', 'a'], 'cell_type': ['OnM', 'OnP'],
+        'n_cells': [12, 5], 'tau_s': [10.0, 5.0], 't50_s': [8.0, 4.0],
+    })
+    cell_type_comparison = pd.DataFrame({
+        'exp_name': ['20230101C'], 'condition': ['a'],
+        'tau_s_diff_OnM_minus_OnP': [5.0],
+    })
     save_recovery_summary(
         _summary('20230101C', [2.0, 4.0], [0.2, 0.4], [0.25, 0.5]),
         '20230101C', output_root=tmp_path, cell_qc=cell_qc,
         template_match=template_match,
+        cell_type_summary=cell_type_summary,
+        cell_type_fits=cell_type_fits,
+        cell_type_comparison=cell_type_comparison,
     )
     capsys.readouterr()
 
@@ -73,10 +91,33 @@ def test_save_lists_existing_dates_then_loads_combined_dataset(tmp_path, capsys)
     pd.testing.assert_frame_equal(bundle['analysis']['cell_qc'], cell_qc)
     pd.testing.assert_frame_equal(
         bundle['analysis']['template_match'], template_match)
+    pd.testing.assert_frame_equal(
+        bundle['analysis']['cell_type_recovery'], cell_type_summary)
+    pd.testing.assert_frame_equal(
+        bundle['analysis']['cell_type_fits'], cell_type_fits)
+    pd.testing.assert_frame_equal(
+        bundle['analysis']['cell_type_comparison'], cell_type_comparison)
     assert bundle['meta']['cell_qc'] == {
         'n_candidates': 2, 'n_retained': 1, 'n_excluded': 1,
         'excluded_cell_ids': [2],
     }
+    assert bundle['meta']['cell_type_recovery']['n_cells_by_type'] == {
+        'OnM': 12, 'OnP': 5,
+    }
+
+    save_recovery_cross_date_summary(
+        _summary('20230101C', [2.0, 4.0], [0.2, 0.4], [0.25, 0.5]),
+        output_root=tmp_path, cell_type_summary=cell_type_summary,
+        cell_type_fits=cell_type_fits,
+        cell_type_comparison=cell_type_comparison,
+    )
+    pooled = load_analysis_bundle('vmdg', summary=True, output_root=tmp_path)
+    assert set(pooled['analysis']) == {
+        'recovery_summary', 'cell_type_recovery', 'cell_type_fits',
+        'cell_type_comparison',
+    }
+    assert pooled['meta']['n_paired_cell_type_dates'] == 1
+    assert pooled['meta']['cell_type_coverage']['OnM']['n_cells_max'] == 12
 
     save_recovery_summary(
         _summary('20230202C', [6.0, 3.0], [0.6, 0.3], [0.6, 0.4]),
