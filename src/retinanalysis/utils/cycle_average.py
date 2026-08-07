@@ -158,7 +158,8 @@ def browse_cell_psths(cells, t, psth, *, cell_types: Optional[Sequence[str]] = N
                       geometry: Optional[Dict] = None,
                       n_cols: int = 6, panel_size: Tuple[float, float] = (2.0, 1.3),
                       share_y: bool = False, description: str = 'Cell type:',
-                      outlier_cell_ids: Optional[Iterable[int]] = None):
+                      outlier_cell_ids: Optional[Iterable[int]] = None,
+                      figure_sink: Optional[Dict[str, object]] = None):
     """Dropdown over cell types; a grid of one trial-averaged PSTH per cell.
 
     Cells are ordered by position along the drift axis when a ``geometry`` is
@@ -184,7 +185,7 @@ def browse_cell_psths(cells, t, psth, *, cell_types: Optional[Sequence[str]] = N
     outlier_ids = {int(v) for v in (() if outlier_cell_ids is None
                                     else outlier_cell_ids)}
 
-    def _render(ct):
+    def _make_figure(ct):
         idx = np.flatnonzero((cells['cell_type'] == ct).to_numpy())
         if geometry is not None:
             a = _axis_of(cells.iloc[idx], geometry)
@@ -235,7 +236,19 @@ def browse_cell_psths(cells, t, psth, *, cell_types: Optional[Sequence[str]] = N
                      + ('ordered across the bars' if geometry is not None
                         else 'unordered'), fontsize=10)
         fig.tight_layout(rect=(0, 0, 1, 0.97))
-        return None, figure_to_png(fig)
+        return fig
+
+    # The dropdown intentionally renders lazily. Protocol notebooks that also
+    # archive every view can request one closed-but-saveable Figure per type.
+    # Closing prevents the complete archive set from flooding inline output.
+    if figure_sink is not None:
+        for ct in present:
+            saved_fig = _make_figure(ct)
+            figure_sink[str(ct)] = saved_fig
+            plt.close(saved_fig)
+
+    def _render(ct):
+        return None, figure_to_png(_make_figure(ct))
 
     return png_browser([(ct, ct) for ct in present], _render,
                        description=description)

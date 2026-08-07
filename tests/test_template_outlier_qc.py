@@ -65,10 +65,13 @@ def test_psth_browser_accepts_an_empty_outlier_list(monkeypatch):
     monkeypatch.setattr(browse, 'figure_to_png', close_figure)
     cells = pd.DataFrame({'cell_id': [1], 'cell_type': ['OnM']})
 
+    saved = {}
     body, png = browse_cell_psths(
         cells, np.array([0.0, 1.0]), np.array([[1.0, 2.0]]),
-        outlier_cell_ids=[], n_cols=1,
+        outlier_cell_ids=[], n_cols=1, figure_sink=saved,
     )
 
     assert body is None
     assert png == b'png'
+    assert list(saved) == ['OnM']
+    assert hasattr(saved['OnM'], 'savefig')
