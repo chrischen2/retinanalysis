@@ -8,6 +8,7 @@ from retinanalysis.utils.protocol_sorting_qc import (
     KilosortOutput,
     analyze_unit_sorting_qc,
     browse_sampled_detected_spikes,
+    browse_unit_sorting_qc,
     extract_multichannel_waveforms,
     load_binary_segment,
     load_kilosort_output,
@@ -154,6 +155,13 @@ def test_sampled_spike_browser_shows_one_labeled_cluster_and_collects_figure(
     assert 'Kilosort cluster 0' in html
     assert png == b'png'
     assert list(saved) == [123]
+
+    full_saved = {}
+    html, png = browse_unit_sorting_qc(
+        {123: result}, figure_sink=full_saved)
+    assert 'cell 123 — OnM' in html
+    assert png == b'png'
+    assert list(full_saved) == [123]
 
 
 def test_refractory_contamination_estimate_is_explicit_about_assumptions():

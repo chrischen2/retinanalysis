@@ -73,6 +73,7 @@ __all__ = [
     'sorting_qc_table',
     'analyze_protocol_sorting_qc',
     'plot_unit_sorting_qc',
+    'browse_unit_sorting_qc',
     'plot_sorting_qc_summary',
     'plot_sampled_detected_spikes',
     'browse_sampled_detected_spikes',
@@ -879,6 +880,10 @@ def plot_sampled_detected_spikes(
 
     if not results:
         raise ValueError('results is empty')
+    if len(results) != 1:
+        raise ValueError(
+            'plot_sampled_detected_spikes shows one cluster; use '
+            'browse_sampled_detected_spikes for multiple sampled clusters')
     items = list(results.items())
     fig, axes = plt.subplots(
         len(items), 3, squeeze=False,
@@ -998,6 +1003,46 @@ def plot_sampled_detected_spikes(
                  y=1.001)
     fig.tight_layout()
     return fig, axes
+
+
+def browse_unit_sorting_qc(
+    results: Mapping[int, UnitSortingQC],
+    *,
+    figure_sink: Optional[Dict[int, object]] = None,
+    description: str = 'Full sorting QC:',
+):
+    """Dropdown over the full four-panel diagnostic for sampled clusters."""
+    import matplotlib.pyplot as plt
+    from .browse import figure_to_png, png_browser
+
+    if not results:
+        print('No sampled sorting-QC results to browse.')
+        return None
+    ordered = [(int(cell_id), result) for cell_id, result in results.items()]
+
+    def _figure(cell_id):
+        fig, _ = plot_unit_sorting_qc(results[int(cell_id)])
+        return fig
+
+    if figure_sink is not None:
+        for cell_id, _ in ordered:
+            saved_fig = _figure(cell_id)
+            figure_sink[cell_id] = saved_fig
+            plt.close(saved_fig)
+
+    def _render(cell_id):
+        result = results[int(cell_id)]
+        cell_type = str(result.summary.get('cell_type', ''))
+        html = (f'<b>cell {int(cell_id)} — {cell_type}; '
+                f'Kilosort cluster {result.target_cluster}</b>')
+        return html, figure_to_png(_figure(cell_id))
+
+    options = [
+        (f'cell {cell_id} — {result.summary.get("cell_type", "")}; '
+         f'KS cluster {result.target_cluster}', cell_id)
+        for cell_id, result in ordered
+    ]
+    return png_browser(options, _render, description=description)
 
 
 def browse_sampled_detected_spikes(
