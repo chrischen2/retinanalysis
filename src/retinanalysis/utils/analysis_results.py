@@ -179,6 +179,10 @@ def _save_bundle(
     plots_dir = folder / 'plots'
     plots_dir.mkdir(parents=True, exist_ok=True)
 
+    analysis_path = folder / _ANALYSIS_FILE
+    meta_path = folder / _META_FILE
+    replaced_existing = analysis_path.exists() or meta_path.exists()
+
     plot_paths = []
     for name, figure in (figures or {}).items():
         path = plots_dir / f'{_safe_name(name)}.png'
@@ -189,6 +193,7 @@ def _save_bundle(
         'proc': _safe_name(proc),
         'scope': 'summary' if summary else 'date',
         'exp_name': None if summary else str(exp_name),
+        'write_mode': ('overwrite_existing' if replaced_existing else 'new'),
         'saved_utc': datetime.now(timezone.utc).isoformat(),
         'objects': {str(k): _object_stats(v) for k, v in analysis.items()},
         'plots': [str(path.relative_to(folder)) for path in plot_paths],
@@ -197,8 +202,6 @@ def _save_bundle(
     meta = _jsonable(meta)
 
     folder.mkdir(parents=True, exist_ok=True)
-    analysis_path = folder / _ANALYSIS_FILE
-    meta_path = folder / _META_FILE
     analysis_tmp = folder / f'{_ANALYSIS_FILE}.tmp'
     meta_tmp = folder / f'{_META_FILE}.tmp'
     with analysis_tmp.open('wb') as handle:
@@ -208,6 +211,14 @@ def _save_bundle(
         handle.write('\n')
     analysis_tmp.replace(analysis_path)
     meta_tmp.replace(meta_path)
+
+    # A rerun is an exact replacement for this date. Remove plots recorded by
+    # an older run but omitted from the new figure mapping, so stale figures
+    # cannot be mistaken for part of the current analysis.
+    current_plots = {path.name for path in plot_paths}
+    for old_plot in plots_dir.glob('*.png'):
+        if old_plot.name not in current_plots:
+            old_plot.unlink()
     return {
         'folder': folder,
         'analysis': analysis_path,
@@ -227,7 +238,14 @@ def save_analysis_bundle(
     dpi: int = 200,
     verbose: bool = True,
 ) -> Dict[str, Path]:
-    """Print existing dates, then save/replace one date's complete bundle."""
+    """Print existing dates, then exactly save/replace one date's bundle.
+
+    Reusing an ``exp_name`` overwrites its pickle and JSON and removes stale
+    PNGs from its plot folder. Bundles for every other experiment are left
+    untouched.
+    """
+    exists = str(exp_name) in list_analysis_dates(
+        proc, output_root=output_root)
     if verbose:
         existing = saved_analysis_stats(proc, output_root=output_root)
         print(f'{proc} dates saved before this update:')
@@ -236,7 +254,9 @@ def save_analysis_bundle(
         proc, analysis, exp_name=str(exp_name), summary=False,
         metadata=metadata, figures=figures, output_root=output_root, dpi=dpi)
     if verbose:
-        print(f'\nSaved {proc}/{exp_name} -> {paths["folder"]}')
+        action = 'Replacing existing' if exists else 'Adding new'
+        print(f'\n{action} {proc}/{exp_name}')
+        print(f'Saved {proc}/{exp_name} -> {paths["folder"]}')
         current = saved_analysis_stats(proc, output_root=output_root)
         current = current[current['exp_name'] == str(exp_name)]
         if not current.empty:

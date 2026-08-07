@@ -1803,6 +1803,8 @@ def save_recovery_summary(
     cell_type_fits: Optional[pd.DataFrame] = None,
     cell_type_comparison: Optional[pd.DataFrame] = None,
     modulation_time_summary: Optional[pd.DataFrame] = None,
+    sorting_qc_summary: Optional[pd.DataFrame] = None,
+    sorting_qc_events: Optional[Dict[int, pd.DataFrame]] = None,
     verbose: bool = True,
 ) -> Dict:
     """Print existing dates, then save one date as pickle + JSON + plots.
@@ -1860,6 +1862,13 @@ def save_recovery_summary(
         modulation = modulation_time_summary.copy()
         modulation['exp_name'] = str(exp_name)
         analysis['population_modulation_time'] = modulation
+    if sorting_qc_summary is not None:
+        analysis['sorting_qc_summary'] = sorting_qc_summary.copy()
+    if sorting_qc_events is not None:
+        analysis['sorting_qc_events'] = {
+            int(cell_id): events.copy()
+            for cell_id, events in sorting_qc_events.items()
+        }
     return save_analysis_bundle(
         protocol, str(exp_name), analysis,
         metadata=meta, figures=figures, output_root=output_root,

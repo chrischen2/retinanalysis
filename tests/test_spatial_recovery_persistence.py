@@ -82,6 +82,13 @@ def test_save_lists_existing_dates_then_loads_combined_dataset(tmp_path, capsys)
         'modulation_amplitude_hz': [4.0, 8.0],
         'modulation_depth': [0.4, 0.6], 'n_cells': [12, 5],
     })
+    sorting_qc_summary = pd.DataFrame({
+        'cell_id': [1], 'cell_type': ['OnM'], 'n_missed': [2],
+        'n_misassigned': [1],
+    })
+    sorting_qc_events = {1: pd.DataFrame({
+        'time_in_segment_s': [1.2], 'status': ['missed_detection'],
+    })}
     save_recovery_summary(
         _summary('20230101C', [2.0, 4.0], [0.2, 0.4], [0.25, 0.5]),
         '20230101C', output_root=tmp_path, cell_qc=cell_qc,
@@ -90,6 +97,8 @@ def test_save_lists_existing_dates_then_loads_combined_dataset(tmp_path, capsys)
         cell_type_fits=cell_type_fits,
         cell_type_comparison=cell_type_comparison,
         modulation_time_summary=modulation_time_summary,
+        sorting_qc_summary=sorting_qc_summary,
+        sorting_qc_events=sorting_qc_events,
     )
     capsys.readouterr()
 
@@ -107,6 +116,10 @@ def test_save_lists_existing_dates_then_loads_combined_dataset(tmp_path, capsys)
     pd.testing.assert_frame_equal(
         saved_modulation.drop(columns='exp_name'), modulation_time_summary)
     assert saved_modulation['exp_name'].eq('20230101C').all()
+    pd.testing.assert_frame_equal(
+        bundle['analysis']['sorting_qc_summary'], sorting_qc_summary)
+    pd.testing.assert_frame_equal(
+        bundle['analysis']['sorting_qc_events'][1], sorting_qc_events[1])
     assert bundle['meta']['cell_qc'] == {
         'n_candidates': 2, 'n_retained': 1, 'n_excluded': 1,
         'excluded_cell_ids': [2],
