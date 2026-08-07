@@ -77,6 +77,11 @@ def test_save_lists_existing_dates_then_loads_combined_dataset(tmp_path, capsys)
         'exp_name': ['20230101C'], 'condition': ['a'],
         'tau_s_diff_OnM_minus_OnP': [5.0],
     })
+    modulation_time_summary = pd.DataFrame({
+        'cell_type': ['OnM', 'OnP'], 't_mid': [2.75, 2.75],
+        'modulation_amplitude_hz': [4.0, 8.0],
+        'modulation_depth': [0.4, 0.6], 'n_cells': [12, 5],
+    })
     save_recovery_summary(
         _summary('20230101C', [2.0, 4.0], [0.2, 0.4], [0.25, 0.5]),
         '20230101C', output_root=tmp_path, cell_qc=cell_qc,
@@ -84,6 +89,7 @@ def test_save_lists_existing_dates_then_loads_combined_dataset(tmp_path, capsys)
         cell_type_summary=cell_type_summary,
         cell_type_fits=cell_type_fits,
         cell_type_comparison=cell_type_comparison,
+        modulation_time_summary=modulation_time_summary,
     )
     capsys.readouterr()
 
@@ -97,6 +103,10 @@ def test_save_lists_existing_dates_then_loads_combined_dataset(tmp_path, capsys)
         bundle['analysis']['cell_type_fits'], cell_type_fits)
     pd.testing.assert_frame_equal(
         bundle['analysis']['cell_type_comparison'], cell_type_comparison)
+    saved_modulation = bundle['analysis']['population_modulation_time']
+    pd.testing.assert_frame_equal(
+        saved_modulation.drop(columns='exp_name'), modulation_time_summary)
+    assert saved_modulation['exp_name'].eq('20230101C').all()
     assert bundle['meta']['cell_qc'] == {
         'n_candidates': 2, 'n_retained': 1, 'n_excluded': 1,
         'excluded_cell_ids': [2],

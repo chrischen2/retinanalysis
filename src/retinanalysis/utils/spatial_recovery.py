@@ -69,6 +69,8 @@ __all__ = [
     'recovery_windows',
     'phase_binned_response',
     'phase_modulation',
+    'population_modulation_summary',
+    'plot_population_modulation_over_time',
     'decode_phase',
     'mosaic_coherence',
     'split_half_reliability',
@@ -603,6 +605,86 @@ def phase_modulation(pbr: PhaseBinnedResponse, *,
     out.attrs['debiased'] = bool(debias)
     out.attrs['condition'] = pbr.condition
     return out
+
+
+def population_modulation_summary(modulation: pd.DataFrame) -> pd.DataFrame:
+    """Average modulation amplitude over cells for each type and time window.
+
+    ``m1`` is the bias-corrected first-harmonic vector strength. For a
+    sinusoid, twice that value is modulation depth relative to the mean rate;
+    multiplying by ``f0_hz`` therefore gives the first-harmonic amplitude in
+    Hz. The returned means and SEMs use cells—not cycles—as the observations.
+    """
+    required = {'cell_id', 'cell_type', 't_mid', 't_start', 't_end',
+                'f0_hz', 'm1'}
+    missing = required.difference(modulation.columns)
+    if missing:
+        raise KeyError(f'modulation table missing: {sorted(missing)}')
+    data = modulation.copy()
+    data['modulation_depth'] = 2.0 * data['m1']
+    data['modulation_amplitude_hz'] = (
+        data['modulation_depth'] * data['f0_hz'])
+    keys = ['cell_type', 't_mid', 't_start', 't_end']
+    out = (data.groupby(keys, as_index=False, dropna=False)
+           .agg(n_cells=('cell_id', 'nunique'),
+                rate_hz=('f0_hz', 'mean'),
+                rate_hz_sem=('f0_hz', 'sem'),
+                modulation_depth=('modulation_depth', 'mean'),
+                modulation_depth_sem=('modulation_depth', 'sem'),
+                modulation_amplitude_hz=('modulation_amplitude_hz', 'mean'),
+                modulation_amplitude_hz_sem=('modulation_amplitude_hz', 'sem')))
+    out.attrs.update(modulation.attrs)
+    return out
+
+
+def plot_population_modulation_over_time(
+    summary: pd.DataFrame,
+    *,
+    cell_types: Optional[Sequence[str]] = None,
+    title: str = '',
+    figsize: Tuple[float, float] = (11.0, 4.0),
+):
+    """Plot population-mean F1 amplitude and modulation depth through time."""
+    import matplotlib.pyplot as plt
+    from .style import apply_publication_style, colors_for_celltypes
+
+    required = {'cell_type', 't_mid', 'n_cells', 'modulation_amplitude_hz',
+                'modulation_amplitude_hz_sem', 'modulation_depth',
+                'modulation_depth_sem'}
+    missing = required.difference(summary.columns)
+    if missing:
+        raise KeyError(f'population modulation summary missing: {sorted(missing)}')
+    present = [str(v) for v in summary.cell_type.dropna().unique()]
+    types = ([str(v) for v in cell_types if str(v) in present]
+             if cell_types is not None else present)
+    if not types:
+        raise ValueError('no requested cell types in modulation summary')
+    apply_publication_style()
+    colors = colors_for_celltypes(types)
+    fig, axes = plt.subplots(1, 2, figsize=figsize, sharex=True)
+    specs = (
+        ('modulation_amplitude_hz', 'modulation_amplitude_hz_sem',
+         'population-average F1 amplitude (Hz)',
+         'A. absolute modulation amplitude'),
+        ('modulation_depth', 'modulation_depth_sem',
+         'F1 amplitude / mean rate', 'B. modulation depth'),
+    )
+    for ax, (value, error, ylabel, panel_title) in zip(axes, specs):
+        for cell_type in types:
+            data = summary[summary.cell_type == cell_type].sort_values('t_mid')
+            if data.empty:
+                continue
+            ax.errorbar(data.t_mid, data[value], yerr=data[error], fmt='-o',
+                        ms=4, capsize=2, lw=1.8, color=colors[cell_type],
+                        label=f'{cell_type} (n={int(data.n_cells.max())})')
+        ax.set_xlabel('time since step (s; 5 s intervals)')
+        ax.set_ylabel(ylabel)
+        ax.set_title(panel_title)
+        ax.legend(fontsize=8)
+    if title:
+        fig.suptitle(title, y=1.03)
+    fig.tight_layout()
+    return fig, axes
 
 
 # ---------------------------------------------------------------------------
@@ -1720,6 +1802,7 @@ def save_recovery_summary(
     cell_type_summary: Optional[pd.DataFrame] = None,
     cell_type_fits: Optional[pd.DataFrame] = None,
     cell_type_comparison: Optional[pd.DataFrame] = None,
+    modulation_time_summary: Optional[pd.DataFrame] = None,
     verbose: bool = True,
 ) -> Dict:
     """Print existing dates, then save one date as pickle + JSON + plots.
@@ -1773,6 +1856,10 @@ def save_recovery_summary(
         analysis['cell_type_fits'] = cell_type_fits.copy()
     if cell_type_comparison is not None:
         analysis['cell_type_comparison'] = cell_type_comparison.copy()
+    if modulation_time_summary is not None:
+        modulation = modulation_time_summary.copy()
+        modulation['exp_name'] = str(exp_name)
+        analysis['population_modulation_time'] = modulation
     return save_analysis_bundle(
         protocol, str(exp_name), analysis,
         metadata=meta, figures=figures, output_root=output_root,

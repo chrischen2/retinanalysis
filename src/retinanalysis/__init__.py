@@ -341,6 +341,8 @@ _ATTR_TO_MODULE = {
     'sliding_windows': 'retinanalysis.utils.spatial_recovery',
     'phase_binned_response': 'retinanalysis.utils.spatial_recovery',
     'phase_modulation': 'retinanalysis.utils.spatial_recovery',
+    'population_modulation_summary': 'retinanalysis.utils.spatial_recovery',
+    'plot_population_modulation_over_time': 'retinanalysis.utils.spatial_recovery',
     'decode_phase': 'retinanalysis.utils.spatial_recovery',
     'mosaic_coherence': 'retinanalysis.utils.spatial_recovery',
     'split_half_reliability': 'retinanalysis.utils.spatial_recovery',
