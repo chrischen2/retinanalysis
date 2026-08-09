@@ -739,7 +739,11 @@ def plot_epoch_spike_counts(response_block, cell_types: Optional[Sequence[str]] 
             ax.set_ylabel('Mean spikes per cell')
 
         ax.set_xlim(-0.5, n_epochs - 0.5 + 0.06 * n_epochs)
-        ax.set_xticks(epochs if n_epochs <= 25 else None)
+        # ``set_xticks(None)`` is not a request for automatic ticks: recent
+        # Matplotlib versions reject it because tick locations must be a 1-D
+        # sequence.  Leave the default locator untouched for long protocols.
+        if n_epochs <= 25:
+            ax.set_xticks(epochs)
         ax.grid(True, linewidth=0.5, alpha=0.35)
         ax.set_axisbelow(True)
 
