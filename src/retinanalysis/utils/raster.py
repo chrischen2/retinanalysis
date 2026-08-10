@@ -436,7 +436,9 @@ def plot_epoch_rasters(response_block, cell_type: str,
 
     # Overlapping ends would draw the same epoch twice and imply a comparison
     # that isn't there, so short blocks collapse to one row of everything.
-    if n_first + n_last >= n_epochs:
+    # Equality is not overlap: e.g. 6 first + 6 last epochs from a 12-epoch
+    # condition should form two complete, non-overlapping rows.
+    if n_first <= 0 or n_last <= 0 or n_first + n_last > n_epochs:
         rows = [(list(range(n_epochs)), f'all {n_epochs} epochs')]
     else:
         rows = [(list(range(n_first)), f'first {n_first} epochs'),
