@@ -113,6 +113,7 @@ _ATTR_TO_MODULE = {
     'USER': 'retinanalysis.config.settings',
     'add_parameters_col': 'retinanalysis.utils.datajoint_utils',
     'add_ss_version_column': 'retinanalysis.analyze',
+    'add_analysis_chunk_columns': 'retinanalysis.analyze',
     'analyze_experiment': 'retinanalysis.analyze',
     'analyze_experiments': 'retinanalysis.analyze',
     'apply_publication_style': 'retinanalysis.utils.style',

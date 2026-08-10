@@ -43,8 +43,8 @@ def plot_mosaics_for_datasets(df_exp_search: pd.DataFrame,
     use_chunk_column (bool): False (default) selects the noise chunk by
     recording time, preferring the chunk that ran *before* the protocol — see
     :func:`get_noise_chunks_sorted_by_distance`. Set True to instead trust the
-    ``chunk_name`` column on ``df_exp_search``, which is whatever chunk the
-    database has associated with the protocol block.
+    resolved ``analysis_chunk_name`` column when present, otherwise the raw
+    ``chunk_name`` column associated with the protocol block.
 
     include_neurons (bool): Load the .neurons file alongside the params. Off by
     default because the mosaic only needs RF fits, and the spike times roughly
@@ -66,8 +66,11 @@ def plot_mosaics_for_datasets(df_exp_search: pd.DataFrame,
 
     exp_names = df_exp_search['exp_name'].values
     datafile_names = df_exp_search['datafile_name'].values
-    has_chunk_col = use_chunk_column and 'chunk_name' in df_exp_search.columns
-    chunk_names = (df_exp_search['chunk_name'].values if has_chunk_col
+    chunk_col = ('analysis_chunk_name'
+                 if 'analysis_chunk_name' in df_exp_search.columns
+                 else 'chunk_name')
+    has_chunk_col = use_chunk_column and chunk_col in df_exp_search.columns
+    chunk_names = (df_exp_search[chunk_col].values if has_chunk_col
                    else [None] * len(exp_names))
 
     from retinanalysis.classes.analysis_chunk import AnalysisChunk

@@ -38,7 +38,8 @@ from .utils.cell_match import save_cell_match
 
 __all__ = ['analyze_experiment', 'analyze_experiments',
            'detect_ss_version', 'pick_typing_file', 'resolve_noise_chunk',
-           'find_available_datasets', 'summarize_batch_results',
+           'add_analysis_chunk_columns', 'find_available_datasets',
+           'summarize_batch_results',
            'SS_VERSION_PRIORITY']
 
 
@@ -101,29 +102,43 @@ def detect_ss_version(
         Source directory doesn't exist, or contains no ``kilosort*``
         subdirs.
     """
-    # Walk all configured tiers — `find_path` tries local SSDs first, then
-    # the NAS. Dates whose sort output never made it onto the local mirror
-    # (e.g. 20250306C) still resolve here.
+    # Inspect every configured tier.  Looking only below ``find_path(...)``
+    # is insufficient when the first tier contains an incomplete copy of the
+    # chunk while a lower-priority tier contains its Kilosort output.
     if kind == 'data':
         if datafile_name is None:
             raise ValueError("kind='data' requires datafile_name")
-        sort_dir = find_path('data', exp_name, datafile_name)
+        parts = (exp_name, datafile_name)
         location_desc = f'{exp_name}/{datafile_name} (data)'
     elif kind == 'analysis':
         if chunk_name is None:
             raise ValueError("kind='analysis' requires chunk_name")
-        sort_dir = find_path('analysis', exp_name, chunk_name)
+        parts = (exp_name, chunk_name)
         location_desc = f'{exp_name}/{chunk_name} (analysis)'
     else:
         raise ValueError(f"kind must be 'data' or 'analysis', got {kind!r}")
 
-    if not sort_dir or not os.path.isdir(sort_dir):
+    from .config.settings import tier_dirs
+
+    sort_dirs = []
+    first = find_path(kind, *parts)
+    if first and os.path.isdir(first):
+        sort_dirs.append(first)
+    for root in tier_dirs(kind):
+        candidate = os.path.join(root, *parts)
+        if os.path.isdir(candidate) and candidate not in sort_dirs:
+            sort_dirs.append(candidate)
+
+    if not sort_dirs:
         raise FileNotFoundError(
             f'No sort directory for {location_desc} on any configured tier: '
-            f'{sort_dir}')
-    chosen = _pick_ss_version_from(os.listdir(sort_dir))
+            f'{first}')
+
+    versions = {name for directory in sort_dirs for name in os.listdir(directory)}
+    chosen = _pick_ss_version_from(versions)
     if chosen is None:
-        raise FileNotFoundError(f'No kilosort* subdirs under {sort_dir}')
+        raise FileNotFoundError(
+            f'No kilosort* subdirs for {location_desc} under {sort_dirs}')
     return chosen
 
 
@@ -167,6 +182,76 @@ def add_ss_version_column(df, kind: str = 'analysis',
 
     df[column] = [_lookup(r) for _, r in df.iterrows()]
     return df
+
+
+def add_analysis_chunk_columns(
+    df,
+    *,
+    chunk_column: str = 'analysis_chunk_name',
+    version_column: str = 'ss_version',
+    distance_column: str = 'chunk_distance_min',
+):
+    """Resolve each protocol row to its nearest loadable typed noise chunk.
+
+    The ``chunk_name`` stored on a protocol row is the sorting chunk assigned
+    at acquisition time; it is not necessarily the name of a noise-analysis
+    directory.  Newer experiments commonly carry labels such as ``dynamics``
+    or ``eye_move`` there while their Vision analysis lives in
+    ``chunk1/kilosort2.5``.  Consequently, applying
+    :func:`add_ss_version_column` directly to a protocol-search frame can
+    report ``'not found'`` even though the dataset is loadable.
+
+    This helper follows the same rule used by the MEA pipeline: rank noise
+    chunks by recording time (preceding chunks first), then select the first
+    candidate that has both a Kilosort directory and a classification file.
+    It adds the resolved chunk, Kilosort version, and time distance while
+    leaving the database's original ``chunk_name`` untouched.
+    """
+    from .utils.datajoint_utils import (get_exp_summary,
+                                        get_noise_chunks_sorted_by_distance,
+                                        get_noise_name_by_exp)
+
+    required = {'exp_name', 'datafile_name'}
+    missing = required.difference(df.columns)
+    if missing:
+        raise ValueError(f'dataset frame is missing columns: {sorted(missing)}')
+
+    out = df.copy()
+    summaries = {}
+    resolved = {}
+
+    def _resolve(exp_name, datafile_name):
+        key = (str(exp_name), str(datafile_name))
+        if key in resolved:
+            return resolved[key]
+
+        if key[0] not in summaries:
+            summaries[key[0]] = get_exp_summary(key[0])
+        summary = summaries[key[0]]
+        candidates, distances = get_noise_chunks_sorted_by_distance(
+            summary, key[1], noise_protocol_name=get_noise_name_by_exp(key[0]))
+
+        answer = (None, 'not found', np.nan)
+        for chunk_name, distance in zip(candidates, distances):
+            try:
+                version = detect_ss_version(
+                    key[0], chunk_name=str(chunk_name), kind='analysis')
+                typing_file = pick_typing_file(
+                    key[0], str(chunk_name), version, strict=False)
+            except (FileNotFoundError, ValueError, OSError):
+                continue
+            if typing_file is not None:
+                answer = (str(chunk_name), version, float(distance))
+                break
+        resolved[key] = answer
+        return answer
+
+    values = [_resolve(row['exp_name'], row['datafile_name'])
+              for _, row in out.iterrows()]
+    out[chunk_column] = [value[0] for value in values]
+    out[version_column] = [value[1] for value in values]
+    out[distance_column] = [value[2] for value in values]
+    return out
 
 
 def pick_typing_file(
