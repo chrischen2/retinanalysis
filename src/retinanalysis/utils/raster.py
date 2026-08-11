@@ -402,7 +402,10 @@ def plot_epoch_rasters(response_block, cell_type: str,
                        stim_time_ms: Optional[float] = None,
                        color: Optional[str] = None,
                        max_yticks: int = 12,
-                       title: Optional[str] = None):
+                       title: Optional[str] = None,
+                       max_cols: Optional[int] = None,
+                       include_psth: bool = False,
+                       psth_bin_ms: float = 100.0):
     """Population raster for the first and last epochs of a block.
 
     One panel per epoch, y is cell (labelled by cell id), x is time within the
@@ -414,6 +417,11 @@ def plot_epoch_rasters(response_block, cell_type: str,
 
     Cell order is by id and identical in every panel, so a row can be read
     straight across.
+
+    ``max_cols`` switches to a wrapped grid containing every selected epoch.
+    With ``include_psth=True``, each epoch's raster has a mean-across-cells
+    PSTH directly underneath it. The PSTH is expressed in Hz per cell and all
+    epoch panels share its y scale.
 
     Returns the Figure, or None when no cell of this type has spikes.
     """
@@ -450,6 +458,16 @@ def plot_epoch_rasters(response_block, cell_type: str,
         t_end_ms = max(finite) if finite else 1.0
 
     color = color or color_for_celltype(cell_type)
+
+    if max_cols is not None or include_psth:
+        return _plot_epoch_raster_grid(
+            ids, spikes, epoch_labels, cell_type=cell_type,
+            t_start_ms=t_start_ms, t_end_ms=t_end_ms,
+            pre_time_ms=pre_time_ms, stim_time_ms=stim_time_ms,
+            color=color, max_yticks=max_yticks, title=title,
+            max_cols=max_cols or 3, include_psth=include_psth,
+            psth_bin_ms=psth_bin_ms)
+
     n_cols = max(len(idx) for idx, _ in rows)
 
     fig, axs = plt.subplots(
@@ -496,6 +514,231 @@ def plot_epoch_rasters(response_block, cell_type: str,
     fig.suptitle(title or f'{cell_type} — {len(ids)} cells, {n_epochs} epochs')
     fig.tight_layout()
     return fig
+
+
+def _plot_epoch_raster_grid(ids, spikes, epoch_labels, *, cell_type,
+                            t_start_ms, t_end_ms, pre_time_ms, stim_time_ms,
+                            color, max_yticks, title, max_cols,
+                            include_psth, psth_bin_ms):
+    """Wrapped all-epoch raster grid used by condition browsers."""
+    if max_cols < 1:
+        raise ValueError('max_cols must be at least 1')
+    if include_psth and psth_bin_ms <= 0:
+        raise ValueError('psth_bin_ms must be positive')
+
+    n_epochs = len(epoch_labels)
+    n_cols = min(int(max_cols), n_epochs)
+    n_rows = int(np.ceil(n_epochs / n_cols))
+    axes_per_row = 2 if include_psth else 1
+    height_ratios = ([3.0, 1.0] * n_rows if include_psth
+                     else [1.0] * n_rows)
+    row_height = min(5.0, max(3.2, 0.025 * len(ids) + 2.2))
+
+    fig = plt.figure(figsize=(3.0 * n_cols + 1.0, row_height * n_rows))
+    gs = fig.add_gridspec(n_rows * axes_per_row, n_cols,
+                          height_ratios=height_ratios,
+                          hspace=0.16 if include_psth else 0.35,
+                          wspace=0.18)
+
+    # Calculate the population PSTHs first so every epoch uses one y scale.
+    psth = {}
+    edges = None
+    if include_psth:
+        edges = np.arange(t_start_ms, t_end_ms + psth_bin_ms, psth_bin_ms)
+        if len(edges) < 2:
+            edges = np.array([t_start_ms, t_end_ms], dtype=float)
+        elif edges[-1] < t_end_ms:
+            edges = np.append(edges, t_end_ms)
+        for epoch in range(n_epochs):
+            counts = np.zeros(len(edges) - 1, dtype=float)
+            for cell in spikes:
+                if epoch >= len(cell) or cell[epoch] is None:
+                    continue
+                counts += np.histogram(np.asarray(cell[epoch], dtype=float),
+                                       bins=edges)[0]
+            widths_s = np.diff(edges) / 1000.0
+            psth[epoch] = counts / max(len(ids), 1) / widths_s
+        psth_max = max((float(np.max(rate)) for rate in psth.values()),
+                       default=1.0)
+        psth_ylim = (0.0, max(1.0, psth_max * 1.05))
+
+    step = max(1, int(np.ceil(len(ids) / max_yticks)))
+    marker_times = ((pre_time_ms, pre_time_ms + stim_time_ms)
+                    if pre_time_ms is not None and stim_time_ms is not None
+                    else ())
+
+    for slot in range(n_rows * n_cols):
+        grid_row, col = divmod(slot, n_cols)
+        raster_row = grid_row * axes_per_row
+        ax_r = fig.add_subplot(gs[raster_row, col])
+        ax_p = (fig.add_subplot(gs[raster_row + 1, col], sharex=ax_r)
+                if include_psth else None)
+
+        if slot >= n_epochs:
+            ax_r.set_axis_off()
+            if ax_p is not None:
+                ax_p.set_axis_off()
+            continue
+
+        segments = []
+        for cell_row, cell in enumerate(spikes):
+            if slot >= len(cell) or cell[slot] is None:
+                continue
+            values = np.asarray(cell[slot], dtype=float)
+            values = values[(values >= t_start_ms) & (values <= t_end_ms)]
+            segments.extend([((t, cell_row + 0.1), (t, cell_row + 0.9))
+                             for t in values])
+        ax_r.add_collection(LineCollection(segments, colors=color,
+                                           linewidths=0.5))
+        ax_r.set_xlim(t_start_ms, t_end_ms)
+        ax_r.set_ylim(0, len(ids))
+        ax_r.set_title(f'epoch {epoch_labels[slot]}', fontsize=8)
+        ax_r.tick_params(axis='x', labelbottom=not include_psth)
+
+        if col == 0:
+            ax_r.set_yticks(np.arange(0, len(ids), step) + 0.5)
+            ax_r.set_yticklabels(
+                [ids[i] for i in range(0, len(ids), step)], fontsize=7)
+            ax_r.set_ylabel('cell ID', fontsize=8)
+        else:
+            ax_r.set_yticklabels([])
+
+        for marker in marker_times:
+            ax_r.axvline(marker, color=NEUTRAL_GRAY, linestyle='--',
+                         linewidth=0.7, alpha=0.7)
+
+        if ax_p is not None:
+            ax_p.stairs(psth[slot], edges, color=color, linewidth=1.0,
+                        fill=False)
+            ax_p.set_xlim(t_start_ms, t_end_ms)
+            ax_p.set_ylim(*psth_ylim)
+            ax_p.set_xlabel('Time in epoch (ms)', fontsize=8)
+            ax_p.tick_params(labelsize=7)
+            if col == 0:
+                ax_p.set_ylabel('Hz/cell', fontsize=7)
+            else:
+                ax_p.set_yticklabels([])
+            for marker in marker_times:
+                ax_p.axvline(marker, color=NEUTRAL_GRAY, linestyle='--',
+                             linewidth=0.7, alpha=0.7)
+        elif grid_row == n_rows - 1:
+            ax_r.set_xlabel('Time in epoch (ms)', fontsize=8)
+
+    fig.suptitle(title or f'{cell_type} — {len(ids)} cells, {n_epochs} epochs',
+                 y=0.99)
+    fig.subplots_adjust(top=0.90, bottom=0.06, left=0.08, right=0.99)
+    return fig
+
+
+def condition_epoch_raster_browser(
+    response_block,
+    epoch_table,
+    group_key: str,
+    *,
+    within_keys: Optional[Sequence[str]] = None,
+    epoch_column: str = 'epoch',
+    cell_types: Optional[Sequence[str]] = None,
+    minimum_n: int = 3,
+    menu_label: Optional[str] = None,
+    max_cols: int = 3,
+    include_psth: bool = True,
+    psth_bin_ms: float = 100.0,
+    pre_time_ms: Optional[float] = None,
+    stim_time_ms: Optional[float] = None,
+    dpi: int = 110,
+):
+    """Build a cached condition dropdown of wrapped epoch rasters.
+
+    This is protocol-agnostic: ``group_key`` is the dropdown condition and
+    ``within_keys`` defines how epochs are ordered inside each selection.
+    Original epoch indices are retained in panel titles. A second dropdown
+    selects cell type. By default every raster has a mean-across-cells PSTH
+    underneath it.
+
+    Returns ``(widget, sorted_epochs, groups, cache)`` without displaying the
+    widget, so callers can place several browsers in tabs or other layouts.
+    """
+    import ipywidgets as widgets
+    from retinanalysis.utils.browse import figure_to_png
+
+    if group_key not in epoch_table.columns:
+        raise KeyError(f'epoch table has no {group_key!r} column')
+    if epoch_column not in epoch_table.columns:
+        raise KeyError(f'epoch table has no {epoch_column!r} column')
+    within_keys = list(within_keys or [])
+    missing = set(within_keys).difference(epoch_table.columns)
+    if missing:
+        raise KeyError(f'epoch table missing sort columns: {sorted(missing)}')
+
+    sort_keys = [group_key] + [key for key in within_keys
+                              if key != group_key]
+    if epoch_column not in sort_keys:
+        sort_keys.append(epoch_column)
+    sorted_epochs = epoch_table.sort_values(
+        sort_keys, kind='stable').reset_index(drop=True)
+    groups = {
+        value: rows[epoch_column].astype(int).tolist()
+        for value, rows in sorted_epochs.groupby(group_key, sort=False,
+                                                  dropna=False)
+    }
+    if not groups:
+        raise ValueError(f'No epochs contain {group_key!r}')
+
+    type_options = _cell_type_options(
+        response_block, cell_types, minimum_n)
+    if not type_options:
+        raise ValueError(f'No cell type has {minimum_n} or more cells')
+
+    label = menu_label or group_key
+    secondary = next((key for key in within_keys
+                      if key not in (group_key, epoch_column)), None)
+    group_options = []
+    for value, epoch_indices in groups.items():
+        text = f'{value} · {len(epoch_indices)} epochs'
+        if secondary is not None:
+            rows = sorted_epochs[sorted_epochs[group_key] == value]
+            levels = ', '.join(map(str, rows[secondary].drop_duplicates()))
+            text += f' · {secondary} {levels}'
+        group_options.append((text, value))
+
+    group_menu = widgets.Dropdown(
+        options=group_options, description=f'{label}:',
+        style={'description_width': 'initial'},
+        layout=widgets.Layout(width='max-content'))
+    type_menu = widgets.Dropdown(
+        options=type_options, description='Cell type:',
+        style={'description_width': 'initial'},
+        layout=widgets.Layout(width='max-content'))
+    note = widgets.HTML()
+    image = widgets.Image(
+        format='png', layout=widgets.Layout(max_width='100%'))
+    cache = {}
+
+    def _show(*_):
+        group_value = group_menu.value
+        cell_type = type_menu.value
+        key = (group_value, cell_type)
+        epoch_indices = groups[group_value]
+        if key not in cache:
+            order_text = ', '.join(within_keys) if within_keys else epoch_column
+            fig = plot_epoch_rasters(
+                response_block, cell_type, epoch_indices=epoch_indices,
+                max_cols=max_cols, include_psth=include_psth,
+                psth_bin_ms=psth_bin_ms, pre_time_ms=pre_time_ms,
+                stim_time_ms=stim_time_ms,
+                title=(f'{cell_type} — {label.lower()} {group_value}; '
+                       f'sorted by {order_text}'))
+            cache[key] = figure_to_png(fig, dpi=dpi)
+        note.value = (f'<b>Original epoch indices:</b> '
+                      f'{", ".join(map(str, epoch_indices))}')
+        image.value = cache[key]
+
+    group_menu.observe(_show, names='value')
+    type_menu.observe(_show, names='value')
+    _show()
+    widget = widgets.VBox([
+        widgets.HBox([group_menu, type_menu]), note, image])
+    return widget, sorted_epochs, groups, cache
 
 
 # Bookkeeping labels, not cell types: cells the EI match dropped, and cells the

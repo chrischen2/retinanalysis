@@ -63,7 +63,242 @@ __all__ = [
     'plot_epoch_range',
     'plot_qc_mosaic',
     'epoch_condition_table',
+    'drop_epoch_conditions',
+    'population_template_qc',
 ]
+
+
+def drop_epoch_conditions(epoch_table: pd.DataFrame, column: str,
+                          values, *, strict: bool = True):
+    """Return ``(kept, dropped)`` after excluding whole condition levels.
+
+    The input order is preserved, which matters when the caller uses the
+    returned epoch indices for drift or repeat analyses. ``values`` may be one
+    scalar or an iterable. With ``strict=True`` (default), misspelled levels
+    raise instead of silently leaving the table unchanged.
+    """
+    if column not in epoch_table.columns:
+        raise KeyError(f'epoch table has no {column!r} column')
+    if isinstance(values, (str, bytes)) or not isinstance(values, Iterable):
+        values = [values]
+    requested = set(values)
+    available = set(epoch_table[column].dropna().unique())
+    unknown = requested - available
+    if strict and unknown:
+        raise ValueError(
+            f'Unknown {column} value(s): {sorted(unknown)}; '
+            f'available: {sorted(available)}')
+
+    mask = epoch_table[column].isin(requested)
+    dropped = epoch_table.loc[mask].copy().reset_index(drop=True)
+    kept = epoch_table.loc[~mask].copy().reset_index(drop=True)
+    if kept.empty:
+        raise ValueError(f'excluding {column}={sorted(requested)} removes '
+                         'every selected epoch')
+    return kept, dropped
+
+
+def _shape_corr(a: np.ndarray, b: np.ndarray) -> float:
+    """Shape correlation with an explicit verdict for flat traces."""
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    ok = np.isfinite(a) & np.isfinite(b)
+    if ok.sum() < 2:
+        return float('nan')
+    a, b = a[ok], b[ok]
+    sa, sb = float(a.std()), float(b.std())
+    eps = np.finfo(float).eps
+    if sa <= eps and sb <= eps:
+        return 1.0
+    if sa <= eps or sb <= eps:
+        return 0.0
+    value = float(np.corrcoef(a, b)[0, 1])
+    return value if np.isfinite(value) else float('nan')
+
+
+def population_template_qc(
+    response_block,
+    epoch_table: pd.DataFrame,
+    condition_keys: Sequence[str],
+    *,
+    epoch_column: str = 'epoch',
+    cell_types: Optional[Iterable[str]] = None,
+    candidate_cell_ids: Optional[Iterable[int]] = None,
+    t_start_ms: float = 0.0,
+    t_end_ms: Optional[float] = None,
+    psth_sigma_ms: float = 50.0,
+    sample_rate_hz: float = 100.0,
+    min_cells_per_type: int = 5,
+    min_template_r: float = 0.25,
+    min_conditions: int = 2,
+    min_pass_fraction: float = 0.5,
+    verbose: bool = True,
+):
+    """Find cells whose condition PSTHs disagree with their population.
+
+    For each ``cell_type × condition`` group, repeated-epoch PSTHs are
+    averaged per cell. Every cell is then correlated with the mean of all
+    *other* cells of its type (a leave-one-cell-out template, avoiding
+    self-correlation). Correlation measures temporal shape, not firing-rate
+    amplitude. A flat trace against a structured template receives zero.
+
+    The downstream verdict is deliberately conservative: a cell is rejected
+    only when it is evaluable in at least ``min_conditions`` and passes less
+    than ``min_pass_fraction`` of them. Small types without enough cells to
+    define a population template are retained as ``kept_unscored``.
+
+    Returns ``(condition_detail, cell_summary)``. The detail table has one row
+    per cell and condition; the summary has one row per candidate cell and a
+    boolean ``passes_template`` suitable for merging with firing-rate QC.
+    """
+    keys = list(condition_keys)
+    required = set(keys) | {epoch_column}
+    missing = required.difference(epoch_table.columns)
+    if missing:
+        raise KeyError(f'epoch table missing columns: {sorted(missing)}')
+    if t_end_ms is None or float(t_end_ms) <= float(t_start_ms):
+        raise ValueError('t_end_ms must be greater than t_start_ms')
+    if int(min_cells_per_type) < 2:
+        raise ValueError('min_cells_per_type must be at least 2')
+    if int(min_conditions) < 1:
+        raise ValueError('min_conditions must be at least 1')
+    if not -1 <= float(min_template_r) <= 1:
+        raise ValueError('min_template_r must be between -1 and 1')
+    if not 0 <= float(min_pass_fraction) <= 1:
+        raise ValueError('min_pass_fraction must be between 0 and 1')
+
+    cells = response_block.df_spike_times.copy()
+    if cell_types is not None:
+        cells = cells[cells['cell_type'].isin(set(cell_types))]
+    if candidate_cell_ids is not None:
+        candidate_ids = {int(v) for v in candidate_cell_ids}
+        cells = cells[cells['cell_id'].astype(int).isin(candidate_ids)]
+    if cells.empty:
+        empty_detail = pd.DataFrame(columns=[
+            'cell_id', 'cell_type', 'condition', 'n_repeats', 'self_r',
+            'template_r', 'type_n', 'template_evaluable',
+            'passes_condition'])
+        empty_summary = pd.DataFrame(columns=[
+            'cell_id', 'cell_type', 'n_conditions_seen',
+            'n_conditions_evaluable', 'n_conditions_passed',
+            'template_pass_fraction', 'median_template_r', 'min_template_r',
+            'passes_template', 'template_status', 'failed_conditions'])
+        return empty_detail, empty_summary
+
+    # Preserve condition order from the retained epoch table. Epoch indices
+    # remain indices into each cell's full spike_times list.
+    condition_rows = []
+    group_arg = keys[0] if len(keys) == 1 else keys
+    for condition, rows in epoch_table.groupby(group_arg, sort=False,
+                                                dropna=False):
+        condition = condition if isinstance(condition, tuple) else (condition,)
+        epoch_indices = rows[epoch_column].astype(int).tolist()
+        condition_rows.append((condition, epoch_indices))
+
+    detail_rows = []
+    for condition, epoch_indices in condition_rows:
+        condition_label = ', '.join(
+            f'{key}={value}' for key, value in zip(keys, condition))
+        for cell_type, type_cells in cells.groupby('cell_type', sort=False):
+            records, means, self_values = [], [], []
+            for row in type_cells.itertuples():
+                selected = [row.spike_times[i] for i in epoch_indices
+                            if 0 <= i < len(row.spike_times)]
+                if not selected:
+                    continue
+                per_epoch = epoch_spikes_to_psth(
+                    selected, float(t_end_ms),
+                    psth_sigma_ms=float(psth_sigma_ms),
+                    sample_rate_hz=float(sample_rate_hz),
+                    t_start_ms=float(t_start_ms))
+                mean = per_epoch.mean(axis=0)
+                pairwise = [_shape_corr(per_epoch[i], per_epoch[j])
+                            for i in range(len(per_epoch))
+                            for j in range(i + 1, len(per_epoch))]
+                self_r = (float(np.nanmean(pairwise)) if pairwise
+                          and np.isfinite(pairwise).any() else np.nan)
+                records.append(row)
+                means.append(mean)
+                self_values.append(self_r)
+
+            if not means:
+                continue
+            matrix = np.stack(means)
+            type_n = len(matrix)
+            usable = type_n >= int(min_cells_per_type)
+            total = matrix.sum(axis=0)
+            for idx, row in enumerate(records):
+                template = ((total - matrix[idx]) / (type_n - 1)
+                            if type_n > 1 else np.full(matrix.shape[1], np.nan))
+                template_r = (_shape_corr(matrix[idx], template)
+                              if usable else np.nan)
+                evaluable = usable and np.isfinite(template_r)
+                passes = bool(evaluable and template_r >= min_template_r)
+                detail_rows.append({
+                    'cell_id': int(row.cell_id),
+                    'cell_type': cell_type,
+                    'condition': condition_label,
+                    'condition_values': condition,
+                    'n_repeats': len(epoch_indices),
+                    'self_r': self_values[idx],
+                    'template_r': template_r,
+                    'type_n': type_n,
+                    'template_evaluable': bool(evaluable),
+                    'passes_condition': passes,
+                })
+
+    detail = pd.DataFrame(detail_rows)
+    summary_rows = []
+    for row in cells.itertuples():
+        sub = detail[detail['cell_id'] == int(row.cell_id)]
+        scored = sub[sub['template_evaluable']]
+        n_eval = len(scored)
+        n_pass = int(scored['passes_condition'].sum())
+        pass_fraction = n_pass / n_eval if n_eval else np.nan
+        passes = (True if n_eval < int(min_conditions)
+                  else pass_fraction >= float(min_pass_fraction))
+        failed = scored.loc[~scored['passes_condition'], 'condition'].tolist()
+        summary_rows.append({
+            'cell_id': int(row.cell_id),
+            'cell_type': row.cell_type,
+            'n_conditions_seen': int(len(sub)),
+            'n_conditions_evaluable': int(n_eval),
+            'n_conditions_passed': int(n_pass),
+            'template_pass_fraction': float(pass_fraction),
+            'median_template_r': (float(scored['template_r'].median())
+                                  if n_eval else np.nan),
+            'min_template_r': (float(scored['template_r'].min())
+                               if n_eval else np.nan),
+            'passes_template': bool(passes),
+            'template_status': ('kept_unscored' if n_eval < int(min_conditions)
+                                else ('kept' if passes else 'outlier')),
+            'failed_conditions': failed,
+        })
+    summary = pd.DataFrame(summary_rows)
+    detail.attrs.update({
+        'condition_keys': keys,
+        'min_template_r': float(min_template_r),
+    })
+    summary.attrs.update({
+        'condition_keys': keys,
+        'min_template_r': float(min_template_r),
+        'min_conditions': int(min_conditions),
+        'min_pass_fraction': float(min_pass_fraction),
+    })
+
+    if verbose:
+        rejected = summary[~summary['passes_template']]
+        unscored = int((summary['template_status'] == 'kept_unscored').sum())
+        print(f'population-template QC: {len(summary) - len(rejected)}/'
+              f'{len(summary)} cells retained; {len(rejected)} outliers; '
+              f'{unscored} retained without enough template evidence')
+        if len(rejected):
+            print('Rejected template-outlier cells:')
+            print(rejected[[
+                'cell_id', 'cell_type', 'n_conditions_evaluable',
+                'n_conditions_passed', 'template_pass_fraction',
+                'median_template_r', 'failed_conditions']].to_string(index=False))
+    return detail, summary
 
 
 def protocol_qc_csv_path(exp_name: str, protocol: str,
