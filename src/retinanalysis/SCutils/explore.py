@@ -35,6 +35,7 @@ __all__ = [
     'scroll_table',
     'tree_table',
     'list_experiments',
+    'protocol_inventory',
     'find_blocks',
     'protocol_tree',
     'summarize_experiment',
@@ -304,6 +305,49 @@ def list_experiments(show: bool = True, height: int = 400) -> pd.DataFrame:
             tree_table(rows.reset_index(drop=True),
                        levels=['exp_name', 'project', 'cell_types'], height=height)
     return df
+
+
+def _species_group(value) -> str:
+    """Normalize database species labels to primate, mouse, or other."""
+    label = str(value or '').strip().lower()
+    if any(token in label for token in ('primate', 'macaque', 'monkey', 'human')):
+        return 'primate'
+    if any(token in label for token in ('mouse', 'mice', 'mus musculus')):
+        return 'mouse'
+    return 'other'
+
+
+def protocol_inventory(show: bool = True, height: int = 500) -> pd.DataFrame:
+    """Short protocols and the unique dates recorded by species.
+
+    Returns one row per protocol with ``primate_dates``, ``mouse_dates`` and
+    ``total_dates``. Counts are unique experiment dates, not epoch blocks, so
+    repeating a protocol many times on one date still contributes one.
+    """
+    catalog = _experiment_catalog().copy()
+    if catalog.empty:
+        return pd.DataFrame(columns=['protocol', 'primate_dates',
+                                     'mouse_dates', 'total_dates'])
+    catalog['species_group'] = catalog['species'].map(_species_group)
+    rows = []
+    for protocol, group in catalog.groupby('protocols', sort=False):
+        rows.append({
+            'protocol': protocol,
+            'primate_dates': group.loc[group['species_group'].eq('primate'),
+                                        'exp_name'].nunique(),
+            'mouse_dates': group.loc[group['species_group'].eq('mouse'),
+                                     'exp_name'].nunique(),
+            'total_dates': group['exp_name'].nunique(),
+        })
+    result = (pd.DataFrame(rows)
+              .sort_values(['total_dates', 'protocol'], ascending=[False, True],
+                           ignore_index=True))
+    if show:
+        print(f"{len(result)} protocols across "
+              f"{catalog['exp_name'].nunique()} experiment dates.")
+        scroll_table(result, height=height,
+                     num_cols=('primate_dates', 'mouse_dates', 'total_dates'))
+    return result
 
 
 _EMPTY_BLOCKS = pd.DataFrame(columns=['exp_name', 'protocol', 'block_id', 'protocol_name'])

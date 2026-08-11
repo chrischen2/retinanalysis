@@ -170,3 +170,20 @@ def test_list_experiments_keeps_one_row_per_protocol(monkeypatch):
     result = sc.list_experiments(show=False)
     assert list(result.columns) == ['exp_name', 'project', 'cell_types', 'protocol']
     assert result['protocol'].tolist() == ['LedPulse', 'VariableMeanNoise']
+
+
+def test_protocol_inventory_counts_unique_dates_by_species(monkeypatch):
+    catalog = pd.DataFrame({
+        'data_owner': ['chris_data'] * 5,
+        'species': ['Primate', 'Primate', 'Mouse', 'Mouse', 'Mouse'],
+        'exp_name': ['p1', 'p1', 'm1', 'm2', 'm2'],
+        'project': ['?'] * 5,
+        'cell_types': ['RGC'] * 5,
+        'protocols': ['Spot', 'Spot', 'Spot', 'Spot', 'Noise'],
+    })
+    monkeypatch.setattr(sc, '_experiment_catalog', lambda: catalog)
+    result = sc.protocol_inventory(show=False)
+    spot = result.set_index('protocol').loc['Spot']
+    assert spot.to_dict() == {
+        'primate_dates': 1, 'mouse_dates': 2, 'total_dates': 3,
+    }
