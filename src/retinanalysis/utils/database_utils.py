@@ -15,7 +15,8 @@ from typing import List, Union
 def populate_database(username = USER, h5_dir = None,
                         meta_dir = None, tags_dir = None,
                         update_if_modified: bool = True,
-                        watch_data_file: bool = False):
+                        watch_data_file: bool = False,
+                        include_freshness: bool = True):
     """Ingest every experiment under the configured source volumes.
 
     By default (all three directory arguments left as ``None``) this sweeps
@@ -39,6 +40,11 @@ def populate_database(username = USER, h5_dir = None,
     ``update_if_modified=False`` for strictly append-only behaviour.
 
     Returns a dict with ``n_ingested``, ``added``, ``updated`` and ``skipped``.
+    By default the same call also performs the post-ingest freshness check and
+    adds ``experiments`` (all database rows) and ``stale`` (only rows whose
+    watched source is still newer). This replaces a separate
+    ``list_database_experiments()`` call in notebooks. Set
+    ``include_freshness=False`` for the original lightweight return value.
     """
     db = dj.VirtualModule('schema.py', 'schema', create_schema=True)
 
@@ -57,10 +63,15 @@ def populate_database(username = USER, h5_dir = None,
         tags_dir = tags_dir if tags_dir is not None else TAGS_DIR
         meta_list = None
 
-    return database_pop.append_data(h5_dir, meta_dir, tags_dir, username, db,
-                                    update_if_modified=update_if_modified,
-                                    watch_data_file=watch_data_file,
-                                    meta_list=meta_list)
+    result = database_pop.append_data(h5_dir, meta_dir, tags_dir, username, db,
+                                      update_if_modified=update_if_modified,
+                                      watch_data_file=watch_data_file,
+                                      meta_list=meta_list)
+    if include_freshness:
+        freshness = list_database_experiments(watch_data_file=watch_data_file)
+        result['experiments'] = freshness
+        result['stale'] = freshness.loc[freshness['is_stale']].reset_index(drop=True)
+    return result
 
 def reload_experiment_data(exp_name, username = USER, h5_dir = None,
                     meta_dir = None, tags_dir = None):
@@ -175,4 +186,3 @@ def purge_database(confirm: str = ''):
     for exp in all_exp_names:
         (schema.Experiment() & {'exp_name' : exp}).delete(prompt=False)
     print(f'Purge complete: {len(all_exp_names)} experiments dropped.')
-

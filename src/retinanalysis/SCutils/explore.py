@@ -38,6 +38,8 @@ __all__ = [
     'find_blocks',
     'protocol_tree',
     'summarize_experiment',
+    'summarize_experiments',
+    'plot_epoch_block_traces',
 ]
 
 # Shared table CSS. Deliberately theme-neutral: colors inherit from the
@@ -167,23 +169,105 @@ def tree_table(df: pd.DataFrame, levels: Sequence[str], height: int = 420,
     return html
 
 
-def list_experiments(show: bool = True, height: int = 400) -> pd.DataFrame:
-    """Every single-cell (``is_mea=0``) experiment, with species and rig type.
+def _as_dict(value) -> dict:
+    """Return a JSON database value as a dict, or an empty dict."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except (TypeError, ValueError):
+            pass
+    return {}
 
-    experimenter / project / rig are not populated for patch data, so they are
-    left out. ``species`` comes from the animal JSON (``attributes.label``);
-    ``rig_type`` is the populated rig info ('PATCH').
+
+def _first_text(*values, default='?') -> str:
+    for value in values:
+        if value is not None and not pd.isna(value) and str(value).strip():
+            return str(value).strip()
+    return default
+
+
+def _data_owner(*paths) -> str:
+    """Infer the patch-data owner from a stored source path."""
+    for path in paths:
+        parts = str(path or '').replace('\\', '/').lower().split('/')
+        for owner in ('chris_data', 'fred_data'):
+            if owner in parts:
+                return owner
+    return 'other_data'
+
+
+def _project_label(row) -> str:
+    """Best available project label from normalized or JSON metadata."""
+    props = _as_dict(row.get('properties'))
+    attrs = _as_dict(row.get('attributes'))
+    keys = ('projectLabel', 'project_label', 'project', 'projectName')
+    candidates = [row.get('project')]
+    candidates.extend(props.get(k) for k in keys)
+    candidates.extend(attrs.get(k) for k in keys)
+    return _first_text(*candidates)
+
+
+def list_experiments(show: bool = True, height: int = 400) -> pd.DataFrame:
+    """Every single-cell experiment, separated by owner and enriched for browsing.
+
+    ``data_owner`` is inferred from the stored h5/meta path (``chris_data`` or
+    ``fred_data``). Species comes from the Animal row; project first uses the
+    normalized Experiment field and then its JSON metadata. ``cell_types`` is
+    the unique set of Cell types recorded on that date.
     """
     from retinanalysis.config import schema
 
-    df = (schema.Experiment() & 'is_mea=0').to_pandas()
-    df['species'] = df['attributes'].apply(
-        lambda d: (d if isinstance(d, dict) else json.loads(d)).get('label'))
-    df = (df[['exp_name', 'species', 'rig_type']]
-          .sort_values('exp_name').reset_index(drop=True))
+    ex = (schema.Experiment() & 'is_mea=0').fetch(format='frame').reset_index()
+    if ex.empty:
+        return pd.DataFrame(columns=['data_owner', 'species', 'exp_name',
+                                     'project', 'cell_types'])
+    ex = ex.rename(columns={'id': 'experiment_id'})
+    sc_experiments = (schema.Experiment() & 'is_mea=0').proj(experiment_id='id')
+
+    animals = schema.Animal() & sc_experiments
+    animal_df = animals.fetch(format='frame').reset_index()
+    if not animal_df.empty:
+        animal_df['species_display'] = animal_df.apply(
+            lambda r: _first_text(r.get('species'),
+                                  _as_dict(r.get('attributes')).get('label'),
+                                  r.get('label')), axis=1)
+        species = (animal_df.groupby('experiment_id', sort=False)['species_display']
+                   .agg(_join_unique).rename('species'))
+        ex = ex.merge(species, on='experiment_id', how='left')
+    else:
+        ex['species'] = '?'
+
+    cells = schema.Cell() & sc_experiments
+    cell_df = cells.fetch(format='frame').reset_index()
+    if not cell_df.empty:
+        cell_df['type_display'] = cell_df.apply(
+            lambda r: _first_text(r.get('type'),
+                                  _as_dict(r.get('properties')).get('type')),
+            axis=1)
+        cell_types = (cell_df.groupby('experiment_id', sort=False)['type_display']
+                      .agg(_join_unique).rename('cell_types'))
+        ex = ex.merge(cell_types, on='experiment_id', how='left')
+    else:
+        ex['cell_types'] = '?'
+
+    ex['data_owner'] = ex.apply(
+        lambda r: _data_owner(r.get('data_file'), r.get('meta_file')), axis=1)
+    ex['project'] = ex.apply(_project_label, axis=1)
+    ex['species'] = ex['species'].fillna('?')
+    ex['cell_types'] = ex['cell_types'].fillna('?')
+    order = pd.Categorical(ex['data_owner'],
+                           ['chris_data', 'fred_data', 'other_data'], ordered=True)
+    ex = ex.assign(_owner_order=order)
+    df = (ex[['data_owner', 'species', 'exp_name', 'project', 'cell_types',
+              '_owner_order']]
+          .sort_values(['_owner_order', 'species', 'exp_name'])
+          .drop(columns='_owner_order').reset_index(drop=True))
     if show:
         print(f'{len(df)} single-cell experiments.')
-        scroll_table(df, height=height)
+        tree_table(df, levels=['data_owner'], height=height)
     return df
 
 
@@ -250,18 +334,19 @@ def _join_unique(s) -> str:
 
 def protocol_tree(df_exp: pd.DataFrame, show: bool = True,
                   height: int = 420) -> pd.DataFrame:
-    """Collapse an experiment-summary frame into a cell -> recording -> protocol tree.
+    """Collapse a summary into cell -> epoch group -> protocol statistics.
 
     ``df_exp`` is what :func:`~retinanalysis.utils.datajoint_utils.get_exp_summary`
-    returns (one row per epoch block). The result has one row per
-    (cell, recording technique, protocol) with the block count, total minutes
-    and the block ids in range notation.
+    returns, enriched with ``epochs`` by :func:`summarize_experiment`. The
+    display has one row per (cell, epoch group, protocol), with block and epoch
+    counts. Block ids stay in the returned frame for raw-data selection but
+    are deliberately omitted from this overview.
 
     Rows stay in acquisition order (first appearance, i.e. ``start_time``), so
     the tree reads top-to-bottom the way the experiment was run.
     """
     df = df_exp.copy()
-    missing = {'cell_label', 'recording_technique'} - set(df.columns)
+    missing = {'cell_label', 'cell_type', 'group_label', 'block_id'} - set(df.columns)
     if missing:
         raise ValueError(
             f'protocol_tree needs a single-cell experiment summary; missing {sorted(missing)}. '
@@ -269,48 +354,231 @@ def protocol_tree(df_exp: pd.DataFrame, show: bool = True,
     if 'protocol' not in df.columns:
         df['protocol'] = df['protocol_name'].str.split('.protocols.').str[-1]
 
-    # group_label is 'Control' for essentially every patch experiment, so it
-    # only earns a column when a date actually varies it.
-    levels = ['cell', 'recording']
+    levels = ['cell', 'epoch_group']
     df['cell'] = df['cell_label'] + '  (' + df['cell_type'].fillna('?') + ')'
-    df['recording'] = df['recording_technique'].fillna('?')
-    if 'pipette_solution' in df.columns and df['pipette_solution'].nunique() > 1:
-        df['recording'] = df['recording'] + ', ' + df['pipette_solution'].fillna('?')
-    if df['group_label'].nunique() > 1:
-        df['group'] = df['group_label']
-        levels.insert(1, 'group')
+    df['epoch_group'] = df['group_label'].fillna('?')
 
     keys = levels + ['protocol']
-    tree = (df.groupby(keys, sort=False)
-              .agg(blocks=('block_id', 'size'),
-                   minutes=('duration_minutes', 'sum'),
-                   block_ids=('block_id', compact_ids))
-              .round({'minutes': 1}).reset_index())
+    aggregations = {'blocks': ('block_id', 'size')}
+    if 'epochs' in df.columns:
+        aggregations['epochs'] = ('epochs', 'sum')
+    tree = (df.groupby(keys, sort=False, dropna=False)
+              .agg(**aggregations).reset_index())
     if show:
         tree_table(tree, levels=keys, height=height,
-                   num_cols=('blocks', 'minutes'))
+                   num_cols=('blocks', 'epochs'))
     return tree
+
+
+def _epoch_counts(block_ids: Sequence[int]) -> pd.Series:
+    """Count Epoch rows for each block id, preserving zero-epoch blocks."""
+    from retinanalysis.config import schema
+
+    ids = [int(i) for i in block_ids]
+    counts = pd.Series(0, index=ids, dtype=int)
+    if not ids:
+        return counts
+    epochs = schema.Epoch() & [{'parent_id': i} for i in ids]
+    if len(epochs):
+        frame = epochs.fetch(format='frame').reset_index()
+        found = frame.groupby('parent_id').size()
+        counts.loc[found.index.astype(int)] = found.astype(int).values
+    return counts
 
 
 def summarize_experiment(exp_name: str, show: bool = True,
                          height: int = 420) -> pd.DataFrame:
-    """One single-cell experiment as a cell -> recording -> protocol tree.
+    """One single-cell experiment as a cell -> epoch group -> protocol tree.
 
     Returns the full per-block summary frame (``get_exp_summary`` plus a
-    ``protocol`` short-name column) so downstream cells can filter it; the
-    tree is only the display.
+    short protocol name and per-block epoch count) so the interactive browser
+    can select an actual block. The overview omits block ids.
     """
     from retinanalysis.utils.datajoint_utils import get_exp_summary
 
     df_exp = get_exp_summary(exp_name)
     df_exp['protocol'] = df_exp['protocol_name'].str.split('.protocols.').str[-1]
+    counts = _epoch_counts(df_exp['block_id'].tolist())
+    df_exp['epochs'] = df_exp['block_id'].map(counts).fillna(0).astype(int)
     if show:
-        n_min = df_exp['duration_minutes'].sum()
         print(f"{exp_name} | {df_exp['cell_label'].nunique()} cells | "
               f"{len(df_exp)} blocks | {df_exp['protocol'].nunique()} protocols | "
-              f'{n_min:.0f} min')
+              f"{int(df_exp['epochs'].sum())} epochs")
         protocol_tree(df_exp, show=True, height=height)
     return df_exp
+
+
+def plot_epoch_block_traces(exp_name: str, block_id: int, show: bool = True):
+    """Load and plot every original Amp1 trace in one patch epoch block.
+
+    Data are read directly from the h5 and are not filtered,
+    baseline-subtracted or spike-detected. Returns
+    ``(figure, traces, sample_rate)``.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from retinanalysis.utils.datajoint_utils import get_epochblock_amp_data
+
+    traces, sample_rate = get_epochblock_amp_data(
+        exp_name, int(block_id), verbose=False)
+    traces = [np.asarray(trace, dtype=float).squeeze() for trace in traces]
+    if not traces:
+        raise ValueError(f'No Amp1 traces found for {exp_name}, block {block_id}.')
+
+    fig, ax = plt.subplots(figsize=(11, 4.5), constrained_layout=True)
+    for trace in traces:
+        time_s = np.arange(trace.size) / float(sample_rate)
+        ax.plot(time_s, trace, lw=0.65, alpha=0.55)
+    ax.set(xlabel='Time (s)', ylabel='Raw Amp1 value',
+           title=(f'{exp_name} | epoch block {int(block_id)} | '
+                  f'{len(traces)} original epoch traces'))
+    for side in ('top', 'right'):
+        ax.spines[side].set_visible(False)
+    if show:
+        plt.show()
+    return fig, traces, float(sample_rate)
+
+
+def summarize_experiments(experiments: pd.DataFrame | None = None,
+                          height: int = 420):
+    """Interactive single-cell browser with cascading experiment/block menus.
+
+    The top selectors cascade through data owner, species and experiment. The
+    selected experiment is summarized as cell -> epoch group -> protocol. A
+    second cascade selects cell, epoch group, protocol and epoch block; its
+    button loads and plots the original h5 Amp1 traces.
+    """
+    try:
+        import ipywidgets as widgets
+        from IPython.display import clear_output, display
+    except ImportError as exc:
+        raise ImportError('summarize_experiments requires ipywidgets.') from exc
+
+    experiments = list_experiments(show=False) if experiments is None else experiments.copy()
+    if experiments.empty:
+        raise ValueError('No single-cell experiments are available.')
+
+    owner = widgets.Dropdown(description='Data:', layout=widgets.Layout(width='260px'))
+    species = widgets.Dropdown(description='Species:', layout=widgets.Layout(width='300px'))
+    experiment = widgets.Dropdown(description='Experiment:', layout=widgets.Layout(width='330px'))
+    cell = widgets.Dropdown(description='Cell:', layout=widgets.Layout(width='330px'))
+    epoch_group = widgets.Dropdown(description='Epoch group:',
+                                   layout=widgets.Layout(width='360px'))
+    protocol = widgets.Dropdown(description='Protocol:', layout=widgets.Layout(width='420px'))
+    block = widgets.Dropdown(description='Epoch block:', layout=widgets.Layout(width='300px'))
+    load = widgets.Button(description='Load original traces', icon='line-chart',
+                          button_style='primary', disabled=True)
+    summary_out = widgets.Output()
+    raw_out = widgets.Output()
+    box = widgets.VBox([
+        widgets.HBox([owner, species, experiment]), summary_out,
+        widgets.HTML('<b>Raw epoch-block viewer</b>'),
+        widgets.HBox([cell, epoch_group]),
+        widgets.HBox([protocol, block, load]), raw_out,
+    ])
+    box.df_exp = None
+    box.selectors = {
+        'data_owner': owner, 'species': species, 'experiment': experiment,
+        'cell': cell, 'epoch_group': epoch_group, 'protocol': protocol,
+        'block': block,
+    }
+
+    def options(frame, column):
+        return [(str(v), v) for v in frame[column].dropna().drop_duplicates()]
+
+    def set_block_options(*_):
+        df = box.df_exp
+        if df is None or experiment.value is None:
+            block.options = []
+        else:
+            q = df[(df['cell_label'] == cell.value)
+                   & (df['group_label'] == epoch_group.value)
+                   & (df['protocol'] == protocol.value)]
+            new_options = [(f"block {int(r.block_id)} ({int(r.epochs)} epochs)",
+                            int(r.block_id)) for r in q.itertuples()]
+            block.unobserve(set_load_enabled, names='value')
+            block.options = new_options
+            block.observe(set_load_enabled, names='value')
+        load.disabled = block.value is None
+
+    def set_protocol_options(*_):
+        df = box.df_exp
+        q = (df[(df['cell_label'] == cell.value)
+                & (df['group_label'] == epoch_group.value)]
+             if df is not None else pd.DataFrame())
+        protocol.unobserve(set_block_options, names='value')
+        protocol.options = options(q, 'protocol') if not q.empty else []
+        protocol.observe(set_block_options, names='value')
+        set_block_options()
+
+    def set_group_options(*_):
+        df = box.df_exp
+        q = df[df['cell_label'] == cell.value] if df is not None else pd.DataFrame()
+        epoch_group.unobserve(set_protocol_options, names='value')
+        epoch_group.options = options(q, 'group_label') if not q.empty else []
+        epoch_group.observe(set_protocol_options, names='value')
+        set_protocol_options()
+
+    def show_experiment(*_):
+        if experiment.value is None:
+            return
+        with summary_out:
+            clear_output(wait=True)
+            try:
+                box.df_exp = summarize_experiment(experiment.value, show=True,
+                                                  height=height)
+            except Exception as exc:
+                box.df_exp = None
+                print(f'Could not summarize {experiment.value}: {type(exc).__name__}: {exc}')
+        df = box.df_exp
+        cell.unobserve(set_group_options, names='value')
+        cell.options = options(df, 'cell_label') if df is not None else []
+        cell.observe(set_group_options, names='value')
+        set_group_options()
+        with raw_out:
+            clear_output(wait=True)
+
+    def set_experiment_options(*_):
+        q = experiments[(experiments['data_owner'] == owner.value)
+                        & (experiments['species'] == species.value)]
+        experiment.unobserve(show_experiment, names='value')
+        experiment.options = options(q, 'exp_name')
+        experiment.observe(show_experiment, names='value')
+        show_experiment()
+
+    def set_species_options(*_):
+        q = experiments[experiments['data_owner'] == owner.value]
+        species.unobserve(set_experiment_options, names='value')
+        species.options = options(q, 'species')
+        species.observe(set_experiment_options, names='value')
+        set_experiment_options()
+
+    def set_load_enabled(change):
+        load.disabled = change['new'] is None
+
+    def load_raw(_):
+        with raw_out:
+            clear_output(wait=True)
+            print(f'Loading original traces for {experiment.value}, block {block.value} ...')
+            try:
+                clear_output(wait=True)
+                plot_epoch_block_traces(experiment.value, block.value, show=True)
+            except Exception as exc:
+                clear_output(wait=True)
+                print(f'Could not load raw traces: {type(exc).__name__}: {exc}')
+
+    owner.observe(set_species_options, names='value')
+    species.observe(set_experiment_options, names='value')
+    experiment.observe(show_experiment, names='value')
+    cell.observe(set_group_options, names='value')
+    epoch_group.observe(set_protocol_options, names='value')
+    protocol.observe(set_block_options, names='value')
+    block.observe(set_load_enabled, names='value')
+    load.on_click(load_raw)
+
+    owner.options = options(experiments, 'data_owner')
+    display(box)
+    return box
 
 
 # --------------------------------------------------------------------------

@@ -104,3 +104,37 @@ def test_protocol_tree_rejects_mea_summary():
                         'block_id': [1], 'duration_minutes': [1.0], 'group_label': ['x']})
     with pytest.raises(ValueError, match='single-cell'):
         sc.protocol_tree(mea, show=False)
+
+
+def test_protocol_tree_groups_cell_epoch_group_protocol_without_block_ids():
+    blocks = pd.DataFrame({
+        'cell_label': ['Cell1', 'Cell1', 'Cell1'],
+        'cell_type': ['RGC', 'RGC', 'RGC'],
+        'recording_technique': ['cell-attached'] * 3,
+        'group_label': ['Control', 'Control', 'Drug'],
+        'protocol_name': ['x.protocols.Spot', 'x.protocols.Spot', 'x.protocols.Spot'],
+        'block_id': [11, 12, 13],
+        'epochs': [5, 7, 3],
+    })
+    tree = sc.protocol_tree(blocks, show=False)
+    assert list(tree.columns) == ['cell', 'epoch_group', 'protocol', 'blocks', 'epochs']
+    assert tree.iloc[0].to_dict() == {
+        'cell': 'Cell1  (RGC)', 'epoch_group': 'Control', 'protocol': 'Spot',
+        'blocks': 2, 'epochs': 12,
+    }
+    assert 'block_ids' not in tree.columns
+
+
+@pytest.mark.parametrize('path, expected', [
+    ('/Volumes/SSD/single_cell/chris_data/h5/2026-01-01_G.h5', 'chris_data'),
+    ('/Volumes/SSD/single_cell/fred_data/json/2026-01-01_E.json', 'fred_data'),
+    ('/tmp/unclassified.h5', 'other_data'),
+])
+def test_data_owner_from_source_path(path, expected):
+    assert sc._data_owner(path) == expected
+
+
+def test_project_label_prefers_normalized_then_json_metadata():
+    assert sc._project_label({'project': 'Retina atlas', 'properties': {}}) == 'Retina atlas'
+    assert sc._project_label({'project': None,
+                              'properties': {'projectLabel': 'Night vision'}}) == 'Night vision'
