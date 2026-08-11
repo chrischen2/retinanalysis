@@ -138,3 +138,20 @@ def test_project_label_prefers_normalized_then_json_metadata():
     assert sc._project_label({'project': 'Retina atlas', 'properties': {}}) == 'Retina atlas'
     assert sc._project_label({'project': None,
                               'properties': {'projectLabel': 'Night vision'}}) == 'Night vision'
+
+
+@pytest.mark.parametrize('label, expected', [
+    (r'RGC\ON-parasol', 'ON-parasol'),
+    ('RGC/OFF-parasol/', 'OFF-parasol'),
+    ('horizontal', 'horizontal'),
+])
+def test_cell_type_short_uses_final_path_component(label, expected):
+    assert sc._cell_type_short(label) == expected
+
+
+@pytest.mark.parametrize('name, expected', [
+    ('edu.washington.riekelab.turner.protocols.ExpandingSpots', 'ExpandingSpots'),
+    ('manookinlab.protocols.JitteredNoise', 'JitteredNoise'),
+])
+def test_protocol_short_removes_package(name, expected):
+    assert sc._protocol_short(name) == expected

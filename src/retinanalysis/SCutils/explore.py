@@ -210,20 +210,25 @@ def _project_label(row) -> str:
     return _first_text(*candidates)
 
 
-def list_experiments(show: bool = True, height: int = 400) -> pd.DataFrame:
-    """Every single-cell experiment, separated by owner and enriched for browsing.
+def _cell_type_short(label) -> str:
+    """Final component of a Symphony cell-type path."""
+    return _first_text(label).replace('/', '\\').rstrip('\\').split('\\')[-1]
 
-    ``data_owner`` is inferred from the stored h5/meta path (``chris_data`` or
-    ``fred_data``). Species comes from the Animal row; project first uses the
-    normalized Experiment field and then its JSON metadata. ``cell_types`` is
-    the unique set of Cell types recorded on that date.
-    """
+
+def _protocol_short(name) -> str:
+    """Protocol class name without its package prefix."""
+    return _first_text(name).split('.protocols.')[-1].split('.')[-1]
+
+
+def _experiment_catalog() -> pd.DataFrame:
+    """Full experiment metadata used by both tables and cascading menus."""
     from retinanalysis.config import schema
 
+    columns = ['data_owner', 'species', 'exp_name', 'project', 'cell_types',
+               'protocols']
     ex = (schema.Experiment() & 'is_mea=0').fetch(format='frame').reset_index()
     if ex.empty:
-        return pd.DataFrame(columns=['data_owner', 'species', 'exp_name',
-                                     'project', 'cell_types'])
+        return pd.DataFrame(columns=columns)
     ex = ex.rename(columns={'id': 'experiment_id'})
     sc_experiments = (schema.Experiment() & 'is_mea=0').proj(experiment_id='id')
 
@@ -244,30 +249,56 @@ def list_experiments(show: bool = True, height: int = 400) -> pd.DataFrame:
     cell_df = cells.fetch(format='frame').reset_index()
     if not cell_df.empty:
         cell_df['type_display'] = cell_df.apply(
-            lambda r: _first_text(r.get('type'),
-                                  _as_dict(r.get('properties')).get('type')),
-            axis=1)
+            lambda r: _cell_type_short(_first_text(
+                r.get('type'), _as_dict(r.get('properties')).get('type'))), axis=1)
         cell_types = (cell_df.groupby('experiment_id', sort=False)['type_display']
                       .agg(_join_unique).rename('cell_types'))
         ex = ex.merge(cell_types, on='experiment_id', how='left')
     else:
         ex['cell_types'] = '?'
 
+    blocks = schema.EpochBlock() & sc_experiments
+    block_df = blocks.fetch(format='frame').reset_index()
+    if not block_df.empty:
+        protocol_df = schema.Protocol().fetch(format='frame').reset_index()
+        block_df = block_df.merge(protocol_df[['protocol_id', 'name']], on='protocol_id')
+        block_df['protocol_display'] = block_df['name'].map(_protocol_short)
+        protocols = (block_df.groupby('experiment_id', sort=False)['protocol_display']
+                     .agg(_join_unique).rename('protocols'))
+        ex = ex.merge(protocols, on='experiment_id', how='left')
+    else:
+        ex['protocols'] = '?'
+
     ex['data_owner'] = ex.apply(
         lambda r: _data_owner(r.get('data_file'), r.get('meta_file')), axis=1)
     ex['project'] = ex.apply(_project_label, axis=1)
-    ex['species'] = ex['species'].fillna('?')
-    ex['cell_types'] = ex['cell_types'].fillna('?')
+    for column in ('species', 'cell_types', 'protocols'):
+        ex[column] = ex[column].fillna('?')
     order = pd.Categorical(ex['data_owner'],
                            ['chris_data', 'fred_data', 'other_data'], ordered=True)
     ex = ex.assign(_owner_order=order)
-    df = (ex[['data_owner', 'species', 'exp_name', 'project', 'cell_types',
-              '_owner_order']]
-          .sort_values(['_owner_order', 'species', 'exp_name'])
-          .drop(columns='_owner_order').reset_index(drop=True))
+    return (ex[columns + ['_owner_order']]
+            .sort_values(['_owner_order', 'species', 'exp_name'])
+            .drop(columns='_owner_order').reset_index(drop=True))
+
+
+def list_experiments(show: bool = True, height: int = 400) -> pd.DataFrame:
+    """Every single-cell date with project, short cell types and protocols.
+
+    ``data_owner`` is inferred from the stored h5/meta path (``chris_data`` or
+    ``fred_data``) only to render separate tables; owner and species are not
+    shown or returned. Project first uses the normalized Experiment field and
+    then its JSON metadata. Cell types and protocols use their short names.
+    """
+    catalog = _experiment_catalog()
+    visible = ['exp_name', 'project', 'cell_types', 'protocols']
+    df = catalog[visible].copy()
     if show:
         print(f'{len(df)} single-cell experiments.')
-        tree_table(df, levels=['data_owner'], height=height)
+        for owner in catalog['data_owner'].drop_duplicates():
+            rows = catalog.loc[catalog['data_owner'].eq(owner), visible]
+            print(f'\n{owner} ({len(rows)})')
+            scroll_table(rows.reset_index(drop=True), height=height)
     return df
 
 
@@ -454,7 +485,16 @@ def summarize_experiments(experiments: pd.DataFrame | None = None,
     except ImportError as exc:
         raise ImportError('summarize_experiments requires ipywidgets.') from exc
 
-    experiments = list_experiments(show=False) if experiments is None else experiments.copy()
+    catalog = _experiment_catalog()
+    if experiments is None:
+        experiments = catalog
+    else:
+        experiments = experiments.copy()
+        required = {'data_owner', 'species'}
+        if not required.issubset(experiments.columns):
+            # A frame returned by list_experiments intentionally contains only
+            # visible columns. Restore hidden selector metadata by exp_name.
+            experiments = catalog[catalog['exp_name'].isin(experiments['exp_name'])]
     if experiments.empty:
         raise ValueError('No single-cell experiments are available.')
 
