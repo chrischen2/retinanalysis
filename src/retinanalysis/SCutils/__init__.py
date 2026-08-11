@@ -4,18 +4,31 @@ Provides pure-function implementations of Clarinet's builtinProcessors
 and builtinExtractors, independent of any GUI framework, plus `explore`:
 read-only DataJoint queries and notebook table rendering for patch data.
 
-Submodules (`dataprocessor`, `protocols`, `explore`) are loaded lazily on
-first access so that `import retinanalysis` stays fast for users who never
-touch the single-cell path.
+Submodules and file-conversion helpers are loaded lazily on first access so
+that `import retinanalysis` stays fast for users who never touch the
+single-cell path.
 """
 
-__all__ = ["dataprocessor", "protocols", "explore"]
+_MODULES = {"dataprocessor", "protocols", "explore", "h5_json"}
+_ATTRIBUTES = {
+    "SingleCellJsonUpdate": ("h5_json", "SingleCellJsonUpdate"),
+    "update_single_cell_json": ("h5_json", "update_single_cell_json"),
+}
+
+__all__ = sorted(_MODULES | set(_ATTRIBUTES))
 
 
 def __getattr__(name):
-    if name in __all__:
-        import importlib
+    import importlib
+
+    if name in _MODULES:
         mod = importlib.import_module(f".{name}", __name__)
         globals()[name] = mod
         return mod
+    if name in _ATTRIBUTES:
+        module_name, attribute_name = _ATTRIBUTES[name]
+        mod = importlib.import_module(f".{module_name}", __name__)
+        value = getattr(mod, attribute_name)
+        globals()[name] = value
+        return value
     raise AttributeError(f"module 'retinanalysis.SCutils' has no attribute {name!r}")
