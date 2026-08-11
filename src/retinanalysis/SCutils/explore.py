@@ -263,8 +263,9 @@ def _experiment_catalog() -> pd.DataFrame:
         protocol_df = schema.Protocol().fetch(format='frame').reset_index()
         block_df = block_df.merge(protocol_df[['protocol_id', 'name']], on='protocol_id')
         block_df['protocol_display'] = block_df['name'].map(_protocol_short)
-        protocols = (block_df.groupby('experiment_id', sort=False)['protocol_display']
-                     .agg(_join_unique).rename('protocols'))
+        protocols = (block_df[['experiment_id', 'protocol_display']]
+                     .drop_duplicates()
+                     .rename(columns={'protocol_display': 'protocols'}))
         ex = ex.merge(protocols, on='experiment_id', how='left')
     else:
         ex['protocols'] = '?'
@@ -278,7 +279,7 @@ def _experiment_catalog() -> pd.DataFrame:
                            ['chris_data', 'fred_data', 'other_data'], ordered=True)
     ex = ex.assign(_owner_order=order)
     return (ex[columns + ['_owner_order']]
-            .sort_values(['_owner_order', 'species', 'exp_name'])
+            .sort_values(['_owner_order', 'species', 'exp_name', 'protocols'])
             .drop(columns='_owner_order').reset_index(drop=True))
 
 
@@ -288,17 +289,19 @@ def list_experiments(show: bool = True, height: int = 400) -> pd.DataFrame:
     ``data_owner`` is inferred from the stored h5/meta path (``chris_data`` or
     ``fred_data``) only to render separate tables; owner and species are not
     shown or returned. Project first uses the normalized Experiment field and
-    then its JSON metadata. Cell types and protocols use their short names.
+    then its JSON metadata. Cell types and protocols use their short names,
+    with one row per protocol for easier scanning.
     """
     catalog = _experiment_catalog()
     visible = ['exp_name', 'project', 'cell_types', 'protocols']
     df = catalog[visible].copy()
     if show:
-        print(f'{len(df)} single-cell experiments.')
+        print(f"{catalog['exp_name'].nunique()} single-cell experiments.")
         for owner in catalog['data_owner'].drop_duplicates():
             rows = catalog.loc[catalog['data_owner'].eq(owner), visible]
-            print(f'\n{owner} ({len(rows)})')
-            scroll_table(rows.reset_index(drop=True), height=height)
+            print(f"\n{owner} ({rows['exp_name'].nunique()} experiments)")
+            tree_table(rows.reset_index(drop=True),
+                       levels=['exp_name', 'project', 'cell_types'], height=height)
     return df
 
 

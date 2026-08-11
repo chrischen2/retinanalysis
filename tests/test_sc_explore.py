@@ -155,3 +155,18 @@ def test_cell_type_short_uses_final_path_component(label, expected):
 ])
 def test_protocol_short_removes_package(name, expected):
     assert sc._protocol_short(name) == expected
+
+
+def test_list_experiments_keeps_one_row_per_protocol(monkeypatch):
+    catalog = pd.DataFrame({
+        'data_owner': ['chris_data', 'chris_data'],
+        'species': ['Primate', 'Primate'],
+        'exp_name': ['2026-08-10_G', '2026-08-10_G'],
+        'project': ['?', '?'],
+        'cell_types': ['ON-parasol', 'ON-parasol'],
+        'protocols': ['LedPulse', 'VariableMeanNoise'],
+    })
+    monkeypatch.setattr(sc, '_experiment_catalog', lambda: catalog)
+    result = sc.list_experiments(show=False)
+    assert list(result.columns) == ['exp_name', 'project', 'cell_types', 'protocols']
+    assert result['protocols'].tolist() == ['LedPulse', 'VariableMeanNoise']

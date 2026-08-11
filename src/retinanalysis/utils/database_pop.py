@@ -757,6 +757,16 @@ def append_data(data_dir: str, meta_dir: str, tags_dir: str, username: str,
             print(f"Loading meta: {meta}")
             with open(meta, 'r', encoding='latin-1') as f:
                 meta_dict = json.load(f)
+            if isinstance(data, str) and os.path.isfile(data):
+                # Some single-cell JSON files were generated without h5path
+                # fields even though responses/stimuli are otherwise complete.
+                # Restore them in memory from the UUID-named H5 groups so the
+                # experiment can be ingested and its raw traces remain usable.
+                from retinanalysis.SCutils.h5_json import repair_h5_paths
+                n_paths = repair_h5_paths(meta_dict, data)
+                if n_paths:
+                    print(f"Restored {n_paths} missing H5 paths from "
+                          f"{os.path.basename(data)}")
             print(f"Loading tags: {tags}")
             with open(tags, 'r', encoding='latin-1') as f:
                 tags_dict = json.load(f)

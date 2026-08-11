@@ -5,11 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import re
 import tempfile
 from typing import List, Optional, Sequence, Tuple, Union
 
 
 PathLike = Union[str, Path]
+_UUID_AT_END = re.compile(
+    r'([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-'
+    r'[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$')
 
 
 # A dedicated single-cell drive wins when more than one known drive is
@@ -106,6 +110,65 @@ def _locate_data_folders(
         'Pass volume="/Volumes/<name>" to select one explicitly.')
 
 
+def _h5path_records(value):
+    """Yield response/stimulus dicts recursively from parsed metadata."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key in ('responses', 'stimuli') and isinstance(child, dict):
+                for record in child.values():
+                    if isinstance(record, dict):
+                        yield record
+            yield from _h5path_records(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _h5path_records(child)
+
+
+def repair_h5_paths(metadata: dict, h5_path: PathLike) -> int:
+    """Restore missing response/stimulus paths from their UUID-named H5 groups.
+
+    Older calls to :func:`update_single_cell_json` could write otherwise valid
+    metadata without ``h5path`` fields. Database ingestion and later raw-trace
+    loading need those paths. This mutates ``metadata`` in memory and returns
+    the number of restored fields; the source JSON is not rewritten.
+    """
+    missing = {}
+    for record in _h5path_records(metadata):
+        if not record.get('h5path') and record.get('uuid'):
+            missing.setdefault(str(record['uuid']).lower(), []).append(record)
+    if not missing:
+        return 0
+
+    import h5py
+
+    resolved = {}
+    with h5py.File(str(h5_path), 'r') as h5_file:
+        def visit(name, obj):
+            parts = name.split('/')
+            if len(parts) < 2 or parts[-2] not in ('responses', 'stimuli'):
+                return
+            match = _UUID_AT_END.search(parts[-1])
+            if match:
+                uuid = match.group(1).lower()
+                if uuid in missing:
+                    resolved[uuid] = obj.name
+        h5_file.visititems(visit)
+
+    unresolved = sorted(set(missing) - set(resolved))
+    if unresolved:
+        shown = ', '.join(unresolved[:3])
+        more = f' (+{len(unresolved) - 3} more)' if len(unresolved) > 3 else ''
+        raise KeyError(f'Could not resolve {len(unresolved)} response/stimulus '
+                       f'UUID(s) in {h5_path}: {shown}{more}')
+
+    repaired = 0
+    for uuid, records in missing.items():
+        for record in records:
+            record['h5path'] = resolved[uuid]
+            repaired += 1
+    return repaired
+
+
 def update_single_cell_json(
     *,
     volumes_root: PathLike = '/Volumes',
@@ -113,7 +176,7 @@ def update_single_cell_json(
     volume_names: Sequence[str] = DEFAULT_VOLUME_NAMES,
     data_owner: str = 'chris_data',
     stage_type: str = 'LightCrafter',
-    save_h5_path: bool = False,
+    save_h5_path: bool = True,
     dry_run: bool = False,
     continue_on_error: bool = True,
     verbose: bool = True,
@@ -128,7 +191,9 @@ def update_single_cell_json(
     Existing JSON files are never overwritten. Each new file is parsed into a
     temporary directory beside the JSON folder, validated as JSON, and moved
     into place only after parsing succeeds. Set ``dry_run=True`` to report the
-    missing mappings without writing anything.
+    missing mappings without writing anything. H5 response/stimulus paths are
+    retained by default because database ingestion and raw-trace loading need
+    them.
 
     Typical use::
 
@@ -213,4 +278,4 @@ def update_single_cell_json(
 
 
 __all__ = ['DEFAULT_VOLUME_NAMES', 'SingleCellJsonUpdate',
-           'update_single_cell_json']
+           'repair_h5_paths', 'update_single_cell_json']
