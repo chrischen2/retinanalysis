@@ -39,7 +39,8 @@ def figure_to_png(fig, dpi: int = 110) -> bytes:
 def png_browser(options: Sequence[Tuple[str, object]],
                 render: Callable[[object], Tuple[Optional[str], bytes]],
                 description: str = 'Show:',
-                empty_message: str = 'Nothing to browse.'):
+                empty_message: str = 'Nothing to browse.',
+                display_widget: bool = True):
     """Dropdown over ``options``, showing one rendered item at a time.
 
     ``options`` is a sequence of ``(label, key)`` pairs — the label is what the
@@ -47,9 +48,10 @@ def png_browser(options: Sequence[Tuple[str, object]],
     ``(html_or_None, png_bytes)``; it is called at most once per key and the
     result cached, so an item nobody selects is never rendered.
 
-    Returns the displayed widget, or None when there is nothing to show or
-    ipywidgets is unavailable (the caller is expected to have a non-widget
-    fallback for that case).
+    Returns the widget, or None when there is nothing to show or ipywidgets is
+    unavailable (the caller is expected to have a non-widget fallback for
+    that case). Set ``display_widget=False`` when embedding it in another
+    widget such as :func:`lazy_tabs`.
     """
     from IPython.display import display
 
@@ -89,7 +91,8 @@ def png_browser(options: Sequence[Tuple[str, object]],
     _show(dropdown.value)
 
     box = widgets.VBox([dropdown, html, note, image])
-    display(box)
+    if display_widget:
+        display(box)
     return box
 
 
@@ -101,9 +104,7 @@ def lazy_tabs(titles, render, description: str = '', widths=None):
     costs nothing until someone opens it, and opening it twice costs once.
 
     ``widths`` optionally gives a CSS width per tab (``None`` to leave one
-    alone), applied to the container rather than to individual images. That
-    catches everything a tab renders, including the per-cell-type browsers,
-    which display themselves and so are never handed back to be resized.
+    alone), applied to the widget returned by ``render``.
 
     Returns the displayed ``Tab`` widget, or None without ipywidgets.
     """
@@ -129,16 +130,12 @@ def lazy_tabs(titles, render, description: str = '', widths=None):
         built.add(index)
         children = list(tab.children)
         width = widths[index] if widths and index < len(widths) else None
-        out = widgets.Output(layout=widgets.Layout(width=width) if width
-                             else widgets.Layout())
-        # The view is captured into an Output rather than returned as a
-        # widget: the per-cell-type browsers display themselves, and this is
-        # the one place that needs to catch that rather than re-plumb them.
-        with out:
-            widget = render(index)
-            if widget is not None:
-                display(widget)
-        children[index] = out
+        widget = render(index)
+        if widget is None:
+            widget = widgets.HTML('<em>Nothing to plot.</em>')
+        if width:
+            widget.layout.width = width
+        children[index] = widget
         tab.children = tuple(children)
 
     tab.observe(lambda change: _build(change['new']), names='selected_index')

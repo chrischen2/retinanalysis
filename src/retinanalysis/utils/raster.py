@@ -794,7 +794,7 @@ def browse_epoch_rasters(response_block, cell_types: Optional[Sequence[str]] = N
                          t_end_ms: Optional[float] = None,
                          cell_ids: Optional[Iterable[int]] = None,
                          epoch_range: Optional[Tuple[int, int]] = None,
-                         dpi: int = 110, **kwargs):
+                         dpi: int = 110, display_widget: bool = True, **kwargs):
     """Dropdown over cell types, showing one type's epoch rasters at a time.
 
     The label carries what you need to choose without opening anything: how
@@ -827,7 +827,8 @@ def browse_epoch_rasters(response_block, cell_types: Optional[Sequence[str]] = N
         return None, figure_to_png(fig, dpi=dpi)
 
     box = png_browser(options, _render, description='Cell type:',
-                      empty_message='No cell types to browse.')
+                      empty_message='No cell types to browse.',
+                      display_widget=display_widget)
     if box is not None:
         return box
 
@@ -1093,7 +1094,8 @@ def plot_epoch_count_heatmap(response_block, cell_type: str,
 
 def browse_epoch_count_heatmaps(response_block,
                                 cell_types: Optional[Sequence[str]] = None,
-                                minimum_n: int = 3, dpi: int = 110, **kwargs):
+                                minimum_n: int = 3, dpi: int = 110,
+                                display_widget: bool = True, **kwargs):
     """Dropdown over cell types, one cell × epoch heatmap at a time.
 
     Same selector as :func:`browse_epoch_rasters` — labels carry the cell count
@@ -1113,7 +1115,8 @@ def browse_epoch_count_heatmaps(response_block,
             dpi=dpi)
 
     box = png_browser(options, _render, description='Cell type:',
-                      empty_message='No cell types to browse.')
+                      empty_message='No cell types to browse.',
+                      display_widget=display_widget)
     if box is not None:
         return box
 

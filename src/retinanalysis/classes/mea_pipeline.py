@@ -659,8 +659,6 @@ class MEAPipeline:
                                                 plot_epoch_spike_counts)
 
         import ipywidgets as widgets  # noqa: F401  (fail early, before any render)
-        from IPython.display import display
-
         block_params = getattr(self.stim, 'd_epoch_block_params', {}) or {}
 
         def _image(fig):
@@ -682,19 +680,20 @@ class MEAPipeline:
                 return widgets.VBox(images) if images else widgets.HTML(
                     '<em>No RFs to compare.</em>')
             if index == 2:
-                browse_epoch_rasters(
+                return browse_epoch_rasters(
                     self.resp, cell_types=cell_types, minimum_n=minimum_n,
                     n_first=n_first, n_last=n_last,
                     pre_time_ms=block_params.get('preTime'),
-                    stim_time_ms=block_params.get('stimTime'), dpi=dpi)
-                return None
+                    stim_time_ms=block_params.get('stimTime'), dpi=dpi,
+                    display_widget=False)
             # Spikes per epoch: the all-types summary, then the per-type
             # heatmap browser under it.
-            display(_image(plot_epoch_spike_counts(
-                self.resp, cell_types=cell_types, minimum_n=minimum_n)))
-            browse_epoch_count_heatmaps(self.resp, cell_types=cell_types,
-                                        minimum_n=minimum_n, dpi=dpi)
-            return None
+            summary = _image(plot_epoch_spike_counts(
+                self.resp, cell_types=cell_types, minimum_n=minimum_n))
+            heatmaps = browse_epoch_count_heatmaps(
+                self.resp, cell_types=cell_types, minimum_n=minimum_n,
+                dpi=dpi, display_widget=False)
+            return widgets.VBox([summary, heatmaps]) if heatmaps is not None else summary
 
         name = (f'{self.analysis_chunk.exp_name} / '
                 f'{getattr(self.resp, "datafile_name", "block")}')
