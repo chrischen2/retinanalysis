@@ -2,6 +2,8 @@ from retinanalysis.utils import (DATA_DIR,
                                  ANALYSIS_DIR,
                                  USER)
 from retinanalysis.config.settings import find_path
+from retinanalysis.utils.experiment_files import (is_mea_experiment_file,
+                                                   is_single_cell_experiment_file)
 
 import datajoint as dj
 import json
@@ -547,21 +549,24 @@ def gen_tags(file_to_create: str, dir: str):
 
 # returns a list of [meta_file, data_file, tag_file] tuples in the directory
 def gen_meta_list(data_dir: str, meta_dir: str, tags_dir: str) -> list:
+    """Return ingestible experiment triples from one source tree.
+
+    Single-cell H5 names must follow ``YYYY-MM-DD_X.h5`` (with optional run
+    suffixes such as ``_2`` or ``_c1-3``). Auxiliary and legacy files are
+    ignored silently; in particular, ``*.auisql.h5`` is not experiment data.
+    The metadata-only pass separately recognizes the compact MEA date format.
+    """
     stack = [data_dir]
     meta_list = []
 
     while stack:
         current_dir = stack.pop()
         for item in os.listdir(current_dir):
-            # Skip macOS AppleDouble sibling files (e.g. ._2019-01-15_G.h5).
-            # These are not valid HDF5/JSON files; parse_data would choke on them.
-            if item.startswith('._'):
-                continue
             full_path = os.path.join(current_dir, item)
             if os.path.isdir(full_path):
                 stack.append(full_path)
             else:
-                if item.endswith('.h5'):
+                if is_single_cell_experiment_file(item, suffix='.h5'):
                     # check for meta
                     meta_file = os.path.join(meta_dir, item[:-3] + '.json')
                     if not os.path.exists(meta_file):
@@ -584,10 +589,11 @@ def gen_meta_list(data_dir: str, meta_dir: str, tags_dir: str) -> list:
     # lines of "Could not find" that read like errors and buried the real ones.
     no_data_dir = []
     for item in os.listdir(meta_dir):
-        # Skip macOS AppleDouble sibling files (e.g. ._2019-01-15_G.json).
-        if item.startswith('._'):
+        # A JSON without its single-cell H5 is considered here only when its
+        # name identifies MEA metadata. Unrelated JSON is not an ingest error.
+        if not is_mea_experiment_file(item, suffix='.json'):
             continue
-        if item.endswith('.json') and item[:-5] + '.h5' not in os.listdir(data_dir):
+        if item[:-5] + '.h5' not in os.listdir(data_dir):
             # check for tags
             tags_file = os.path.join(tags_dir, item[:-5] + '.json')
             if not os.path.exists(tags_file):

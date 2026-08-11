@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from typing import Union
 import sys
 from pathlib import Path
+from retinanalysis.utils.experiment_files import is_single_cell_experiment_file
 
 def strip_uuid(uuid: str) -> str:
     """ Strip the UUID from the UUID string. """
@@ -1802,8 +1803,7 @@ def find_new_h5_files(h5_dir: Path, json_dir: Path):
     h5_files = sorted(
         p for p in h5_dir.glob("*.h5")
         if p.is_file()
-        and not p.name.startswith(".")
-        and not p.name.startswith("._")
+        and is_single_cell_experiment_file(p, suffix='.h5')
     )
 
     existing_json_stems = {
