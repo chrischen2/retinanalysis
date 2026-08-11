@@ -168,5 +168,5 @@ def test_list_experiments_keeps_one_row_per_protocol(monkeypatch):
     })
     monkeypatch.setattr(sc, '_experiment_catalog', lambda: catalog)
     result = sc.list_experiments(show=False)
-    assert list(result.columns) == ['exp_name', 'project', 'cell_types', 'protocols']
-    assert result['protocols'].tolist() == ['LedPulse', 'VariableMeanNoise']
+    assert list(result.columns) == ['exp_name', 'project', 'cell_types', 'protocol']
+    assert result['protocol'].tolist() == ['LedPulse', 'VariableMeanNoise']

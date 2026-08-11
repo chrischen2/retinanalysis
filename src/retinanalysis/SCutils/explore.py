@@ -294,11 +294,12 @@ def list_experiments(show: bool = True, height: int = 400) -> pd.DataFrame:
     """
     catalog = _experiment_catalog()
     visible = ['exp_name', 'project', 'cell_types', 'protocols']
-    df = catalog[visible].copy()
+    df = catalog[visible].rename(columns={'protocols': 'protocol'}).copy()
     if show:
         print(f"{catalog['exp_name'].nunique()} single-cell experiments.")
         for owner in catalog['data_owner'].drop_duplicates():
-            rows = catalog.loc[catalog['data_owner'].eq(owner), visible]
+            rows = (catalog.loc[catalog['data_owner'].eq(owner), visible]
+                    .rename(columns={'protocols': 'protocol'}))
             print(f"\n{owner} ({rows['exp_name'].nunique()} experiments)")
             tree_table(rows.reset_index(drop=True),
                        levels=['exp_name', 'project', 'cell_types'], height=height)
