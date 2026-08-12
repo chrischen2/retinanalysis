@@ -30,6 +30,7 @@ _SUBMODULES = {
     'database_pop': 'retinanalysis.utils.database_pop',
     'datajoint_utils': 'retinanalysis.utils.datajoint_utils',
     'cell_type_utils': 'retinanalysis.utils.cell_type_utils',
+    'isomerization': 'retinanalysis.utils.isomerization',
 }
 
 _ATTR_TO_MODULE = {
@@ -37,6 +38,16 @@ _ATTR_TO_MODULE = {
     'load_canonical_cell_types': 'retinanalysis.utils.cell_type_utils',
     'map_cell_type': 'retinanalysis.utils.cell_type_utils',
     'filter_available_types': 'retinanalysis.utils.cell_type_utils',
+    'collecting_area': 'retinanalysis.utils.isomerization',
+    'convert_isomerizations': 'retinanalysis.utils.isomerization',
+    'convert_experiment_receptors': 'retinanalysis.utils.isomerization',
+    'epoch_group_ndf_table': 'retinanalysis.utils.isomerization',
+    'infer_rig_name': 'retinanalysis.utils.isomerization',
+    'isomerizations_converter': 'retinanalysis.utils.isomerization',
+    'isomerization_converter_widget': 'retinanalysis.utils.isomerization',
+    'isomerization_converter_browser': 'retinanalysis.utils.isomerization',
+    'isomerizations_per_watt': 'retinanalysis.utils.isomerization',
+    'select_flux_factor': 'retinanalysis.utils.isomerization',
 }
 
 
