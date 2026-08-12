@@ -9,6 +9,7 @@ from retinanalysis.utils.isomerization import (
     epoch_group_ndf_table,
     infer_rig_name,
     ndf_attenuation,
+    resolve_calibration_resources,
     select_flux_factor,
     split_stage_ndfs,
 )
@@ -24,6 +25,13 @@ from retinanalysis.utils.isomerization import (
 ])
 def test_infer_rig_name(name, expected):
     assert infer_rig_name(name) == expected
+
+
+def test_default_calibration_resources_is_repository_folder():
+    root = resolve_calibration_resources()
+    assert root.name == "calibration-resources"
+    assert (root / "rigs" / "shared_two_photon").is_dir()
+    assert (root / "sources" / "primate").is_dir()
 
 
 def test_filter_wheel_token_is_not_used_as_wheel_reading():

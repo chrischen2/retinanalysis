@@ -31,6 +31,12 @@ RIG_BY_SUFFIX = {
     "C": "mea",
 }
 
+# Repository-local checkout added for the notebook workflow. Keeping this
+# relative to this module makes the default survive moving/cloning the repo.
+DEFAULT_CALIBRATION_RESOURCES = (
+    Path(__file__).resolve().parents[3] / "calibration-resources"
+)
+
 # Values are optical density (OD), copied from the corresponding base rig
 # descriptions in riekelab-package. Display colour-dependent maps are left to
 # the caller because the exact add-on rig class can change with date.
@@ -278,7 +284,8 @@ def collecting_area(species: str, receptor: str, light_path: str,
 
 def resolve_calibration_resources(path: str | os.PathLike[str] | None = None) -> Path:
     """Locate a checkout of Rieke-Lab/calibration-resources."""
-    candidates = [path, os.environ.get("RIEKELAB_CALIBRATION_RESOURCES")]
+    candidates = [path, os.environ.get("RIEKELAB_CALIBRATION_RESOURCES"),
+                  DEFAULT_CALIBRATION_RESOURCES]
     package = Path("/Users/chrischen/Documents/GitHub/riekelab-package-master")
     candidates.extend((package.parent / "calibration-resources", package / "calibration-resources"))
     for candidate in candidates:
@@ -606,7 +613,7 @@ def isomerization_converter_widget(metadata: Mapping[str, Any] | str | os.PathLi
                                        layout=widgets.Layout(width="250px"))
     value = widgets.FloatText(value=1.0, description="Input value:",
                               layout=widgets.Layout(width="250px"))
-    root_value = str(calibration_root or "")
+    root_value = str(calibration_root or DEFAULT_CALIBRATION_RESOURCES)
     resource_path = widgets.Text(value=root_value, description="Calibration:",
                                  placeholder="path or RIEKELAB_CALIBRATION_RESOURCES",
                                  layout=widgets.Layout(width="760px"))
@@ -733,7 +740,8 @@ def isomerization_converter_browser(experiments=None,
 
 
 __all__ = [
-    "COLLECTING_AREAS", "FluxFactor", "RIG_BY_SUFFIX", "collecting_area",
+    "COLLECTING_AREAS", "DEFAULT_CALIBRATION_RESOURCES", "FluxFactor",
+    "RIG_BY_SUFFIX", "collecting_area",
     "convert_isomerizations", "epoch_group_ndf_table", "infer_rig_name",
     "isomerizations_converter", "isomerization_converter_widget",
     "isomerization_converter_browser",

@@ -93,6 +93,18 @@ def test_scroll_table_escapes_html():
     assert '&lt;script&gt;' in html
 
 
+@pytest.mark.parametrize('ndfs, wheel, recorded, expected', [
+    ('["EL3"]', 0.0, True, 'EL3 + FW0'),
+    ('["EL06", "EL2", "FW1"]', 3.0, True, 'EL06 + EL2 + FW3'),
+    ('[]', 2.0, True, 'FW2'),
+    ('[]', float('nan'), True, 'none'),
+    ('', float('nan'), False, 'not recorded'),
+])
+def test_format_ndf_fw_uses_numeric_wheel_not_embedded_token(
+        ndfs, wheel, recorded, expected):
+    assert sc._format_ndf_fw(ndfs, wheel, recorded) == expected
+
+
 def test_num_cols_right_aligned(tree_df):
     html = sc.tree_table(tree_df, levels=['cell'], show=False, num_cols=('blocks',))
     assert html.count('class="num"') == len(tree_df)
