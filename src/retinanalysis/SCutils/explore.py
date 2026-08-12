@@ -546,6 +546,15 @@ def summarize_experiments(experiments: pd.DataFrame | None = None,
     if experiments.empty:
         raise ValueError('No single-cell experiments are available.')
 
+    # _experiment_catalog has one row per (experiment, protocol) for the
+    # Section 3/4 inventory tables. The browser must instead have exactly one
+    # row per experiment, or the same date is repeated for every protocol it
+    # ran. Protocols are loaded only after a date is selected.
+    experiments = (experiments[['data_owner', 'species', 'exp_name']]
+                   .drop_duplicates(subset='exp_name', keep='first')
+                   .sort_values(['data_owner', 'species', 'exp_name'],
+                                ignore_index=True))
+
     owner = widgets.Dropdown(description='Data:', layout=widgets.Layout(width='260px'))
     species = widgets.Dropdown(description='Species:', layout=widgets.Layout(width='300px'))
     experiment = widgets.Dropdown(description='Experiment:', layout=widgets.Layout(width='330px'))

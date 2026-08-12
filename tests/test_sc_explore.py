@@ -187,3 +187,29 @@ def test_protocol_inventory_counts_unique_dates_by_species(monkeypatch):
     assert spot.to_dict() == {
         'primate_dates': 1, 'mouse_dates': 2, 'total_dates': 3,
     }
+
+
+def test_experiment_browser_lists_each_date_once(monkeypatch):
+    pytest.importorskip('ipywidgets')
+    catalog = pd.DataFrame({
+        'data_owner': ['chris_data'] * 3,
+        'species': ['Primate'] * 3,
+        'exp_name': ['2026-08-04_G', '2026-08-04_G', '2026-08-10_G'],
+        'project': ['?'] * 3,
+        'cell_types': ['RGC'] * 3,
+        'protocols': ['Spot', 'Noise', 'Pulse'],
+    })
+    summary = pd.DataFrame({
+        'cell_label': ['Cell1'], 'cell_type': ['RGC'],
+        'group_label': ['Control'], 'protocol': ['Spot'],
+        'block_id': [1], 'epochs': [2],
+    })
+    monkeypatch.setattr(sc, '_experiment_catalog', lambda: catalog)
+    monkeypatch.setattr(sc, 'summarize_experiment',
+                        lambda *args, **kwargs: summary.copy())
+    monkeypatch.setattr('IPython.display.display', lambda *args, **kwargs: None)
+
+    browser = sc.summarize_experiments(
+        catalog[['exp_name']].drop_duplicates())
+    values = [value for _, value in browser.selectors['experiment'].options]
+    assert values == ['2026-08-04_G', '2026-08-10_G']
