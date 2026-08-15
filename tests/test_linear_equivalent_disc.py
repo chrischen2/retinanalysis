@@ -104,6 +104,22 @@ def test_only_linear_equivalent_disc_needs_the_filter():
                                   'LinearEquivalentDisc'}
 
 
+def test_find_blocks_display_is_compact():
+    from retinanalysis.SCutils import explore as sc
+
+    assert 'protocol' not in led.FIND_BLOCKS_DISPLAY_COLUMNS
+    assert not ({'onlineAnalysis', 'backgroundIntensity', 'light_setting',
+                 'WeberConstant', 'block_id'} & set(led.FIND_BLOCKS_DISPLAY_COLUMNS))
+    assert {'exp_name', 'cell_label', 'cell_type_short', 'n_epochs'}.issubset(
+        led.FIND_BLOCKS_DISPLAY_COLUMNS)
+    frame = pd.DataFrame([{column: 'x' for column in led.FIND_BLOCKS_DISPLAY_COLUMNS}])
+    html = sc.scroll_table(frame, show=False)
+    assert all(f'<th>{column}</th>' in html for column in led.FIND_BLOCKS_DISPLAY_COLUMNS)
+    assert all(f'<th>{column}</th>' not in html for column in
+               ('onlineAnalysis', 'backgroundIntensity', 'light_setting',
+                'WeberConstant', 'block_id'))
+
+
 def test_record_key_is_hdf5_safe_and_separates_sites():
     a = led.record_key('2026-05-08_E', 'Cell4', 'extracellular', 'center', 0.0, 0.5)
     b = led.record_key('2026-05-08_E', 'Cell4', 'extracellular', 'surround', 0.0, 0.5)

@@ -68,6 +68,13 @@ PROTOCOLS = ('LinearEquivalentDiscConeLin', 'LinearEquivalentAnnulus',
              'LinearEquivalentDisc')
 NEEDS_LINEARIZE_FILTER = ('LinearEquivalentDisc',)
 
+# Keep the discovery view compact. The returned DataFrame still carries every
+# field needed downstream; these are only the columns shown by find_blocks().
+FIND_BLOCKS_DISPLAY_COLUMNS = (
+    'exp_name', 'cell_label', 'cell_type_short', 'site',
+    'filter_wheel_ndf', 'stage_ndfs', 'maxIntensity', 'n_epochs',
+)
+
 # stimulusTag spellings: DiscConeLin writes camelCase, the other two use spaces.
 TAG_IMAGE = 'image'
 TAG_DISC = 'intensity'
@@ -221,12 +228,13 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
                   f'linearizeCones parameter (the older, unrelated protocol)')
         print('  by protocol: ' + ', '.join(f'{k} {v}' for k, v in
                                             df['protocol'].value_counts().items()))
-        cols = ['exp_name', 'cell_label', 'cell_type_short', 'protocol', 'site',
-                'onlineAnalysis', 'filter_wheel_ndf', 'stage_ndfs', 'backgroundIntensity',
-                'maxIntensity', 'light_setting', 'WeberConstant', 'n_epochs', 'block_id']
-        sc.scroll_table(df[cols], height=height,
-                        num_cols=('filter_wheel_ndf', 'backgroundIntensity', 'maxIntensity',
-                                  'WeberConstant', 'n_epochs', 'block_id'))
+        for protocol in PROTOCOLS:
+            protocol_df = df[df['protocol'].eq(protocol)]
+            if protocol_df.empty:
+                continue
+            print(f'\n{protocol} ({len(protocol_df)} blocks)')
+            sc.scroll_table(protocol_df[list(FIND_BLOCKS_DISPLAY_COLUMNS)], height=height,
+                            num_cols=('filter_wheel_ndf', 'maxIntensity', 'n_epochs'))
     return df
 
 
