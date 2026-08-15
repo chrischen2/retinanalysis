@@ -120,6 +120,35 @@ def test_find_blocks_display_is_compact():
                 'WeberConstant', 'block_id'))
 
 
+def test_linearized_only_filters_only_old_same_named_disc_blocks():
+    frame = pd.DataFrame({
+        'protocol': ['LinearEquivalentDisc', 'LinearEquivalentDisc',
+                     'LinearEquivalentDiscConeLin', 'LinearEquivalentAnnulus'],
+        'parameters': [{}, {'linearizeCones': True}, {}, {}],
+    })
+    kept, dropped = led._linearized_only(frame)
+    assert dropped == 1
+    assert kept['protocol'].tolist() == [
+        'LinearEquivalentDisc', 'LinearEquivalentDiscConeLin',
+        'LinearEquivalentAnnulus']
+
+
+def test_find_protocol_cells_returns_only_unique_date_and_cell(monkeypatch):
+    blocks = pd.DataFrame({
+        'exp_name': ['2026-01-01_E', '2026-01-01_E', '2026-01-02_E'],
+        'cell_label': ['Cell1', 'Cell1', 'Cell2'],
+        'protocol': ['LinearEquivalentAnnulus'] * 3,
+        'parameters': [{}] * 3,
+    })
+    monkeypatch.setattr(led, '_protocol_block_rows', lambda protocols: blocks)
+    found = led.find_protocol_cells('LinearEquivalentAnnulus', show=False)
+    assert list(found.columns) == ['exp_name', 'cell_label']
+    assert found.to_dict('records') == [
+        {'exp_name': '2026-01-01_E', 'cell_label': 'Cell1'},
+        {'exp_name': '2026-01-02_E', 'cell_label': 'Cell2'},
+    ]
+
+
 def test_record_key_is_hdf5_safe_and_separates_sites():
     a = led.record_key('2026-05-08_E', 'Cell4', 'extracellular', 'center', 0.0, 0.5)
     b = led.record_key('2026-05-08_E', 'Cell4', 'extracellular', 'surround', 0.0, 0.5)

@@ -72,7 +72,7 @@ NEEDS_LINEARIZE_FILTER = ('LinearEquivalentDisc',)
 # field needed downstream; these are only the columns shown by find_blocks().
 FIND_BLOCKS_DISPLAY_COLUMNS = (
     'exp_name', 'cell_label', 'cell_type_short', 'site',
-    'filter_wheel_ndf', 'stage_ndfs', 'maxIntensity', 'n_epochs',
+    'filter_wheel_ndf', 'maxIntensity', 'n_epochs',
 )
 
 # stimulusTag spellings: DiscConeLin writes camelCase, the other two use spaces.
@@ -158,51 +158,128 @@ def compute_nli(image_mean, disc_mean, threshold: float) -> np.ndarray:
 # discovery
 # --------------------------------------------------------------------------
 
+def _protocol_block_rows(protocols: Sequence[str],
+                         exp_names: Optional[Sequence[str]] = None) -> pd.DataFrame:
+    """Fetch block, experiment, and cell metadata without per-block queries."""
+    from retinanalysis.config import schema
+
+    protocols = tuple(protocols)
+    unknown = sorted(set(protocols) - set(PROTOCOLS))
+    if unknown:
+        raise ValueError(f'Unsupported protocol(s): {unknown}. Choose from {list(PROTOCOLS)}.')
+
+    protocol_df = schema.Protocol().to_pandas().reset_index()[['protocol_id', 'name']]
+    protocol_df['protocol'] = protocol_df['name'].str.rsplit('.', n=1).str[-1]
+    protocol_df = protocol_df[protocol_df['protocol'].isin(protocols)]
+    if protocol_df.empty:
+        return pd.DataFrame()
+
+    block_query = schema.EpochBlock() & [
+        f'protocol_id={int(protocol_id)}' for protocol_id in protocol_df['protocol_id']]
+    blocks = block_query.to_pandas().reset_index()
+    if blocks.empty:
+        return pd.DataFrame()
+    blocks = blocks.rename(columns={'id': 'block_id', 'parent_id': 'group_id'})
+
+    experiments = (schema.Experiment() & [
+        f'id={int(exp_id)}' for exp_id in blocks['experiment_id'].unique()
+    ]).to_pandas().reset_index()[['id', 'exp_name', 'is_mea']]
+    experiments = experiments.rename(columns={'id': 'experiment_id'})
+    experiments = experiments[~experiments['is_mea'].astype(bool)]
+    if exp_names is not None:
+        experiments = experiments[experiments['exp_name'].isin(exp_names)]
+
+    groups = (schema.EpochGroup() & [
+        f'id={int(group_id)}' for group_id in blocks['group_id'].unique()
+    ]).to_pandas().reset_index()[['id', 'parent_id', 'properties']]
+    groups = groups.rename(columns={'id': 'group_id', 'parent_id': 'cell_id',
+                                    'properties': 'group_properties'})
+    cells = (schema.Cell() & [
+        f'id={int(cell_id)}' for cell_id in groups['cell_id'].unique()
+    ]).to_pandas().reset_index()[['id', 'label', 'properties']]
+    cells = cells.rename(columns={'id': 'cell_id', 'label': 'cell_label',
+                                  'properties': 'cell_properties'})
+
+    df = (blocks.merge(experiments, on='experiment_id')
+                .merge(groups, on='group_id')
+                .merge(cells, on='cell_id')
+                .merge(protocol_df[['protocol_id', 'protocol']], on='protocol_id'))
+    df['cell_type'] = df['cell_properties'].apply(
+        lambda value: value.get('type', 'Unknown') if isinstance(value, dict) else 'Unknown')
+    return df
+
+
+def _linearized_only(df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
+    """Drop old same-named disc blocks using block-level parameters."""
+    needs_filter = df['protocol'].isin(NEEDS_LINEARIZE_FILTER)
+    has_parameter = df['parameters'].apply(
+        lambda value: isinstance(value, dict) and 'linearizeCones' in value)
+    keep = ~needs_filter | has_parameter
+    return df.loc[keep].copy(), int((~keep).sum())
+
+
+def find_protocol_cells(protocol: str, show: bool = True,
+                        height: int = 420) -> pd.DataFrame:
+    """Unique experiment dates and cells that ran one exact protocol.
+
+    This is the fast discovery view used in Section 1 of ``analyzeConeDisc``.
+    For ``LinearEquivalentDisc``, older blocks without ``linearizeCones`` are
+    excluded using the block's own parameter dictionary.
+    """
+    from retinanalysis.SCutils import explore as sc
+
+    blocks = _protocol_block_rows((protocol,))
+    if blocks.empty:
+        cells = pd.DataFrame(columns=['exp_name', 'cell_label'])
+        if show:
+            print(f'No single-cell blocks found for {protocol}.')
+        return cells
+    blocks, dropped = _linearized_only(blocks)
+    cells = (blocks[['exp_name', 'cell_label']].drop_duplicates()
+             .sort_values(['exp_name', 'cell_label']).reset_index(drop=True))
+    if show:
+        print(f'{protocol}: {len(cells)} cells across {cells.exp_name.nunique()} experiments')
+        if dropped:
+            print(f'  excluded {dropped} older block(s) without linearizeCones')
+        sc.scroll_table(cells, height=height)
+    return cells
+
+
 def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
-                height: int = 420) -> pd.DataFrame:
-    """Blocks from all three protocols, with the ``linearizeCones`` filter applied.
+                height: int = 420, protocols: Optional[Sequence[str]] = None,
+                include_stage_ndfs: bool = False) -> pd.DataFrame:
+    """Detailed blocks from selected protocols, with ``linearizeCones`` filtering.
 
     ``LinearEquivalentDisc`` blocks without a ``linearizeCones`` parameter are the
-    older, unrelated experiment and are dropped (reported in the output).
+    older, unrelated experiment and are dropped (reported in the output). Database
+    metadata and epoch counts are fetched in batches. Slow per-block stage-NDF reads
+    are opt-in via ``include_stage_ndfs=True``.
     """
-    import retinanalysis as ra
     from retinanalysis.config import schema
     from retinanalysis.SCutils import explore as sc
 
-    found = []
-    for protocol in PROTOCOLS:
-        b = sc.find_blocks(protocol, show=False)
-        if b.empty:
-            continue
-        found.append(b[b['protocol'].eq(protocol)])      # exact leaf name
-    if not found:
+    if protocols is None:
+        selected_protocols = PROTOCOLS
+    elif isinstance(protocols, str):
+        selected_protocols = (protocols,)
+    else:
+        selected_protocols = tuple(protocols)
+    blocks = _protocol_block_rows(selected_protocols, exp_names=exp_names)
+    if blocks.empty:
         return pd.DataFrame()
-    blocks = pd.concat(found, ignore_index=True)
-    if exp_names is not None:
-        blocks = blocks[blocks['exp_name'].isin(exp_names)]
+    blocks, dropped = _linearized_only(blocks)
 
-    meta = pd.concat([
-        ra.get_exp_summary(exp)[['exp_name', 'block_id', 'cell_label', 'cell_type',
-                                 'recording_technique', 'duration_minutes', 'start_time']]
-        for exp in sorted(blocks['exp_name'].unique())])
+    epoch_parents = (schema.Epoch() & [
+        {'parent_id': int(block_id)} for block_id in blocks['block_id']
+    ]).fetch('parent_id')
+    epoch_counts = pd.Series(epoch_parents).value_counts()
 
-    rows, dropped = [], []
-    for _, blk in blocks.iterrows():
-        bid = int(blk['block_id'])
-        ep = (schema.Epoch() & f'parent_id={bid}').to_pandas()
-        if ep.empty:
-            continue
-        ids = [int(i) for i in (ep['id'] if 'id' in ep else ep.index)]
-        p = (schema.Epoch() & f'id={ids[0]}').fetch1('parameters')
-        if blk['protocol'] in NEEDS_LINEARIZE_FILTER and 'linearizeCones' not in p:
-            dropped.append(bid)
-            continue
-        row = {'block_id': bid, 'protocol': blk['protocol'], 'n_epochs': len(ids)}
-        row.update({k: p.get(k, np.nan) for k in CONFIG_KEYS})
-        rows.append(row)
-
-    df = pd.DataFrame(rows).merge(blocks[['exp_name', 'block_id']], on='block_id')
-    df = df.merge(meta, on=['exp_name', 'block_id'], how='left')
+    df = blocks.copy()
+    df['n_epochs'] = df['block_id'].map(epoch_counts).fillna(0).astype(int)
+    for key in CONFIG_KEYS:
+        df[key] = df['parameters'].apply(
+            lambda value, name=key: value.get(name, np.nan)
+            if isinstance(value, dict) else np.nan)
     df['site'] = df['protocol'].apply(stimulus_site)
     df['cell_type_short'] = df['cell_type'].astype(str).str.split('\\').str[-1]
     df = df.rename(columns={'NDF': 'filter_wheel_ndf'})
@@ -213,18 +290,17 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
           zip(df['filter_wheel_ndf'], df['backgroundIntensity'])]
     df['rstar'] = [r for r, _ in rs]
     df['light_level'] = [lab for _, lab in rs]
-    # The fixed filters in the light path, which the wheel setting does not
-    # cover; read per block because they change within an experiment.
-    df = df.merge(stage_ndf_table(df[['exp_name', 'block_id']], verbose=show),
-                  on='block_id', how='left')
-    df['stage_ndfs'] = df['stage_ndfs'].fillna('')
+    if include_stage_ndfs:
+        df = df.merge(stage_ndf_table(df[['exp_name', 'block_id']], verbose=show),
+                      on='block_id', how='left')
+        df['stage_ndfs'] = df['stage_ndfs'].fillna('')
     df = df.sort_values(['exp_name', 'cell_label', 'start_time']).reset_index(drop=True)
 
     if show:
         print(f"{len(df)} blocks | {df['exp_name'].nunique()} experiments | "
               f"{df.groupby(['exp_name', 'cell_label']).ngroups} cells")
         if dropped:
-            print(f'  dropped {len(dropped)} LinearEquivalentDisc block(s) with no '
+            print(f'  dropped {dropped} LinearEquivalentDisc block(s) with no '
                   f'linearizeCones parameter (the older, unrelated protocol)')
         print('  by protocol: ' + ', '.join(f'{k} {v}' for k, v in
                                             df['protocol'].value_counts().items()))
@@ -233,7 +309,9 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
             if protocol_df.empty:
                 continue
             print(f'\n{protocol} ({len(protocol_df)} blocks)')
-            sc.scroll_table(protocol_df[list(FIND_BLOCKS_DISPLAY_COLUMNS)], height=height,
+            display_columns = [column for column in FIND_BLOCKS_DISPLAY_COLUMNS
+                               if column in protocol_df]
+            sc.scroll_table(protocol_df[display_columns], height=height,
                             num_cols=('filter_wheel_ndf', 'maxIntensity', 'n_epochs'))
     return df
 
