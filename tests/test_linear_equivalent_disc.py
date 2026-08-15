@@ -151,6 +151,36 @@ def test_find_protocol_cells_returns_only_unique_date_and_cell(monkeypatch):
     ]
 
 
+def test_describe_experiment_protocol_builds_group_and_block_columns(monkeypatch):
+    blocks = pd.DataFrame({
+        'exp_name': ['2026-01-01_E'],
+        'cell_label': ['Cell1'],
+        'epoch_group': ['Control'],
+        'group_properties': [{'recordingTechnique': 'cell-attached'}],
+        'parameters': [{'onlineAnalysis': 'none', 'imageName': 'block-image'}],
+        'block_id': [123],
+        'protocol': ['LinearEquivalentAnnulus'],
+        'start_time': pd.to_datetime(['2026-01-01 12:00']),
+    })
+    monkeypatch.setattr(led, '_protocol_block_rows',
+                        lambda protocols, exp_names=None: blocks)
+    monkeypatch.setattr(led, '_first_epoch_metadata',
+                        lambda block_ids: ({123: {'onlineAnalysis': 'extracellular',
+                                                  'NDF': 0.5,
+                                                  'imageName': 'epoch-image'}},
+                                           pd.Series({123: 10})))
+    found = led.describe_experiment_protocol(
+        '2026-01-01_E', 'LinearEquivalentAnnulus', show=False)
+    assert list(found.columns) == [
+        'exp_name', 'cell_label', 'epoch_group', 'recording_technique',
+        'onlineAnalysis', 'block_id', 'protocol', 'filter_wheel_ndf', 'imageName']
+    assert found.iloc[0].to_dict() == {
+        'exp_name': '2026-01-01_E', 'cell_label': 'Cell1', 'epoch_group': 'Control',
+        'recording_technique': 'cell-attached', 'onlineAnalysis': 'extracellular',
+        'block_id': 123, 'protocol': 'LinearEquivalentAnnulus',
+        'filter_wheel_ndf': 0.5, 'imageName': 'epoch-image'}
+
+
 def test_record_key_is_hdf5_safe_and_separates_sites():
     a = led.record_key('2026-05-08_E', 'Cell4', 'extracellular', 'center', 0.0, 0.5)
     b = led.record_key('2026-05-08_E', 'Cell4', 'extracellular', 'surround', 0.0, 0.5)

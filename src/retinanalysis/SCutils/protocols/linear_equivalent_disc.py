@@ -179,7 +179,8 @@ def _protocol_block_rows(protocols: Sequence[str],
     blocks = block_query.to_pandas().reset_index()
     if blocks.empty:
         return pd.DataFrame()
-    blocks = blocks.rename(columns={'id': 'block_id', 'parent_id': 'group_id'})
+    blocks = blocks.rename(columns={'id': 'block_id', 'parent_id': 'group_id',
+                                    'label': 'block_label'})
 
     experiments = (schema.Experiment() & [
         f'id={int(exp_id)}' for exp_id in blocks['experiment_id'].unique()
@@ -191,8 +192,9 @@ def _protocol_block_rows(protocols: Sequence[str],
 
     groups = (schema.EpochGroup() & [
         f'id={int(group_id)}' for group_id in blocks['group_id'].unique()
-    ]).to_pandas().reset_index()[['id', 'parent_id', 'properties']]
+    ]).to_pandas().reset_index()[['id', 'parent_id', 'label', 'properties']]
     groups = groups.rename(columns={'id': 'group_id', 'parent_id': 'cell_id',
+                                    'label': 'epoch_group',
                                     'properties': 'group_properties'})
     cells = (schema.Cell() & [
         f'id={int(cell_id)}' for cell_id in groups['cell_id'].unique()
@@ -216,6 +218,31 @@ def _linearized_only(df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
         lambda value: isinstance(value, dict) and 'linearizeCones' in value)
     keep = ~needs_filter | has_parameter
     return df.loc[keep].copy(), int((~keep).sum())
+
+
+def _first_epoch_metadata(block_ids: Sequence[int]) -> Tuple[Dict[int, dict], pd.Series]:
+    """First-epoch parameters and epoch counts, fetched in two batched queries."""
+    import datajoint as dj
+    from retinanalysis.config import schema
+
+    ids = [int(block_id) for block_id in block_ids]
+    if not ids:
+        return {}, pd.Series(dtype=int)
+    epochs = schema.Epoch() & [{'parent_id': block_id} for block_id in ids]
+    summary = (dj.U('parent_id')
+               .aggr(epochs, first_epoch_id='min(id)', n_epochs='count(*)')
+               .to_pandas().reset_index())
+    if summary.empty:
+        return {}, pd.Series(0, index=ids, dtype=int)
+
+    first_epochs = (schema.Epoch() & [
+        {'id': int(epoch_id)} for epoch_id in summary['first_epoch_id']
+    ]).to_pandas().reset_index()[['parent_id', 'parameters']]
+    parameters = {int(row.parent_id): row.parameters
+                  for row in first_epochs.itertuples()}
+    counts = summary.set_index('parent_id')['n_epochs'].astype(int)
+    counts.index = counts.index.astype(int)
+    return parameters, counts
 
 
 def find_protocol_cells(protocol: str, show: bool = True,
@@ -245,6 +272,56 @@ def find_protocol_cells(protocol: str, show: bool = True,
     return cells
 
 
+def describe_experiment_protocol(exp_name: str, protocol: str, show: bool = True,
+                                 height: int = 500) -> pd.DataFrame:
+    """Block-level protocol metadata for one experiment, grouped for display."""
+    from retinanalysis.SCutils import explore as sc
+
+    columns = ['exp_name', 'cell_label', 'epoch_group', 'recording_technique',
+               'onlineAnalysis', 'block_id', 'protocol', 'filter_wheel_ndf', 'imageName']
+    blocks = _protocol_block_rows((protocol,), exp_names=(exp_name,))
+    if blocks.empty:
+        result = pd.DataFrame(columns=columns)
+        if show:
+            print(f'No {protocol} blocks found for {exp_name}.')
+        return result
+    blocks, dropped = _linearized_only(blocks)
+    first_parameters, _ = _first_epoch_metadata(blocks['block_id'])
+
+    def parameter(row, name, default=np.nan):
+        epoch_value = first_parameters.get(int(row['block_id']), {}).get(name, default)
+        if not (pd.isna(epoch_value) if np.isscalar(epoch_value) else False):
+            return epoch_value
+        block_parameters = row['parameters'] if isinstance(row['parameters'], dict) else {}
+        return block_parameters.get(name, default)
+
+    result = pd.DataFrame({
+        'exp_name': blocks['exp_name'],
+        'cell_label': blocks['cell_label'],
+        'epoch_group': blocks['epoch_group'].fillna('?'),
+        'recording_technique': blocks['group_properties'].apply(
+            lambda value: value.get('recordingTechnique', '?')
+            if isinstance(value, dict) else '?'),
+        'onlineAnalysis': blocks.apply(lambda row: parameter(row, 'onlineAnalysis', '?'), axis=1),
+        'block_id': blocks['block_id'].astype(int),
+        'protocol': blocks['protocol'],
+        'filter_wheel_ndf': blocks.apply(lambda row: parameter(row, 'NDF'), axis=1),
+        'imageName': blocks.apply(lambda row: parameter(row, 'imageName', '?'), axis=1),
+        '_start_time': blocks['start_time'],
+    }).sort_values(['cell_label', '_start_time', 'block_id']).drop(columns='_start_time')
+    result = result.reset_index(drop=True)
+    if show:
+        print(f'{exp_name} | {protocol} | {result.cell_label.nunique()} cells | '
+              f'{len(result)} blocks')
+        if dropped:
+            print(f'  excluded {dropped} older block(s) without linearizeCones')
+        sc.tree_table(result,
+                      levels=['exp_name', 'cell_label', 'epoch_group',
+                              'recording_technique', 'onlineAnalysis'],
+                      height=height, num_cols=('block_id', 'filter_wheel_ndf'))
+    return result
+
+
 def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
                 height: int = 420, protocols: Optional[Sequence[str]] = None,
                 include_stage_ndfs: bool = False) -> pd.DataFrame:
@@ -255,7 +332,6 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
     metadata and epoch counts are fetched in batches. Slow per-block stage-NDF reads
     are opt-in via ``include_stage_ndfs=True``.
     """
-    from retinanalysis.config import schema
     from retinanalysis.SCutils import explore as sc
 
     if protocols is None:
@@ -269,17 +345,15 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
         return pd.DataFrame()
     blocks, dropped = _linearized_only(blocks)
 
-    epoch_parents = (schema.Epoch() & [
-        {'parent_id': int(block_id)} for block_id in blocks['block_id']
-    ]).fetch('parent_id')
-    epoch_counts = pd.Series(epoch_parents).value_counts()
+    first_parameters, epoch_counts = _first_epoch_metadata(blocks['block_id'])
 
     df = blocks.copy()
     df['n_epochs'] = df['block_id'].map(epoch_counts).fillna(0).astype(int)
     for key in CONFIG_KEYS:
-        df[key] = df['parameters'].apply(
-            lambda value, name=key: value.get(name, np.nan)
-            if isinstance(value, dict) else np.nan)
+        df[key] = df.apply(
+            lambda row, name=key: first_parameters.get(int(row['block_id']), {}).get(
+                name, row['parameters'].get(name, np.nan)
+                if isinstance(row['parameters'], dict) else np.nan), axis=1)
     df['site'] = df['protocol'].apply(stimulus_site)
     df['cell_type_short'] = df['cell_type'].astype(str).str.split('\\').str[-1]
     df = df.rename(columns={'NDF': 'filter_wheel_ndf'})
