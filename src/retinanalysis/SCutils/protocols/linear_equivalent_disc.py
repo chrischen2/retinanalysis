@@ -220,7 +220,7 @@ def _linearized_only(df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
 
 def find_protocol_cells(protocol: str, show: bool = True,
                         height: int = 420) -> pd.DataFrame:
-    """Unique experiment dates and cells that ran one exact protocol.
+    """Unique experiment dates and cells that ran one exact short protocol.
 
     This is the fast discovery view used in Section 1 of ``analyzeConeDisc``.
     For ``LinearEquivalentDisc``, older blocks without ``linearizeCones`` are
@@ -230,13 +230,13 @@ def find_protocol_cells(protocol: str, show: bool = True,
 
     blocks = _protocol_block_rows((protocol,))
     if blocks.empty:
-        cells = pd.DataFrame(columns=['exp_name', 'cell_label'])
+        cells = pd.DataFrame(columns=['exp_name', 'cell_label', 'protocol'])
         if show:
             print(f'No single-cell blocks found for {protocol}.')
         return cells
     blocks, dropped = _linearized_only(blocks)
-    cells = (blocks[['exp_name', 'cell_label']].drop_duplicates()
-             .sort_values(['exp_name', 'cell_label']).reset_index(drop=True))
+    cells = (blocks[['exp_name', 'cell_label', 'protocol']].drop_duplicates()
+             .sort_values(['exp_name', 'cell_label', 'protocol']).reset_index(drop=True))
     if show:
         print(f'{protocol}: {len(cells)} cells across {cells.exp_name.nunique()} experiments')
         if dropped:

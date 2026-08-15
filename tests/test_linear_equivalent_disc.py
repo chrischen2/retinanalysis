@@ -142,10 +142,12 @@ def test_find_protocol_cells_returns_only_unique_date_and_cell(monkeypatch):
     })
     monkeypatch.setattr(led, '_protocol_block_rows', lambda protocols: blocks)
     found = led.find_protocol_cells('LinearEquivalentAnnulus', show=False)
-    assert list(found.columns) == ['exp_name', 'cell_label']
+    assert list(found.columns) == ['exp_name', 'cell_label', 'protocol']
     assert found.to_dict('records') == [
-        {'exp_name': '2026-01-01_E', 'cell_label': 'Cell1'},
-        {'exp_name': '2026-01-02_E', 'cell_label': 'Cell2'},
+        {'exp_name': '2026-01-01_E', 'cell_label': 'Cell1',
+         'protocol': 'LinearEquivalentAnnulus'},
+        {'exp_name': '2026-01-02_E', 'cell_label': 'Cell2',
+         'protocol': 'LinearEquivalentAnnulus'},
     ]
 
 
