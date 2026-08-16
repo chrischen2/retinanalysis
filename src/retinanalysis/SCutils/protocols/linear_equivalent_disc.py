@@ -262,12 +262,34 @@ def find_protocol_cells(protocol: str, show: bool = True,
             print(f'No single-cell blocks found for {protocol}.')
         return cells
     blocks, dropped = _linearized_only(blocks)
-    cells = (blocks[['exp_name', 'cell_label', 'protocol']].drop_duplicates()
-             .sort_values(['exp_name', 'cell_label', 'protocol']).reset_index(drop=True))
+    cells = protocol_cells_from_blocks(blocks, show=False)
     if show:
         print(f'{protocol}: {len(cells)} cells across {cells.exp_name.nunique()} experiments')
         if dropped:
             print(f'  excluded {dropped} older block(s) without linearizeCones')
+        sc.scroll_table(cells, height=height)
+    return cells
+
+
+def protocol_cells_from_blocks(blocks: pd.DataFrame, show: bool = True,
+                               height: int = 420) -> pd.DataFrame:
+    """Compact experiment/cell/protocol view from an existing block table.
+
+    Use this when detailed blocks are already needed downstream, avoiding a
+    second database discovery query just to build the Section 1 overview.
+    """
+    from retinanalysis.SCutils import explore as sc
+
+    columns = ['exp_name', 'cell_label', 'protocol']
+    if blocks.empty:
+        cells = pd.DataFrame(columns=columns)
+    else:
+        cells = (blocks[columns].drop_duplicates()
+                 .sort_values(columns).reset_index(drop=True))
+    if show:
+        protocol = ', '.join(sorted(cells['protocol'].unique())) if not cells.empty else 'protocol'
+        print(f'{protocol}: {len(cells)} cells across '
+              f'{cells.exp_name.nunique() if not cells.empty else 0} experiments')
         sc.scroll_table(cells, height=height)
     return cells
 

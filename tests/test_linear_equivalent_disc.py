@@ -151,6 +151,22 @@ def test_find_protocol_cells_returns_only_unique_date_and_cell(monkeypatch):
     ]
 
 
+def test_protocol_cells_from_blocks_reuses_detailed_discovery():
+    blocks = pd.DataFrame({
+        'exp_name': ['2026-01-02_E', '2026-01-01_E', '2026-01-01_E'],
+        'cell_label': ['Cell2', 'Cell1', 'Cell1'],
+        'protocol': ['LinearEquivalentAnnulus'] * 3,
+        'block_id': [3, 1, 2],
+    })
+    found = led.protocol_cells_from_blocks(blocks, show=False)
+    assert found.to_dict('records') == [
+        {'exp_name': '2026-01-01_E', 'cell_label': 'Cell1',
+         'protocol': 'LinearEquivalentAnnulus'},
+        {'exp_name': '2026-01-02_E', 'cell_label': 'Cell2',
+         'protocol': 'LinearEquivalentAnnulus'},
+    ]
+
+
 def test_describe_experiment_protocol_builds_group_and_block_columns(monkeypatch):
     blocks = pd.DataFrame({
         'exp_name': ['2026-01-01_E'],
@@ -206,6 +222,49 @@ def test_recording_mode_helpers_are_the_shared_ones():
                  'read_series_resistance', 'trace_is_spiking', 'read_stage_ndfs'):
         assert getattr(led, name) is getattr(rm, name)
         assert getattr(sag, name) is getattr(rm, name)
+
+
+def test_series_resistance_table_uses_one_batched_path_lookup(tmp_path, monkeypatch):
+    import h5py
+    from retinanalysis.SCutils import recording_mode as rm
+    from retinanalysis.utils import datajoint_utils
+
+    h5_path = tmp_path / 'recordings.h5'
+    with h5py.File(h5_path, 'w') as h5:
+        for block_id, values in {1: [0.0, 0.0], 2: [8e6, 25e6]}.items():
+            for epoch_index, value in enumerate(values):
+                epoch = h5.create_group(f'block-{block_id}/epoch-{epoch_index}')
+                amp_node = epoch.create_group(
+                    'stimuli/Amp1-device/dataConfigurationSpans/span_0/Amp1')
+                amp_node.attrs['seriesResistance'] = value
+
+    calls = []
+
+    def batched(block_ids, amp='Amp1'):
+        calls.append((list(block_ids), amp))
+        return {
+            1: ['block-1/epoch-0', 'block-1/epoch-1'],
+            2: ['block-2/epoch-0', 'block-2/epoch-1'],
+        }
+
+    monkeypatch.setattr(rm, '_amp_epoch_groups_by_block', batched)
+    monkeypatch.setattr(datajoint_utils, 'get_h5_file', lambda exp_name: str(h5_path))
+    monkeypatch.setattr(
+        rm, 'read_series_resistance',
+        lambda *args, **kwargs: pytest.fail('per-block response query should not run'))
+
+    blocks = pd.DataFrame({'exp_name': ['X_E', 'X_E'], 'block_id': [1, 2]})
+    result = rm.series_resistance_table(blocks, verbose=False)
+    sampled = rm.series_resistance_table(
+        blocks, verbose=False, sample_one_per_block=True)
+
+    assert calls == [([1, 2], 'Amp1'), ([1, 2], 'Amp1')]
+    assert result.loc[0, 'series_resistance'] == 0.0
+    assert result.loc[1, 'series_resistance'] == pytest.approx(16.5e6)
+    assert result.loc[1, 'n_epochs_high_rs'] == 1
+    assert sampled.loc[1, 'series_resistance'] == pytest.approx(8e6)
+    assert sampled.loc[1, 'n_epochs_rs'] == 2
+    assert sampled.loc[1, 'n_epochs_high_rs'] == 0
 
 
 def _spiking_trace(n=12, length=3000, seed=0):

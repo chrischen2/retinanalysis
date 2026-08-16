@@ -47,6 +47,78 @@ def _amp_epoch_groups(exp_name: str, block_id: int, amp: str = 'Amp1') -> List[s
     return [str(p).split('/responses/')[0] for p in df['h5path'].values]
 
 
+def _amp_response_table(block_ids: Sequence[int], amp: str = 'Amp1') -> pd.DataFrame:
+    """Fetch the minimal amplifier response metadata for many blocks at once.
+
+    ``_amp_epoch_groups`` follows the general response loader and performs one
+    DataJoint query per block.  That is appropriate for a single recording but
+    made a dataset-wide series-resistance audit spend minutes repeatedly
+    fetching and decoding response rows. This projection asks only for the
+    path, sample rate, and block id, once for the entire block set.
+    """
+    from retinanalysis.config import schema
+
+    ids = sorted({int(block_id) for block_id in block_ids})
+    if not ids:
+        return pd.DataFrame(columns=['response_id', 'block_id', 'h5path', 'sample_rate'])
+    epochs = (schema.Epoch & [{'parent_id': block_id} for block_id in ids]).proj(
+        block_id='parent_id', epoch_id='id')
+    responses = epochs * schema.Response.proj(
+        ..., epoch_id='parent_id', response_id='id')
+    return ((responses & {'device_name': amp})
+            .proj('block_id', 'h5path', 'sample_rate').to_pandas().reset_index()
+            .sort_values('response_id').reset_index(drop=True))
+
+
+def _amp_epoch_groups_by_block(block_ids: Sequence[int],
+                               amp: str = 'Amp1') -> Dict[int, List[str]]:
+    """Fetch amplifier epoch-group paths for many blocks in one query."""
+    paths = _amp_response_table(block_ids, amp=amp)
+    paths['epoch_group'] = paths['h5path'].astype(str).str.split('/responses/').str[0]
+    return {int(block_id): group['epoch_group'].tolist()
+            for block_id, group in paths.groupby('block_id', sort=False)}
+
+
+def _amp_trace_samples(df: pd.DataFrame, amp: str = 'Amp1', n_trials: int = 12,
+                       verbose: bool = True) -> Dict[int, Tuple[np.ndarray, float]]:
+    """Load a small raw-trace sample per block without constructing StimBlocks.
+
+    Response paths are fetched once, H5 files are opened once per experiment,
+    and only the trials needed by :func:`trace_is_spiking` are read. This avoids
+    loading frame-monitor data and repeating DataJoint joins during recording
+    mode discovery.
+    """
+    import h5py
+    from retinanalysis.utils.datajoint_utils import get_h5_file
+
+    paths = _amp_response_table(df['block_id'], amp=amp)
+    out: Dict[int, Tuple[np.ndarray, float]] = {}
+    for exp_name, blocks in df.groupby('exp_name', sort=False):
+        try:
+            h5 = h5py.File(get_h5_file(str(exp_name)), 'r')
+        except Exception as e:
+            if verbose:
+                print(f'  {exp_name}: cannot open the h5 for trace sampling '
+                      f'({type(e).__name__})')
+            continue
+        with h5:
+            for block_id in blocks['block_id']:
+                rows = paths[paths['block_id'].eq(int(block_id))].head(n_trials)
+                try:
+                    rates = rows['sample_rate'].dropna().astype(float).unique()
+                    if len(rates) != 1:
+                        raise ValueError(f'expected one sample rate, found {len(rates)}')
+                    traces = [np.asarray(h5[path]['data']['quantity'])
+                              for path in rows['h5path']]
+                    if traces:
+                        out[int(block_id)] = (np.asarray(traces), float(rates[0]))
+                except Exception as e:
+                    if verbose:
+                        print(f'  {exp_name} block {int(block_id)}: cannot sample the trace '
+                              f'({type(e).__name__}: {e})')
+    return out
+
+
 def _epoch_series_resistance(epoch_group, amp: str = 'Amp1') -> float:
     """``stimulus:<amp>:seriesResistance`` for one epoch group, in ohms.
 
@@ -234,17 +306,21 @@ def resolve_recording_mode(online_analysis, series_resistance, amp_data=None,
 
 def series_resistance_table(df: pd.DataFrame, amp: str = 'Amp1',
                             max_series_resistance: float = MAX_SERIES_RESISTANCE,
-                            verbose: bool = True) -> pd.DataFrame:
+                            verbose: bool = True,
+                            sample_one_per_block: bool = False) -> pd.DataFrame:
     """Read the series resistance of every block in ``df``, one h5 open per date.
 
     Returns one row per ``block_id`` with the median / min / max reading and how
     many of its epochs sit above ``max_series_resistance``. Blocks whose h5 is
     missing come back with NaN rather than raising, so one absent file does not
-    stop the audit.
+    stop the audit. With ``sample_one_per_block=True``, treat the first epoch as
+    representative of the block. This is suitable for quick discovery when the
+    full analysis will still audit the recording itself.
     """
     import h5py
     from retinanalysis.utils.datajoint_utils import get_h5_file
 
+    groups_by_block = _amp_epoch_groups_by_block(df['block_id'], amp=amp)
     rows = []
     for exp, sub in df.groupby('exp_name', sort=True):
         try:
@@ -258,18 +334,30 @@ def series_resistance_table(df: pd.DataFrame, amp: str = 'Amp1',
             rs = np.zeros(0, dtype=float)
             if f is not None:
                 try:
-                    rs = read_series_resistance(str(exp), int(bid), amp=amp, h5=f)
+                    groups = groups_by_block.get(int(bid), ())
+                    groups_to_read = groups[:1] if sample_one_per_block else groups
+                    rs = np.asarray([
+                        _epoch_series_resistance(f[group], amp)
+                        for group in groups_to_read if group in f
+                    ], dtype=float)
                 except Exception as e:
                     if verbose:
                         print(f'  {exp} block {bid}: {type(e).__name__}: {e}')
             good = rs[np.isfinite(rs)]
+            n_epochs = len(groups_by_block.get(int(bid), ()))
+            n_high = int(np.sum(good > max_series_resistance))
+            if sample_one_per_block and good.size:
+                n_read = n_epochs
+                n_high = n_epochs if n_high else 0
+            else:
+                n_read = int(good.size)
             rows.append({
                 'block_id': int(bid),
                 'series_resistance': float(np.median(good)) if good.size else np.nan,
                 'series_resistance_min': float(good.min()) if good.size else np.nan,
                 'series_resistance_max': float(good.max()) if good.size else np.nan,
-                'n_epochs_rs': int(good.size),
-                'n_epochs_high_rs': int(np.sum(good > max_series_resistance)),
+                'n_epochs_rs': n_read,
+                'n_epochs_high_rs': n_high,
             })
         if f is not None:
             f.close()
@@ -279,6 +367,7 @@ def series_resistance_table(df: pd.DataFrame, amp: str = 'Amp1',
 def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
                             max_series_resistance: float = MAX_SERIES_RESISTANCE,
                             drop: bool = True, show: bool = True,
+                            sample_series_resistance: bool = False,
                             detector_kwargs: Optional[dict] = None) -> pd.DataFrame:
     """Cross-check every block's ``onlineAnalysis`` label against the amplifier.
 
@@ -314,14 +403,19 @@ def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
         '' when the recorded label stood, else what changed and on what
         evidence.
 
-    Resolving a contradiction needs the block's raw trace, so this reads the h5
-    for those blocks only; blocks whose label already agrees with the reading
-    cost nothing beyond the reading itself.
+    ``sample_series_resistance=True`` makes discovery substantially faster by
+    using one epoch's representative amplifier setting. The per-recording
+    analysis still audits the raw recording when it runs.
+
+    Resolving a contradiction can need the block's raw trace, so this reads it
+    only when the label, series resistance, and epoch-group
+    ``recordingTechnique`` metadata do not already settle the mode.
     """
     out = df.copy()
-    table = series_resistance_table(out[['exp_name', 'block_id']], amp=amp,
-                                    max_series_resistance=max_series_resistance,
-                                    verbose=show)
+    table = series_resistance_table(
+        out[['exp_name', 'block_id']], amp=amp,
+        max_series_resistance=max_series_resistance, verbose=show,
+        sample_one_per_block=sample_series_resistance)
     out = out.merge(table, on='block_id', how='left')
 
     rs = out['series_resistance'].to_numpy(dtype=float)
@@ -332,32 +426,59 @@ def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
     # Two kinds of block need the trace: one whose label the reading contradicts,
     # and one that was never labelled at all -- the latter is most of the
     # linear-equivalent-disc dataset, where 'none' is the commonest entry.
+    if 'recording_technique' in out:
+        technique = out['recording_technique']
+    elif 'group_properties' in out:
+        technique = out['group_properties'].apply(
+            lambda value: value.get('recordingTechnique', '')
+            if isinstance(value, dict) else '')
+    else:
+        technique = pd.Series('', index=out.index)
+    technique = technique.astype(str).str.strip().str.lower()
     contested = (out['rs_mode'].ne('') & out['label_mode'].ne('')
                  & out['rs_mode'].ne(out['label_mode']))
-    unlabelled = out['rs_mode'].ne('') & out['label_mode'].eq('')
+    unlabelled = (out['label_mode'].eq('')
+                  & (out['rs_mode'].ne('')
+                     | technique.isin(['cell-attached', 'whole-cell'])))
     needs_resolving = contested | unlabelled
     all_high = (out['n_epochs_rs'] > 0) & out['n_epochs_high_rs'].eq(out['n_epochs_rs'])
 
+    # When epoch-group metadata says cell-attached and the amplifier does not
+    # contradict it, no raw response is needed merely to prove that it spikes.
+    metadata_cell_attached = (out['label_mode'].ne('cell-attached')
+                              & technique.eq('cell-attached')
+                              & ~out['rs_mode'].eq('whole-cell'))
+    out.loc[metadata_cell_attached, 'onlineAnalysis'] = 'extracellular'
+    needs_resolving = (needs_resolving | metadata_cell_attached) & ~metadata_cell_attached
+
     if show and needs_resolving.any():
         print(f'reading the trace for {int(needs_resolving.sum())} block(s) whose mode the '
-              f'label does not settle ({int(unlabelled.sum())} never labelled, '
-              f'{int(contested.sum())} contradicted)')
+              f'label does not settle ({int((unlabelled & needs_resolving).sum())} '
+              f'never labelled, {int((contested & needs_resolving).sum())} contradicted)')
 
     flags = pd.Series('', index=out.index, dtype=object)
+    flags.loc[metadata_cell_attached] = (
+        "resolved to 'extracellular': recordingTechnique is cell-attached "
+        'and series resistance is 0')
+    trace_samples = _amp_trace_samples(
+        out.loc[needs_resolving, ['exp_name', 'block_id']], amp=amp,
+        verbose=show)
     for i in out.index[needs_resolving]:
         row = out.loc[i]
-        amp_data = sample_rate = None
-        try:
-            import retinanalysis as ra
-            rb = ra.SCResponseBlock(str(row['exp_name']), int(row['block_id']),
-                                    b_spiking=False, verbose=False)
-            amp_data, sample_rate = rb.amp_data, float(rb.amp_sample_rate)
-        except Exception as e:
-            flags[i] = f'could not read the trace to resolve the label ({type(e).__name__})'
+        sample = trace_samples.get(int(row['block_id']))
+        if sample is None:
+            flags[i] = 'could not read the trace to resolve the label'
             continue
-        mode, note = resolve_recording_mode(row['onlineAnalysis'], row['series_resistance'],
-                                            amp_data=amp_data, sample_rate=sample_rate,
-                                            detector_kwargs=detector_kwargs)
+        amp_data, sample_rate = sample
+        if row['rs_mode'] == '' and technique.loc[i] == 'whole-cell':
+            mode = 'exc' if float(np.mean(amp_data)) < 0 else 'inh'
+            note = (f"'{row['onlineAnalysis']}' resolved to '{mode}': "
+                    'recordingTechnique is whole-cell; polarity from the sign '
+                    'of the current')
+        else:
+            mode, note = resolve_recording_mode(
+                row['onlineAnalysis'], row['series_resistance'], amp_data=amp_data,
+                sample_rate=sample_rate, detector_kwargs=detector_kwargs)
         out.loc[i, 'onlineAnalysis'] = mode
         flags[i] = note
     flags[all_high & flags.eq('')] = (

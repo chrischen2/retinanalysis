@@ -909,16 +909,11 @@ def _check(blocks, rs, traces=None, **kwargs):
     from unittest import mock
     from retinanalysis.SCutils import recording_mode as rm
 
-    class _Stub:
-        def __init__(self, exp_name, block_id, **_):
-            self.amp_data = (traces or {}).get(int(block_id), _smooth_trace())
-            self.amp_sample_rate = 1e4
-
-    ra_stub = mock.MagicMock()
-    ra_stub.SCResponseBlock = _Stub
+    samples = {int(block_id): ((traces or {}).get(int(block_id), _smooth_trace()), 1e4)
+               for block_id in blocks['block_id']}
     # check_series_resistance lives in the shared module, so patch it there.
     with mock.patch.object(rm, 'series_resistance_table', return_value=rs), \
-            mock.patch.dict('sys.modules', {'retinanalysis': ra_stub}):
+            mock.patch.object(rm, '_amp_trace_samples', return_value=samples):
         return sag.check_series_resistance(blocks, show=False, **kwargs)
 
 
@@ -929,6 +924,30 @@ def test_audit_relabels_a_mislabelled_cell_attached_block():
     assert out.loc[0, 'onlineAnalysis_recorded'] == 'exc'
     assert out.loc[1, 'onlineAnalysis'] == 'exc'          # no spikes, label stands
     assert len(out) == 2                                  # neither is thrown away
+
+
+def test_audit_uses_recording_technique_to_skip_an_unneeded_trace_read():
+    blocks, rs = _blocks_with_rs(['exc'], [0.0])
+    blocks['group_properties'] = [{'recordingTechnique': 'cell-attached'}]
+    # A smooth trace would preserve the whole-cell label if it were consulted;
+    # the two agreeing hardware metadata fields settle this without loading it.
+    out = _check(blocks, rs, traces={1: _smooth_trace()})
+    assert out.loc[0, 'onlineAnalysis'] == 'extracellular'
+    assert 'recordingTechnique is cell-attached' in out.loc[0, 'rs_flag']
+
+
+def test_audit_resolves_whole_cell_from_technique_when_rs_is_missing():
+    blocks, rs = _blocks_with_rs(['none', 'none'], [np.nan, np.nan])
+    blocks['group_properties'] = [
+        {'recordingTechnique': 'whole-cell'},
+        {'recordingTechnique': 'whole-cell'},
+    ]
+    out = _check(blocks, rs, traces={
+        1: np.full((4, 100), -5.0),
+        2: np.full((4, 100), 5.0),
+    })
+    assert out['onlineAnalysis'].tolist() == ['exc', 'inh']
+    assert out['rs_flag'].str.contains('recordingTechnique is whole-cell').all()
 
 
 def test_audit_relabels_rather_than_drops_a_mislabelled_whole_cell_block():
