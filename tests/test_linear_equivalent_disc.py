@@ -168,11 +168,11 @@ def test_protocol_cells_from_blocks_reuses_detailed_discovery():
     })
     found = led.protocol_cells_from_blocks(blocks, show=False)
     assert found.to_dict('records') == [
-        {'exp_name': '2026-01-01_E', 'cell_label': 'Cell1',
+        {'date_index': 1, 'exp_name': '2026-01-01_E', 'cell_label': 'Cell1',
          'cell_type_short': 'ON-parasol', 'recording_technique': 'cell-attached',
          'onlineAnalysis': 'extracellular', 'filter_wheel_values': [0.0, 0.5],
          'protocol': 'LinearEquivalentAnnulus'},
-        {'exp_name': '2026-01-02_E', 'cell_label': 'Cell2',
+        {'date_index': 2, 'exp_name': '2026-01-02_E', 'cell_label': 'Cell2',
          'cell_type_short': 'OFF-parasol', 'recording_technique': 'whole-cell',
          'onlineAnalysis': 'exc', 'filter_wheel_values': [1.0],
          'protocol': 'LinearEquivalentAnnulus'},
@@ -354,15 +354,15 @@ def test_example_patch_params_from_blocks_skips_pre_cone_rows(monkeypatch):
     ])
     calls = []
 
-    def params(exp_name, block_id, patch_index=None):
-        calls.append((exp_name, block_id, patch_index))
+    def params(exp_name, block_id, patch_index=None, image_name=None):
+        calls.append((exp_name, block_id, patch_index, image_name))
         return {'equivalentIntensityConeLin': 0.25}
 
     monkeypatch.setattr(led, 'example_patch_params', params)
     result = led.example_patch_params_from_blocks(blocks, patch_index=3)
 
     assert result['equivalentIntensityConeLin'] == 0.25
-    assert calls == [('new_E', 2, 3)]
+    assert calls == [('new_E', 2, 3, None)]
 
 
 def test_example_patch_params_from_blocks_rejects_missing_cone_value(monkeypatch):
@@ -380,3 +380,45 @@ def test_example_patch_params_from_blocks_rejects_missing_cone_value(monkeypatch
 def test_plot_stimulus_example_never_labels_a_missing_cone_value_as_nan():
     with pytest.raises(ValueError, match='no cone-linearized equivalent intensity'):
         led.plot_stimulus_example({'equivalentIntensity': 0.2})
+
+
+def test_example_patch_params_from_blocks_filters_image_name(monkeypatch):
+    blocks = pd.DataFrame([
+        {'exp_name': 'X_E', 'block_id': 1, 'linearizeCones': 1,
+         'imageName': '00152'},
+        {'exp_name': 'X_E', 'block_id': 2, 'linearizeCones': 1,
+         'imageName': '01769'},
+    ])
+    calls = []
+
+    def params(exp_name, block_id, patch_index=None, image_name=None):
+        calls.append((block_id, image_name))
+        return {'imageName': image_name, 'equivalentIntensityConeLin': 0.3}
+
+    monkeypatch.setattr(led, 'example_patch_params', params)
+    result = led.example_patch_params_from_blocks(blocks, image_name='01769')
+
+    assert result['imageName'] == '01769'
+    assert calls == [(2, '01769')]
+
+
+def test_stimulus_example_widget_lists_and_redraws_image_names(monkeypatch):
+    import matplotlib.pyplot as plt
+
+    blocks = pd.DataFrame({'imageName': ['01769', '00152', '01769']})
+    rendered = []
+
+    def params(_blocks, patch_index=None, image_name=None):
+        rendered.append(image_name)
+        return {'imageName': image_name}
+
+    monkeypatch.setattr(led, 'example_patch_params_from_blocks', params)
+    monkeypatch.setattr(led, 'plot_stimulus_example', lambda _params: plt.figure())
+
+    widget = led.stimulus_example_widget(blocks)
+    dropdown, output = widget.children
+    dropdown.value = '01769'
+
+    assert list(dropdown.options) == ['00152', '01769']
+    assert rendered == ['00152', '01769']
+    assert output is not None

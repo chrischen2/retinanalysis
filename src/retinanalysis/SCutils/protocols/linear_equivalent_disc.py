@@ -289,8 +289,9 @@ def protocol_cells_from_blocks(blocks: pd.DataFrame, show: bool = True,
     """
     from retinanalysis.SCutils import explore as sc
 
-    columns = ['exp_name', 'cell_label', 'cell_type_short', 'recording_technique',
-               'onlineAnalysis', 'filter_wheel_values', 'protocol']
+    columns = ['date_index', 'exp_name', 'cell_label', 'cell_type_short',
+               'recording_technique', 'onlineAnalysis', 'filter_wheel_values',
+               'protocol']
     if blocks.empty:
         cells = pd.DataFrame(columns=columns)
     else:
@@ -314,9 +315,10 @@ def protocol_cells_from_blocks(blocks: pd.DataFrame, show: bool = True,
                  .agg(recording_technique=('recording_technique', text_values),
                       onlineAnalysis=('onlineAnalysis', text_values),
                       filter_wheel_values=('filter_wheel_ndf', filter_values))
-                 .reset_index()[columns]
+                 .reset_index()[columns[1:]]
                  .sort_values(['exp_name', 'cell_label', 'protocol'])
                  .reset_index(drop=True))
+        cells.insert(0, 'date_index', pd.factorize(cells['exp_name'], sort=False)[0] + 1)
     if show:
         protocol = ', '.join(sorted(cells['protocol'].unique())) if not cells.empty else 'protocol'
         print(f'{protocol}: {len(cells)} cells across '
@@ -1244,7 +1246,9 @@ def plot_stimulus_example(params: Dict, patch_location=None,
     return fig
 
 
-def example_patch_params(exp_name: str, block_id: int, patch_index: Optional[float] = None):
+def example_patch_params(exp_name: str, block_id: int,
+                         patch_index: Optional[float] = None,
+                         image_name: Optional[str] = None):
     """Epoch parameters of one ``image`` trial, for :func:`plot_stimulus_example`."""
     import retinanalysis as ra
 
@@ -1252,13 +1256,17 @@ def example_patch_params(exp_name: str, block_id: int, patch_index: Optional[flo
     for p in ep['epoch_parameters']:
         if category_of(p.get('stimulusTag')) != 'image':
             continue
+        if image_name is not None and str(p.get('imageName')) != str(image_name):
+            continue
         if patch_index is None or float(p.get('imagePatchIndex', -1)) == float(patch_index):
             return p
-    raise ValueError(f'no image trial for patch {patch_index} in block {block_id}')
+    detail = f'image {image_name}' if image_name is not None else f'patch {patch_index}'
+    raise ValueError(f'no image trial for {detail} in block {block_id}')
 
 
 def example_patch_params_from_blocks(blocks: pd.DataFrame,
-                                     patch_index: Optional[float] = None):
+                                     patch_index: Optional[float] = None,
+                                     image_name: Optional[str] = None):
     """Image-trial parameters from a block with a recorded cone intensity.
 
     Section 2 uses this instead of choosing a positional row: older annulus
@@ -1275,6 +1283,11 @@ def example_patch_params_from_blocks(blocks: pd.DataFrame,
         raise ValueError('no blocks are available for the Section 2 example')
 
     candidates = blocks.copy()
+    if image_name is not None and 'imageName' in candidates:
+        candidates = candidates.loc[
+            candidates['imageName'].astype(str).eq(str(image_name))].copy()
+        if candidates.empty:
+            raise ValueError(f'image {image_name!r} is not available in the selected date')
     if 'linearizeCones' in candidates:
         candidates['_cone_priority'] = pd.to_numeric(
             candidates['linearizeCones'], errors='coerce').notna()
@@ -1282,7 +1295,13 @@ def example_patch_params_from_blocks(blocks: pd.DataFrame,
                                              kind='stable')
 
     for row in candidates.itertuples(index=False):
-        params = example_patch_params(row.exp_name, int(row.block_id), patch_index)
+        try:
+            params = example_patch_params(
+                row.exp_name, int(row.block_id), patch_index, image_name=image_name)
+        except ValueError as error:
+            if str(error).startswith('no image trial for'):
+                continue
+            raise
         cone_value = pd.to_numeric(params.get('equivalentIntensityConeLin'),
                                    errors='coerce')
         if np.isfinite(cone_value):
@@ -1290,6 +1309,39 @@ def example_patch_params_from_blocks(blocks: pd.DataFrame,
     raise ValueError(
         'none of the selected blocks records equivalentIntensityConeLin; '
         'choose a cone-linearized protocol or experiment')
+
+
+def stimulus_example_widget(blocks: pd.DataFrame,
+                            patch_index: Optional[float] = None):
+    """Dropdown of image names that redraws the three-stimulus example."""
+    import ipywidgets as widgets
+    import matplotlib.pyplot as plt
+    from IPython.display import clear_output, display
+
+    if 'imageName' not in blocks:
+        raise ValueError('blocks is missing required column: imageName')
+    image_names = sorted({str(value) for value in blocks['imageName']
+                          if pd.notna(value) and str(value).strip()})
+    if not image_names:
+        raise ValueError('the selected date has no recorded image names')
+
+    dropdown = widgets.Dropdown(
+        options=image_names, value=image_names[0], description='Image name:',
+        style={'description_width': 'initial'})
+    output = widgets.Output()
+
+    def render(_change=None):
+        with output:
+            clear_output(wait=True)
+            params = example_patch_params_from_blocks(
+                blocks, patch_index=patch_index, image_name=dropdown.value)
+            fig = plot_stimulus_example(params)
+            display(fig)
+            plt.close(fig)
+
+    dropdown.observe(render, names='value')
+    render()
+    return widgets.VBox([dropdown, output])
 
 
 def describe_cell(cell: str, groups: pd.DataFrame, show: bool = True, **kwargs):
