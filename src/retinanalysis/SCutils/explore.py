@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 from typing import Iterable, Sequence
 
+import numpy as np
 import pandas as pd
 
 # DataJoint (and the DB connection) is imported inside the query functions, not
@@ -103,8 +104,16 @@ def _render(df: pd.DataFrame, height: int, summary: str | None,
     head = ''.join(f'<th>{escape(str(c))}</th>' for c in df.columns)
 
     body = []
+    def display_value(value):
+        missing = pd.isna(value)
+        # Lists/arrays are legitimate consolidated table values. ``pd.isna``
+        # returns an array for them, so only treat scalar missing values as blank.
+        if np.isscalar(missing) and bool(missing):
+            return ''
+        return escape(str(value))
+
     for i, (_, row) in enumerate(df.iterrows()):
-        vals = ['' if pd.isna(v) else escape(str(v)) for v in row]
+        vals = [display_value(v) for v in row]
         tr = '<tr class="grp">' if group_starts is not None and group_starts[i] else '<tr>'
         body.append(tr + _cells_html(vals, cls) + '</tr>')
 

@@ -155,14 +155,26 @@ def test_protocol_cells_from_blocks_reuses_detailed_discovery():
     blocks = pd.DataFrame({
         'exp_name': ['2026-01-02_E', '2026-01-01_E', '2026-01-01_E'],
         'cell_label': ['Cell2', 'Cell1', 'Cell1'],
+        'cell_type_short': ['OFF-parasol', 'ON-parasol', 'ON-parasol'],
         'protocol': ['LinearEquivalentAnnulus'] * 3,
+        'group_properties': [
+            {'recordingTechnique': 'whole-cell'},
+            {'recordingTechnique': 'cell-attached'},
+            {'recordingTechnique': 'cell-attached'},
+        ],
+        'onlineAnalysis': ['exc', 'extracellular', 'extracellular'],
+        'filter_wheel_ndf': [1.0, 0.0, 0.5],
         'block_id': [3, 1, 2],
     })
     found = led.protocol_cells_from_blocks(blocks, show=False)
     assert found.to_dict('records') == [
         {'exp_name': '2026-01-01_E', 'cell_label': 'Cell1',
+         'cell_type_short': 'ON-parasol', 'recording_technique': 'cell-attached',
+         'onlineAnalysis': 'extracellular', 'filter_wheel_values': [0.0, 0.5],
          'protocol': 'LinearEquivalentAnnulus'},
         {'exp_name': '2026-01-02_E', 'cell_label': 'Cell2',
+         'cell_type_short': 'OFF-parasol', 'recording_technique': 'whole-cell',
+         'onlineAnalysis': 'exc', 'filter_wheel_values': [1.0],
          'protocol': 'LinearEquivalentAnnulus'},
     ]
 
@@ -291,6 +303,7 @@ def _one_block(**overrides):
            'filter_wheel_ndf': 0.0, 'backgroundIntensity': 0.5, 'n_epochs': 10,
            'protocol': 'P', 'light_setting': 'FW0/bg0.5', 'rstar': np.nan,
            'light_level': '?', 'WeberConstant': 0.1, 'maxIntensity': 7500.0}
+    row['imageName'] = '00152'
     row.update(overrides)
     return row
 
@@ -307,7 +320,22 @@ def test_group_blocks_carries_max_intensity_and_the_recorded_label():
     df = pd.DataFrame([_one_block()])
     g = led.group_blocks(df, show=False)
     assert g.loc[0, 'max_intensity'] == 7500.0
+    assert g.loc[0, 'maxIntensity'] == 7500.0
+    assert g.loc[0, 'image_names'] == ['00152']
     assert g.loc[0, 'recorded_labels'] == 'exc'
+
+
+def test_group_table_display_keeps_only_requested_columns(monkeypatch):
+    from retinanalysis.SCutils import explore as sc
+
+    captured = {}
+    monkeypatch.setattr(
+        sc, 'tree_table',
+        lambda frame, **kwargs: captured.update(frame=frame.copy(), kwargs=kwargs))
+    led.group_blocks(pd.DataFrame([_one_block()]), show=True)
+
+    assert tuple(captured['frame'].columns) == led.GROUP_DISPLAY_COLUMNS
+    assert captured['kwargs']['levels'] == ['exp_name', 'cell_label', 'cell_type_short']
 
 
 def test_group_blocks_prefers_the_pre_relabel_column_for_recorded_labels():

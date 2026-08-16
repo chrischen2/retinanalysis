@@ -101,7 +101,13 @@ CONFIG_KEYS = ['apertureDiameter', 'annulusInnerDiameter', 'annulusOuterDiameter
                'backgroundIntensity', 'NDF', 'onlineAnalysis', 'linearizeCones',
                'WeberConstant', 'maxIntensity', 'rfSigmaCenter', 'rfSigmaSurround',
                'linearIntegrationFunction', 'currentImageSet', 'noPatches',
-               'preTime', 'stimTime', 'tailTime', 'sampleRate', 'micronsPerPixel']
+               'imageName', 'preTime', 'stimTime', 'tailTime', 'sampleRate',
+               'micronsPerPixel']
+
+GROUP_DISPLAY_COLUMNS = (
+    'exp_name', 'cell_label', 'cell_type_short', 'onlineAnalysis', 'site',
+    'light_settings', 'block_ids', 'image_names', 'protocols', 'maxIntensity',
+)
 
 
 def stimulus_site(protocol: str) -> str:
@@ -262,7 +268,8 @@ def find_protocol_cells(protocol: str, show: bool = True,
             print(f'No single-cell blocks found for {protocol}.')
         return cells
     blocks, dropped = _linearized_only(blocks)
-    cells = protocol_cells_from_blocks(blocks, show=False)
+    cells = (blocks[['exp_name', 'cell_label', 'protocol']].drop_duplicates()
+             .sort_values(['exp_name', 'cell_label', 'protocol']).reset_index(drop=True))
     if show:
         print(f'{protocol}: {len(cells)} cells across {cells.exp_name.nunique()} experiments')
         if dropped:
@@ -273,19 +280,43 @@ def find_protocol_cells(protocol: str, show: bool = True,
 
 def protocol_cells_from_blocks(blocks: pd.DataFrame, show: bool = True,
                                height: int = 420) -> pd.DataFrame:
-    """Compact experiment/cell/protocol view from an existing block table.
+    """Compact experiment/cell overview from an existing resolved block table.
 
     Use this when detailed blocks are already needed downstream, avoiding a
-    second database discovery query just to build the Section 1 overview.
+    second database discovery query just to build the Section 1 overview. One
+    row represents an experiment/cell/protocol, with recording modes and
+    FilterWheel settings consolidated across its blocks.
     """
     from retinanalysis.SCutils import explore as sc
 
-    columns = ['exp_name', 'cell_label', 'protocol']
+    columns = ['exp_name', 'cell_label', 'cell_type_short', 'recording_technique',
+               'onlineAnalysis', 'filter_wheel_values', 'protocol']
     if blocks.empty:
         cells = pd.DataFrame(columns=columns)
     else:
-        cells = (blocks[columns].drop_duplicates()
-                 .sort_values(columns).reset_index(drop=True))
+        frame = blocks.copy()
+        frame['recording_technique'] = frame['group_properties'].apply(
+            lambda value: value.get('recordingTechnique', '')
+            if isinstance(value, dict) else '')
+
+        def text_values(values):
+            found = sorted({str(value).strip() for value in values
+                            if pd.notna(value) and str(value).strip()
+                            and str(value).strip().lower() != 'nan'})
+            return ', '.join(found) if found else '?'
+
+        def filter_values(values):
+            numeric = sorted({float(value) for value in values if pd.notna(value)})
+            return numeric + (['?'] if pd.isna(values).any() else [])
+
+        keys = ['exp_name', 'cell_label', 'cell_type_short', 'protocol']
+        cells = (frame.groupby(keys, dropna=False, sort=False)
+                 .agg(recording_technique=('recording_technique', text_values),
+                      onlineAnalysis=('onlineAnalysis', text_values),
+                      filter_wheel_values=('filter_wheel_ndf', filter_values))
+                 .reset_index()[columns]
+                 .sort_values(['exp_name', 'cell_label', 'protocol'])
+                 .reset_index(drop=True))
     if show:
         protocol = ', '.join(sorted(cells['protocol'].unique())) if not cells.empty else 'protocol'
         print(f'{protocol}: {len(cells)} cells across '
@@ -428,6 +459,8 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420) -> pd.D
     from retinanalysis.SCutils import explore as sc
 
     df = df.copy()
+    if 'imageName' not in df:
+        df['imageName'] = np.nan
     df['mode'] = df['onlineAnalysis'].astype(str).str.lower()
     unresolved = ~df['mode'].isin(['extracellular', 'exc', 'inh'])
     if show and unresolved.any():
@@ -445,18 +478,28 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420) -> pd.D
                light_level=('light_level', 'first'),
                weber=('WeberConstant', 'first'),
                max_intensity=('maxIntensity', 'first'),
-               block_ids=('block_id', lambda s: ', '.join(str(int(b)) for b in sorted(s))))
+               maxIntensity=('maxIntensity', 'first'),
+               light_settings=('light_setting', 'first'),
+               block_ids=('block_id', lambda s: ', '.join(str(int(b)) for b in sorted(s))),
+               image_names=('imageName',
+                            lambda s: sorted({str(value) for value in s if pd.notna(value)})))
     recorded_col = ('onlineAnalysis_recorded' if 'onlineAnalysis_recorded' in df.columns
                     else 'onlineAnalysis')
     agg['recorded_labels'] = (recorded_col,
                               lambda s: ', '.join(sorted({str(v) for v in s})))
+
+    def median_mohm(values):
+        numeric = np.asarray(values, dtype=float)
+        finite = numeric[np.isfinite(numeric)]
+        return np.round(np.median(finite) / 1e6, 2) if finite.size else np.nan
+
     for name, source in (('stage_ndfs', 'stage_ndfs'),
                          ('rs_mohm', 'series_resistance'),
                          ('epochs_high_rs', 'n_epochs_high_rs')):
         if source not in df.columns:
             continue
         if name == 'rs_mohm':
-            agg[name] = (source, lambda s: np.round(np.nanmedian(s) / 1e6, 2))
+            agg[name] = (source, median_mohm)
         elif name == 'epochs_high_rs':
             agg[name] = (source, 'sum')
         else:
@@ -464,11 +507,10 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420) -> pd.D
     g = df.groupby(keys, dropna=False, sort=False).agg(**agg).reset_index()
     if show:
         print(f'{len(g)} recording groups (experiment x cell x mode x site x light level)')
-        sc.tree_table(g.sort_values(['cell_type_short', 'exp_name', 'cell_label']),
-                      levels=['cell_type_short', 'exp_name', 'cell_label'], height=height,
-                      num_cols=('blocks', 'epochs', 'filter_wheel_ndf',
-                                'backgroundIntensity', 'weber', 'rstar',
-                                'max_intensity', 'rs_mohm', 'epochs_high_rs'))
+        display = g[list(GROUP_DISPLAY_COLUMNS)].sort_values(
+            ['exp_name', 'cell_label', 'onlineAnalysis', 'site', 'light_settings'])
+        sc.tree_table(display, levels=['exp_name', 'cell_label', 'cell_type_short'],
+                      height=height, num_cols=('maxIntensity',))
     return g
 
 

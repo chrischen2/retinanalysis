@@ -93,6 +93,14 @@ def test_scroll_table_escapes_html():
     assert '&lt;script&gt;' in html
 
 
+def test_scroll_table_renders_consolidated_list_values():
+    df = pd.DataFrame({'filters': [[0.0, 0.5, 1.0]],
+                       'images': [['00152', '01192']]})
+    html = sc.scroll_table(df, show=False)
+    assert '[0.0, 0.5, 1.0]' in html
+    assert '[&#x27;00152&#x27;, &#x27;01192&#x27;]' in html
+
+
 @pytest.mark.parametrize('ndfs, wheel, recorded, expected', [
     ('["EL3"]', 0.0, True, 'EL3 + FW0'),
     ('["EL06", "EL2", "FW1"]', 3.0, True, 'EL06 + EL2 + FW3'),
