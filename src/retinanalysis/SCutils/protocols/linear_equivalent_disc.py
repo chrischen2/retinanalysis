@@ -1188,6 +1188,12 @@ def plot_stimulus_example(params: Dict, patch_location=None,
         equivalent_intensity = float(params.get('equivalentIntensity', np.nan))
     if equivalent_intensity_cone is None:
         equivalent_intensity_cone = float(params.get('equivalentIntensityConeLin', np.nan))
+    if not np.isfinite(equivalent_intensity):
+        raise ValueError('the selected image trial has no finite equivalentIntensity')
+    if not np.isfinite(equivalent_intensity_cone):
+        raise ValueError(
+            'the selected block has no cone-linearized equivalent intensity; '
+            'use example_patch_params_from_blocks() to select a compatible block')
     # The annulus protocol has no apertureDiameter; its stimulus runs between
     # the annulus diameters instead.
     outer = params.get('apertureDiameter') or params.get('annulusOuterDiameter') or 200.0
@@ -1249,6 +1255,41 @@ def example_patch_params(exp_name: str, block_id: int, patch_index: Optional[flo
         if patch_index is None or float(p.get('imagePatchIndex', -1)) == float(patch_index):
             return p
     raise ValueError(f'no image trial for patch {patch_index} in block {block_id}')
+
+
+def example_patch_params_from_blocks(blocks: pd.DataFrame,
+                                     patch_index: Optional[float] = None):
+    """Image-trial parameters from a block with a recorded cone intensity.
+
+    Section 2 uses this instead of choosing a positional row: older annulus
+    blocks can be present in the discovery table but predate cone linearization.
+    Rows whose block metadata carries ``linearizeCones`` are tried first, then
+    the returned epoch parameters are verified against the recorded
+    ``equivalentIntensityConeLin`` value.
+    """
+    required = {'exp_name', 'block_id'}
+    missing = required.difference(blocks.columns)
+    if missing:
+        raise ValueError(f'blocks is missing required columns: {sorted(missing)}')
+    if blocks.empty:
+        raise ValueError('no blocks are available for the Section 2 example')
+
+    candidates = blocks.copy()
+    if 'linearizeCones' in candidates:
+        candidates['_cone_priority'] = pd.to_numeric(
+            candidates['linearizeCones'], errors='coerce').notna()
+        candidates = candidates.sort_values('_cone_priority', ascending=False,
+                                             kind='stable')
+
+    for row in candidates.itertuples(index=False):
+        params = example_patch_params(row.exp_name, int(row.block_id), patch_index)
+        cone_value = pd.to_numeric(params.get('equivalentIntensityConeLin'),
+                                   errors='coerce')
+        if np.isfinite(cone_value):
+            return params
+    raise ValueError(
+        'none of the selected blocks records equivalentIntensityConeLin; '
+        'choose a cone-linearized protocol or experiment')
 
 
 def describe_cell(cell: str, groups: pd.DataFrame, show: bool = True, **kwargs):

@@ -345,3 +345,38 @@ def test_group_blocks_prefers_the_pre_relabel_column_for_recorded_labels():
     # Grouped by what it is analyzed as, but reporting what was recorded.
     assert g.loc[0, 'onlineAnalysis'] == 'extracellular'
     assert g.loc[0, 'recorded_labels'] == 'none'
+
+
+def test_example_patch_params_from_blocks_skips_pre_cone_rows(monkeypatch):
+    blocks = pd.DataFrame([
+        {'exp_name': 'old_E', 'block_id': 1, 'linearizeCones': np.nan},
+        {'exp_name': 'new_E', 'block_id': 2, 'linearizeCones': 1.0},
+    ])
+    calls = []
+
+    def params(exp_name, block_id, patch_index=None):
+        calls.append((exp_name, block_id, patch_index))
+        return {'equivalentIntensityConeLin': 0.25}
+
+    monkeypatch.setattr(led, 'example_patch_params', params)
+    result = led.example_patch_params_from_blocks(blocks, patch_index=3)
+
+    assert result['equivalentIntensityConeLin'] == 0.25
+    assert calls == [('new_E', 2, 3)]
+
+
+def test_example_patch_params_from_blocks_rejects_missing_cone_value(monkeypatch):
+    blocks = pd.DataFrame([
+        {'exp_name': 'old_E', 'block_id': 1, 'linearizeCones': np.nan},
+    ])
+    monkeypatch.setattr(
+        led, 'example_patch_params',
+        lambda *args, **kwargs: {'equivalentIntensity': 0.2})
+
+    with pytest.raises(ValueError, match='none of the selected blocks records'):
+        led.example_patch_params_from_blocks(blocks)
+
+
+def test_plot_stimulus_example_never_labels_a_missing_cone_value_as_nan():
+    with pytest.raises(ValueError, match='no cone-linearized equivalent intensity'):
+        led.plot_stimulus_example({'equivalentIntensity': 0.2})
