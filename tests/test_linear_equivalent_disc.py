@@ -1,9 +1,19 @@
 """Tests for SCutils.protocols.linear_equivalent_disc — pure helpers only."""
+import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from retinanalysis.SCutils.protocols import linear_equivalent_disc as led
+
+
+def test_analysis_notebook_selects_retinanalysis_kernel():
+    notebook_path = Path(__file__).parents[1] / 'SingCell_Notebooks' / 'analyzeConeDisc.ipynb'
+    notebook = json.loads(notebook_path.read_text())
+
+    assert notebook['metadata']['kernelspec']['name'] == 'retinanalysis'
 
 
 # --- stimulus tag mapping --------------------------------------------------
