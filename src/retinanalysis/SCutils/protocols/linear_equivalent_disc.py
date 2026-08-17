@@ -714,6 +714,8 @@ class ConditionAnalysis:
     online_analysis: str
     filter_wheel_ndf: float
     block_ids: List[int]
+    protocols: List[str]
+    site: str
     image_summary: pd.DataFrame
     epoch_responses: pd.DataFrame
     patch_responses: pd.DataFrame
@@ -1071,6 +1073,8 @@ def analyze_condition(blocks: pd.DataFrame,
     analysis = ConditionAnalysis(
         exp_name=exp_name, cell_label=cell_label, cell_type=cell_type,
         online_analysis=mode, filter_wheel_ndf=ndf, block_ids=used_blocks,
+        protocols=sorted({str(value) for value in blocks['protocol']}),
+        site=str(blocks['site'].iloc[0]),
         image_summary=condition_image_summary(blocks.loc[blocks['block_id'].isin(used_blocks)]),
         epoch_responses=epoch_responses, patch_responses=patch_responses,
         units=units, threshold=threshold)
@@ -1089,6 +1093,97 @@ def store_dir():
     from pathlib import Path
     from retinanalysis.config.settings import OUTPUT_DIR
     return Path(OUTPUT_DIR) / 'linear_equivalent_disc'
+
+
+def condition_population_table(analysis: ConditionAnalysis) -> pd.DataFrame:
+    """Population-ready patch rows for one saved cell condition.
+
+    One row is one unique ``(imageName, patchIndex)`` pair. Image-specific
+    intensity metadata is joined without collapsing patch indices reused by a
+    different image.
+    """
+    patches = analysis.patch_responses.copy()
+    image_metadata = analysis.image_summary[
+        ['imageName', 'block_ids', 'maxIntensity', 'backgroundIntensity',
+         'meanIntensity']].copy()
+    table = patches.merge(image_metadata, on='imageName', how='left', validate='many_to_one')
+    table.insert(0, 'date', analysis.exp_name)
+    table.insert(1, 'cell_label', analysis.cell_label)
+    table.insert(2, 'cell_type', analysis.cell_type)
+    table.insert(3, 'onlineAnalysis', analysis.online_analysis)
+    table.insert(4, 'protocol', ', '.join(analysis.protocols))
+    table.insert(5, 'site', analysis.site)
+    table.insert(6, 'filter_wheel_ndf', analysis.filter_wheel_ndf)
+    table['block_ids'] = table['block_ids'].apply(
+        lambda values: ','.join(str(int(value)) for value in values)
+        if isinstance(values, (list, tuple, np.ndarray)) else str(values))
+    table['response_units'] = analysis.units
+    table = table.rename(columns={
+        'image_mean': 'image_response', 'image_sem': 'image_response_sem',
+        'image_n': 'image_trials', 'disc_mean': 'disc_response',
+        'disc_sem': 'disc_response_sem', 'disc_n': 'disc_trials',
+        'cone_disc_mean': 'cone_disc_response',
+        'cone_disc_sem': 'cone_disc_response_sem',
+        'cone_disc_n': 'cone_disc_trials',
+        'nli_disc': 'nli_image_vs_disc',
+        'nli_cone_disc': 'nli_image_vs_cone_disc',
+    })
+    columns = [
+        'date', 'cell_label', 'cell_type', 'onlineAnalysis', 'protocol', 'site',
+        'filter_wheel_ndf', 'imageName', 'patchIndex', 'patch_key', 'block_ids',
+        'maxIntensity', 'backgroundIntensity', 'meanIntensity', 'response_units',
+        'image_response', 'image_response_sem', 'image_trials',
+        'disc_response', 'disc_response_sem', 'disc_trials',
+        'cone_disc_response', 'cone_disc_response_sem', 'cone_disc_trials',
+        'nli_image_vs_disc', 'nli_image_vs_cone_disc',
+    ]
+    return table[columns].sort_values(['imageName', 'patchIndex']).reset_index(drop=True)
+
+
+def condition_output_dir():
+    """Directory containing one population-ready CSV per cell condition."""
+    return store_dir() / 'condition_outputs'
+
+
+def _condition_output_name(analysis: ConditionAnalysis) -> str:
+    import re
+
+    raw = '__'.join((analysis.exp_name, analysis.cell_label,
+                    analysis.online_analysis, analysis.site,
+                    ','.join(analysis.protocols),
+                    f'FW{analysis.filter_wheel_ndf:g}'))
+    return re.sub(r'[^A-Za-z0-9_-]+', '-', raw).strip('-') + '.csv'
+
+
+def save_condition_output(analysis: ConditionAnalysis, output_dir=None,
+                          verbose: bool = True):
+    """Idempotently save one cell condition for later population analysis."""
+    from pathlib import Path
+
+    directory = Path(output_dir) if output_dir is not None else condition_output_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / _condition_output_name(analysis)
+    temporary = path.with_suffix(path.suffix + '.tmp')
+    table = condition_population_table(analysis)
+    table.to_csv(temporary, index=False)
+    temporary.replace(path)
+    if verbose:
+        print(f'saved {len(table)} patch rows to {path}')
+    return path
+
+
+def load_condition_outputs(output_dir=None) -> pd.DataFrame:
+    """Load all saved cell-condition CSVs into one population patch table."""
+    from pathlib import Path
+
+    directory = Path(output_dir) if output_dir is not None else condition_output_dir()
+    paths = sorted(directory.glob('*.csv')) if directory.exists() else []
+    if not paths:
+        return pd.DataFrame()
+    text_columns = {'date': str, 'cell_label': str, 'imageName': str,
+                    'patch_key': str, 'block_ids': str}
+    return pd.concat([pd.read_csv(path, dtype=text_columns) for path in paths],
+                     ignore_index=True)
 
 
 def record_key(exp_name: str, cell_label: str, online_analysis: str, site: str,
@@ -1311,24 +1406,45 @@ def plot_condition(analysis: ConditionAnalysis,
     pooled_ax.legend(frameon=False, fontsize=8)
     pooled_fig.tight_layout()
 
-    nli_fig, nli_ax = plt.subplots(figsize=(6.0, 4.2))
+    nli_fig, (nli_ax, mean_ax) = plt.subplots(1, 2, figsize=(9.2, 4.2))
     bins = np.linspace(-1, 1, 21)
-    for column, color, label in (
-            ('nli_disc', colors['disc'], 'image vs disc'),
-            ('nli_cone_disc', colors['cone_disc'], 'image vs cone-lin disc')):
+    nli_groups = (
+        ('nli_disc', colors['disc'], 'image vs disc'),
+        ('nli_cone_disc', colors['cone_disc'], 'image vs cone-lin disc'),
+    )
+    group_stats = []
+    for group_index, (column, color, label) in enumerate(nli_groups):
         values = patches[column].to_numpy(dtype=float)
         values = values[np.isfinite(values)]
         if values.size:
-            nli_ax.hist(values, bins=bins, density=True, histtype='stepfilled',
-                        alpha=.28, color=color, edgecolor=color, linewidth=1.5,
+            density, edges = np.histogram(values, bins=bins, density=True)
+            centers = (edges[:-1] + edges[1:]) / 2
+            nli_ax.plot(centers, density, '-o', ms=3, lw=1.6, color=color,
                         label=f'{label} (n={len(values)})')
-            nli_ax.axvline(np.mean(values), color=color, lw=1.5)
+            mean = float(np.mean(values))
+            sem = (float(np.std(values, ddof=1) / np.sqrt(values.size))
+                   if values.size > 1 else 0.0)
+            nli_ax.axvline(mean, color=color, lw=1, alpha=.75)
+            mean_ax.errorbar(group_index, mean, yerr=sem, fmt='o', ms=7,
+                             color=color, ecolor=color, elinewidth=1.5, capsize=4)
+            group_stats.append((group_index, mean, sem, len(values)))
     nli_ax.axvline(0, color='black', ls='--', lw=1)
     nli_ax.set_xlim(-1, 1)
     nli_ax.set_xlabel('Nonlinear Index  (image - disc) / (|image| + |disc|)')
     nli_ax.set_ylabel('density')
-    nli_ax.set_title(f'onset response | threshold {analysis.threshold:g} {analysis.units}')
+    nli_ax.set_title('20-bin onset NLI distribution')
     nli_ax.legend(frameon=False, fontsize=8)
+    mean_ax.axhline(0, color='black', ls='--', lw=1)
+    mean_ax.set_xticks(range(len(nli_groups)))
+    mean_ax.set_xticklabels(['standard disc', 'cone-lin disc'])
+    mean_ax.set_ylabel('mean Nonlinear Index ± SEM')
+    mean_ax.set_title('across all image-specific patches')
+    for group_index, mean, sem, count in group_stats:
+        mean_ax.text(group_index, mean + sem, f'n={count}', ha='center', va='bottom',
+                     fontsize=8)
+    nli_fig.suptitle(
+        f'{analysis.exp_name}/{analysis.cell_label} | onset threshold '
+        f'{analysis.threshold:g} {analysis.units}', fontsize=10)
     nli_fig.tight_layout()
     return per_image_fig, pooled_fig, nli_fig
 

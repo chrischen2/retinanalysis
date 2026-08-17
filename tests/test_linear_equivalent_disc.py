@@ -402,6 +402,71 @@ def test_condition_patch_error_bars_are_sem_across_repeats():
     assert patch['nli_disc'] == pytest.approx(0.2)
 
 
+def _condition_analysis_for_output():
+    patches = pd.DataFrame({
+        'imageName': ['00152', '00152', '01769'],
+        'patchIndex': [1.0, 2.0, 1.0],
+        'patch_key': ['00152:1', '00152:2', '01769:1'],
+        'image_mean': [4.0, 8.0, 6.0], 'image_sem': [1.0, .5, .25],
+        'image_n': [2, 2, 2],
+        'disc_mean': [2.0, 4.0, 3.0], 'disc_sem': [.5, .25, .1],
+        'disc_n': [2, 2, 2],
+        'cone_disc_mean': [3.0, 7.0, 5.0], 'cone_disc_sem': [.4, .3, .2],
+        'cone_disc_n': [2, 2, 2],
+        'nli_disc': [1 / 3, 1 / 3, 1 / 3],
+        'nli_cone_disc': [1 / 7, 1 / 15, 1 / 11],
+    })
+    image_summary = pd.DataFrame({
+        'imageName': ['00152', '01769'], 'block_ids': [[11], [12]],
+        'epochs': [12, 6], 'maxIntensity': [1000.0, 1000.0],
+        'backgroundIntensity': [.2, .1], 'meanIntensity': [200.0, 100.0],
+    })
+    return led.ConditionAnalysis(
+        exp_name='2026-01-01_E', cell_label='Cell1', cell_type='ON-parasol',
+        online_analysis='extracellular', filter_wheel_ndf=0.0,
+        block_ids=[11, 12], protocols=['LinearEquivalentAnnulus'], site='surround',
+        image_summary=image_summary, epoch_responses=pd.DataFrame(),
+        patch_responses=patches, units='spikes', threshold=3.0)
+
+
+def test_condition_population_table_labels_every_patch_and_image_intensity():
+    table = led.condition_population_table(_condition_analysis_for_output())
+
+    assert len(table) == 3
+    assert table['date'].unique().tolist() == ['2026-01-01_E']
+    assert table['onlineAnalysis'].unique().tolist() == ['extracellular']
+    assert table['patch_key'].tolist() == ['00152:1', '00152:2', '01769:1']
+    assert table['meanIntensity'].tolist() == [200.0, 200.0, 100.0]
+    assert {'image_response', 'disc_response', 'cone_disc_response',
+            'nli_image_vs_disc', 'nli_image_vs_cone_disc'}.issubset(table.columns)
+
+
+def test_condition_output_save_is_idempotent_and_loads_population_rows(tmp_path):
+    analysis = _condition_analysis_for_output()
+    first = led.save_condition_output(analysis, output_dir=tmp_path, verbose=False)
+    second = led.save_condition_output(analysis, output_dir=tmp_path, verbose=False)
+    loaded = led.load_condition_outputs(tmp_path)
+
+    assert first == second
+    assert len(list(tmp_path.glob('*.csv'))) == 1
+    assert len(loaded) == 3
+    assert loaded['imageName'].tolist() == ['00152', '00152', '01769']
+
+
+def test_condition_nli_plot_uses_lines_and_mean_sem_subplot():
+    import matplotlib.pyplot as plt
+
+    figures = led.plot_condition(_condition_analysis_for_output(), columns=2)
+    nli_figure = figures[2]
+    distribution_axis, mean_axis = nli_figure.axes
+
+    assert len(nli_figure.axes) == 2
+    assert len(distribution_axis.patches) == 0
+    assert len(distribution_axis.lines) >= 5  # two distributions, two means, zero
+    assert len(mean_axis.collections) == 2   # two error-bar point collections
+    plt.close('all')
+
+
 def test_example_patch_params_from_blocks_skips_pre_cone_rows(monkeypatch):
     blocks = pd.DataFrame([
         {'exp_name': 'old_E', 'block_id': 1, 'linearizeCones': np.nan},
