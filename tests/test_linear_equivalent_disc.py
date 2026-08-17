@@ -510,6 +510,8 @@ def test_condition_nli_plot_uses_lines_and_mean_sem_subplot():
     assert len(nli_figure.axes) == 2
     assert len(distribution_axis.patches) == 0
     assert len(distribution_axis.lines) >= 5  # two distributions, two means, zero
+    assert len(distribution_axis.lines[0].get_xdata()) == 50
+    assert distribution_axis.get_title() == '50-bin onset NLI distribution'
     assert len(mean_axis.collections) == 2   # two error-bar point collections
     plt.close('all')
 

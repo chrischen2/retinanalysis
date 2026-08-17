@@ -1630,7 +1630,7 @@ def plot_condition(analysis: ConditionAnalysis,
     pooled_fig.tight_layout()
 
     nli_fig, (nli_ax, mean_ax) = plt.subplots(1, 2, figsize=(9.2, 4.2))
-    bins = np.linspace(-1, 1, 21)
+    bins = np.linspace(-1, 1, 51)
     nli_groups = (
         ('nli_disc', colors['disc'], 'image vs disc'),
         ('nli_cone_disc', colors['cone_disc'], 'image vs cone-lin disc'),
@@ -1655,7 +1655,7 @@ def plot_condition(analysis: ConditionAnalysis,
     nli_ax.set_xlim(-1, 1)
     nli_ax.set_xlabel('Nonlinear Index  (image - disc) / (|image| + |disc|)')
     nli_ax.set_ylabel('density')
-    nli_ax.set_title('20-bin onset NLI distribution')
+    nli_ax.set_title('50-bin onset NLI distribution')
     nli_ax.legend(frameon=False, fontsize=8)
     mean_ax.axhline(0, color='black', ls='--', lw=1)
     mean_ax.set_xticks(range(len(nli_groups)))
