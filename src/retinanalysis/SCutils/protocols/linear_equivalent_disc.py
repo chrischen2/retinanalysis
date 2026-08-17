@@ -109,6 +109,11 @@ GROUP_DISPLAY_COLUMNS = (
     'light_settings', 'block_ids', 'image_names', 'protocols', 'maxIntensity',
 )
 
+CONDITION_SUMMARY_COLUMNS = (
+    'imageName', 'block_ids', 'epochs', 'maxIntensity',
+    'backgroundIntensity', 'meanIntensity',
+)
+
 
 def stimulus_site(protocol: str) -> str:
     """'surround' for the annulus protocol, 'centre' for the disc protocols."""
@@ -516,6 +521,96 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420) -> pd.D
     return g
 
 
+def condition_image_summary(blocks: pd.DataFrame) -> pd.DataFrame:
+    """One row per image in a selected cell/mode/FilterWheel condition.
+
+    ``meanIntensity`` follows the protocol convention requested in the notebook:
+    ``maxIntensity * backgroundIntensity``. Patch indices are intentionally not
+    part of this aggregation because they restart for every image name.
+    """
+    if blocks.empty:
+        return pd.DataFrame(columns=CONDITION_SUMMARY_COLUMNS)
+
+    frame = blocks.copy()
+    frame['imageName'] = frame['imageName'].astype(str)
+    frame['meanIntensity'] = (pd.to_numeric(frame['maxIntensity'], errors='coerce')
+                              * pd.to_numeric(frame['backgroundIntensity'],
+                                              errors='coerce'))
+
+    def numeric_value(values):
+        values = pd.to_numeric(values, errors='coerce')
+        finite = np.asarray(values[np.isfinite(values)], dtype=float)
+        unique = np.unique(finite)
+        if unique.size == 0:
+            return np.nan
+        if unique.size == 1:
+            return float(unique[0])
+        return ', '.join(f'{value:g}' for value in unique)
+
+    summary = (frame.groupby('imageName', sort=True, dropna=False)
+               .agg(block_ids=('block_id', lambda values: [int(v) for v in sorted(values)]),
+                    epochs=('n_epochs', 'sum'),
+                    maxIntensity=('maxIntensity', numeric_value),
+                    backgroundIntensity=('backgroundIntensity', numeric_value),
+                    meanIntensity=('meanIntensity', numeric_value))
+               .reset_index())
+    return summary[list(CONDITION_SUMMARY_COLUMNS)]
+
+
+def select_condition_blocks(blocks: pd.DataFrame, cell_label: str,
+                            online_analysis: str, filter_wheel_ndf: float,
+                            show: bool = True, height: int = 360) -> pd.DataFrame:
+    """Select one cell x recording mode x FilterWheel condition.
+
+    The input is normally ``selected_blocks`` from Sections 1--2 of
+    ``analyzeConeDisc.ipynb`` and therefore already belongs to one experiment.
+    The returned rows retain every image-specific background intensity while
+    pooling across image names for the requested condition.
+    """
+    from retinanalysis.SCutils import explore as sc
+
+    required = {'cell_label', 'onlineAnalysis', 'filter_wheel_ndf', 'block_id'}
+    missing = sorted(required - set(blocks.columns))
+    if missing:
+        raise ValueError(f'blocks is missing required column(s): {missing}')
+
+    mode = str(online_analysis).strip().lower()
+    wheel = float(filter_wheel_ndf)
+    numeric_wheel = pd.to_numeric(blocks['filter_wheel_ndf'], errors='coerce')
+    keep = (blocks['cell_label'].astype(str).eq(str(cell_label))
+            & blocks['onlineAnalysis'].astype(str).str.strip().str.lower().eq(mode)
+            & np.isclose(numeric_wheel, wheel, equal_nan=False))
+    sort_columns = [column for column in ('imageName', 'start_time', 'block_id')
+                    if column in blocks]
+    selected = blocks.loc[keep].sort_values(sort_columns).copy()
+    if selected.empty:
+        available = (blocks[['cell_label', 'onlineAnalysis', 'filter_wheel_ndf']]
+                     .drop_duplicates().sort_values(['cell_label', 'onlineAnalysis',
+                                                     'filter_wheel_ndf']))
+        choices = '; '.join(
+            f"{row.cell_label}/{row.onlineAnalysis}/FW{row.filter_wheel_ndf:g}"
+            for row in available.itertuples())
+        raise ValueError(
+            f'No blocks match cell_label={cell_label!r}, onlineAnalysis={mode!r}, '
+            f'FilterWheel={wheel:g}. Available: {choices}')
+
+    experiments = selected['exp_name'].astype(str).unique()
+    if len(experiments) != 1:
+        raise ValueError('Select blocks from one experiment before analyzing one cell.')
+
+    summary = condition_image_summary(selected)
+    selected.attrs['image_summary'] = summary
+    if show:
+        block_ids = ', '.join(str(int(value)) for value in selected['block_id'])
+        print(f'{experiments[0]}/{cell_label} | {mode} | FilterWheel {wheel:g}')
+        print(f'block_ids: {block_ids}')
+        print(f'{len(summary)} imageNames | {int(summary.epochs.sum())} epochs')
+        sc.scroll_table(summary, height=height,
+                        num_cols=('epochs', 'maxIntensity',
+                                  'backgroundIntensity', 'meanIntensity'))
+    return selected
+
+
 # --------------------------------------------------------------------------
 # per-group analysis
 # --------------------------------------------------------------------------
@@ -608,6 +703,73 @@ class DiscRecord:
                 f'offset {m(self.nli_disc_offset):+.3f}\n'
                 f'  NLI cone-lin disc : onset {m(self.nli_cone_onset):+.3f}  '
                 f'offset {m(self.nli_cone_offset):+.3f}')
+
+
+@dataclass
+class ConditionAnalysis:
+    """Exact-onset responses for one cell/mode/FilterWheel condition."""
+    exp_name: str
+    cell_label: str
+    cell_type: str
+    online_analysis: str
+    filter_wheel_ndf: float
+    block_ids: List[int]
+    image_summary: pd.DataFrame
+    epoch_responses: pd.DataFrame
+    patch_responses: pd.DataFrame
+    units: str
+    threshold: float
+
+
+def summarize_patch_responses(epoch_responses: pd.DataFrame,
+                              threshold: float) -> pd.DataFrame:
+    """Mean, SEM, and NLI per unique ``(imageName, patchIndex)`` pair."""
+    required = {'imageName', 'patchIndex', 'category', 'response'}
+    missing = sorted(required - set(epoch_responses.columns))
+    if missing:
+        raise ValueError(f'epoch_responses is missing required column(s): {missing}')
+
+    def sem(values):
+        values = np.asarray(values, dtype=float)
+        values = values[np.isfinite(values)]
+        return (float(np.std(values, ddof=1) / np.sqrt(values.size))
+                if values.size > 1 else 0.0)
+
+    stats = (epoch_responses.groupby(['imageName', 'patchIndex', 'category'], sort=True)
+             .agg(response_mean=('response', 'mean'),
+                  response_sem=('response', sem),
+                  n_trials=('response', 'count'))
+             .reset_index())
+    index = ['imageName', 'patchIndex']
+    base = stats[index].drop_duplicates().set_index(index)
+    for category in ('image', 'disc', 'cone_disc'):
+        category_rows = stats.loc[stats['category'].eq(category)].set_index(index)
+        for source, suffix in (('response_mean', 'mean'), ('response_sem', 'sem'),
+                               ('n_trials', 'n')):
+            base[f'{category}_{suffix}'] = category_rows[source]
+    patches = base.reset_index()
+    for column in ('image_mean', 'disc_mean', 'cone_disc_mean'):
+        if column not in patches:
+            patches[column] = np.nan
+    keep = (patches['image_mean'].notna()
+            & (patches['disc_mean'].notna() | patches['cone_disc_mean'].notna()))
+    patches = patches.loc[keep].reset_index(drop=True)
+
+    def nli(disc_column):
+        image = patches['image_mean'].to_numpy(dtype=float)
+        disc = patches[disc_column].to_numpy(dtype=float)
+        with np.errstate(invalid='ignore', divide='ignore'):
+            values = (image - disc) / (np.abs(image) + np.abs(disc))
+        below = np.maximum(np.abs(image), np.abs(disc)) < float(threshold)
+        values[below] = 0.0
+        values[~np.isfinite(image) | ~np.isfinite(disc)] = np.nan
+        return values
+
+    patches['nli_disc'] = nli('disc_mean')
+    patches['nli_cone_disc'] = nli('cone_disc_mean')
+    patches['patch_key'] = [f'{image}:{patch:g}' for image, patch in
+                            zip(patches['imageName'], patches['patchIndex'])]
+    return patches
 
 
 def analyze_group(exp_name: str, block_ids: Sequence[int],
@@ -789,6 +951,135 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
     return rec
 
 
+def analyze_condition(blocks: pd.DataFrame,
+                      detector_kwargs: Optional[dict] = None,
+                      max_series_resistance: Optional[float] = MAX_SERIES_RESISTANCE,
+                      verbose: bool = True) -> ConditionAnalysis:
+    """Analyze one selected cell/mode/FilterWheel condition.
+
+    The onset window is exactly ``preTime`` through ``preTime + stimTime``.
+    Extracellular responses are spike counts in that window. Whole-cell traces
+    are baseline-subtracted using the preTime samples and integrated over the
+    window in pA*s; excitatory currents are sign-flipped so stronger responses
+    remain positive. Repeated epochs provide the SEM used for both plot axes.
+    """
+    import contextlib
+    import io
+    import warnings
+
+    import retinanalysis as ra
+
+    if blocks.empty:
+        raise ValueError('No condition blocks were supplied.')
+    for column in ('exp_name', 'cell_label', 'onlineAnalysis', 'filter_wheel_ndf',
+                   'block_id'):
+        if blocks[column].nunique(dropna=False) != 1 and column != 'block_id':
+            raise ValueError(f'Condition must contain exactly one {column}.')
+
+    exp_name = str(blocks['exp_name'].iloc[0])
+    cell_label = str(blocks['cell_label'].iloc[0])
+    mode = str(blocks['onlineAnalysis'].iloc[0]).strip().lower()
+    if mode not in ('extracellular', 'exc', 'inh'):
+        raise ValueError(f'Unsupported onlineAnalysis {mode!r}.')
+    ndf = float(blocks['filter_wheel_ndf'].iloc[0])
+    cell_type_column = ('cell_type_short' if 'cell_type_short' in blocks
+                        else 'cell_type')
+    cell_type = str(blocks[cell_type_column].iloc[0])
+
+    responses = []
+    used_blocks = []
+    for row in blocks.itertuples(index=False):
+        block_id = int(row.block_id)
+        sb = ra.StimBlock(exp_name, block_id, verbose=False)
+        parameters = list(sb.df_epochs['epoch_parameters'])
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            rb = ra.SCResponseBlock(exp_name, block_id, b_spiking=False, verbose=False)
+        sample_rate = float(rb.amp_sample_rate)
+        try:
+            series_resistance = np.asarray(read_series_resistance(exp_name, block_id),
+                                           dtype=float)
+            rs_median = (float(np.nanmedian(series_resistance))
+                         if np.isfinite(series_resistance).any() else np.nan)
+        except Exception:
+            rs_median = np.nan
+        if (max_series_resistance is not None and np.isfinite(rs_median)
+                and rs_median > max_series_resistance):
+            if verbose:
+                print(f'  block {block_id}: series resistance {rs_median / 1e6:.1f} MOhm '
+                      f'exceeds {max_series_resistance / 1e6:g} MOhm; skipped')
+            continue
+
+        if mode == 'extracellular':
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', category=RuntimeWarning,
+                                        module=r'retinanalysis\.utils\.spike_detector')
+                rb.get_spike_times(**(detector_kwargs or {}))
+        used_blocks.append(block_id)
+
+        for epoch_index, parameters_i in enumerate(parameters):
+            category = category_of(parameters_i.get('stimulusTag'))
+            patch_index = parameters_i.get('patchIndex')
+            if patch_index is None:
+                patch_index = parameters_i.get('imagePatchIndex', np.nan)
+            try:
+                patch_index = float(patch_index)
+            except (TypeError, ValueError):
+                patch_index = np.nan
+            if (not category or epoch_index >= len(rb.amp_data)
+                    or not np.isfinite(patch_index)):
+                continue
+            pre_points = int(round(float(parameters_i['preTime']) / 1e3 * sample_rate))
+            stim_points = int(round(float(parameters_i['stimTime']) / 1e3 * sample_rate))
+            onset_start = max(pre_points, 0)
+            onset_stop = min(pre_points + stim_points, rb.amp_data.shape[1])
+            if onset_stop <= onset_start:
+                continue
+
+            if mode == 'extracellular':
+                spikes = np.asarray(rb.spike_times[epoch_index], dtype=float)
+                response = float(np.sum((spikes >= onset_start) & (spikes < onset_stop)))
+            else:
+                trace = np.asarray(rb.amp_data[epoch_index], dtype=float)
+                baseline = float(np.mean(trace[:pre_points])) if pre_points > 0 else 0.0
+                sign = -1.0 if mode == 'exc' else 1.0
+                response = sign * float(np.sum(trace[onset_start:onset_stop] - baseline)
+                                        / sample_rate)
+
+            image_name = str(parameters_i.get('imageName', getattr(row, 'imageName', '?')))
+            max_intensity = float(parameters_i.get(
+                'maxIntensity', getattr(row, 'maxIntensity', np.nan)))
+            background = float(parameters_i.get(
+                'backgroundIntensity', getattr(row, 'backgroundIntensity', np.nan)))
+            responses.append({
+                'block_id': block_id, 'epoch_index': epoch_index,
+                'imageName': image_name, 'patchIndex': patch_index,
+                'category': category, 'response': response,
+                'maxIntensity': max_intensity,
+                'backgroundIntensity': background,
+                'meanIntensity': max_intensity * background,
+            })
+
+    epoch_responses = pd.DataFrame(responses)
+    if epoch_responses.empty:
+        raise ValueError(f'{exp_name}/{cell_label}: no usable epochs in the selected condition')
+    threshold = float(NLI_THRESHOLD[mode])
+    patch_responses = summarize_patch_responses(epoch_responses, threshold=threshold)
+    if patch_responses.empty:
+        raise ValueError(f'{exp_name}/{cell_label}: no image/disc patch pairs were found')
+
+    units = 'spikes' if mode == 'extracellular' else 'charge (pA*s)'
+    analysis = ConditionAnalysis(
+        exp_name=exp_name, cell_label=cell_label, cell_type=cell_type,
+        online_analysis=mode, filter_wheel_ndf=ndf, block_ids=used_blocks,
+        image_summary=condition_image_summary(blocks.loc[blocks['block_id'].isin(used_blocks)]),
+        epoch_responses=epoch_responses, patch_responses=patch_responses,
+        units=units, threshold=threshold)
+    if verbose:
+        print(f'analyzed {len(used_blocks)} blocks, {len(epoch_responses)} epochs, '
+              f'{len(patch_responses)} image/patch pairs')
+    return analysis
+
+
 # --------------------------------------------------------------------------
 # record store
 # --------------------------------------------------------------------------
@@ -932,6 +1223,114 @@ def plot_group(rec: DiscRecord, figsize: Tuple[float, float] = (9.0, 4.2)):
                    f'{rec.threshold_offset:.3g} offset {rec.units.split()[-1]})', fontsize=9)
     fig.tight_layout()
     return fig
+
+
+def plot_condition(analysis: ConditionAnalysis,
+                   panel_width: float = 3.2,
+                   columns: int = 4):
+    """Plot per-image scatters, a pooled scatter, and onset NLI distributions.
+
+    Standard image--disc pairs use grey and cone-linearized pairs use red. Every
+    point is one image-specific patch and carries x/y SEM bars. The pooled plot
+    preserves the full ``imageName:patchIndex`` key, so reused patch indices are
+    never collapsed across images.
+    """
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    patches = analysis.patch_responses
+    images = list(analysis.image_summary['imageName'].astype(str))
+    n_columns = max(1, min(int(columns), len(images)))
+    n_rows = int(np.ceil(len(images) / n_columns))
+    per_image_fig, axes = plt.subplots(
+        n_rows, n_columns, figsize=(panel_width * n_columns, panel_width * n_rows),
+        squeeze=False)
+
+    colors = {'disc': '#666666', 'cone_disc': '#C44E52'}
+    labels = {'disc': 'image vs disc', 'cone_disc': 'image vs cone-lin disc'}
+
+    def draw_scatter(ax, frame, title):
+        plotted = []
+        for category in ('disc', 'cone_disc'):
+            x = frame['image_mean'].to_numpy(dtype=float)
+            y = frame[f'{category}_mean'].to_numpy(dtype=float)
+            xerr = frame['image_sem'].fillna(0).to_numpy(dtype=float)
+            yerr = frame[f'{category}_sem'].fillna(0).to_numpy(dtype=float)
+            keep = np.isfinite(x) & np.isfinite(y)
+            if not keep.any():
+                continue
+            ax.errorbar(x[keep], y[keep], xerr=xerr[keep], yerr=yerr[keep],
+                        fmt='o', ms=4, color=colors[category], ecolor=colors[category],
+                        elinewidth=.8, capsize=2, alpha=.82, label=labels[category],
+                        zorder=3)
+            plotted.extend((x[keep] - xerr[keep]).tolist())
+            plotted.extend((x[keep] + xerr[keep]).tolist())
+            plotted.extend((y[keep] - yerr[keep]).tolist())
+            plotted.extend((y[keep] + yerr[keep]).tolist())
+        finite = np.asarray(plotted, dtype=float)
+        finite = finite[np.isfinite(finite)]
+        if finite.size:
+            lower, upper = min(float(finite.min()), 0.0), max(float(finite.max()), 0.0)
+            span = upper - lower
+            pad = .06 * span if span else 1.0
+            limits = (lower - pad, upper + pad)
+            ax.plot(limits, limits, '--', color='black', lw=1, zorder=1)
+            ax.set_xlim(limits)
+            ax.set_ylim(limits)
+        ax.set_aspect('equal', adjustable='box')
+        ax.set_xlabel(f'image response ({analysis.units})')
+        ax.set_ylabel(f'disc response ({analysis.units})')
+        ax.set_title(title, fontsize=9)
+
+    summaries = analysis.image_summary.set_index('imageName')
+    for ax, image_name in zip(axes.flat, images):
+        frame = patches.loc[patches['imageName'].astype(str).eq(image_name)]
+        summary = summaries.loc[image_name]
+        mean_intensity = summary['meanIntensity']
+        intensity_text = (f'{mean_intensity:g}' if np.isscalar(mean_intensity)
+                          and not isinstance(mean_intensity, str) else str(mean_intensity))
+        draw_scatter(
+            ax, frame,
+            f'{image_name} | {int(summary.epochs)} epochs | '
+            f'meanIntensity {intensity_text}\n{len(frame)} patches')
+    for ax in axes.flat[len(images):]:
+        ax.set_visible(False)
+    handles, legend_labels = axes.flat[0].get_legend_handles_labels()
+    if handles:
+        per_image_fig.legend(handles, legend_labels, loc='upper center', ncol=2,
+                             bbox_to_anchor=(.5, .955), frameon=False)
+    per_image_fig.suptitle(
+        f'{analysis.exp_name}/{analysis.cell_label} | {analysis.online_analysis} | '
+        f'FilterWheel {analysis.filter_wheel_ndf:g}', y=.995, fontsize=11)
+    per_image_fig.tight_layout(rect=(0, 0, 1, .91))
+
+    pooled_fig, pooled_ax = plt.subplots(figsize=(5.4, 5.0))
+    draw_scatter(pooled_ax, patches,
+                 f'all image-specific patches ({len(patches)} pairs)')
+    pooled_ax.legend(frameon=False, fontsize=8)
+    pooled_fig.tight_layout()
+
+    nli_fig, nli_ax = plt.subplots(figsize=(6.0, 4.2))
+    bins = np.linspace(-1, 1, 21)
+    for column, color, label in (
+            ('nli_disc', colors['disc'], 'image vs disc'),
+            ('nli_cone_disc', colors['cone_disc'], 'image vs cone-lin disc')):
+        values = patches[column].to_numpy(dtype=float)
+        values = values[np.isfinite(values)]
+        if values.size:
+            nli_ax.hist(values, bins=bins, density=True, histtype='stepfilled',
+                        alpha=.28, color=color, edgecolor=color, linewidth=1.5,
+                        label=f'{label} (n={len(values)})')
+            nli_ax.axvline(np.mean(values), color=color, lw=1.5)
+    nli_ax.axvline(0, color='black', ls='--', lw=1)
+    nli_ax.set_xlim(-1, 1)
+    nli_ax.set_xlabel('Nonlinear Index  (image - disc) / (|image| + |disc|)')
+    nli_ax.set_ylabel('density')
+    nli_ax.set_title(f'onset response | threshold {analysis.threshold:g} {analysis.units}')
+    nli_ax.legend(frameon=False, fontsize=8)
+    nli_fig.tight_layout()
+    return per_image_fig, pooled_fig, nli_fig
 
 
 def plot_population_nli(summary: Optional[pd.DataFrame] = None,

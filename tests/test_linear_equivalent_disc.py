@@ -347,6 +347,61 @@ def test_group_blocks_prefers_the_pre_relabel_column_for_recorded_labels():
     assert g.loc[0, 'recorded_labels'] == 'none'
 
 
+def test_select_condition_blocks_uses_cell_mode_and_filter_wheel(monkeypatch):
+    blocks = pd.DataFrame([
+        _one_block(block_id=1, imageName='00152', n_epochs=120,
+                   backgroundIntensity=0.2, maxIntensity=1000.0),
+        _one_block(block_id=2, imageName='01769', n_epochs=90,
+                   backgroundIntensity=0.1, maxIntensity=1000.0),
+        _one_block(block_id=3, imageName='00152', filter_wheel_ndf=1.0),
+        _one_block(block_id=4, imageName='00152', onlineAnalysis='inh'),
+        _one_block(block_id=5, imageName='00152', cell_label='Cell2'),
+    ])
+    blocks['start_time'] = pd.date_range('2026-01-01', periods=len(blocks))
+    selected = led.select_condition_blocks(
+        blocks, 'Cell1', 'exc', 0.0, show=False)
+
+    assert selected['block_id'].tolist() == [1, 2]
+    summary = selected.attrs['image_summary']
+    assert summary[['imageName', 'epochs']].to_dict('records') == [
+        {'imageName': '00152', 'epochs': 120},
+        {'imageName': '01769', 'epochs': 90},
+    ]
+    assert summary['meanIntensity'].tolist() == [200.0, 100.0]
+
+
+def test_condition_summary_does_not_merge_reused_patch_indices():
+    epochs = pd.DataFrame([
+        {'imageName': image, 'patchIndex': 1.0, 'category': category, 'response': value}
+        for image, values in [('A', (2, 1, 2)), ('B', (10, 5, 8))]
+        for category, value in zip(('image', 'disc', 'cone_disc'), values)
+    ])
+    patches = led.summarize_patch_responses(epochs, threshold=0.0)
+
+    assert patches['patch_key'].tolist() == ['A:1', 'B:1']
+    assert patches['image_mean'].tolist() == [2.0, 10.0]
+    assert patches['nli_disc'].tolist() == pytest.approx([1 / 3, 1 / 3])
+
+
+def test_condition_patch_error_bars_are_sem_across_repeats():
+    epochs = pd.DataFrame([
+        {'imageName': 'A', 'patchIndex': 1.0, 'category': category, 'response': response}
+        for category, responses in {
+            'image': [2.0, 4.0], 'disc': [1.0, 3.0],
+            'cone_disc': [2.0, 2.0],
+        }.items()
+        for response in responses
+    ])
+    patch = led.summarize_patch_responses(epochs, threshold=3.0).iloc[0]
+
+    assert patch['image_mean'] == 3.0
+    assert patch['image_sem'] == pytest.approx(1.0)
+    assert patch['disc_sem'] == pytest.approx(1.0)
+    assert patch['cone_disc_sem'] == 0.0
+    assert patch['image_n'] == patch['disc_n'] == patch['cone_disc_n'] == 2
+    assert patch['nli_disc'] == pytest.approx(0.2)
+
+
 def test_example_patch_params_from_blocks_skips_pre_cone_rows(monkeypatch):
     blocks = pd.DataFrame([
         {'exp_name': 'old_E', 'block_id': 1, 'linearizeCones': np.nan},
