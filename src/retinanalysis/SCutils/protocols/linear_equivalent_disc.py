@@ -113,6 +113,7 @@ CONDITION_SUMMARY_COLUMNS = (
     'imageName', 'block_ids', 'epochs', 'maxIntensity',
     'backgroundIntensity', 'meanIntensity',
 )
+CONDITION_OUTPUT_VERSION = 1
 
 
 def stimulus_site(protocol: str) -> str:
@@ -721,6 +722,7 @@ class ConditionAnalysis:
     patch_responses: pd.DataFrame
     units: str
     threshold: float
+    loaded_from_saved: bool = False
 
 
 def summarize_patch_responses(epoch_responses: pd.DataFrame,
@@ -956,6 +958,8 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
 def analyze_condition(blocks: pd.DataFrame,
                       detector_kwargs: Optional[dict] = None,
                       max_series_resistance: Optional[float] = MAX_SERIES_RESISTANCE,
+                      reuse_saved: bool = True,
+                      saved_output_dir=None,
                       verbose: bool = True) -> ConditionAnalysis:
     """Analyze one selected cell/mode/FilterWheel condition.
 
@@ -970,6 +974,8 @@ def analyze_condition(blocks: pd.DataFrame,
     import warnings
 
     import retinanalysis as ra
+    from retinanalysis.utils.datajoint_utils import get_epochblock_amp_data
+    from retinanalysis.utils.spike_detector import detector
 
     if blocks.empty:
         raise ValueError('No condition blocks were supplied.')
@@ -988,6 +994,11 @@ def analyze_condition(blocks: pd.DataFrame,
                         else 'cell_type')
     cell_type = str(blocks[cell_type_column].iloc[0])
 
+    if reuse_saved and detector_kwargs is None:
+        saved = load_condition_output(blocks, output_dir=saved_output_dir, verbose=verbose)
+        if saved is not None:
+            return saved
+
     responses = []
     used_blocks = []
     for row in blocks.itertuples(index=False):
@@ -995,8 +1006,10 @@ def analyze_condition(blocks: pd.DataFrame,
         sb = ra.StimBlock(exp_name, block_id, verbose=False)
         parameters = list(sb.df_epochs['epoch_parameters'])
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            rb = ra.SCResponseBlock(exp_name, block_id, b_spiking=False, verbose=False)
-        sample_rate = float(rb.amp_sample_rate)
+            amp_data, sample_rate = get_epochblock_amp_data(
+                exp_name, block_id, verbose=False)
+        amp_data = np.asarray(amp_data, dtype=float)
+        sample_rate = float(sample_rate)
         try:
             series_resistance = np.asarray(read_series_resistance(exp_name, block_id),
                                            dtype=float)
@@ -1015,7 +1028,10 @@ def analyze_condition(blocks: pd.DataFrame,
             with warnings.catch_warnings():
                 warnings.filterwarnings('ignore', category=RuntimeWarning,
                                         module=r'retinanalysis\.utils\.spike_detector')
-                rb.get_spike_times(**(detector_kwargs or {}))
+                options = dict(detector_kwargs or {})
+                options.setdefault('verbose', False)
+                spike_times, _, _ = detector(
+                    amp_data, sample_rate=sample_rate, **options)
         used_blocks.append(block_id)
 
         for epoch_index, parameters_i in enumerate(parameters):
@@ -1027,21 +1043,21 @@ def analyze_condition(blocks: pd.DataFrame,
                 patch_index = float(patch_index)
             except (TypeError, ValueError):
                 patch_index = np.nan
-            if (not category or epoch_index >= len(rb.amp_data)
+            if (not category or epoch_index >= len(amp_data)
                     or not np.isfinite(patch_index)):
                 continue
             pre_points = int(round(float(parameters_i['preTime']) / 1e3 * sample_rate))
             stim_points = int(round(float(parameters_i['stimTime']) / 1e3 * sample_rate))
             onset_start = max(pre_points, 0)
-            onset_stop = min(pre_points + stim_points, rb.amp_data.shape[1])
+            onset_stop = min(pre_points + stim_points, amp_data.shape[1])
             if onset_stop <= onset_start:
                 continue
 
             if mode == 'extracellular':
-                spikes = np.asarray(rb.spike_times[epoch_index], dtype=float)
+                spikes = np.asarray(spike_times[epoch_index], dtype=float)
                 response = float(np.sum((spikes >= onset_start) & (spikes < onset_stop)))
             else:
-                trace = np.asarray(rb.amp_data[epoch_index], dtype=float)
+                trace = amp_data[epoch_index]
                 baseline = float(np.mean(trace[:pre_points])) if pre_points > 0 else 0.0
                 sign = -1.0 if mode == 'exc' else 1.0
                 response = sign * float(np.sum(trace[onset_start:onset_stop] - baseline)
@@ -1104,7 +1120,7 @@ def condition_population_table(analysis: ConditionAnalysis) -> pd.DataFrame:
     """
     patches = analysis.patch_responses.copy()
     image_metadata = analysis.image_summary[
-        ['imageName', 'block_ids', 'maxIntensity', 'backgroundIntensity',
+        ['imageName', 'block_ids', 'epochs', 'maxIntensity', 'backgroundIntensity',
          'meanIntensity']].copy()
     table = patches.merge(image_metadata, on='imageName', how='left', validate='many_to_one')
     table.insert(0, 'date', analysis.exp_name)
@@ -1118,6 +1134,7 @@ def condition_population_table(analysis: ConditionAnalysis) -> pd.DataFrame:
         lambda values: ','.join(str(int(value)) for value in values)
         if isinstance(values, (list, tuple, np.ndarray)) else str(values))
     table['response_units'] = analysis.units
+    table['output_version'] = CONDITION_OUTPUT_VERSION
     table = table.rename(columns={
         'image_mean': 'image_response', 'image_sem': 'image_response_sem',
         'image_n': 'image_trials', 'disc_mean': 'disc_response',
@@ -1127,15 +1144,17 @@ def condition_population_table(analysis: ConditionAnalysis) -> pd.DataFrame:
         'cone_disc_n': 'cone_disc_trials',
         'nli_disc': 'nli_image_vs_disc',
         'nli_cone_disc': 'nli_image_vs_cone_disc',
+        'epochs': 'image_epochs',
     })
     columns = [
         'date', 'cell_label', 'cell_type', 'onlineAnalysis', 'protocol', 'site',
         'filter_wheel_ndf', 'imageName', 'patchIndex', 'patch_key', 'block_ids',
-        'maxIntensity', 'backgroundIntensity', 'meanIntensity', 'response_units',
+        'image_epochs', 'maxIntensity', 'backgroundIntensity', 'meanIntensity',
+        'response_units',
         'image_response', 'image_response_sem', 'image_trials',
         'disc_response', 'disc_response_sem', 'disc_trials',
         'cone_disc_response', 'cone_disc_response_sem', 'cone_disc_trials',
-        'nli_image_vs_disc', 'nli_image_vs_cone_disc',
+        'nli_image_vs_disc', 'nli_image_vs_cone_disc', 'output_version',
     ]
     return table[columns].sort_values(['imageName', 'patchIndex']).reset_index(drop=True)
 
@@ -1145,14 +1164,21 @@ def condition_output_dir():
     return store_dir() / 'condition_outputs'
 
 
-def _condition_output_name(analysis: ConditionAnalysis) -> str:
+def _condition_output_name_from_values(exp_name: str, cell_label: str,
+                                       online_analysis: str, site: str,
+                                       protocols: Sequence[str],
+                                       filter_wheel_ndf: float) -> str:
     import re
 
-    raw = '__'.join((analysis.exp_name, analysis.cell_label,
-                    analysis.online_analysis, analysis.site,
-                    ','.join(analysis.protocols),
-                    f'FW{analysis.filter_wheel_ndf:g}'))
+    raw = '__'.join((exp_name, cell_label, online_analysis, site,
+                    ','.join(protocols), f'FW{filter_wheel_ndf:g}'))
     return re.sub(r'[^A-Za-z0-9_-]+', '-', raw).strip('-') + '.csv'
+
+
+def _condition_output_name(analysis: ConditionAnalysis) -> str:
+    return _condition_output_name_from_values(
+        analysis.exp_name, analysis.cell_label, analysis.online_analysis,
+        analysis.site, analysis.protocols, analysis.filter_wheel_ndf)
 
 
 def save_condition_output(analysis: ConditionAnalysis, output_dir=None,
@@ -1172,6 +1198,87 @@ def save_condition_output(analysis: ConditionAnalysis, output_dir=None,
     return path
 
 
+def _read_condition_csv(path) -> pd.DataFrame:
+    text_columns = {'date': str, 'cell_label': str, 'imageName': str,
+                    'patch_key': str, 'block_ids': str}
+    return pd.read_csv(path, dtype=text_columns)
+
+
+def load_condition_output(blocks: pd.DataFrame, output_dir=None,
+                          verbose: bool = True) -> Optional[ConditionAnalysis]:
+    """Rehydrate a matching saved condition, or return ``None`` if stale/missing."""
+    from pathlib import Path
+
+    if blocks.empty:
+        return None
+    exp_names = blocks['exp_name'].astype(str).unique()
+    cell_labels = blocks['cell_label'].astype(str).unique()
+    modes = blocks['onlineAnalysis'].astype(str).str.strip().str.lower().unique()
+    wheels = pd.to_numeric(blocks['filter_wheel_ndf'], errors='coerce').unique()
+    sites = blocks['site'].astype(str).unique()
+    if any(len(values) != 1 for values in (exp_names, cell_labels, modes, wheels, sites)):
+        return None
+    protocols = sorted({str(value) for value in blocks['protocol']})
+    directory = Path(output_dir) if output_dir is not None else condition_output_dir()
+    path = directory / _condition_output_name_from_values(
+        exp_names[0], cell_labels[0], modes[0], sites[0], protocols, float(wheels[0]))
+    if not path.exists():
+        return None
+    try:
+        table = _read_condition_csv(path)
+        if ('output_version' not in table
+                or not table['output_version'].eq(CONDITION_OUTPUT_VERSION).all()):
+            return None
+        saved_blocks = {int(value) for values in table['block_ids'].dropna()
+                        for value in str(values).split(',') if value}
+        expected_blocks = {int(value) for value in blocks['block_id']}
+        if saved_blocks != expected_blocks:
+            return None
+    except (OSError, ValueError, KeyError):
+        return None
+
+    patch_responses = table.rename(columns={
+        'image_response': 'image_mean', 'image_response_sem': 'image_sem',
+        'image_trials': 'image_n', 'disc_response': 'disc_mean',
+        'disc_response_sem': 'disc_sem', 'disc_trials': 'disc_n',
+        'cone_disc_response': 'cone_disc_mean',
+        'cone_disc_response_sem': 'cone_disc_sem',
+        'cone_disc_trials': 'cone_disc_n',
+        'nli_image_vs_disc': 'nli_disc',
+        'nli_image_vs_cone_disc': 'nli_cone_disc',
+    })
+    patch_columns = [
+        'imageName', 'patchIndex', 'image_mean', 'image_sem', 'image_n',
+        'disc_mean', 'disc_sem', 'disc_n', 'cone_disc_mean', 'cone_disc_sem',
+        'cone_disc_n', 'nli_disc', 'nli_cone_disc', 'patch_key',
+    ]
+    patch_responses = patch_responses[patch_columns].copy()
+
+    image_summary = (table.groupby('imageName', sort=True)
+                     .agg(block_ids=('block_ids', 'first'),
+                          epochs=('image_epochs', 'first'),
+                          maxIntensity=('maxIntensity', 'first'),
+                          backgroundIntensity=('backgroundIntensity', 'first'),
+                          meanIntensity=('meanIntensity', 'first'))
+                     .reset_index())
+    image_summary['block_ids'] = image_summary['block_ids'].apply(
+        lambda values: [int(value) for value in str(values).split(',') if value])
+    cell_type_column = ('cell_type_short' if 'cell_type_short' in blocks
+                        else 'cell_type')
+    analysis = ConditionAnalysis(
+        exp_name=exp_names[0], cell_label=cell_labels[0],
+        cell_type=str(blocks[cell_type_column].iloc[0]),
+        online_analysis=modes[0], filter_wheel_ndf=float(wheels[0]),
+        block_ids=sorted(saved_blocks), protocols=protocols, site=sites[0],
+        image_summary=image_summary, epoch_responses=pd.DataFrame(),
+        patch_responses=patch_responses,
+        units=str(table['response_units'].iloc[0]),
+        threshold=float(NLI_THRESHOLD[modes[0]]), loaded_from_saved=True)
+    if verbose:
+        print(f'loaded {len(patch_responses)} saved patch rows from {path}')
+    return analysis
+
+
 def load_condition_outputs(output_dir=None) -> pd.DataFrame:
     """Load all saved cell-condition CSVs into one population patch table."""
     from pathlib import Path
@@ -1180,9 +1287,7 @@ def load_condition_outputs(output_dir=None) -> pd.DataFrame:
     paths = sorted(directory.glob('*.csv')) if directory.exists() else []
     if not paths:
         return pd.DataFrame()
-    text_columns = {'date': str, 'cell_label': str, 'imageName': str,
-                    'patch_key': str, 'block_ids': str}
-    return pd.concat([pd.read_csv(path, dtype=text_columns) for path in paths],
+    return pd.concat([_read_condition_csv(path) for path in paths],
                      ignore_index=True)
 
 

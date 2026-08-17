@@ -453,6 +453,36 @@ def test_condition_output_save_is_idempotent_and_loads_population_rows(tmp_path)
     assert loaded['imageName'].tolist() == ['00152', '00152', '01769']
 
 
+def test_matching_saved_condition_rehydrates_without_raw_data(tmp_path):
+    analysis = _condition_analysis_for_output()
+    led.save_condition_output(analysis, output_dir=tmp_path, verbose=False)
+    blocks = pd.DataFrame({
+        'exp_name': ['2026-01-01_E', '2026-01-01_E'],
+        'cell_label': ['Cell1', 'Cell1'],
+        'cell_type_short': ['ON-parasol', 'ON-parasol'],
+        'onlineAnalysis': ['extracellular', 'extracellular'],
+        'filter_wheel_ndf': [0.0, 0.0],
+        'protocol': ['LinearEquivalentAnnulus', 'LinearEquivalentAnnulus'],
+        'site': ['surround', 'surround'], 'block_id': [11, 12],
+    })
+
+    restored = led.load_condition_output(blocks, output_dir=tmp_path, verbose=False)
+    assert restored is not None and restored.loaded_from_saved
+    assert restored.block_ids == [11, 12]
+    assert restored.image_summary['epochs'].tolist() == [12, 6]
+    assert restored.patch_responses['patch_key'].tolist() == [
+        '00152:1', '00152:2', '01769:1']
+
+    automatic = led.analyze_condition(
+        blocks, saved_output_dir=tmp_path, verbose=False)
+    assert automatic.loaded_from_saved
+    assert automatic.patch_responses.equals(restored.patch_responses)
+
+    stale = blocks.copy()
+    stale.loc[1, 'block_id'] = 13
+    assert led.load_condition_output(stale, output_dir=tmp_path, verbose=False) is None
+
+
 def test_condition_nli_plot_uses_lines_and_mean_sem_subplot():
     import matplotlib.pyplot as plt
 
