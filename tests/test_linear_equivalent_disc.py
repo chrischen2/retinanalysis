@@ -452,13 +452,20 @@ def test_condition_population_table_labels_every_patch_and_image_intensity():
 
 
 def test_condition_output_save_is_idempotent_and_loads_population_rows(tmp_path):
+    import h5py
+
     analysis = _condition_analysis_for_output()
     first = led.save_condition_output(analysis, output_dir=tmp_path, verbose=False)
     second = led.save_condition_output(analysis, output_dir=tmp_path, verbose=False)
     loaded = led.load_condition_outputs(tmp_path)
 
     assert first == second
-    assert len(list(tmp_path.glob('*.csv'))) == 1
+    assert len(list(tmp_path.glob('*.h5'))) == 1
+    assert not list(tmp_path.glob('*.csv'))
+    with h5py.File(first, 'r') as stored:
+        assert set(stored) == {'block_ids', 'image_summary', 'patch_responses'}
+        assert stored['patch_responses/image_mean'].compression == 'gzip'
+        assert len(stored['patch_responses/patch_key']) == 3
     assert len(loaded) == 3
     assert loaded['imageName'].tolist() == ['00152', '00152', '01769']
 

@@ -1160,19 +1160,20 @@ def condition_population_table(analysis: ConditionAnalysis) -> pd.DataFrame:
 
 
 def condition_output_dir():
-    """Directory containing one population-ready CSV per cell condition."""
+    """Directory containing one compressed HDF5 record per cell condition."""
     return store_dir() / 'condition_outputs'
 
 
 def _condition_output_name_from_values(exp_name: str, cell_label: str,
                                        online_analysis: str, site: str,
                                        protocols: Sequence[str],
-                                       filter_wheel_ndf: float) -> str:
+                                       filter_wheel_ndf: float,
+                                       suffix: str = '.h5') -> str:
     import re
 
     raw = '__'.join((exp_name, cell_label, online_analysis, site,
                     ','.join(protocols), f'FW{filter_wheel_ndf:g}'))
-    return re.sub(r'[^A-Za-z0-9_-]+', '-', raw).strip('-') + '.csv'
+    return re.sub(r'[^A-Za-z0-9_-]+', '-', raw).strip('-') + suffix
 
 
 def _condition_output_name(analysis: ConditionAnalysis) -> str:
@@ -1183,19 +1184,112 @@ def _condition_output_name(analysis: ConditionAnalysis) -> str:
 
 def save_condition_output(analysis: ConditionAnalysis, output_dir=None,
                           verbose: bool = True):
-    """Idempotently save one cell condition for later population analysis."""
+    """Idempotently save one cell condition as compressed typed arrays.
+
+    The file is deliberately organized like a MATLAB struct containing arrays:
+    scalar condition metadata live in HDF5 attributes, while ``image_summary``
+    and ``patch_responses`` are groups of column datasets.  A flat population
+    table is only materialized when requested, avoiding a large text CSV on
+    disk while retaining the same public loading API.
+    """
+    import h5py
     from pathlib import Path
 
     directory = Path(output_dir) if output_dir is not None else condition_output_dir()
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / _condition_output_name(analysis)
     temporary = path.with_suffix(path.suffix + '.tmp')
-    table = condition_population_table(analysis)
-    table.to_csv(temporary, index=False)
+
+    with h5py.File(temporary, 'w') as h5:
+        h5.attrs['output_version'] = CONDITION_OUTPUT_VERSION
+        h5.attrs['exp_name'] = analysis.exp_name
+        h5.attrs['cell_label'] = analysis.cell_label
+        h5.attrs['cell_type'] = analysis.cell_type
+        h5.attrs['online_analysis'] = analysis.online_analysis
+        h5.attrs['filter_wheel_ndf'] = analysis.filter_wheel_ndf
+        h5.attrs['protocols'] = '\n'.join(analysis.protocols)
+        h5.attrs['site'] = analysis.site
+        h5.attrs['units'] = analysis.units
+        h5.attrs['threshold'] = analysis.threshold
+        h5.create_dataset('block_ids', data=np.asarray(analysis.block_ids, dtype=np.int64))
+        _write_condition_frame(h5.create_group('image_summary'), analysis.image_summary)
+        _write_condition_frame(h5.create_group('patch_responses'), analysis.patch_responses)
     temporary.replace(path)
     if verbose:
-        print(f'saved {len(table)} patch rows to {path}')
+        print(f'saved 1 condition ({len(analysis.patch_responses)} patches as arrays) to {path}')
     return path
+
+
+def _write_condition_frame(group, frame: pd.DataFrame):
+    """Write a DataFrame as compressed HDF5 column arrays."""
+    import h5py
+
+    group.attrs['columns'] = '\n'.join(frame.columns)
+    for column in frame.columns:
+        values = frame[column]
+        if column == 'block_ids':
+            array = np.asarray([
+                ','.join(str(int(value)) for value in item)
+                if isinstance(item, (list, tuple, np.ndarray)) else str(item)
+                for item in values
+            ], dtype=object)
+        elif pd.api.types.is_numeric_dtype(values.dtype):
+            array = values.to_numpy()
+        else:
+            array = np.asarray(['' if pd.isna(value) else str(value)
+                                for value in values], dtype=object)
+        options = dict(compression='gzip', shuffle=True) if len(array) else {}
+        if array.dtype.kind in 'OUS':
+            group.create_dataset(column, data=array,
+                                 dtype=h5py.string_dtype(encoding='utf-8'), **options)
+        else:
+            group.create_dataset(column, data=array, **options)
+
+
+def _read_condition_frame(group) -> pd.DataFrame:
+    """Read a DataFrame written by :func:`_write_condition_frame`."""
+    columns_attr = group.attrs.get('columns', '')
+    if isinstance(columns_attr, bytes):
+        columns_attr = columns_attr.decode()
+    columns = str(columns_attr).split('\n') if columns_attr else list(group)
+    data = {}
+    for column in columns:
+        values = group[column][()]
+        if values.dtype.kind in 'SO':
+            values = np.asarray([value.decode() if isinstance(value, bytes) else str(value)
+                                 for value in values], dtype=object)
+        data[column] = values
+    frame = pd.DataFrame(data, columns=columns)
+    if 'block_ids' in frame:
+        frame['block_ids'] = frame['block_ids'].apply(
+            lambda item: [int(value) for value in str(item).split(',') if value])
+    return frame
+
+
+def _read_condition_h5(path) -> ConditionAnalysis:
+    """Read one complete condition record without DataJoint or raw-data access."""
+    import h5py
+
+    def text(value):
+        return value.decode() if isinstance(value, bytes) else str(value)
+
+    with h5py.File(path, 'r') as h5:
+        if int(h5.attrs.get('output_version', -1)) != CONDITION_OUTPUT_VERSION:
+            raise ValueError('condition output version does not match')
+        image_summary = _read_condition_frame(h5['image_summary'])
+        patch_responses = _read_condition_frame(h5['patch_responses'])
+        protocols = text(h5.attrs['protocols']).split('\n')
+        return ConditionAnalysis(
+            exp_name=text(h5.attrs['exp_name']),
+            cell_label=text(h5.attrs['cell_label']),
+            cell_type=text(h5.attrs['cell_type']),
+            online_analysis=text(h5.attrs['online_analysis']),
+            filter_wheel_ndf=float(h5.attrs['filter_wheel_ndf']),
+            block_ids=[int(value) for value in h5['block_ids'][()]],
+            protocols=protocols, site=text(h5.attrs['site']),
+            image_summary=image_summary, epoch_responses=pd.DataFrame(),
+            patch_responses=patch_responses, units=text(h5.attrs['units']),
+            threshold=float(h5.attrs['threshold']), loaded_from_saved=True)
 
 
 def _read_condition_csv(path) -> pd.DataFrame:
@@ -1222,6 +1316,22 @@ def load_condition_output(blocks: pd.DataFrame, output_dir=None,
     directory = Path(output_dir) if output_dir is not None else condition_output_dir()
     path = directory / _condition_output_name_from_values(
         exp_names[0], cell_labels[0], modes[0], sites[0], protocols, float(wheels[0]))
+    if path.exists():
+        try:
+            analysis = _read_condition_h5(path)
+            if set(analysis.block_ids) != {int(value) for value in blocks['block_id']}:
+                return None
+        except (OSError, ValueError, KeyError):
+            return None
+        if verbose:
+            print(f'loaded {len(analysis.patch_responses)} saved patch arrays from {path}')
+        return analysis
+
+    # Read pre-HDF5 outputs so existing work remains usable. A subsequent save
+    # writes the compact format and takes precedence in population loading.
+    path = directory / _condition_output_name_from_values(
+        exp_names[0], cell_labels[0], modes[0], sites[0], protocols,
+        float(wheels[0]), suffix='.csv')
     if not path.exists():
         return None
     try:
@@ -1280,15 +1390,23 @@ def load_condition_output(blocks: pd.DataFrame, output_dir=None,
 
 
 def load_condition_outputs(output_dir=None) -> pd.DataFrame:
-    """Load all saved cell-condition CSVs into one population patch table."""
+    """Expand all saved condition arrays into one population patch table.
+
+    Legacy CSVs are included only when the same condition has not yet been
+    resaved as HDF5.
+    """
     from pathlib import Path
 
     directory = Path(output_dir) if output_dir is not None else condition_output_dir()
-    paths = sorted(directory.glob('*.csv')) if directory.exists() else []
-    if not paths:
+    if not directory.exists():
         return pd.DataFrame()
-    return pd.concat([_read_condition_csv(path) for path in paths],
-                     ignore_index=True)
+    h5_paths = sorted(directory.glob('*.h5'))
+    h5_stems = {path.stem for path in h5_paths}
+    legacy_paths = sorted(path for path in directory.glob('*.csv')
+                          if path.stem not in h5_stems)
+    tables = [condition_population_table(_read_condition_h5(path)) for path in h5_paths]
+    tables.extend(_read_condition_csv(path) for path in legacy_paths)
+    return pd.concat(tables, ignore_index=True) if tables else pd.DataFrame()
 
 
 def record_key(exp_name: str, cell_label: str, online_analysis: str, site: str,
