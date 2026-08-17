@@ -1409,6 +1409,47 @@ def load_condition_outputs(output_dir=None) -> pd.DataFrame:
     return pd.concat(tables, ignore_index=True) if tables else pd.DataFrame()
 
 
+def load_condition_index(output_dir=None) -> pd.DataFrame:
+    """List saved cell conditions by reading metadata only.
+
+    This does not load or expand the patch arrays. Legacy CSVs are listed only
+    when the corresponding condition has not yet been resaved as HDF5.
+    """
+    import h5py
+    from pathlib import Path
+
+    columns = ['date', 'cell_label', 'cell_type', 'onlineAnalysis',
+               'filter_wheel_ndf']
+    directory = Path(output_dir) if output_dir is not None else condition_output_dir()
+    if not directory.exists():
+        return pd.DataFrame(columns=columns)
+
+    def text(value):
+        return value.decode() if isinstance(value, bytes) else str(value)
+
+    rows = []
+    h5_paths = sorted(directory.glob('*.h5'))
+    h5_stems = {path.stem for path in h5_paths}
+    for path in h5_paths:
+        with h5py.File(path, 'r') as h5:
+            rows.append({
+                'date': text(h5.attrs['exp_name']),
+                'cell_label': text(h5.attrs['cell_label']),
+                'cell_type': text(h5.attrs['cell_type']),
+                'onlineAnalysis': text(h5.attrs['online_analysis']),
+                'filter_wheel_ndf': float(h5.attrs['filter_wheel_ndf']),
+            })
+    for path in sorted(directory.glob('*.csv')):
+        if path.stem in h5_stems:
+            continue
+        legacy = pd.read_csv(path, nrows=1)
+        if not legacy.empty:
+            rows.append(legacy.iloc[0][columns].to_dict())
+    return (pd.DataFrame(rows, columns=columns)
+            .sort_values(['date', 'cell_label', 'onlineAnalysis', 'filter_wheel_ndf'],
+                         ignore_index=True))
+
+
 def record_key(exp_name: str, cell_label: str, online_analysis: str, site: str,
                ndf: float, background_intensity: float) -> str:
     def num(v):

@@ -470,6 +470,31 @@ def test_condition_output_save_is_idempotent_and_loads_population_rows(tmp_path)
     assert loaded['imageName'].tolist() == ['00152', '00152', '01769']
 
 
+def test_condition_index_lists_metadata_without_expanding_patch_rows(tmp_path):
+    from dataclasses import replace
+
+    analysis = _condition_analysis_for_output()
+    led.save_condition_output(analysis, output_dir=tmp_path, verbose=False)
+    led.save_condition_output(analysis, output_dir=tmp_path, verbose=False)
+    led.save_condition_output(replace(analysis, cell_label='Cell2',
+                                      filter_wheel_ndf=1.0),
+                              output_dir=tmp_path, verbose=False)
+
+    index = led.load_condition_index(tmp_path)
+
+    assert len(list(tmp_path.glob('*.h5'))) == 2
+    assert index.columns.tolist() == [
+        'date', 'cell_label', 'cell_type', 'onlineAnalysis', 'filter_wheel_ndf']
+    assert index.to_dict('records') == [
+        {'date': '2026-01-01_E', 'cell_label': 'Cell1',
+         'cell_type': 'ON-parasol', 'onlineAnalysis': 'extracellular',
+         'filter_wheel_ndf': 0.0},
+        {'date': '2026-01-01_E', 'cell_label': 'Cell2',
+         'cell_type': 'ON-parasol', 'onlineAnalysis': 'extracellular',
+         'filter_wheel_ndf': 1.0},
+    ]
+
+
 def test_matching_saved_condition_rehydrates_without_raw_data(tmp_path):
     analysis = _condition_analysis_for_output()
     led.save_condition_output(analysis, output_dir=tmp_path, verbose=False)
