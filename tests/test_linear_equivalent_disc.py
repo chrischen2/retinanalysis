@@ -9,8 +9,12 @@ import pytest
 from retinanalysis.SCutils.protocols import linear_equivalent_disc as led
 
 
-def test_analysis_notebook_selects_retinanalysis_kernel():
-    notebook_path = Path(__file__).parents[1] / 'SingCell_Notebooks' / 'analyzeConeDisc.ipynb'
+@pytest.mark.parametrize('name', [
+    'analyzeConeAnnulusDisc.ipynb',
+    'analyzeConeCenterDisc.ipynb',
+])
+def test_analysis_notebooks_select_retinanalysis_kernel(name):
+    notebook_path = Path(__file__).parents[1] / 'SingCell_Notebooks' / name
     notebook = json.loads(notebook_path.read_text())
 
     assert notebook['metadata']['kernelspec']['name'] == 'retinanalysis'
@@ -159,6 +163,30 @@ def test_find_protocol_cells_returns_only_unique_date_and_cell(monkeypatch):
         {'exp_name': '2026-01-02_E', 'cell_label': 'Cell2',
          'protocol': 'LinearEquivalentAnnulus'},
     ]
+
+
+def test_find_protocol_cells_combines_center_names_and_drops_old_disc(monkeypatch):
+    blocks = pd.DataFrame({
+        'exp_name': ['old_E', 'new_E', 'cone_E'],
+        'cell_label': ['Cell1', 'Cell2', 'Cell3'],
+        'protocol': ['LinearEquivalentDisc', 'LinearEquivalentDisc',
+                     'LinearEquivalentDiscConeLin'],
+        'parameters': [{}, {'linearizeCones': True}, {'linearizeCones': True}],
+    })
+    requested = []
+
+    def block_rows(protocols):
+        requested.extend(protocols)
+        return blocks
+
+    monkeypatch.setattr(led, '_protocol_block_rows', block_rows)
+    found = led.find_protocol_cells(
+        ('LinearEquivalentDiscConeLin', 'LinearEquivalentDisc'), show=False)
+
+    assert requested == ['LinearEquivalentDiscConeLin', 'LinearEquivalentDisc']
+    assert found['exp_name'].tolist() == ['cone_E', 'new_E']
+    assert set(found['protocol']) == {
+        'LinearEquivalentDiscConeLin', 'LinearEquivalentDisc'}
 
 
 def test_protocol_cells_from_blocks_reuses_detailed_discovery():
@@ -542,6 +570,30 @@ def test_patch_nli_loader_reads_h5_without_averaging_or_other_protocols(tmp_path
     assert patches['meanIntensity'].tolist() == [200.0, 200.0, 100.0]
 
 
+def test_population_loaders_accept_both_center_protocol_names(tmp_path):
+    from dataclasses import replace
+
+    analysis = _condition_analysis_for_output()
+    for cell_label, protocol in (
+            ('Cell1', 'LinearEquivalentDiscConeLin'),
+            ('Cell2', 'LinearEquivalentDisc')):
+        led.save_condition_output(
+            replace(analysis, cell_label=cell_label, protocols=[protocol], site='center'),
+            output_dir=tmp_path, verbose=False)
+    led.save_condition_output(
+        replace(analysis, cell_label='Cell3'), output_dir=tmp_path, verbose=False)
+
+    protocols = ('LinearEquivalentDiscConeLin', 'LinearEquivalentDisc')
+    images = led.load_condition_image_nli_summary(tmp_path, protocol=protocols)
+    patches = led.load_condition_patch_nli(tmp_path, protocol=protocols)
+    index = led.load_condition_index(tmp_path, protocol=protocols)
+
+    assert set(images['cell_label']) == {'Cell1', 'Cell2'}
+    assert set(patches['cell_label']) == {'Cell1', 'Cell2'}
+    assert set(index['cell_label']) == {'Cell1', 'Cell2'}
+    assert set(images['protocol']) == set(protocols)
+
+
 def test_pooled_patch_nli_plot_has_density_and_empirical_cdf(tmp_path):
     import matplotlib.pyplot as plt
 
@@ -558,6 +610,19 @@ def test_pooled_patch_nli_plot_has_density_and_empirical_cdf(tmp_path):
     cdf_lines = [line for line in cdf_axis.lines if line.get_drawstyle() == 'steps-post']
     assert len(cdf_lines) == 2
     assert all(line.get_ydata()[-1] == 1 for line in cdf_lines)
+    plt.close('all')
+
+
+def test_pooled_patch_nli_plot_handles_an_empty_center_dataset():
+    import matplotlib.pyplot as plt
+
+    empty = pd.DataFrame(columns=led.PATCH_NLI_COLUMNS)
+    fig = led.plot_pooled_patch_nli_distributions(
+        empty, title_prefix='Cone-linearized center disc')
+
+    assert all(ax.texts[0].get_text() == 'no saved patch NLI data'
+               for ax in fig.axes)
+    assert fig._suptitle.get_text().startswith('Cone-linearized center disc')
     plt.close('all')
 
 

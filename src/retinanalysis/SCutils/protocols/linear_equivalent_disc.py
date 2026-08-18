@@ -46,7 +46,7 @@ blocks; :func:`find_blocks` applies it and reports what it dropped.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -257,27 +257,29 @@ def _first_epoch_metadata(block_ids: Sequence[int]) -> Tuple[Dict[int, dict], pd
     return parameters, counts
 
 
-def find_protocol_cells(protocol: str, show: bool = True,
+def find_protocol_cells(protocol: Union[str, Sequence[str]], show: bool = True,
                         height: int = 420) -> pd.DataFrame:
-    """Unique experiment dates and cells that ran one exact short protocol.
+    """Unique experiment dates and cells that ran the requested protocols.
 
-    This is the fast discovery view used in Section 1 of ``analyzeConeDisc``.
+    This is the fast discovery view used in Section 1 of the cone/disc notebooks.
     For ``LinearEquivalentDisc``, older blocks without ``linearizeCones`` are
     excluded using the block's own parameter dictionary.
     """
     from retinanalysis.SCutils import explore as sc
 
-    blocks = _protocol_block_rows((protocol,))
+    protocols = (protocol,) if isinstance(protocol, str) else tuple(protocol)
+    label = ', '.join(protocols)
+    blocks = _protocol_block_rows(protocols)
     if blocks.empty:
         cells = pd.DataFrame(columns=['exp_name', 'cell_label', 'protocol'])
         if show:
-            print(f'No single-cell blocks found for {protocol}.')
+            print(f'No single-cell blocks found for {label}.')
         return cells
     blocks, dropped = _linearized_only(blocks)
     cells = (blocks[['exp_name', 'cell_label', 'protocol']].drop_duplicates()
              .sort_values(['exp_name', 'cell_label', 'protocol']).reset_index(drop=True))
     if show:
-        print(f'{protocol}: {len(cells)} cells across {cells.exp_name.nunique()} experiments')
+        print(f'{label}: {len(cells)} cells across {cells.exp_name.nunique()} experiments')
         if dropped:
             print(f'  excluded {dropped} older block(s) without linearizeCones')
         sc.scroll_table(cells, height=height)
@@ -563,8 +565,8 @@ def select_condition_blocks(blocks: pd.DataFrame, cell_label: str,
                             show: bool = True, height: int = 360) -> pd.DataFrame:
     """Select one cell x recording mode x FilterWheel condition.
 
-    The input is normally ``selected_blocks`` from Sections 1--2 of
-    ``analyzeConeDisc.ipynb`` and therefore already belongs to one experiment.
+    The input is normally ``selected_blocks`` from Sections 1--2 of a cone/disc
+    notebook and therefore already belongs to one experiment.
     The returned rows retain every image-specific background intensity while
     pooling across image names for the requested condition.
     """
@@ -1446,9 +1448,20 @@ CELL_PATCH_NLI_COLUMNS = [
 ]
 
 
-def load_condition_image_nli_summary(output_dir=None,
-                                     protocol: Optional[str] = 'LinearEquivalentAnnulus'
-                                     ) -> pd.DataFrame:
+def _saved_condition_matches_protocol(
+        saved_protocols: Sequence[str],
+        protocol: Optional[Union[str, Sequence[str]]]) -> bool:
+    """Return whether a saved condition contains any requested protocol."""
+    if protocol is None:
+        return True
+    requested = {protocol} if isinstance(protocol, str) else set(protocol)
+    return bool(requested.intersection(saved_protocols))
+
+
+def load_condition_image_nli_summary(
+        output_dir=None,
+        protocol: Optional[Union[str, Sequence[str]]] = 'LinearEquivalentAnnulus',
+        ) -> pd.DataFrame:
     """Read saved HDF5 conditions into one row per cell, FW, and image.
 
     Patch NLIs are averaged only within a single saved condition's
@@ -1465,7 +1478,7 @@ def load_condition_image_nli_summary(output_dir=None,
     rows = []
     for path in sorted(directory.glob('*.h5')):
         analysis = _read_condition_h5(path)
-        if protocol is not None and protocol not in analysis.protocols:
+        if not _saved_condition_matches_protocol(analysis.protocols, protocol):
             continue
 
         patch_means = (analysis.patch_responses.groupby('imageName', sort=False)
@@ -1503,9 +1516,10 @@ def load_condition_image_nli_summary(output_dir=None,
                          ignore_index=True))
 
 
-def load_condition_patch_nli(output_dir=None,
-                             protocol: Optional[str] = 'LinearEquivalentAnnulus'
-                             ) -> pd.DataFrame:
+def load_condition_patch_nli(
+        output_dir=None,
+        protocol: Optional[Union[str, Sequence[str]]] = 'LinearEquivalentAnnulus',
+        ) -> pd.DataFrame:
     """Read every saved HDF5 patch NLI without image or cell averaging.
 
     One row remains one unique ``(imageName, patchIndex)`` observation in one
@@ -1520,7 +1534,7 @@ def load_condition_patch_nli(output_dir=None,
     tables = []
     for path in sorted(directory.glob('*.h5')):
         analysis = _read_condition_h5(path)
-        if protocol is not None and protocol not in analysis.protocols:
+        if not _saved_condition_matches_protocol(analysis.protocols, protocol):
             continue
         table = condition_population_table(analysis).rename(columns={
             'date': 'exp_name',
@@ -1659,7 +1673,10 @@ def summarize_cell_patch_nli_light_levels(
             .reset_index(drop=True))
 
 
-def load_condition_index(output_dir=None) -> pd.DataFrame:
+def load_condition_index(
+        output_dir=None,
+        protocol: Optional[Union[str, Sequence[str]]] = None,
+        ) -> pd.DataFrame:
     """List saved cell conditions by reading metadata only.
 
     This does not load or expand the patch arrays. Legacy CSVs are listed only
@@ -1682,6 +1699,9 @@ def load_condition_index(output_dir=None) -> pd.DataFrame:
     h5_stems = {path.stem for path in h5_paths}
     for path in h5_paths:
         with h5py.File(path, 'r') as h5:
+            saved_protocols = text(h5.attrs['protocols']).split('\n')
+            if not _saved_condition_matches_protocol(saved_protocols, protocol):
+                continue
             rows.append({
                 'date': text(h5.attrs['exp_name']),
                 'cell_label': text(h5.attrs['cell_label']),
@@ -1693,7 +1713,9 @@ def load_condition_index(output_dir=None) -> pd.DataFrame:
         if path.stem in h5_stems:
             continue
         legacy = pd.read_csv(path, nrows=1)
-        if not legacy.empty:
+        if not legacy.empty and (protocol is None or (
+                'protocol' in legacy and _saved_condition_matches_protocol(
+                    str(legacy.iloc[0]['protocol']).split(', '), protocol))):
             rows.append(legacy.iloc[0][columns].to_dict())
     return (pd.DataFrame(rows, columns=columns)
             .sort_values(['date', 'cell_label', 'onlineAnalysis', 'filter_wheel_ndf'],
@@ -2015,7 +2037,8 @@ def plot_image_nli_by_cell_type(image_summary: Optional[pd.DataFrame] = None,
                                 LIGHT_LEVEL_GROUPS,
                                 log_x: bool = True,
                                 columns: int = 2,
-                                panel_size: Tuple[float, float] = (4.8, 3.8)):
+                                panel_size: Tuple[float, float] = (4.8, 3.8),
+                                title_prefix: str = 'LinearEquivalentAnnulus'):
     """Plot binned population mean NLI and SEM against mean light level.
 
     The input retains every cell/image observation. This function groups those
@@ -2091,7 +2114,7 @@ def plot_image_nli_by_cell_type(image_summary: Optional[pd.DataFrame] = None,
                           ha='center', va='center', transform=axes.flat[0].transAxes)
         axes.flat[0].set_axis_off()
 
-    fig.suptitle('LinearEquivalentAnnulus: grouped light-level NLI by cell type',
+    fig.suptitle(f'{title_prefix}: grouped light-level NLI by cell type',
                  fontsize=11, y=1.01)
     fig.tight_layout()
     return fig
@@ -2101,12 +2124,12 @@ def plot_pooled_patch_nli_distributions(
         patch_nli: Optional[pd.DataFrame] = None,
         cell_types: Optional[Sequence[str]] = None,
         bins: int = 50,
-        figsize: Tuple[float, float] = (9.2, 4.1)):
+        figsize: Tuple[float, float] = (9.2, 4.1),
+        title_prefix: str = 'LinearEquivalentAnnulus'):
     """Plot normalized density and empirical CDF for all saved patch NLIs.
 
     Patches are pooled without image- or cell-level averaging. ``cell_types``
-    can restrict the pool; by default every saved LinearEquivalentAnnulus cell
-    type contributes.
+    can restrict the pool; by default every saved annulus condition contributes.
     """
     import matplotlib.pyplot as plt
     from retinanalysis.utils import style
@@ -2146,14 +2169,19 @@ def plot_pooled_patch_nli_distributions(
         ax.axvline(0, color='black', ls='--', lw=1)
         ax.set_xlim(-1, 1)
         ax.set_xlabel('NLI  (image - disc) / (|image| + |disc|)')
-        ax.legend(frameon=False, fontsize=8)
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(handles, labels, frameon=False, fontsize=8)
+        else:
+            ax.text(.5, .5, 'no saved patch NLI data', ha='center', va='center',
+                    transform=ax.transAxes)
     density_ax.set_ylabel('density')
     density_ax.set_title(f'{int(bins)}-bin pooled patch density')
     cdf_ax.set_ylim(0, 1.02)
     cdf_ax.set_ylabel('cumulative fraction')
     cdf_ax.set_title('pooled patch empirical CDF')
     types = ', '.join(sorted(frame['cell_type'].dropna().astype(str).unique()))
-    fig.suptitle(f'LinearEquivalentAnnulus patch NLI | {types}', fontsize=10)
+    fig.suptitle(f'{title_prefix} patch NLI | {types}', fontsize=10)
     fig.tight_layout()
     return fig
 
@@ -2163,7 +2191,8 @@ def plot_cell_patch_nli_by_light(
         patch_nli: Optional[pd.DataFrame] = None,
         cell_types: Optional[Sequence[str]] = None,
         columns: int = 2,
-        panel_size: Tuple[float, float] = (4.6, 3.8)):
+        panel_size: Tuple[float, float] = (4.6, 3.8),
+        title_prefix: str = 'LinearEquivalentAnnulus'):
     """Plot cell-first mean patch NLI at the ~1k and ~10k light levels.
 
     Faint points are individual cell means across all patches and image names.
@@ -2266,7 +2295,7 @@ def plot_cell_patch_nli_by_light(
         axes.flat[0].text(.5, .5, 'no saved cell-level NLI data',
                           ha='center', va='center', transform=axes.flat[0].transAxes)
         axes.flat[0].set_axis_off()
-    fig.suptitle('LinearEquivalentAnnulus: cell-level patch NLI by light level',
+    fig.suptitle(f'{title_prefix}: cell-level patch NLI by light level',
                  fontsize=11, y=1.01)
     fig.tight_layout()
     return fig
