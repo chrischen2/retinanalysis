@@ -524,6 +524,43 @@ def test_image_nli_summary_keeps_one_row_per_cell_fw_and_image(tmp_path):
     assert set(summary['cell_type']) == {'ON-parasol', 'OFF-parasol'}
 
 
+def test_patch_nli_loader_reads_h5_without_averaging_or_other_protocols(tmp_path):
+    from dataclasses import replace
+
+    analysis = _condition_analysis_for_output()
+    led.save_condition_output(analysis, output_dir=tmp_path, verbose=False)
+    led.save_condition_output(
+        replace(analysis, cell_label='Cell2', protocols=['LinearEquivalentDiscConeLin']),
+        output_dir=tmp_path, verbose=False)
+
+    patches = led.load_condition_patch_nli(tmp_path)
+
+    assert len(patches) == 3
+    assert patches.columns.tolist() == led.PATCH_NLI_COLUMNS
+    assert patches['patch_key'].tolist() == ['00152:1', '00152:2', '01769:1']
+    assert patches['nli_disc'].tolist() == pytest.approx([1 / 3] * 3)
+    assert patches['meanIntensity'].tolist() == [200.0, 200.0, 100.0]
+
+
+def test_pooled_patch_nli_plot_has_density_and_empirical_cdf(tmp_path):
+    import matplotlib.pyplot as plt
+
+    led.save_condition_output(
+        _condition_analysis_for_output(), output_dir=tmp_path, verbose=False)
+    patches = led.load_condition_patch_nli(tmp_path)
+    fig = led.plot_pooled_patch_nli_distributions(patches, bins=20)
+    density_axis, cdf_axis = fig.axes
+
+    assert density_axis.get_title() == '20-bin pooled patch density'
+    assert density_axis.get_ylabel() == 'density'
+    assert cdf_axis.get_title() == 'pooled patch empirical CDF'
+    assert cdf_axis.get_ylabel() == 'cumulative fraction'
+    cdf_lines = [line for line in cdf_axis.lines if line.get_drawstyle() == 'steps-post']
+    assert len(cdf_lines) == 2
+    assert all(line.get_ydata()[-1] == 1 for line in cdf_lines)
+    plt.close('all')
+
+
 def test_light_level_summary_uses_requested_bins_and_cell_image_sem():
     rows = pd.DataFrame({
         'cell_type': ['ON-parasol'] * 8,
@@ -544,6 +581,63 @@ def test_light_level_summary_uses_requested_bins_and_cell_image_sem():
     assert summary['mean_nli_disc'].tolist() == pytest.approx([1, 3, 4, 5.5])
     assert summary.loc[0, 'sem_nli_disc'] == pytest.approx(1 / np.sqrt(3))
     assert np.isnan(summary.loc[1, 'sem_nli_disc'])
+
+
+def test_cell_patch_summary_averages_all_images_within_each_cell_first():
+    rows = pd.DataFrame({
+        'cell_type': ['ON-parasol'] * 8,
+        'cell_id': ['d/C1'] * 5 + ['d/C2'] * 3,
+        'exp_name': ['d'] * 8,
+        'cell_label': ['C1'] * 5 + ['C2'] * 3,
+        'imageName': ['A', 'A', 'B', 'C', 'edge', 'A', 'D', 'D'],
+        'patch_key': [f'p{i}' for i in range(8)],
+        'meanIntensity': [1000, 1000, 1200, 10000, 1500, 900, 6000, 20000],
+        'nli_disc': [0, 1, 2, 4, 99, 5, 6, 8],
+        'nli_cone_disc': [0, -1, -2, -4, -99, -5, -6, -8],
+    })
+
+    summary = led.summarize_cell_patch_nli_light_levels(rows)
+
+    c1_low = summary.loc[(summary['cell_id'].eq('d/C1'))
+                         & (summary['light_level'].eq('~1k'))].iloc[0]
+    c2_high = summary.loc[(summary['cell_id'].eq('d/C2'))
+                          & (summary['light_level'].eq('~10k'))].iloc[0]
+    assert c1_low['n_images'] == 2
+    assert c1_low['n_patches'] == 3
+    assert c1_low['mean_nli_disc'] == pytest.approx(1.0)
+    assert c1_low['mean_nli_cone_disc'] == pytest.approx(-1.0)
+    assert c2_high['n_patches'] == 2
+    assert c2_high['mean_nli_disc'] == pytest.approx(7.0)
+    assert c2_high['meanIntensity'] == 13000.0
+    assert not (summary['mean_nli_disc'] == 99).any()  # 1500 is outside the two bins
+
+
+def test_cell_patch_population_plot_uses_cell_means_and_sem():
+    import matplotlib.pyplot as plt
+
+    summary = pd.DataFrame({
+        'cell_type': ['ON-parasol'] * 4 + ['OFF-parasol'] * 2,
+        'cell_id': ['d/C1', 'd/C2'] * 2 + ['d/C3'] * 2,
+        'exp_name': ['d'] * 6,
+        'cell_label': ['C1', 'C2'] * 2 + ['C3'] * 2,
+        'light_level': ['~1k', '~1k', '~10k', '~10k', '~1k', '~10k'],
+        'light_min': [500, 500, 6000, 6000, 500, 6000],
+        'light_max': [1500, 1500, 20000, 20000, 1500, 20000],
+        'meanIntensity': [1000, 1100, 10000, 11000, 900, 9000],
+        'n_images': [2] * 6, 'n_patches': [20] * 6,
+        'mean_nli_disc': [.1, .3, .2, .4, -.2, -.1],
+        'mean_nli_cone_disc': [0, .2, .1, .3, -.1, 0],
+    }, columns=led.CELL_PATCH_NLI_COLUMNS)
+
+    fig = led.plot_cell_patch_nli_by_light(summary)
+    visible_axes = [ax for ax in fig.axes if ax.get_visible()]
+
+    assert len(visible_axes) == 2
+    assert all(ax.get_ylabel() == 'cell mean NLI; population mean ± SEM'
+               for ax in visible_axes)
+    assert all([tick.get_text().split('\n')[0] for tick in ax.get_xticklabels()]
+               == ['~1k', '~10k'] for ax in visible_axes)
+    plt.close('all')
 
 
 def test_image_nli_population_plot_has_one_panel_per_cell_type(tmp_path):

@@ -1428,6 +1428,23 @@ LIGHT_LEVEL_SUMMARY_COLUMNS = [
     'mean_nli_cone_disc', 'sem_nli_cone_disc',
 ]
 
+PATCH_NLI_COLUMNS = [
+    'exp_name', 'cell_label', 'cell_id', 'cell_type', 'onlineAnalysis',
+    'protocol', 'site', 'filter_wheel_ndf', 'imageName', 'patchIndex',
+    'patch_key', 'meanIntensity', 'nli_disc', 'nli_cone_disc',
+]
+
+CELL_LEVEL_LIGHT_GROUPS = (
+    (500.0, 1500.0),
+    (6000.0, 20000.0),
+)
+
+CELL_PATCH_NLI_COLUMNS = [
+    'cell_type', 'cell_id', 'exp_name', 'cell_label', 'light_level',
+    'light_min', 'light_max', 'meanIntensity', 'n_images', 'n_patches',
+    'mean_nli_disc', 'mean_nli_cone_disc',
+]
+
 
 def load_condition_image_nli_summary(output_dir=None,
                                      protocol: Optional[str] = 'LinearEquivalentAnnulus'
@@ -1483,6 +1500,40 @@ def load_condition_image_nli_summary(output_dir=None,
     return (pd.DataFrame(rows, columns=IMAGE_NLI_SUMMARY_COLUMNS)
             .sort_values(['cell_type', 'exp_name', 'cell_label', 'onlineAnalysis',
                           'filter_wheel_ndf', 'meanIntensity', 'imageName'],
+                         ignore_index=True))
+
+
+def load_condition_patch_nli(output_dir=None,
+                             protocol: Optional[str] = 'LinearEquivalentAnnulus'
+                             ) -> pd.DataFrame:
+    """Read every saved HDF5 patch NLI without image or cell averaging.
+
+    One row remains one unique ``(imageName, patchIndex)`` observation in one
+    saved cell condition. Legacy CSV files are intentionally excluded.
+    """
+    from pathlib import Path
+
+    directory = Path(output_dir) if output_dir is not None else condition_output_dir()
+    if not directory.exists():
+        return pd.DataFrame(columns=PATCH_NLI_COLUMNS)
+
+    tables = []
+    for path in sorted(directory.glob('*.h5')):
+        analysis = _read_condition_h5(path)
+        if protocol is not None and protocol not in analysis.protocols:
+            continue
+        table = condition_population_table(analysis).rename(columns={
+            'date': 'exp_name',
+            'nli_image_vs_disc': 'nli_disc',
+            'nli_image_vs_cone_disc': 'nli_cone_disc',
+        })
+        table.insert(2, 'cell_id', table['exp_name'] + '/' + table['cell_label'])
+        tables.append(table[PATCH_NLI_COLUMNS])
+    if not tables:
+        return pd.DataFrame(columns=PATCH_NLI_COLUMNS)
+    return (pd.concat(tables, ignore_index=True)
+            .sort_values(['cell_type', 'exp_name', 'cell_label', 'onlineAnalysis',
+                          'filter_wheel_ndf', 'imageName', 'patchIndex'],
                          ignore_index=True))
 
 
@@ -1545,6 +1596,66 @@ def summarize_image_nli_light_levels(
         lambda row: f"{row['light_min']:g}-{row['light_max']:g}", axis=1)
     return (summary.sort_values(['cell_type', '_light_group'])
             .drop(columns='_light_group')[LIGHT_LEVEL_SUMMARY_COLUMNS]
+            .reset_index(drop=True))
+
+
+def summarize_cell_patch_nli_light_levels(
+        patch_nli: pd.DataFrame,
+        light_groups: Sequence[Tuple[float, float]] = CELL_LEVEL_LIGHT_GROUPS,
+        ) -> pd.DataFrame:
+    """Average all patches and image names within each cell and light level.
+
+    This is deliberately cell-first: patch NLIs are pooled across every
+    ``imageName`` in a light range to make one standard-disc and one
+    cone-linearized mean per cell. Population error bars must be computed from
+    these cell means, not by treating patches as independent cells.
+    """
+    required = {'cell_type', 'cell_id', 'exp_name', 'cell_label', 'imageName',
+                'patch_key', 'meanIntensity', 'nli_disc', 'nli_cone_disc'}
+    missing = required.difference(patch_nli.columns)
+    if missing:
+        raise ValueError(f'patch_nli is missing columns: {sorted(missing)}')
+
+    groups = [(float(lower), float(upper)) for lower, upper in light_groups]
+    if (not groups or any(not np.isfinite([lower, upper]).all() or lower >= upper
+                          for lower, upper in groups)
+            or any(groups[i][1] > groups[i + 1][0]
+                   for i in range(len(groups) - 1))):
+        raise ValueError('light_groups must be ordered, finite, non-overlapping ranges')
+
+    frame = patch_nli.copy()
+    intensity = pd.to_numeric(frame['meanIntensity'], errors='coerce')
+    group_index = np.full(len(frame), -1, dtype=int)
+    for index, (lower, upper) in enumerate(groups):
+        upper_keep = intensity.le(upper) if index == len(groups) - 1 else intensity.lt(upper)
+        keep = intensity.ge(lower) & upper_keep & (group_index == -1)
+        group_index[keep.to_numpy()] = index
+    frame['_light_group'] = group_index
+    frame = frame.loc[frame['_light_group'].ge(0)].copy()
+    if frame.empty:
+        return pd.DataFrame(columns=CELL_PATCH_NLI_COLUMNS)
+
+    summary = (frame.groupby(['cell_type', 'cell_id', '_light_group'],
+                             sort=True, observed=True)
+               .agg(exp_name=('exp_name', 'first'),
+                    cell_label=('cell_label', 'first'),
+                    meanIntensity=('meanIntensity', 'mean'),
+                    n_images=('imageName', 'nunique'),
+                    n_patches=('patch_key', 'size'),
+                    mean_nli_disc=('nli_disc', 'mean'),
+                    mean_nli_cone_disc=('nli_cone_disc', 'mean'))
+               .reset_index())
+    summary['light_min'] = summary['_light_group'].map(
+        lambda index: groups[int(index)][0])
+    summary['light_max'] = summary['_light_group'].map(
+        lambda index: groups[int(index)][1])
+    default_labels = (len(groups) == 2 and groups == list(CELL_LEVEL_LIGHT_GROUPS))
+    summary['light_level'] = summary.apply(
+        lambda row: (('~1k' if int(row['_light_group']) == 0 else '~10k')
+                     if default_labels else
+                     f"{row['light_min']:g}-{row['light_max']:g}"), axis=1)
+    return (summary.sort_values(['cell_type', '_light_group', 'cell_id'])
+            .drop(columns='_light_group')[CELL_PATCH_NLI_COLUMNS]
             .reset_index(drop=True))
 
 
@@ -1981,6 +2092,181 @@ def plot_image_nli_by_cell_type(image_summary: Optional[pd.DataFrame] = None,
         axes.flat[0].set_axis_off()
 
     fig.suptitle('LinearEquivalentAnnulus: grouped light-level NLI by cell type',
+                 fontsize=11, y=1.01)
+    fig.tight_layout()
+    return fig
+
+
+def plot_pooled_patch_nli_distributions(
+        patch_nli: Optional[pd.DataFrame] = None,
+        cell_types: Optional[Sequence[str]] = None,
+        bins: int = 50,
+        figsize: Tuple[float, float] = (9.2, 4.1)):
+    """Plot normalized density and empirical CDF for all saved patch NLIs.
+
+    Patches are pooled without image- or cell-level averaging. ``cell_types``
+    can restrict the pool; by default every saved LinearEquivalentAnnulus cell
+    type contributes.
+    """
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    if patch_nli is None:
+        patch_nli = load_condition_patch_nli()
+    required = {'cell_type', 'nli_disc', 'nli_cone_disc'}
+    missing = required.difference(patch_nli.columns)
+    if missing:
+        raise ValueError(f'patch_nli is missing columns: {sorted(missing)}')
+    frame = patch_nli.copy()
+    if cell_types is not None:
+        wanted = {str(value) for value in cell_types}
+        frame = frame.loc[frame['cell_type'].astype(str).isin(wanted)]
+
+    fig, (density_ax, cdf_ax) = plt.subplots(1, 2, figsize=figsize)
+    edges = np.linspace(-1, 1, int(bins) + 1)
+    series = (
+        ('nli_disc', '#666666', 'image vs standard disc'),
+        ('nli_cone_disc', '#C44E52', 'image vs cone-lin disc'),
+    )
+    for column, color, label in series:
+        values = pd.to_numeric(frame[column], errors='coerce').to_numpy(dtype=float)
+        values = values[np.isfinite(values)]
+        if not values.size:
+            continue
+        full_label = f'{label} (n={values.size})'
+        density_ax.hist(values, bins=edges, density=True, histtype='step',
+                        lw=1.7, color=color, label=full_label)
+        ordered = np.sort(values)
+        cumulative = np.arange(1, values.size + 1, dtype=float) / values.size
+        cdf_ax.step(np.r_[-1.0, ordered, 1.0], np.r_[0.0, cumulative, 1.0],
+                    where='post', lw=1.7, color=color, label=full_label)
+
+    for ax in (density_ax, cdf_ax):
+        ax.axvline(0, color='black', ls='--', lw=1)
+        ax.set_xlim(-1, 1)
+        ax.set_xlabel('NLI  (image - disc) / (|image| + |disc|)')
+        ax.legend(frameon=False, fontsize=8)
+    density_ax.set_ylabel('density')
+    density_ax.set_title(f'{int(bins)}-bin pooled patch density')
+    cdf_ax.set_ylim(0, 1.02)
+    cdf_ax.set_ylabel('cumulative fraction')
+    cdf_ax.set_title('pooled patch empirical CDF')
+    types = ', '.join(sorted(frame['cell_type'].dropna().astype(str).unique()))
+    fig.suptitle(f'LinearEquivalentAnnulus patch NLI | {types}', fontsize=10)
+    fig.tight_layout()
+    return fig
+
+
+def plot_cell_patch_nli_by_light(
+        cell_summary: Optional[pd.DataFrame] = None,
+        patch_nli: Optional[pd.DataFrame] = None,
+        cell_types: Optional[Sequence[str]] = None,
+        columns: int = 2,
+        panel_size: Tuple[float, float] = (4.6, 3.8)):
+    """Plot cell-first mean patch NLI at the ~1k and ~10k light levels.
+
+    Faint points are individual cell means across all patches and image names.
+    Large points and error bars are the population mean +/- SEM across those
+    cell means, so cells with more patches do not receive extra population
+    weight.
+    """
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    if cell_summary is None:
+        if patch_nli is None:
+            patch_nli = load_condition_patch_nli()
+        cell_summary = summarize_cell_patch_nli_light_levels(patch_nli)
+    required = set(CELL_PATCH_NLI_COLUMNS)
+    missing = required.difference(cell_summary.columns)
+    if missing:
+        raise ValueError(f'cell_summary is missing columns: {sorted(missing)}')
+
+    frame = cell_summary.copy()
+    level_rows = (frame.sort_values('light_min')
+                  .drop_duplicates('light_level')[
+                      ['light_level', 'light_min', 'light_max']])
+    levels = level_rows['light_level'].astype(str).tolist()
+    positions = {level: index for index, level in enumerate(levels)}
+    tick_labels = [
+        f'{row.light_level}\n{row.light_min:g}-{row.light_max:g}'
+        for row in level_rows.itertuples(index=False)]
+
+    if cell_types is None:
+        preferred = ['ON-parasol', 'OFF-parasol', 'ON-midget', 'OFF-midget']
+        present = set(frame['cell_type'].dropna().astype(str))
+        cell_types = [name for name in preferred if name in present]
+        cell_types += sorted(present.difference(cell_types))
+    else:
+        cell_types = [str(value) for value in cell_types]
+
+    n_panels = max(len(cell_types), 1)
+    n_columns = max(1, min(int(columns), n_panels))
+    n_rows = int(np.ceil(n_panels / n_columns))
+    fig, axes = plt.subplots(
+        n_rows, n_columns,
+        figsize=(panel_size[0] * n_columns, panel_size[1] * n_rows),
+        squeeze=False, sharey=True)
+    series = (
+        ('mean_nli_disc', '#666666', 'o', -.07, 'image vs standard disc'),
+        ('mean_nli_cone_disc', '#C44E52', 's', .07, 'image vs cone-lin disc'),
+    )
+
+    def sem(values):
+        values = np.asarray(values, dtype=float)
+        values = values[np.isfinite(values)]
+        return (float(np.std(values, ddof=1) / np.sqrt(values.size))
+                if values.size > 1 else np.nan)
+
+    for ax, cell_type in zip(axes.flat, cell_types):
+        sub = frame.loc[frame['cell_type'].astype(str).eq(cell_type)]
+        for column, color, marker, offset, label in series:
+            mean_x, mean_y = [], []
+            for level in levels:
+                level_values = pd.to_numeric(
+                    sub.loc[sub['light_level'].astype(str).eq(level), column],
+                    errors='coerce').dropna().to_numpy(dtype=float)
+                x = positions[level] + offset
+                if not level_values.size:
+                    continue
+                ax.scatter(np.full(level_values.size, x), level_values,
+                           s=18, marker=marker, color=color, alpha=.28, lw=0,
+                           zorder=1)
+                mean = float(np.mean(level_values))
+                error = sem(level_values)
+                ax.scatter([x], [mean], s=58, marker=marker, color=color,
+                           edgecolor='white', linewidth=.6, zorder=4)
+                if np.isfinite(error):
+                    ax.errorbar([x], [mean], yerr=[error], fmt='none',
+                                color=color, elinewidth=1.4, capsize=4, zorder=3)
+                mean_x.append(x)
+                mean_y.append(mean)
+            ax.plot(mean_x, mean_y, '-', color=color, lw=1.4, label=label,
+                    zorder=2)
+        for level in levels:
+            n_cells = sub.loc[sub['light_level'].astype(str).eq(level), 'cell_id'].nunique()
+            if n_cells:
+                ax.text(positions[level], -.96, f'n={n_cells}', ha='center',
+                        va='bottom', fontsize=7)
+        ax.axhline(0, color='black', ls='--', lw=1)
+        ax.set_xticks(range(len(levels)))
+        ax.set_xticklabels(tick_labels)
+        ax.set_ylim(-1.02, 1.02)
+        ax.set_ylabel('cell mean NLI; population mean ± SEM')
+        total_cells = sub.cell_id.nunique()
+        noun = 'cell' if total_cells == 1 else 'cells'
+        ax.set_title(f'{cell_type} | {total_cells} {noun}', fontsize=9)
+        ax.legend(frameon=False, fontsize=7)
+
+    for ax in axes.flat[len(cell_types):]:
+        ax.set_visible(False)
+    if not cell_types:
+        axes.flat[0].text(.5, .5, 'no saved cell-level NLI data',
+                          ha='center', va='center', transform=axes.flat[0].transAxes)
+        axes.flat[0].set_axis_off()
+    fig.suptitle('LinearEquivalentAnnulus: cell-level patch NLI by light level',
                  fontsize=11, y=1.01)
     fig.tight_layout()
     return fig
