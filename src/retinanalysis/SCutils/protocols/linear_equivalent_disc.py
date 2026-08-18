@@ -1409,6 +1409,70 @@ def load_condition_outputs(output_dir=None) -> pd.DataFrame:
     return pd.concat(tables, ignore_index=True) if tables else pd.DataFrame()
 
 
+IMAGE_NLI_SUMMARY_COLUMNS = [
+    'exp_name', 'cell_label', 'cell_id', 'cell_type', 'onlineAnalysis',
+    'protocol', 'site', 'filter_wheel_ndf', 'imageName', 'meanIntensity',
+    'n_patches', 'mean_nli_disc', 'mean_nli_cone_disc',
+]
+
+
+def load_condition_image_nli_summary(output_dir=None,
+                                     protocol: Optional[str] = 'LinearEquivalentAnnulus'
+                                     ) -> pd.DataFrame:
+    """Read saved HDF5 conditions into one row per cell, FW, and image.
+
+    Patch NLIs are averaged only within a single saved condition's
+    ``imageName``. No values are pooled across cells, FilterWheel settings, or
+    cell types here; that preserves the individual observations needed by the
+    population plot. Legacy CSV outputs are intentionally excluded.
+    """
+    from pathlib import Path
+
+    directory = Path(output_dir) if output_dir is not None else condition_output_dir()
+    if not directory.exists():
+        return pd.DataFrame(columns=IMAGE_NLI_SUMMARY_COLUMNS)
+
+    rows = []
+    for path in sorted(directory.glob('*.h5')):
+        analysis = _read_condition_h5(path)
+        if protocol is not None and protocol not in analysis.protocols:
+            continue
+
+        patch_means = (analysis.patch_responses.groupby('imageName', sort=False)
+                       .agg(n_patches=('patch_key', 'size'),
+                            mean_nli_disc=('nli_disc', 'mean'),
+                            mean_nli_cone_disc=('nli_cone_disc', 'mean'))
+                       .reset_index())
+        image_metadata = (analysis.image_summary[['imageName', 'meanIntensity']]
+                          .drop_duplicates('imageName'))
+        per_image = image_metadata.merge(
+            patch_means, on='imageName', how='inner', validate='one_to_one')
+
+        for row in per_image.itertuples(index=False):
+            rows.append({
+                'exp_name': analysis.exp_name,
+                'cell_label': analysis.cell_label,
+                'cell_id': f'{analysis.exp_name}/{analysis.cell_label}',
+                'cell_type': analysis.cell_type,
+                'onlineAnalysis': analysis.online_analysis,
+                'protocol': ', '.join(analysis.protocols),
+                'site': analysis.site,
+                'filter_wheel_ndf': analysis.filter_wheel_ndf,
+                'imageName': str(row.imageName),
+                'meanIntensity': float(row.meanIntensity),
+                'n_patches': int(row.n_patches),
+                'mean_nli_disc': float(row.mean_nli_disc),
+                'mean_nli_cone_disc': float(row.mean_nli_cone_disc),
+            })
+
+    if not rows:
+        return pd.DataFrame(columns=IMAGE_NLI_SUMMARY_COLUMNS)
+    return (pd.DataFrame(rows, columns=IMAGE_NLI_SUMMARY_COLUMNS)
+            .sort_values(['cell_type', 'exp_name', 'cell_label', 'onlineAnalysis',
+                          'filter_wheel_ndf', 'meanIntensity', 'imageName'],
+                         ignore_index=True))
+
+
 def load_condition_index(output_dir=None) -> pd.DataFrame:
     """List saved cell conditions by reading metadata only.
 
@@ -1756,6 +1820,107 @@ def plot_population_nli(summary: Optional[pd.DataFrame] = None,
     fig.suptitle(f'Per-cell NLI, standard vs cone-linearized disc ({window})',
                  fontsize=11, y=1.02)
     fig.tight_layout()
+    return fig
+
+
+def plot_image_nli_by_cell_type(image_summary: Optional[pd.DataFrame] = None,
+                                cell_types: Optional[Sequence[str]] = None,
+                                log_x: bool = True,
+                                columns: int = 2,
+                                panel_size: Tuple[float, float] = (4.8, 3.8)):
+    """Plot every cell/image NLI pair against that image's mean intensity.
+
+    Each row in ``image_summary`` contributes two dots at the same x value:
+    mean patch NLI for image vs standard disc and for image vs cone-linearized
+    disc. Panels separate cell types; points are not averaged across cells.
+    FilterWheel is retained in the source table and represented by marker shape.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    if image_summary is None:
+        image_summary = load_condition_image_nli_summary()
+    required = set(IMAGE_NLI_SUMMARY_COLUMNS)
+    missing = required.difference(image_summary.columns)
+    if missing:
+        raise ValueError(f'image_summary is missing columns: {sorted(missing)}')
+
+    frame = image_summary.copy()
+    if cell_types is None:
+        preferred = ['ON-parasol', 'OFF-parasol', 'ON-midget', 'OFF-midget']
+        present = set(frame['cell_type'].dropna().astype(str))
+        cell_types = [name for name in preferred if name in present]
+        cell_types += sorted(present.difference(cell_types))
+    else:
+        cell_types = [str(name) for name in cell_types]
+
+    n_panels = max(len(cell_types), 1)
+    n_columns = max(1, min(int(columns), n_panels))
+    n_rows = int(np.ceil(n_panels / n_columns))
+    fig, axes = plt.subplots(
+        n_rows, n_columns,
+        figsize=(panel_size[0] * n_columns, panel_size[1] * n_rows),
+        squeeze=False, sharey=True)
+
+    colors = {'mean_nli_disc': '#666666', 'mean_nli_cone_disc': '#C44E52'}
+    markers = ('o', 's', '^', 'D', 'v', 'P', 'X')
+    wheel_values = sorted(pd.to_numeric(frame['filter_wheel_ndf'], errors='coerce')
+                          .dropna().unique())
+    wheel_markers = {wheel: markers[i % len(markers)]
+                     for i, wheel in enumerate(wheel_values)}
+
+    for ax, cell_type in zip(axes.flat, cell_types):
+        sub = frame.loc[frame['cell_type'].astype(str).eq(cell_type)].copy()
+        for row in sub.itertuples(index=False):
+            if np.isfinite(row.meanIntensity) and np.isfinite(row.mean_nli_disc) \
+                    and np.isfinite(row.mean_nli_cone_disc):
+                ax.plot([row.meanIntensity, row.meanIntensity],
+                        [row.mean_nli_disc, row.mean_nli_cone_disc],
+                        color='#BBBBBB', lw=.7, alpha=.45, zorder=1)
+        for wheel, marker in wheel_markers.items():
+            wheel_sub = sub.loc[np.isclose(sub['filter_wheel_ndf'], wheel)]
+            for column, color in colors.items():
+                keep = (np.isfinite(wheel_sub['meanIntensity'])
+                        & np.isfinite(wheel_sub[column]))
+                ax.scatter(wheel_sub.loc[keep, 'meanIntensity'],
+                           wheel_sub.loc[keep, column], s=24, marker=marker,
+                           color=color, alpha=.72, lw=0, zorder=2)
+        ax.axhline(0, color='black', ls='--', lw=1)
+        positive_x = pd.to_numeric(sub['meanIntensity'], errors='coerce').dropna()
+        if log_x and len(positive_x) and positive_x.gt(0).all():
+            ax.set_xscale('log')
+        ax.set_ylim(-1.02, 1.02)
+        ax.set_xlabel('meanIntensity')
+        ax.set_ylabel('mean NLI across image patches')
+        n_cells = sub['cell_id'].nunique()
+        ax.set_title(f'{cell_type} | {n_cells} cells | {len(sub)} cell-images',
+                     fontsize=9)
+
+    for ax in axes.flat[len(cell_types):]:
+        ax.set_visible(False)
+    if not cell_types:
+        axes.flat[0].text(.5, .5, 'no saved image-level NLI data',
+                          ha='center', va='center', transform=axes.flat[0].transAxes)
+        axes.flat[0].set_axis_off()
+
+    legend_handles = [
+        Line2D([], [], marker='o', ls='none', color=colors['mean_nli_disc'],
+               label='image vs standard disc'),
+        Line2D([], [], marker='o', ls='none', color=colors['mean_nli_cone_disc'],
+               label='image vs cone-lin disc'),
+    ]
+    legend_handles.extend(
+        Line2D([], [], marker=wheel_markers[wheel], ls='none', color='black',
+               markerfacecolor='none', label=f'FilterWheel {wheel:g}')
+        for wheel in wheel_values)
+    if legend_handles:
+        fig.legend(handles=legend_handles, loc='upper center', ncol=min(4, len(legend_handles)),
+                   bbox_to_anchor=(.5, 1.0), frameon=False, fontsize=8)
+    fig.suptitle('LinearEquivalentAnnulus: image-level mean NLI by cell type',
+                 fontsize=11, y=1.04)
+    fig.tight_layout(rect=(0, 0, 1, .94))
     return fig
 
 

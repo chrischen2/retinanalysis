@@ -495,6 +495,57 @@ def test_condition_index_lists_metadata_without_expanding_patch_rows(tmp_path):
     ]
 
 
+def test_image_nli_summary_keeps_one_row_per_cell_fw_and_image(tmp_path):
+    from dataclasses import replace
+
+    analysis = _condition_analysis_for_output()
+    second_images = analysis.image_summary.copy()
+    second_images['meanIntensity'] /= 10
+    led.save_condition_output(analysis, output_dir=tmp_path, verbose=False)
+    led.save_condition_output(
+        replace(analysis, cell_label='Cell2', cell_type='OFF-parasol',
+                filter_wheel_ndf=1.0, image_summary=second_images),
+        output_dir=tmp_path, verbose=False)
+    led.save_condition_output(
+        replace(analysis, cell_label='Cell3', protocols=['LinearEquivalentDiscConeLin']),
+        output_dir=tmp_path, verbose=False)
+
+    summary = led.load_condition_image_nli_summary(tmp_path)
+
+    assert len(summary) == 4
+    assert summary.columns.tolist() == led.IMAGE_NLI_SUMMARY_COLUMNS
+    assert summary[['cell_id', 'filter_wheel_ndf', 'imageName']].duplicated().sum() == 0
+    first = summary.loc[(summary['cell_label'].eq('Cell1'))
+                        & (summary['imageName'].eq('00152'))].iloc[0]
+    assert first['meanIntensity'] == 200.0
+    assert first['n_patches'] == 2
+    assert first['mean_nli_disc'] == pytest.approx(1 / 3)
+    assert first['mean_nli_cone_disc'] == pytest.approx((1 / 7 + 1 / 15) / 2)
+    assert set(summary['cell_type']) == {'ON-parasol', 'OFF-parasol'}
+
+
+def test_image_nli_population_plot_has_one_panel_per_cell_type(tmp_path):
+    from dataclasses import replace
+    import matplotlib.pyplot as plt
+
+    analysis = _condition_analysis_for_output()
+    led.save_condition_output(analysis, output_dir=tmp_path, verbose=False)
+    led.save_condition_output(replace(analysis, cell_label='Cell2',
+                                      cell_type='OFF-parasol'),
+                              output_dir=tmp_path, verbose=False)
+    summary = led.load_condition_image_nli_summary(tmp_path)
+
+    fig = led.plot_image_nli_by_cell_type(summary, log_x=False)
+    visible_axes = [ax for ax in fig.axes if ax.get_visible()]
+
+    assert len(visible_axes) == 2
+    assert {ax.get_title().split(' | ')[0] for ax in visible_axes} == {
+        'ON-parasol', 'OFF-parasol'}
+    assert all(ax.get_ylabel() == 'mean NLI across image patches' for ax in visible_axes)
+    assert all(len(ax.collections) == 2 for ax in visible_axes)
+    plt.close('all')
+
+
 def test_matching_saved_condition_rehydrates_without_raw_data(tmp_path):
     analysis = _condition_analysis_for_output()
     led.save_condition_output(analysis, output_dir=tmp_path, verbose=False)
