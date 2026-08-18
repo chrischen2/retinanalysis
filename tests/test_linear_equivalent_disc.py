@@ -524,11 +524,36 @@ def test_image_nli_summary_keeps_one_row_per_cell_fw_and_image(tmp_path):
     assert set(summary['cell_type']) == {'ON-parasol', 'OFF-parasol'}
 
 
+def test_light_level_summary_uses_requested_bins_and_cell_image_sem():
+    rows = pd.DataFrame({
+        'cell_type': ['ON-parasol'] * 8,
+        'cell_id': ['d/C1', 'd/C1', 'd/C2', 'd/C2', 'd/C3', 'd/C3', 'd/C4', 'd/C4'],
+        'imageName': [str(i) for i in range(8)],
+        'meanIntensity': [499, 500, 1000, 1499, 1500, 3500, 6000, 20000],
+        'mean_nli_disc': [9, 0, 1, 2, 3, 4, 5, 6],
+        'mean_nli_cone_disc': [9, 0, -1, -2, -3, -4, -5, -6],
+    })
+
+    summary = led.summarize_image_nli_light_levels(rows)
+
+    assert summary['light_level'].tolist() == [
+        '500-1500', '1500-3500', '3500-6000', '6000-20000']
+    assert summary['n_cell_images'].tolist() == [3, 1, 1, 2]
+    assert summary['meanIntensity'].tolist() == pytest.approx(
+        [(500 + 1000 + 1499) / 3, 1500, 3500, 13000])
+    assert summary['mean_nli_disc'].tolist() == pytest.approx([1, 3, 4, 5.5])
+    assert summary.loc[0, 'sem_nli_disc'] == pytest.approx(1 / np.sqrt(3))
+    assert np.isnan(summary.loc[1, 'sem_nli_disc'])
+
+
 def test_image_nli_population_plot_has_one_panel_per_cell_type(tmp_path):
     from dataclasses import replace
     import matplotlib.pyplot as plt
 
     analysis = _condition_analysis_for_output()
+    plot_images = analysis.image_summary.copy()
+    plot_images['meanIntensity'] *= 10
+    analysis = replace(analysis, image_summary=plot_images)
     led.save_condition_output(analysis, output_dir=tmp_path, verbose=False)
     led.save_condition_output(replace(analysis, cell_label='Cell2',
                                       cell_type='OFF-parasol'),
@@ -541,8 +566,9 @@ def test_image_nli_population_plot_has_one_panel_per_cell_type(tmp_path):
     assert len(visible_axes) == 2
     assert {ax.get_title().split(' | ')[0] for ax in visible_axes} == {
         'ON-parasol', 'OFF-parasol'}
-    assert all(ax.get_ylabel() == 'mean NLI across image patches' for ax in visible_axes)
-    assert all(len(ax.collections) == 2 for ax in visible_axes)
+    assert all(ax.get_ylabel() == 'population mean NLI ± SEM' for ax in visible_axes)
+    assert all({line.get_label() for line in ax.lines}.issuperset({
+        'image vs standard disc', 'image vs cone-lin disc'}) for ax in visible_axes)
     plt.close('all')
 
 

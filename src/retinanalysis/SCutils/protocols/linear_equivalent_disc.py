@@ -1415,6 +1415,19 @@ IMAGE_NLI_SUMMARY_COLUMNS = [
     'n_patches', 'mean_nli_disc', 'mean_nli_cone_disc',
 ]
 
+LIGHT_LEVEL_GROUPS = (
+    (500.0, 1500.0),
+    (1500.0, 3500.0),
+    (3500.0, 6000.0),
+    (6000.0, 20000.0),
+)
+
+LIGHT_LEVEL_SUMMARY_COLUMNS = [
+    'cell_type', 'light_level', 'light_min', 'light_max', 'meanIntensity',
+    'n_cells', 'n_cell_images', 'mean_nli_disc', 'sem_nli_disc',
+    'mean_nli_cone_disc', 'sem_nli_cone_disc',
+]
+
 
 def load_condition_image_nli_summary(output_dir=None,
                                      protocol: Optional[str] = 'LinearEquivalentAnnulus'
@@ -1471,6 +1484,68 @@ def load_condition_image_nli_summary(output_dir=None,
             .sort_values(['cell_type', 'exp_name', 'cell_label', 'onlineAnalysis',
                           'filter_wheel_ndf', 'meanIntensity', 'imageName'],
                          ignore_index=True))
+
+
+def summarize_image_nli_light_levels(
+        image_summary: pd.DataFrame,
+        light_groups: Sequence[Tuple[float, float]] = LIGHT_LEVEL_GROUPS,
+        ) -> pd.DataFrame:
+    """Aggregate cell/image NLI observations within predefined light ranges.
+
+    Every input row remains one cell/``imageName`` observation. Within each
+    cell type and light range, x is the observed mean ``meanIntensity`` and y
+    is the mean NLI across those observations; error is SEM across the same
+    observations. Ranges are lower-inclusive and upper-exclusive, except the
+    final range, which includes its upper bound.
+    """
+    required = {'cell_type', 'cell_id', 'imageName', 'meanIntensity',
+                'mean_nli_disc', 'mean_nli_cone_disc'}
+    missing = required.difference(image_summary.columns)
+    if missing:
+        raise ValueError(f'image_summary is missing columns: {sorted(missing)}')
+
+    groups = [(float(lower), float(upper)) for lower, upper in light_groups]
+    if (not groups or any(not np.isfinite([lower, upper]).all() or lower >= upper
+                          for lower, upper in groups)
+            or any(groups[i][1] > groups[i + 1][0]
+                   for i in range(len(groups) - 1))):
+        raise ValueError('light_groups must be ordered, finite, non-overlapping ranges')
+
+    frame = image_summary.copy()
+    intensity = pd.to_numeric(frame['meanIntensity'], errors='coerce')
+    group_index = np.full(len(frame), -1, dtype=int)
+    for index, (lower, upper) in enumerate(groups):
+        upper_keep = intensity.le(upper) if index == len(groups) - 1 else intensity.lt(upper)
+        keep = intensity.ge(lower) & upper_keep & (group_index == -1)
+        group_index[keep.to_numpy()] = index
+    frame['_light_group'] = group_index
+    frame = frame.loc[frame['_light_group'].ge(0)].copy()
+    if frame.empty:
+        return pd.DataFrame(columns=LIGHT_LEVEL_SUMMARY_COLUMNS)
+
+    def sem(values):
+        values = pd.to_numeric(values, errors='coerce').dropna()
+        return (float(values.std(ddof=1) / np.sqrt(len(values)))
+                if len(values) > 1 else np.nan)
+
+    summary = (frame.groupby(['cell_type', '_light_group'], sort=True, observed=True)
+               .agg(meanIntensity=('meanIntensity', 'mean'),
+                    n_cells=('cell_id', 'nunique'),
+                    n_cell_images=('imageName', 'size'),
+                    mean_nli_disc=('mean_nli_disc', 'mean'),
+                    sem_nli_disc=('mean_nli_disc', sem),
+                    mean_nli_cone_disc=('mean_nli_cone_disc', 'mean'),
+                    sem_nli_cone_disc=('mean_nli_cone_disc', sem))
+               .reset_index())
+    summary['light_min'] = summary['_light_group'].map(
+        lambda index: groups[int(index)][0])
+    summary['light_max'] = summary['_light_group'].map(
+        lambda index: groups[int(index)][1])
+    summary['light_level'] = summary.apply(
+        lambda row: f"{row['light_min']:g}-{row['light_max']:g}", axis=1)
+    return (summary.sort_values(['cell_type', '_light_group'])
+            .drop(columns='_light_group')[LIGHT_LEVEL_SUMMARY_COLUMNS]
+            .reset_index(drop=True))
 
 
 def load_condition_index(output_dir=None) -> pd.DataFrame:
@@ -1825,32 +1900,28 @@ def plot_population_nli(summary: Optional[pd.DataFrame] = None,
 
 def plot_image_nli_by_cell_type(image_summary: Optional[pd.DataFrame] = None,
                                 cell_types: Optional[Sequence[str]] = None,
+                                light_groups: Sequence[Tuple[float, float]] =
+                                LIGHT_LEVEL_GROUPS,
                                 log_x: bool = True,
                                 columns: int = 2,
                                 panel_size: Tuple[float, float] = (4.8, 3.8)):
-    """Plot every cell/image NLI pair against that image's mean intensity.
+    """Plot binned population mean NLI and SEM against mean light level.
 
-    Each row in ``image_summary`` contributes two dots at the same x value:
-    mean patch NLI for image vs standard disc and for image vs cone-linearized
-    disc. Panels separate cell types; points are not averaged across cells.
-    FilterWheel is retained in the source table and represented by marker shape.
+    The input retains every cell/image observation. This function groups those
+    rows with :func:`summarize_image_nli_light_levels`, then draws the standard
+    and cone-linearized population mean +/- SEM in one panel per cell type.
     """
     import matplotlib.pyplot as plt
-    from matplotlib.lines import Line2D
+    from matplotlib.ticker import NullLocator
     from retinanalysis.utils import style
 
     style.apply_publication_style()
     if image_summary is None:
         image_summary = load_condition_image_nli_summary()
-    required = set(IMAGE_NLI_SUMMARY_COLUMNS)
-    missing = required.difference(image_summary.columns)
-    if missing:
-        raise ValueError(f'image_summary is missing columns: {sorted(missing)}')
-
-    frame = image_summary.copy()
+    grouped = summarize_image_nli_light_levels(image_summary, light_groups=light_groups)
     if cell_types is None:
         preferred = ['ON-parasol', 'OFF-parasol', 'ON-midget', 'OFF-midget']
-        present = set(frame['cell_type'].dropna().astype(str))
+        present = set(grouped['cell_type'].dropna().astype(str))
         cell_types = [name for name in preferred if name in present]
         cell_types += sorted(present.difference(cell_types))
     else:
@@ -1864,39 +1935,43 @@ def plot_image_nli_by_cell_type(image_summary: Optional[pd.DataFrame] = None,
         figsize=(panel_size[0] * n_columns, panel_size[1] * n_rows),
         squeeze=False, sharey=True)
 
-    colors = {'mean_nli_disc': '#666666', 'mean_nli_cone_disc': '#C44E52'}
-    markers = ('o', 's', '^', 'D', 'v', 'P', 'X')
-    wheel_values = sorted(pd.to_numeric(frame['filter_wheel_ndf'], errors='coerce')
-                          .dropna().unique())
-    wheel_markers = {wheel: markers[i % len(markers)]
-                     for i, wheel in enumerate(wheel_values)}
+    series = (
+        ('mean_nli_disc', 'sem_nli_disc', '#666666', 'o', 'image vs standard disc'),
+        ('mean_nli_cone_disc', 'sem_nli_cone_disc', '#C44E52', 's',
+         'image vs cone-lin disc'),
+    )
 
     for ax, cell_type in zip(axes.flat, cell_types):
-        sub = frame.loc[frame['cell_type'].astype(str).eq(cell_type)].copy()
-        for row in sub.itertuples(index=False):
-            if np.isfinite(row.meanIntensity) and np.isfinite(row.mean_nli_disc) \
-                    and np.isfinite(row.mean_nli_cone_disc):
-                ax.plot([row.meanIntensity, row.meanIntensity],
-                        [row.mean_nli_disc, row.mean_nli_cone_disc],
-                        color='#BBBBBB', lw=.7, alpha=.45, zorder=1)
-        for wheel, marker in wheel_markers.items():
-            wheel_sub = sub.loc[np.isclose(sub['filter_wheel_ndf'], wheel)]
-            for column, color in colors.items():
-                keep = (np.isfinite(wheel_sub['meanIntensity'])
-                        & np.isfinite(wheel_sub[column]))
-                ax.scatter(wheel_sub.loc[keep, 'meanIntensity'],
-                           wheel_sub.loc[keep, column], s=24, marker=marker,
-                           color=color, alpha=.72, lw=0, zorder=2)
+        sub = grouped.loc[grouped['cell_type'].astype(str).eq(cell_type)].copy()
+        for mean_column, sem_column, color, marker, label in series:
+            x = sub['meanIntensity'].to_numpy(dtype=float)
+            y = sub[mean_column].to_numpy(dtype=float)
+            errors = sub[sem_column].to_numpy(dtype=float)
+            keep = np.isfinite(x) & np.isfinite(y)
+            ax.plot(x[keep], y[keep], '-', color=color, lw=1.3, alpha=.8,
+                    label=label, zorder=2)
+            ax.scatter(x[keep], y[keep], s=34, marker=marker, color=color,
+                       zorder=3)
+            with_error = keep & np.isfinite(errors)
+            if with_error.any():
+                ax.errorbar(x[with_error], y[with_error], yerr=errors[with_error],
+                            fmt='none', color=color, elinewidth=1.2, capsize=3,
+                            zorder=2)
         ax.axhline(0, color='black', ls='--', lw=1)
         positive_x = pd.to_numeric(sub['meanIntensity'], errors='coerce').dropna()
         if log_x and len(positive_x) and positive_x.gt(0).all():
             ax.set_xscale('log')
+            ax.xaxis.set_minor_locator(NullLocator())
+        if len(positive_x):
+            ax.set_xticks(positive_x)
+            ax.set_xticklabels([f'{value:,.0f}' for value in positive_x])
         ax.set_ylim(-1.02, 1.02)
-        ax.set_xlabel('meanIntensity')
-        ax.set_ylabel('mean NLI across image patches')
-        n_cells = sub['cell_id'].nunique()
-        ax.set_title(f'{cell_type} | {n_cells} cells | {len(sub)} cell-images',
-                     fontsize=9)
+        ax.set_xlabel('mean intensity within light-level group')
+        ax.set_ylabel('population mean NLI ± SEM')
+        n_cells = image_summary.loc[
+            image_summary['cell_type'].astype(str).eq(cell_type), 'cell_id'].nunique()
+        ax.set_title(f'{cell_type} | {n_cells} cells', fontsize=9)
+        ax.legend(frameon=False, fontsize=7)
 
     for ax in axes.flat[len(cell_types):]:
         ax.set_visible(False)
@@ -1905,22 +1980,9 @@ def plot_image_nli_by_cell_type(image_summary: Optional[pd.DataFrame] = None,
                           ha='center', va='center', transform=axes.flat[0].transAxes)
         axes.flat[0].set_axis_off()
 
-    legend_handles = [
-        Line2D([], [], marker='o', ls='none', color=colors['mean_nli_disc'],
-               label='image vs standard disc'),
-        Line2D([], [], marker='o', ls='none', color=colors['mean_nli_cone_disc'],
-               label='image vs cone-lin disc'),
-    ]
-    legend_handles.extend(
-        Line2D([], [], marker=wheel_markers[wheel], ls='none', color='black',
-               markerfacecolor='none', label=f'FilterWheel {wheel:g}')
-        for wheel in wheel_values)
-    if legend_handles:
-        fig.legend(handles=legend_handles, loc='upper center', ncol=min(4, len(legend_handles)),
-                   bbox_to_anchor=(.5, 1.0), frameon=False, fontsize=8)
-    fig.suptitle('LinearEquivalentAnnulus: image-level mean NLI by cell type',
-                 fontsize=11, y=1.04)
-    fig.tight_layout(rect=(0, 0, 1, .94))
+    fig.suptitle('LinearEquivalentAnnulus: grouped light-level NLI by cell type',
+                 fontsize=11, y=1.01)
+    fig.tight_layout()
     return fig
 
 
