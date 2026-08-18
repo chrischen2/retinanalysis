@@ -525,7 +525,7 @@ def test_matching_saved_condition_rehydrates_without_raw_data(tmp_path):
     assert led.load_condition_output(stale, output_dir=tmp_path, verbose=False) is None
 
 
-def test_condition_nli_plot_uses_lines_and_mean_sem_subplot():
+def test_condition_nli_plot_uses_ecdf_and_mean_sem_subplot():
     import matplotlib.pyplot as plt
 
     figures = led.plot_condition(_condition_analysis_for_output(), columns=2)
@@ -535,8 +535,11 @@ def test_condition_nli_plot_uses_lines_and_mean_sem_subplot():
     assert len(nli_figure.axes) == 2
     assert len(distribution_axis.patches) == 0
     assert len(distribution_axis.lines) >= 5  # two distributions, two means, zero
-    assert len(distribution_axis.lines[0].get_xdata()) == 50
-    assert distribution_axis.get_title() == '50-bin onset NLI distribution'
+    first_cdf = distribution_axis.lines[0]
+    assert first_cdf.get_drawstyle() == 'steps-post'
+    assert first_cdf.get_ydata().tolist() == pytest.approx([0.0, 1 / 3, 2 / 3, 1.0])
+    assert distribution_axis.get_ylabel() == 'cumulative fraction'
+    assert distribution_axis.get_title() == 'onset NLI empirical CDF'
     assert len(mean_axis.collections) == 2   # two error-bar point collections
     plt.close('all')
 

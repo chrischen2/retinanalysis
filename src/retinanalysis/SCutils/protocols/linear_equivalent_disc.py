@@ -1671,7 +1671,6 @@ def plot_condition(analysis: ConditionAnalysis,
     pooled_fig.tight_layout()
 
     nli_fig, (nli_ax, mean_ax) = plt.subplots(1, 2, figsize=(9.2, 4.2))
-    bins = np.linspace(-1, 1, 51)
     nli_groups = (
         ('nli_disc', colors['disc'], 'image vs disc'),
         ('nli_cone_disc', colors['cone_disc'], 'image vs cone-lin disc'),
@@ -1681,9 +1680,10 @@ def plot_condition(analysis: ConditionAnalysis,
         values = patches[column].to_numpy(dtype=float)
         values = values[np.isfinite(values)]
         if values.size:
-            density, edges = np.histogram(values, bins=bins, density=True)
-            centers = (edges[:-1] + edges[1:]) / 2
-            nli_ax.plot(centers, density, '-o', ms=3, lw=1.6, color=color,
+            sorted_values = np.sort(values)
+            cumulative = np.arange(1, values.size + 1, dtype=float) / values.size
+            nli_ax.step(np.r_[-1.0, sorted_values], np.r_[0.0, cumulative],
+                        where='post', lw=1.6, color=color,
                         label=f'{label} (n={len(values)})')
             mean = float(np.mean(values))
             sem = (float(np.std(values, ddof=1) / np.sqrt(values.size))
@@ -1695,8 +1695,9 @@ def plot_condition(analysis: ConditionAnalysis,
     nli_ax.axvline(0, color='black', ls='--', lw=1)
     nli_ax.set_xlim(-1, 1)
     nli_ax.set_xlabel('Nonlinear Index  (image - disc) / (|image| + |disc|)')
-    nli_ax.set_ylabel('density')
-    nli_ax.set_title('50-bin onset NLI distribution')
+    nli_ax.set_ylim(0, 1.02)
+    nli_ax.set_ylabel('cumulative fraction')
+    nli_ax.set_title('onset NLI empirical CDF')
     nli_ax.legend(frameon=False, fontsize=8)
     mean_ax.axhline(0, color='black', ls='--', lw=1)
     mean_ax.set_xticks(range(len(nli_groups)))
