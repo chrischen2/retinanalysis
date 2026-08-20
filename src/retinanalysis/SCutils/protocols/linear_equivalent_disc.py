@@ -271,12 +271,19 @@ def find_protocol_cells(protocol: Union[str, Sequence[str]], show: bool = True,
     label = ', '.join(protocols)
     blocks = _protocol_block_rows(protocols)
     if blocks.empty:
-        cells = pd.DataFrame(columns=['exp_name', 'cell_label', 'protocol'])
+        cells = pd.DataFrame(columns=[
+            'exp_name', 'cell_label', 'cell_type_short', 'protocol'])
         if show:
             print(f'No single-cell blocks found for {label}.')
         return cells
     blocks, dropped = _linearized_only(blocks)
-    cells = (blocks[['exp_name', 'cell_label', 'protocol']].drop_duplicates()
+    if 'cell_type' in blocks:
+        blocks['cell_type_short'] = (
+            blocks['cell_type'].fillna('Unknown').astype(str).str.split('\\').str[-1])
+    else:
+        blocks['cell_type_short'] = 'Unknown'
+    cells = (blocks[[
+        'exp_name', 'cell_label', 'cell_type_short', 'protocol']].drop_duplicates()
              .sort_values(['exp_name', 'cell_label', 'protocol']).reset_index(drop=True))
     if show:
         print(f'{label}: {len(cells)} cells across {cells.exp_name.nunique()} experiments')

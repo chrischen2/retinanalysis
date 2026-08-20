@@ -156,16 +156,20 @@ def test_find_protocol_cells_returns_only_unique_date_and_cell(monkeypatch):
     blocks = pd.DataFrame({
         'exp_name': ['2026-01-01_E', '2026-01-01_E', '2026-01-02_E'],
         'cell_label': ['Cell1', 'Cell1', 'Cell2'],
+        'cell_type': ['RGC\\ON-parasol', 'RGC\\ON-parasol', 'horizontal'],
         'protocol': ['LinearEquivalentAnnulus'] * 3,
         'parameters': [{}] * 3,
     })
     monkeypatch.setattr(led, '_protocol_block_rows', lambda protocols: blocks)
     found = led.find_protocol_cells('LinearEquivalentAnnulus', show=False)
-    assert list(found.columns) == ['exp_name', 'cell_label', 'protocol']
+    assert list(found.columns) == [
+        'exp_name', 'cell_label', 'cell_type_short', 'protocol']
     assert found.to_dict('records') == [
         {'exp_name': '2026-01-01_E', 'cell_label': 'Cell1',
+         'cell_type_short': 'ON-parasol',
          'protocol': 'LinearEquivalentAnnulus'},
         {'exp_name': '2026-01-02_E', 'cell_label': 'Cell2',
+         'cell_type_short': 'horizontal',
          'protocol': 'LinearEquivalentAnnulus'},
     ]
 
@@ -174,6 +178,7 @@ def test_find_protocol_cells_combines_center_names_and_drops_old_disc(monkeypatc
     blocks = pd.DataFrame({
         'exp_name': ['old_E', 'new_E', 'cone_E'],
         'cell_label': ['Cell1', 'Cell2', 'Cell3'],
+        'cell_type': ['RGC\\ON-parasol', 'RGC\\OFF-parasol', 'horizontal'],
         'protocol': ['LinearEquivalentDisc', 'LinearEquivalentDisc',
                      'LinearEquivalentDiscConeLin'],
         'parameters': [{}, {'linearizeCones': True}, {'linearizeCones': True}],
@@ -190,6 +195,7 @@ def test_find_protocol_cells_combines_center_names_and_drops_old_disc(monkeypatc
 
     assert requested == ['LinearEquivalentDiscConeLin', 'LinearEquivalentDisc']
     assert found['exp_name'].tolist() == ['cone_E', 'new_E']
+    assert found['cell_type_short'].tolist() == ['horizontal', 'OFF-parasol']
     assert set(found['protocol']) == {
         'LinearEquivalentDiscConeLin', 'LinearEquivalentDisc'}
 
