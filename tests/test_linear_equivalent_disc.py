@@ -509,6 +509,52 @@ def test_condition_output_save_is_idempotent_and_loads_population_rows(tmp_path)
     assert loaded['imageName'].tolist() == ['00152', '00152', '01769']
 
 
+def test_default_condition_outputs_use_separate_center_and_annulus_folders(
+        tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    monkeypatch.setattr(led, 'store_dir', lambda: tmp_path)
+    annulus = _condition_analysis_for_output()
+    center = replace(
+        annulus, cell_label='Cell2', site='center',
+        protocols=['LinearEquivalentDisc'])
+
+    annulus_path = led.save_condition_output(annulus, verbose=False)
+    center_path = led.save_condition_output(center, verbose=False)
+
+    assert annulus_path.parent == tmp_path / 'condition_outputs' / 'annulus_disc'
+    assert center_path.parent == tmp_path / 'condition_outputs' / 'center_disc'
+    assert led.condition_output_dir('LinearEquivalentDiscConeLin') == center_path.parent
+    assert len(led.load_condition_outputs()) == 6
+    assert set(led.load_condition_index(protocol='LinearEquivalentAnnulus')['cell_label']) == {
+        'Cell1'}
+    assert set(led.load_condition_index(
+        protocol=('LinearEquivalentDisc', 'LinearEquivalentDiscConeLin'))['cell_label']) == {
+            'Cell2'}
+
+
+def test_default_condition_loader_falls_back_to_legacy_shared_folder(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(led, 'store_dir', lambda: tmp_path)
+    analysis = _condition_analysis_for_output()
+    led.save_condition_output(
+        analysis, output_dir=led.condition_output_dir(), verbose=False)
+    blocks = pd.DataFrame({
+        'exp_name': ['2026-01-01_E', '2026-01-01_E'],
+        'cell_label': ['Cell1', 'Cell1'],
+        'cell_type_short': ['ON-parasol', 'ON-parasol'],
+        'onlineAnalysis': ['extracellular', 'extracellular'],
+        'filter_wheel_ndf': [0.0, 0.0],
+        'protocol': ['LinearEquivalentAnnulus', 'LinearEquivalentAnnulus'],
+        'site': ['surround', 'surround'], 'block_id': [11, 12],
+    })
+
+    restored = led.load_condition_output(blocks, verbose=False)
+
+    assert restored is not None and restored.loaded_from_saved
+    assert restored.block_ids == [11, 12]
+
+
 def test_condition_index_lists_metadata_without_expanding_patch_rows(tmp_path):
     from dataclasses import replace
 

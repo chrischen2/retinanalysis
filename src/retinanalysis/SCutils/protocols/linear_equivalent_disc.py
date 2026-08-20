@@ -1168,9 +1168,55 @@ def condition_population_table(analysis: ConditionAnalysis) -> pd.DataFrame:
     return table[columns].sort_values(['imageName', 'patchIndex']).reset_index(drop=True)
 
 
-def condition_output_dir():
-    """Directory containing one compressed HDF5 record per cell condition."""
-    return store_dir() / 'condition_outputs'
+def _condition_protocol_folder(
+        protocol: Union[str, Sequence[str]]) -> str:
+    """Map saved protocols to the center- or annulus-disc output folder."""
+    protocols = {protocol} if isinstance(protocol, str) else set(protocol)
+    has_annulus = 'LinearEquivalentAnnulus' in protocols
+    has_center = bool(protocols.intersection(
+        {'LinearEquivalentDisc', 'LinearEquivalentDiscConeLin'}))
+    if has_annulus and has_center:
+        raise ValueError('A saved condition cannot mix center- and annulus-disc protocols.')
+    if has_annulus:
+        return 'annulus_disc'
+    if has_center:
+        return 'center_disc'
+    raise ValueError(f'Unsupported saved condition protocol(s): {sorted(protocols)}')
+
+
+def condition_output_dir(
+        protocol: Optional[Union[str, Sequence[str]]] = None):
+    """Return the shared legacy root or a protocol-specific output directory."""
+    root = store_dir() / 'condition_outputs'
+    return root if protocol is None else root / _condition_protocol_folder(protocol)
+
+
+def _condition_read_directories(output_dir=None, protocol=None):
+    """Directories to search, with protocol-specific storage before legacy root."""
+    from pathlib import Path
+
+    if output_dir is not None:
+        return [Path(output_dir)]
+    root = condition_output_dir()
+    if protocol is None:
+        directories = [root / 'center_disc', root / 'annulus_disc']
+    else:
+        directories = [condition_output_dir(protocol)]
+    return directories + [root]
+
+
+def _condition_paths(output_dir=None, protocol=None, suffix='.h5'):
+    """Find saved conditions once, preferring routed folders over legacy root."""
+    paths = []
+    seen_names = set()
+    for directory in _condition_read_directories(output_dir, protocol):
+        if not directory.exists():
+            continue
+        for path in sorted(directory.glob(f'*{suffix}')):
+            if path.name not in seen_names:
+                paths.append(path)
+                seen_names.add(path.name)
+    return paths
 
 
 def _condition_output_name_from_values(exp_name: str, cell_label: str,
@@ -1195,6 +1241,10 @@ def save_condition_output(analysis: ConditionAnalysis, output_dir=None,
                           verbose: bool = True):
     """Idempotently save one cell condition as compressed typed arrays.
 
+    By default, center-disc and annulus-disc conditions are routed to separate
+    ``center_disc`` and ``annulus_disc`` directories. An explicit
+    ``output_dir`` is used as-is.
+
     The file is deliberately organized like a MATLAB struct containing arrays:
     scalar condition metadata live in HDF5 attributes, while ``image_summary``
     and ``patch_responses`` are groups of column datasets.  A flat population
@@ -1204,7 +1254,8 @@ def save_condition_output(analysis: ConditionAnalysis, output_dir=None,
     import h5py
     from pathlib import Path
 
-    directory = Path(output_dir) if output_dir is not None else condition_output_dir()
+    directory = (Path(output_dir) if output_dir is not None
+                 else condition_output_dir(analysis.protocols))
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / _condition_output_name(analysis)
     temporary = path.with_suffix(path.suffix + '.tmp')
@@ -1310,8 +1361,6 @@ def _read_condition_csv(path) -> pd.DataFrame:
 def load_condition_output(blocks: pd.DataFrame, output_dir=None,
                           verbose: bool = True) -> Optional[ConditionAnalysis]:
     """Rehydrate a matching saved condition, or return ``None`` if stale/missing."""
-    from pathlib import Path
-
     if blocks.empty:
         return None
     exp_names = blocks['exp_name'].astype(str).unique()
@@ -1322,26 +1371,30 @@ def load_condition_output(blocks: pd.DataFrame, output_dir=None,
     if any(len(values) != 1 for values in (exp_names, cell_labels, modes, wheels, sites)):
         return None
     protocols = sorted({str(value) for value in blocks['protocol']})
-    directory = Path(output_dir) if output_dir is not None else condition_output_dir()
-    path = directory / _condition_output_name_from_values(
+    output_name = _condition_output_name_from_values(
         exp_names[0], cell_labels[0], modes[0], sites[0], protocols, float(wheels[0]))
-    if path.exists():
+    directories = _condition_read_directories(output_dir, protocols)
+    for path in (directory / output_name for directory in directories):
+        if not path.exists():
+            continue
         try:
             analysis = _read_condition_h5(path)
             if set(analysis.block_ids) != {int(value) for value in blocks['block_id']}:
-                return None
+                continue
         except (OSError, ValueError, KeyError):
-            return None
+            continue
         if verbose:
             print(f'loaded {len(analysis.patch_responses)} saved patch arrays from {path}')
         return analysis
 
     # Read pre-HDF5 outputs so existing work remains usable. A subsequent save
     # writes the compact format and takes precedence in population loading.
-    path = directory / _condition_output_name_from_values(
+    legacy_name = _condition_output_name_from_values(
         exp_names[0], cell_labels[0], modes[0], sites[0], protocols,
         float(wheels[0]), suffix='.csv')
-    if not path.exists():
+    path = next((directory / legacy_name for directory in directories
+                 if (directory / legacy_name).exists()), None)
+    if path is None:
         return None
     try:
         table = _read_condition_csv(path)
@@ -1398,23 +1451,28 @@ def load_condition_output(blocks: pd.DataFrame, output_dir=None,
     return analysis
 
 
-def load_condition_outputs(output_dir=None) -> pd.DataFrame:
+def load_condition_outputs(
+        output_dir=None,
+        protocol: Optional[Union[str, Sequence[str]]] = None,
+        ) -> pd.DataFrame:
     """Expand all saved condition arrays into one population patch table.
 
     Legacy CSVs are included only when the same condition has not yet been
     resaved as HDF5.
     """
-    from pathlib import Path
-
-    directory = Path(output_dir) if output_dir is not None else condition_output_dir()
-    if not directory.exists():
-        return pd.DataFrame()
-    h5_paths = sorted(directory.glob('*.h5'))
+    h5_paths = _condition_paths(output_dir, protocol, '.h5')
     h5_stems = {path.stem for path in h5_paths}
-    legacy_paths = sorted(path for path in directory.glob('*.csv')
-                          if path.stem not in h5_stems)
-    tables = [condition_population_table(_read_condition_h5(path)) for path in h5_paths]
-    tables.extend(_read_condition_csv(path) for path in legacy_paths)
+    legacy_paths = [path for path in _condition_paths(output_dir, protocol, '.csv')
+                    if path.stem not in h5_stems]
+    analyses = [_read_condition_h5(path) for path in h5_paths]
+    tables = [condition_population_table(analysis) for analysis in analyses
+              if _saved_condition_matches_protocol(analysis.protocols, protocol)]
+    for path in legacy_paths:
+        table = _read_condition_csv(path)
+        if (protocol is None or ('protocol' in table and not table.empty
+                and _saved_condition_matches_protocol(
+                    str(table.iloc[0]['protocol']).split(', '), protocol))):
+            tables.append(table)
     return pd.concat(tables, ignore_index=True) if tables else pd.DataFrame()
 
 
@@ -1482,14 +1540,8 @@ def load_condition_image_nli_summary(
     cell types here; that preserves the individual observations needed by the
     population plot. Legacy CSV outputs are intentionally excluded.
     """
-    from pathlib import Path
-
-    directory = Path(output_dir) if output_dir is not None else condition_output_dir()
-    if not directory.exists():
-        return pd.DataFrame(columns=IMAGE_NLI_SUMMARY_COLUMNS)
-
     rows = []
-    for path in sorted(directory.glob('*.h5')):
+    for path in _condition_paths(output_dir, protocol, '.h5'):
         analysis = _read_condition_h5(path)
         if not _saved_condition_matches_protocol(analysis.protocols, protocol):
             continue
@@ -1538,14 +1590,8 @@ def load_condition_patch_nli(
     One row remains one unique ``(imageName, patchIndex)`` observation in one
     saved cell condition. Legacy CSV files are intentionally excluded.
     """
-    from pathlib import Path
-
-    directory = Path(output_dir) if output_dir is not None else condition_output_dir()
-    if not directory.exists():
-        return pd.DataFrame(columns=PATCH_NLI_COLUMNS)
-
     tables = []
-    for path in sorted(directory.glob('*.h5')):
+    for path in _condition_paths(output_dir, protocol, '.h5'):
         analysis = _read_condition_h5(path)
         if not _saved_condition_matches_protocol(analysis.protocols, protocol):
             continue
@@ -1736,19 +1782,14 @@ def load_condition_index(
     when the corresponding condition has not yet been resaved as HDF5.
     """
     import h5py
-    from pathlib import Path
-
     columns = ['date', 'cell_label', 'cell_type', 'onlineAnalysis',
                'filter_wheel_ndf']
-    directory = Path(output_dir) if output_dir is not None else condition_output_dir()
-    if not directory.exists():
-        return pd.DataFrame(columns=columns)
 
     def text(value):
         return value.decode() if isinstance(value, bytes) else str(value)
 
     rows = []
-    h5_paths = sorted(directory.glob('*.h5'))
+    h5_paths = _condition_paths(output_dir, protocol, '.h5')
     h5_stems = {path.stem for path in h5_paths}
     for path in h5_paths:
         with h5py.File(path, 'r') as h5:
@@ -1762,7 +1803,7 @@ def load_condition_index(
                 'onlineAnalysis': text(h5.attrs['online_analysis']),
                 'filter_wheel_ndf': float(h5.attrs['filter_wheel_ndf']),
             })
-    for path in sorted(directory.glob('*.csv')):
+    for path in _condition_paths(output_dir, protocol, '.csv'):
         if path.stem in h5_stems:
             continue
         legacy = pd.read_csv(path, nrows=1)
