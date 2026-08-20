@@ -631,6 +631,23 @@ def test_pooled_patch_nli_plot_handles_an_empty_center_dataset():
     plt.close('all')
 
 
+def test_patch_nli_distribution_plot_has_one_row_per_cell_type():
+    import matplotlib.pyplot as plt
+
+    rows = pd.DataFrame({
+        'cell_type': ['ON-parasol', 'ON-parasol', 'OFF-parasol'],
+        'nli_disc': [-.2, .1, .3],
+        'nli_cone_disc': [-.1, .2, .4],
+    })
+    fig = led.plot_patch_nli_distributions_by_cell_type(rows, bins=25)
+
+    assert len(fig.axes) == 4
+    assert [fig.axes[index].get_ylabel().split('\n')[0] for index in (0, 2)] == [
+        'ON-parasol', 'OFF-parasol']
+    assert all(ax.get_title() == '25-bin patch density' for ax in fig.axes[::2])
+    plt.close('all')
+
+
 def test_light_level_summary_uses_requested_bins_and_cell_image_sem():
     rows = pd.DataFrame({
         'cell_type': ['ON-parasol'] * 8,
@@ -680,6 +697,53 @@ def test_cell_patch_summary_averages_all_images_within_each_cell_first():
     assert c2_high['mean_nli_disc'] == pytest.approx(7.0)
     assert c2_high['meanIntensity'] == 13000.0
     assert not (summary['mean_nli_disc'] == 99).any()  # 1500 is outside the two bins
+
+
+def test_high_light_cell_summary_uses_7000_as_inclusive_lower_cutoff():
+    rows = pd.DataFrame({
+        'cell_type': ['ON-parasol'] * 5,
+        'cell_id': ['d/C1'] * 3 + ['d/C2'] * 2,
+        'exp_name': ['d'] * 5,
+        'cell_label': ['C1'] * 3 + ['C2'] * 2,
+        'imageName': ['low', 'A', 'B', 'A', 'B'],
+        'patch_key': [f'p{i}' for i in range(5)],
+        'meanIntensity': [6999, 7000, 30000, 8000, 9000],
+        'nli_disc': [99, .2, .4, -.2, 0],
+        'nli_cone_disc': [99, .1, .3, -.1, .1],
+    })
+
+    summary = led.summarize_cell_patch_nli_above(rows)
+
+    assert summary['cell_id'].tolist() == ['d/C1', 'd/C2']
+    assert summary['min_intensity'].eq(7000).all()
+    assert summary.loc[0, 'mean_nli_disc'] == pytest.approx(.3)
+    assert summary.loc[0, 'meanIntensity'] == 18500
+    assert not (summary['mean_nli_disc'] == 99).any()
+
+
+def test_high_light_cell_plot_draws_one_pair_per_cell_type():
+    import matplotlib.pyplot as plt
+
+    summary = pd.DataFrame({
+        'cell_type': ['ON-parasol', 'ON-parasol', 'OFF-parasol'],
+        'cell_id': ['d/C1', 'd/C2', 'd/C3'],
+        'exp_name': ['d'] * 3,
+        'cell_label': ['C1', 'C2', 'C3'],
+        'min_intensity': [7000.] * 3,
+        'meanIntensity': [9000., 10000., 11000.],
+        'n_images': [2] * 3,
+        'n_patches': [20] * 3,
+        'mean_nli_disc': [.1, .3, -.2],
+        'mean_nli_cone_disc': [0, .2, -.1],
+    }, columns=led.HIGH_LIGHT_CELL_NLI_COLUMNS)
+
+    fig = led.plot_cell_patch_nli_paired_above(summary)
+    visible_axes = [ax for ax in fig.axes if ax.get_visible()]
+
+    assert len(visible_axes) == 2
+    assert len(visible_axes[0].lines) == 3  # two paired cells and the zero line
+    assert fig._suptitle.get_text().endswith('≥7,000 R*')
+    plt.close('all')
 
 
 def test_cell_patch_population_plot_uses_cell_means_and_sem():
@@ -846,12 +910,12 @@ def test_stimulus_example_widget_lists_and_redraws_image_names(monkeypatch):
     blocks = pd.DataFrame({'imageName': ['01769', '00152', '01769']})
     rendered = []
 
-    def params(_blocks, patch_index=None, image_name=None):
+    def params(_blocks, patch_index=None, image_name=None, count=4):
         rendered.append(image_name)
-        return {'imageName': image_name}
+        return [{'imageName': image_name}]
 
-    monkeypatch.setattr(led, 'example_patch_params_from_blocks', params)
-    monkeypatch.setattr(led, 'plot_stimulus_example', lambda _params: plt.figure())
+    monkeypatch.setattr(led, 'example_patch_sequence_from_blocks', params)
+    monkeypatch.setattr(led, 'plot_stimulus_sequence', lambda _params: plt.figure())
 
     widget = led.stimulus_example_widget(blocks)
     dropdown, output = widget.children
@@ -860,3 +924,28 @@ def test_stimulus_example_widget_lists_and_redraws_image_names(monkeypatch):
     assert list(dropdown.options) == ['00152', '01769']
     assert rendered == ['00152', '01769']
     assert output is not None
+
+
+def test_plot_stimulus_sequence_draws_tilted_triplets_and_arrows(monkeypatch):
+    import matplotlib.pyplot as plt
+
+    patch = np.arange(25, dtype=float).reshape(5, 5) / 25
+    mask = np.ones_like(patch, dtype=bool)
+    monkeypatch.setattr(
+        led, 'image_patch',
+        lambda *args, **kwargs: (patch, mask, 100.0, .5))
+    params = [{
+        'imageName': '00152', 'imagePatchIndex': index,
+        'currentPatchLocation': [10, 20], 'annulusInnerDiameter': 50,
+        'annulusOuterDiameter': 200, 'equivalentIntensity': .4,
+        'equivalentIntensityConeLin': .6,
+    } for index in (1, 2)]
+
+    fig = led.plot_stimulus_sequence(params)
+    ax = fig.axes[0]
+
+    assert len(ax.images) == 6
+    assert sum(text.get_text().startswith('patch ') for text in ax.texts) == 2
+    assert any(text.get_text() == 'time' for text in ax.texts)
+    assert not ax.axison
+    plt.close('all')

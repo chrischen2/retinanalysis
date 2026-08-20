@@ -1447,6 +1447,12 @@ CELL_PATCH_NLI_COLUMNS = [
     'mean_nli_disc', 'mean_nli_cone_disc',
 ]
 
+HIGH_LIGHT_CELL_NLI_COLUMNS = [
+    'cell_type', 'cell_id', 'exp_name', 'cell_label', 'min_intensity',
+    'meanIntensity', 'n_images', 'n_patches', 'mean_nli_disc',
+    'mean_nli_cone_disc',
+]
+
 
 def _saved_condition_matches_protocol(
         saved_protocols: Sequence[str],
@@ -1671,6 +1677,46 @@ def summarize_cell_patch_nli_light_levels(
     return (summary.sort_values(['cell_type', '_light_group', 'cell_id'])
             .drop(columns='_light_group')[CELL_PATCH_NLI_COLUMNS]
             .reset_index(drop=True))
+
+
+def summarize_cell_patch_nli_above(
+        patch_nli: pd.DataFrame,
+        min_intensity: float = 7000.0,
+        ) -> pd.DataFrame:
+    """Make one paired standard/cone-disc NLI observation per high-light cell.
+
+    All patches whose image-level ``meanIntensity`` is at least
+    ``min_intensity`` are pooled within a cell. This intentionally has no upper
+    cutoff: it represents the requested highest-light population rather than a
+    finite display bin.
+    """
+    required = {'cell_type', 'cell_id', 'exp_name', 'cell_label', 'imageName',
+                'patch_key', 'meanIntensity', 'nli_disc', 'nli_cone_disc'}
+    missing = required.difference(patch_nli.columns)
+    if missing:
+        raise ValueError(f'patch_nli is missing columns: {sorted(missing)}')
+    cutoff = float(min_intensity)
+    if not np.isfinite(cutoff):
+        raise ValueError('min_intensity must be finite')
+
+    frame = patch_nli.copy()
+    intensity = pd.to_numeric(frame['meanIntensity'], errors='coerce')
+    frame = frame.loc[intensity.ge(cutoff)].copy()
+    if frame.empty:
+        return pd.DataFrame(columns=HIGH_LIGHT_CELL_NLI_COLUMNS)
+
+    summary = (frame.groupby(['cell_type', 'cell_id'], sort=True, observed=True)
+               .agg(exp_name=('exp_name', 'first'),
+                    cell_label=('cell_label', 'first'),
+                    meanIntensity=('meanIntensity', 'mean'),
+                    n_images=('imageName', 'nunique'),
+                    n_patches=('patch_key', 'size'),
+                    mean_nli_disc=('nli_disc', 'mean'),
+                    mean_nli_cone_disc=('nli_cone_disc', 'mean'))
+               .reset_index())
+    summary.insert(4, 'min_intensity', cutoff)
+    return (summary[HIGH_LIGHT_CELL_NLI_COLUMNS]
+            .sort_values(['cell_type', 'cell_id'], ignore_index=True))
 
 
 def load_condition_index(
@@ -2186,6 +2232,149 @@ def plot_pooled_patch_nli_distributions(
     return fig
 
 
+def plot_patch_nli_distributions_by_cell_type(
+        patch_nli: Optional[pd.DataFrame] = None,
+        cell_types: Optional[Sequence[str]] = None,
+        bins: int = 50,
+        panel_size: Tuple[float, float] = (4.5, 3.2),
+        title_prefix: str = 'LinearEquivalentAnnulus'):
+    """Plot patch-NLI density and empirical CDF separately for each cell type."""
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    if patch_nli is None:
+        patch_nli = load_condition_patch_nli()
+    required = {'cell_type', 'nli_disc', 'nli_cone_disc'}
+    missing = required.difference(patch_nli.columns)
+    if missing:
+        raise ValueError(f'patch_nli is missing columns: {sorted(missing)}')
+    frame = patch_nli.copy()
+    present = set(frame['cell_type'].dropna().astype(str))
+    if cell_types is None:
+        preferred = ['ON-parasol', 'OFF-parasol', 'ON-midget', 'OFF-midget']
+        cell_types = [name for name in preferred if name in present]
+        cell_types += sorted(present.difference(cell_types))
+    else:
+        cell_types = [str(value) for value in cell_types]
+
+    n_rows = max(len(cell_types), 1)
+    fig, axes = plt.subplots(
+        n_rows, 2, figsize=(panel_size[0] * 2, panel_size[1] * n_rows),
+        squeeze=False, sharex=True)
+    edges = np.linspace(-1, 1, int(bins) + 1)
+    series = (
+        ('nli_disc', '#666666', 'image vs standard disc'),
+        ('nli_cone_disc', '#C44E52', 'image vs cone-lin disc'),
+    )
+    for row_index, cell_type in enumerate(cell_types):
+        density_ax, cdf_ax = axes[row_index]
+        sub = frame.loc[frame['cell_type'].astype(str).eq(cell_type)]
+        for column, color, label in series:
+            values = pd.to_numeric(sub[column], errors='coerce').to_numpy(dtype=float)
+            values = values[np.isfinite(values)]
+            if not values.size:
+                continue
+            full_label = f'{label} (n={values.size})'
+            density_ax.hist(values, bins=edges, density=True, histtype='step',
+                            lw=1.7, color=color, label=full_label)
+            ordered = np.sort(values)
+            cumulative = np.arange(1, values.size + 1, dtype=float) / values.size
+            cdf_ax.step(np.r_[-1.0, ordered, 1.0],
+                        np.r_[0.0, cumulative, 1.0], where='post',
+                        lw=1.7, color=color, label=full_label)
+        for ax in (density_ax, cdf_ax):
+            ax.axvline(0, color='black', ls='--', lw=1)
+            ax.set_xlim(-1, 1)
+            ax.legend(frameon=False, fontsize=7)
+        density_ax.set_ylabel(f'{cell_type}\ndensity')
+        cdf_ax.set_ylabel('cumulative fraction')
+        cdf_ax.set_ylim(0, 1.02)
+        density_ax.set_title(f'{int(bins)}-bin patch density')
+        cdf_ax.set_title('patch empirical CDF')
+    if not cell_types:
+        for ax in axes[0]:
+            ax.text(.5, .5, 'no saved patch NLI data', ha='center', va='center',
+                    transform=ax.transAxes)
+            ax.set_axis_off()
+    else:
+        for ax in axes[-1]:
+            ax.set_xlabel('NLI  (image - disc) / (|image| + |disc|)')
+    fig.suptitle(f'{title_prefix}: patch NLI distributions by cell type',
+                 fontsize=11, y=1.0)
+    fig.tight_layout()
+    return fig
+
+
+def plot_cell_patch_nli_paired_above(
+        cell_summary: Optional[pd.DataFrame] = None,
+        patch_nli: Optional[pd.DataFrame] = None,
+        min_intensity: float = 7000.0,
+        cell_types: Optional[Sequence[str]] = None,
+        columns: int = 2,
+        panel_size: Tuple[float, float] = (4.2, 3.8),
+        title_prefix: str = 'LinearEquivalentAnnulus'):
+    """Paired per-cell standard/cone-disc NLI above a light-level cutoff."""
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    if cell_summary is None:
+        if patch_nli is None:
+            patch_nli = load_condition_patch_nli()
+        cell_summary = summarize_cell_patch_nli_above(
+            patch_nli, min_intensity=min_intensity)
+    required = set(HIGH_LIGHT_CELL_NLI_COLUMNS)
+    missing = required.difference(cell_summary.columns)
+    if missing:
+        raise ValueError(f'cell_summary is missing columns: {sorted(missing)}')
+    frame = cell_summary.copy()
+    present = set(frame['cell_type'].dropna().astype(str))
+    if cell_types is None:
+        preferred = ['ON-parasol', 'OFF-parasol', 'ON-midget', 'OFF-midget']
+        cell_types = [name for name in preferred if name in present]
+        cell_types += sorted(present.difference(cell_types))
+    else:
+        cell_types = [str(value) for value in cell_types]
+
+    n_panels = max(len(cell_types), 1)
+    n_columns = max(1, min(int(columns), n_panels))
+    n_rows = int(np.ceil(n_panels / n_columns))
+    fig, axes = plt.subplots(
+        n_rows, n_columns,
+        figsize=(panel_size[0] * n_columns, panel_size[1] * n_rows),
+        squeeze=False, sharey=True)
+    for ax, cell_type in zip(axes.flat, cell_types):
+        sub = frame.loc[frame['cell_type'].astype(str).eq(cell_type)].dropna(
+            subset=['mean_nli_disc', 'mean_nli_cone_disc'])
+        for row in sub.itertuples(index=False):
+            ax.plot([0, 1], [row.mean_nli_disc, row.mean_nli_cone_disc],
+                    '-', color='#9A9A9A', lw=1.0, alpha=.7, zorder=1)
+        ax.scatter(np.zeros(len(sub)), sub['mean_nli_disc'], s=30,
+                   color='#666666', zorder=3, label='standard disc')
+        ax.scatter(np.ones(len(sub)), sub['mean_nli_cone_disc'], s=30,
+                   color='#C44E52', zorder=3, label='cone-lin disc')
+        ax.axhline(0, color='black', ls='--', lw=1)
+        ax.set_xlim(-.35, 1.35)
+        ax.set_ylim(-1.02, 1.02)
+        ax.set_xticks([0, 1])
+        ax.set_xticklabels(['standard\ndisc', 'cone-lin\ndisc'])
+        ax.set_ylabel('cell mean patch NLI')
+        noun = 'cell' if len(sub) == 1 else 'cells'
+        ax.set_title(f'{cell_type} | {len(sub)} {noun}', fontsize=9)
+    for ax in axes.flat[len(cell_types):]:
+        ax.set_visible(False)
+    if not cell_types:
+        axes.flat[0].text(.5, .5, 'no cells at or above the light cutoff',
+                          ha='center', va='center', transform=axes.flat[0].transAxes)
+        axes.flat[0].set_axis_off()
+    fig.suptitle(
+        f'{title_prefix}: paired cell NLI at ≥{float(min_intensity):,.0f} R*',
+        fontsize=11, y=1.01)
+    fig.tight_layout()
+    return fig
+
+
 def plot_cell_patch_nli_by_light(
         cell_summary: Optional[pd.DataFrame] = None,
         patch_nli: Optional[pd.DataFrame] = None,
@@ -2586,6 +2775,40 @@ def example_patch_params(exp_name: str, block_id: int,
     raise ValueError(f'no image trial for {detail} in block {block_id}')
 
 
+def example_patch_params_sequence(exp_name: str, block_id: int,
+                                  image_name: Optional[str] = None,
+                                  count: int = 4,
+                                  patch_index: Optional[float] = None):
+    """Return several unique image-trial parameter sets from one block."""
+    import retinanalysis as ra
+
+    wanted = max(1, int(count))
+    ep = ra.StimBlock(exp_name, int(block_id), verbose=False).df_epochs
+    found, seen = [], set()
+    for params in ep['epoch_parameters']:
+        if category_of(params.get('stimulusTag')) != 'image':
+            continue
+        if image_name is not None and str(params.get('imageName')) != str(image_name):
+            continue
+        index = pd.to_numeric(params.get('imagePatchIndex'), errors='coerce')
+        if patch_index is not None and index != float(patch_index):
+            continue
+        cone_value = pd.to_numeric(params.get('equivalentIntensityConeLin'),
+                                   errors='coerce')
+        disc_value = pd.to_numeric(params.get('equivalentIntensity'), errors='coerce')
+        key = (str(params.get('imageName')), float(index) if np.isfinite(index) else None)
+        if key in seen or not np.isfinite(cone_value) or not np.isfinite(disc_value):
+            continue
+        seen.add(key)
+        found.append(params)
+        if len(found) >= wanted:
+            break
+    detail = f'image {image_name}' if image_name is not None else 'the selected block'
+    if not found:
+        raise ValueError(f'no cone-linearized image trials are available for {detail}')
+    return found
+
+
 def example_patch_params_from_blocks(blocks: pd.DataFrame,
                                      patch_index: Optional[float] = None,
                                      image_name: Optional[str] = None):
@@ -2633,9 +2856,142 @@ def example_patch_params_from_blocks(blocks: pd.DataFrame,
         'choose a cone-linearized protocol or experiment')
 
 
+def example_patch_sequence_from_blocks(blocks: pd.DataFrame,
+                                       image_name: Optional[str] = None,
+                                       count: int = 4,
+                                       patch_index: Optional[float] = None):
+    """Select several recorded patch triplets for the Section 2 schematic."""
+    required = {'exp_name', 'block_id'}
+    missing = required.difference(blocks.columns)
+    if missing:
+        raise ValueError(f'blocks is missing required columns: {sorted(missing)}')
+    candidates = blocks.copy()
+    if image_name is not None and 'imageName' in candidates:
+        candidates = candidates.loc[
+            candidates['imageName'].astype(str).eq(str(image_name))].copy()
+    if 'linearizeCones' in candidates:
+        candidates['_cone_priority'] = pd.to_numeric(
+            candidates['linearizeCones'], errors='coerce').notna()
+        candidates = candidates.sort_values('_cone_priority', ascending=False,
+                                             kind='stable')
+    for row in candidates.itertuples(index=False):
+        try:
+            return example_patch_params_sequence(
+                row.exp_name, int(row.block_id), image_name=image_name,
+                count=count, patch_index=patch_index)
+        except ValueError as error:
+            if str(error).startswith('no cone-linearized image trials'):
+                continue
+            raise
+    raise ValueError(
+        'none of the selected blocks has cone-linearized image trials for '
+        f'image {image_name!r}')
+
+
+def plot_stimulus_sequence(params_sequence: Sequence[Dict],
+                           figsize: Tuple[float, float] = (12.0, 5.2)):
+    """Publication-style tilted time sequence of image, disc, and cone disc."""
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import FancyArrowPatch, Rectangle
+    from matplotlib.transforms import Affine2D
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    params_sequence = list(params_sequence)
+    if not params_sequence:
+        raise ValueError('params_sequence must contain at least one patch')
+
+    triplets, finite_values = [], []
+    for params in params_sequence:
+        outer = params.get('apertureDiameter') or params.get('annulusOuterDiameter') or 200.0
+        inner = float(params.get('annulusInnerDiameter') or 0.0)
+        patch, mask, _extent, _background = image_patch(
+            str(params.get('imageName')), params.get('currentPatchLocation'), float(outer),
+            str(params.get('currentImageSet', 'VHsubsample_20160105')),
+            inner_diameter=inner)
+        disc = float(params.get('equivalentIntensity', np.nan))
+        cone = float(params.get('equivalentIntensityConeLin', np.nan))
+        if not np.isfinite(disc) or not np.isfinite(cone):
+            raise ValueError('every sequence patch needs both finite equivalent intensities')
+        size = 151
+        grid = np.linspace(-float(outer) * .65, float(outer) * .65, size)
+        radius = np.hypot(*np.meshgrid(grid, grid))
+        aperture_mask = ((radius <= float(outer) / 2) & (radius >= inner / 2))
+        disc_frame = np.where(aperture_mask, disc, np.nan)
+        cone_frame = np.where(aperture_mask, cone, np.nan)
+        if patch is None:
+            patch_frame = np.where(aperture_mask, 0.0, np.nan)
+        else:
+            patch_frame = np.where(mask, patch, np.nan)
+            finite_values.extend(patch_frame[np.isfinite(patch_frame)].tolist())
+        finite_values.extend([disc, cone])
+        triplets.append((patch_frame, disc_frame, cone_frame, params))
+
+    vmax = max(finite_values) if finite_values else 1.0
+    cmap = plt.get_cmap('gray').copy()
+    cmap.set_bad('white')
+    frames = []
+    for patch_number, (patch, disc, cone, params) in enumerate(triplets, start=1):
+        frames.extend([
+            (patch, 'image', patch_number, params),
+            (disc, 'disc', patch_number, params),
+            (cone, 'cone disc', patch_number, params),
+        ])
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.set_facecolor('white')
+    width, height = 1.55, 1.55
+    dx, dy = .72, .28
+    skew = -8
+    for index, (frame, label, patch_number, params) in enumerate(frames):
+        x, y = index * dx, index * dy
+        transform = Affine2D().skew_deg(0, skew) + ax.transData
+        ax.imshow(frame, cmap=cmap, vmin=0, vmax=vmax, origin='lower',
+                  extent=[x, x + width, y, y + height], interpolation='nearest',
+                  transform=transform, zorder=index + 1)
+        ax.add_patch(Rectangle((x, y), width, height, fill=False, ec='#333333',
+                               lw=.7, transform=transform, zorder=index + 1.2))
+        if index < 3:
+            ax.text(x + width / 2, y + height + .13, label, ha='center', va='bottom',
+                    fontsize=8, transform=transform, zorder=len(frames) + 2)
+        if label == 'image':
+            ax.text(x + .08, y + .08, f'patch {patch_number}', ha='left', va='bottom',
+                    fontsize=7, color='white', transform=transform,
+                    zorder=len(frames) + 2,
+                    bbox=dict(facecolor='black', alpha=.45, edgecolor='none', pad=1.2))
+
+    transform = Affine2D().skew_deg(0, skew) + ax.transData
+    ax.annotate('', xy=(width * .62, -.18), xytext=(.15, -.18),
+                arrowprops=dict(arrowstyle='-|>', lw=1.3), transform=transform)
+    ax.text(width * .67, -.18, 'x', va='center', fontsize=9, transform=transform)
+    ax.annotate('', xy=(.15, height * .42), xytext=(.15, -.18),
+                arrowprops=dict(arrowstyle='-|>', lw=1.3), transform=transform)
+    ax.text(.15, height * .48, 'y', ha='center', fontsize=9, transform=transform)
+    last = len(frames) - 1
+    time_start = (2 * dx + width * .1, 2 * dy - .7)
+    time_end = (last * dx + width * .95, last * dy - .7)
+    ax.add_patch(FancyArrowPatch(
+        time_start, time_end, arrowstyle='-|>', mutation_scale=12,
+        lw=1.5, color='#333333', transform=transform,
+        zorder=len(frames) + 4))
+    ax.text((time_start[0] + time_end[0]) / 2,
+            (time_start[1] + time_end[1]) / 2 - .16, 'time',
+            ha='center', va='top', color='#333333', fontsize=9,
+            transform=transform, zorder=len(frames) + 4)
+    ax.set_xlim(-.35, last * dx + width + .55)
+    ax.set_ylim(-.75, last * dy + height + .5)
+    ax.set_aspect('equal')
+    ax.set_axis_off()
+    fig.suptitle('Interleaved natural-image, equivalent-disc, and cone-disc flashes',
+                 fontsize=11, y=.98)
+    fig.tight_layout()
+    return fig
+
+
 def stimulus_example_widget(blocks: pd.DataFrame,
-                            patch_index: Optional[float] = None):
-    """Dropdown of image names that redraws the three-stimulus example."""
+                            patch_index: Optional[float] = None,
+                            sequence_length: int = 4):
+    """Dropdown that redraws a tilted sequence of recorded stimulus triplets."""
     import ipywidgets as widgets
     import matplotlib.pyplot as plt
     from IPython.display import clear_output, display
@@ -2655,9 +3011,10 @@ def stimulus_example_widget(blocks: pd.DataFrame,
     def render(_change=None):
         with output:
             clear_output(wait=True)
-            params = example_patch_params_from_blocks(
-                blocks, patch_index=patch_index, image_name=dropdown.value)
-            fig = plot_stimulus_example(params)
+            params = example_patch_sequence_from_blocks(
+                blocks, patch_index=patch_index, image_name=dropdown.value,
+                count=sequence_length)
+            fig = plot_stimulus_sequence(params)
             display(fig)
             plt.close(fig)
 
