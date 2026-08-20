@@ -746,6 +746,19 @@ def test_high_light_cell_plot_draws_one_pair_per_cell_type():
     plt.close('all')
 
 
+def test_high_light_cell_plot_shows_empty_cutoff_message():
+    import matplotlib.pyplot as plt
+
+    empty = pd.DataFrame(columns=led.HIGH_LIGHT_CELL_NLI_COLUMNS)
+    fig = led.plot_cell_patch_nli_paired_above(empty)
+
+    visible_axes = [ax for ax in fig.axes if ax.get_visible()]
+    assert len(visible_axes) == 1
+    assert visible_axes[0].texts[0].get_text() == (
+        'no cells at or above the light cutoff')
+    plt.close('all')
+
+
 def test_cell_patch_population_plot_uses_cell_means_and_sem():
     import matplotlib.pyplot as plt
 

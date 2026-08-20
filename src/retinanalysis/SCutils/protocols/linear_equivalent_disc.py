@@ -2362,9 +2362,10 @@ def plot_cell_patch_nli_paired_above(
         ax.set_ylabel('cell mean patch NLI')
         noun = 'cell' if len(sub) == 1 else 'cells'
         ax.set_title(f'{cell_type} | {len(sub)} {noun}', fontsize=9)
-    for ax in axes.flat[len(cell_types):]:
-        ax.set_visible(False)
-    if not cell_types:
+    if cell_types:
+        for ax in axes.flat[len(cell_types):]:
+            ax.set_visible(False)
+    else:
         axes.flat[0].text(.5, .5, 'no cells at or above the light cutoff',
                           ha='center', va='center', transform=axes.flat[0].transAxes)
         axes.flat[0].set_axis_off()
