@@ -23,8 +23,8 @@ def ax():
 
 
 def test_sanitize_follows_matlab_rules():
-    assert igor_export._sanitize('mean SEM', 1) == 'meanSEM'
-    assert igor_export._sanitize('DoG fit', 1) == 'DoGfit'
+    assert igor_export._sanitize('mean SEM', 1) == 'mean_SEM'
+    assert igor_export._sanitize('DoG fit', 1) == 'DoG_fit'
     assert igor_export._sanitize('40', 1) == 'n40'          # numeric -> 'n' prefix
     assert igor_export._sanitize('a__b', 1) == 'a_b'        # collapse underscores
     assert igor_export._sanitize('', 7) == 'L007'           # unlabeled
@@ -73,10 +73,21 @@ def test_scatter_exports_marker_mode(ax):
     assert np.allclose(s['pts_markercolor'], [0, 1, 0])
 
 
+def test_scatter_preserves_per_point_sizes_and_colors(ax):
+    ax.scatter([1, 2], [3, 4], s=[10, 30],
+               c=[[1, 0, 0], [0, 0, 1]], label='cells')
+
+    s = igor_export.axis_to_dict(ax)
+
+    assert s['cells_markerSize'].tolist() == [10, 30]
+    assert np.allclose(s['cells_markercolor'], [[1, 0, 0], [0, 0, 1]])
+
+
 def test_errorbar_yerr_recovered_from_segments(ax):
     y = np.array([1.0, 2.0, 3.0])
     err = np.array([0.1, 0.2, 0.3])
-    ax.errorbar([1, 2, 3], y, yerr=err, fmt='o', label='mean')
+    ax.errorbar([1, 2, 3], y, yerr=err, fmt='o', label='mean',
+                ecolor='red', elinewidth=1.5, capsize=4)
     s = igor_export.axis_to_dict(ax)
     assert 'meanerrY_Yerr' in s
     yerr = s['meanerrY_Yerr']
@@ -84,6 +95,9 @@ def test_errorbar_yerr_recovered_from_segments(ax):
     assert np.allclose(yerr[:, 0], err)
     assert np.allclose(yerr[:, 1], err)
     assert 'meanerrY_Xerr' not in s
+    assert np.allclose(s['meanerrY_errorBarColor'], [1, 0, 0])
+    assert s['meanerrY_errorBarWidth'] == pytest.approx(1.5)
+    assert s['meanerrY_capSize'] == pytest.approx(4)
 
 
 def test_errorbar_xerr_gets_errx_suffix(ax):
@@ -130,6 +144,75 @@ def test_axis_level_fields(ax):
     assert s['FigureTitle'] == 'my title'
     assert len(s['Xlim']) == 2 and len(s['Ylim']) == 2
     assert s['XTickLabel'] and isinstance(s['XTickLabel'][0], str)
+    assert s['HasColorbar'] == 0
+
+
+def test_histogram_and_bar_containers_export_as_single_waves():
+    fig, (hist_ax, bar_ax) = plt.subplots(1, 2)
+    hist_ax.hist([0, 0, 1, 2], bins=[0, 1, 2, 3], label='counts')
+    bar_ax.bar([1, 2], [3, 4], label='cells')
+
+    hist = igor_export.axis_to_dict(hist_ax)
+    bars = igor_export.axis_to_dict(bar_ax)
+
+    assert hist['countshist_type'] == 'histogram'
+    assert hist['countshist_mode'] == 6
+    assert hist['countshist_numBins'] == 3
+    assert hist['countshist_binLimits'].tolist() == [0, 3]
+    assert hist['lineNames'] == ['countshist']
+    assert bars['cellsbar_type'] == 'bar'
+    assert bars['cellsbar_X'].tolist() == [1, 2]
+    assert bars['cellsbar_Y'].tolist() == [3, 4]
+    plt.close(fig)
+
+
+def test_contour_exports_levels_paths_and_colormap(ax):
+    z = np.arange(16, dtype=float).reshape(4, 4)
+    ax.contour(z, levels=[3, 6, 9], cmap='viridis')
+
+    s = igor_export.axis_to_dict(ax)
+    prefix = s['lineNames'][0]
+
+    assert prefix.startswith('contour')
+    assert s[f'{prefix}_type'] == 'contour'
+    assert s[f'{prefix}_LevelList'].tolist() == [3, 6, 9]
+    assert s[f'{prefix}_X'].shape == s[f'{prefix}_Y'].shape
+    assert s[f'{prefix}_cmap'].shape == (256, 3)
+
+
+def test_3d_line_exports_z_limits_view_and_projection():
+    fig = plt.figure()
+    ax = fig.add_subplot(projection='3d')
+    ax.plot([0, 1], [2, 3], [4, 5], label='trajectory')
+    ax.set_zlabel('depth')
+    ax.view_init(elev=20, azim=35)
+
+    s = igor_export.axis_to_dict(ax)
+
+    assert s['trajectory_Z'].tolist() == [4, 5]
+    assert s['Zlabel'] == 'depth'
+    assert len(s['Zlim']) == 2
+    assert s['view_azimuth'] == pytest.approx(35)
+    assert s['view_elevation'] == pytest.approx(20)
+    assert s['Projection'] in ('orthographic', 'perspective')
+    plt.close(fig)
+
+
+def test_image_colorbar_metadata_and_colorbar_axis_is_not_exported(tmp_path):
+    fig, ax = plt.subplots()
+    image = ax.imshow(np.arange(9).reshape(3, 3), vmin=0, vmax=8)
+    colorbar = fig.colorbar(image, ax=ax)
+    colorbar.set_label('contrast')
+
+    s = igor_export.axis_to_dict(ax)
+    paths = igor_export.export_figure_to_h5(
+        fig, 'imageFigure', basedir=tmp_path, verbose=False)
+
+    assert s['HasColorbar'] == 1
+    assert s['ColorbarLabel'] == 'contrast'
+    assert s['ColorbarLimits'].tolist() == [0, 8]
+    assert len(paths) == 1 and paths[0].name == 'imageFigure.h5'
+    plt.close(fig)
 
 
 def test_hdf5_layout_matches_matlab(ax, tmp_path):
@@ -185,3 +268,22 @@ def test_igor_dir_honours_env(monkeypatch, tmp_path):
     assert igor_export.igor_dir() == tmp_path / 'igor'
     monkeypatch.delenv('RA_IGOR_DIR')
     assert igor_export.igor_dir().name == 'igor_h5'
+
+
+def test_top_level_igor_output_accepts_figure_or_axis(tmp_path):
+    import retinanalysis as ra
+
+    fig, ax = plt.subplots()
+    ax.plot([0, 1], [1, 2], label='trace')
+
+    figure_paths = ra.igor_output(
+        fig, 'fromFigure', basedir=tmp_path, verbose=False)
+    axis_paths = ra.igor_output(
+        ax, 'fromAxis', basedir=tmp_path, verbose=False)
+
+    assert [path.name for path in figure_paths] == ['fromFigure.h5']
+    assert [path.name for path in axis_paths] == ['fromAxis.h5']
+    assert ra.igor_axis_struct(ax)['lineNames'] == ['trace']
+    with pytest.raises(TypeError):
+        ra.igor_output(object(), 'bad', basedir=tmp_path, verbose=False)
+    plt.close(fig)

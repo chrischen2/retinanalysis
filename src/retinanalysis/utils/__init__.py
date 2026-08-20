@@ -36,6 +36,11 @@ _SUBMODULES = {
 _ATTR_TO_MODULE = {
     'apply_publication_style': 'retinanalysis.utils.style',
     'format_figure': 'retinanalysis.utils.style',
+    'igor_output': 'retinanalysis.utils.igor_export',
+    'igor_axis_struct': 'retinanalysis.utils.igor_export',
+    'igor_dir': 'retinanalysis.utils.igor_export',
+    'export_axis_to_h5': 'retinanalysis.utils.igor_export',
+    'export_figure_to_h5': 'retinanalysis.utils.igor_export',
     'get_exp_summary': 'retinanalysis.utils.datajoint_utils',
     'load_canonical_cell_types': 'retinanalysis.utils.cell_type_utils',
     'map_cell_type': 'retinanalysis.utils.cell_type_utils',

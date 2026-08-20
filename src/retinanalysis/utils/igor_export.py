@@ -46,7 +46,11 @@ from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
-__all__ = ['export_axis_to_h5', 'export_figure_to_h5', 'axis_to_dict', 'igor_dir']
+__all__ = [
+    'igor_output', 'igor_axis_struct',
+    'export_axis_to_h5', 'export_figure_to_h5',
+    'axis_to_dict', 'igor_dir',
+]
 
 # makeAxisStructChris.m marker mapping (matplotlib marker -> Igor marker number).
 MARKER_NUM = {'o': 8, '+': 0, '.': 19, '^': 17, 'x': 1, '*': 2, 's': 16, 'D': 18}
@@ -78,9 +82,9 @@ def _sanitize(label: str, index: int) -> str:
     """Igor/MATLAB-safe wave prefix, following makeAxisStructChris.m."""
     if not label or label.startswith('_'):  # matplotlib's auto labels
         return f'L{index:03d}'
-    name = re.sub(r'[^a-zA-Z0-9_]', '', label)
+    name = re.sub(r'[^a-zA-Z0-9_]', '_', label)
     name = re.sub(r'_{2,}', '_', name)
-    if not name:
+    if not name or not re.search(r'[a-zA-Z0-9]', name):
         return f'wave{index}'
     try:  # a purely numeric label gets an 'n' so it stays a valid name
         float(name)
@@ -167,9 +171,11 @@ def axis_to_dict(ax, figure_title: Optional[str] = None) -> Dict[str, object]:
     tested without touching disk.
     """
     from matplotlib.collections import EventCollection, LineCollection, PathCollection
-    from matplotlib.container import ErrorbarContainer
+    from matplotlib.container import BarContainer, ErrorbarContainer
+    from matplotlib.contour import QuadContourSet
     from matplotlib.image import AxesImage
     from matplotlib.lines import Line2D
+    from mpl_toolkits.mplot3d.art3d import Line3D, Path3DCollection, Poly3DCollection
 
     ax.figure.canvas.draw()  # tick labels / auto limits are only real after a draw
 
@@ -191,21 +197,65 @@ def axis_to_dict(ax, figure_title: Optional[str] = None) -> Dict[str, object]:
         s['Xlabel'] = ax.get_xlabel()
     if ax.get_ylabel():
         s['Ylabel'] = ax.get_ylabel()
+    is_3d = hasattr(ax, 'get_zlim')
+    if is_3d and ax.get_zlabel():
+        s['Zlabel'] = ax.get_zlabel()
     s['Xlim'] = np.asarray(ax.get_xlim(), dtype=float)
     s['Ylim'] = np.asarray(ax.get_ylim(), dtype=float)
-    s['Zlim'] = np.array([-1.0, 1.0])           # MATLAB writes these for 2-D axes too
+    s['Zlim'] = (np.asarray(ax.get_zlim(), dtype=float) if is_3d
+                 else np.array([-1.0, 1.0]))
     s['Xscale'] = 1 if ax.get_xscale() == 'log' else 0
     s['Yscale'] = 1 if ax.get_yscale() == 'log' else 0
-    s['Zscale'] = 0
-    s['view_azimuth'] = 0
-    s['view_elevation'] = 90
+    s['Zscale'] = 1 if is_3d and ax.get_zscale() == 'log' else 0
+    s['view_azimuth'] = float(ax.azim) if is_3d else 0
+    s['view_elevation'] = float(ax.elev) if is_3d else 90
 
     names: List[str] = []
     index = 0
 
-    # Errorbar containers first: their child Line2D/LineCollections must not be
-    # exported a second time as plain lines.
+    # Containers first: their child artists must not be exported a second time.
     claimed = set()
+    for container in ax.containers:
+        if not isinstance(container, BarContainer):
+            continue
+        for patch in container.patches:
+            claimed.add(id(patch))
+        if not container.patches:
+            continue
+        index += 1
+        label = container.get_label()
+        patch_label = container.patches[0].get_label()
+        is_histogram = ((not label or label.startswith('_'))
+                        and patch_label and not patch_label.startswith('_'))
+        if is_histogram:
+            label = patch_label
+        suffix = 'hist' if is_histogram else 'bar'
+        prefix = unique(_sanitize(label, index) + suffix)
+        orientation = getattr(container, 'orientation', 'vertical')
+        if orientation == 'horizontal':
+            x = np.asarray(container.datavalues, dtype=float)
+            y = np.asarray([patch.get_y() + patch.get_height() / 2
+                            for patch in container.patches], dtype=float)
+        else:
+            x = np.asarray([patch.get_x() + patch.get_width() / 2
+                            for patch in container.patches], dtype=float)
+            y = np.asarray(container.datavalues, dtype=float)
+        s.update(_xy_fields(prefix, x, y))
+        s[f'{prefix}_type'] = 'histogram' if is_histogram else 'bar'
+        face = np.asarray(container.patches[0].get_facecolor(), dtype=float)
+        if face.size >= 3:
+            s[f'{prefix}_facecolor'] = face[:3]
+        if is_histogram:
+            edges = np.asarray(
+                [container.patches[0].get_x()]
+                + [patch.get_x() + patch.get_width() for patch in container.patches],
+                dtype=float)
+            s[f'{prefix}_mode'] = 6
+            s[f'{prefix}_numBins'] = len(container.patches)
+            s[f'{prefix}_binLimits'] = np.array([edges[0], edges[-1]])
+        s[f'{prefix}_waveName'] = prefix
+        names.append(prefix)
+
     for container in ax.containers:
         if not isinstance(container, ErrorbarContainer):
             continue
@@ -226,6 +276,15 @@ def axis_to_dict(ax, figure_title: Optional[str] = None) -> Dict[str, object]:
             s[f'{prefix}_Yerr'] = yerr
         if xerr is not None:
             s[f'{prefix}_Xerr'] = xerr
+        if bars:
+            colors = np.atleast_2d(np.asarray(bars[0].get_color(), dtype=float))
+            widths = np.atleast_1d(np.asarray(bars[0].get_linewidth(), dtype=float))
+            if colors.size:
+                s[f'{prefix}_errorBarColor'] = colors[0, :3]
+            if widths.size:
+                s[f'{prefix}_errorBarWidth'] = float(widths[0])
+        if caps:
+            s[f'{prefix}_capSize'] = float(caps[0].get_markersize()) / 2
         s[f'{prefix}_waveName'] = prefix
         names.append(prefix)
 
@@ -273,23 +332,76 @@ def axis_to_dict(ax, figure_title: Optional[str] = None) -> Dict[str, object]:
             index += 1
             prefix = unique(_sanitize(artist.get_label(), index))
             s.update(_xy_fields(prefix, x, y))
+            if isinstance(artist, Line3D):
+                _, _, z = artist.get_data_3d()
+                s[f'{prefix}_Z'] = np.asarray(z, dtype=float)
             s.update(_line_style_fields(prefix, artist))
 
         elif isinstance(artist, PathCollection):  # scatter
-            offsets = np.asarray(artist.get_offsets(), dtype=float)
+            if isinstance(artist, Path3DCollection):
+                x3, y3, z3 = artist._offsets3d
+                offsets = np.column_stack([x3, y3])
+            else:
+                offsets = np.asarray(artist.get_offsets(), dtype=float)
             if offsets.size == 0:
                 continue
             index += 1
             prefix = unique(_sanitize(artist.get_label(), index))
             s.update(_xy_fields(prefix, offsets[:, 0], offsets[:, 1]))
+            if isinstance(artist, Path3DCollection):
+                s[f'{prefix}_Z'] = np.asarray(z3, dtype=float)
             s[f'{prefix}_mode'] = 3          # Igor: markers only
             s[f'{prefix}_marker'] = 19
             sizes = np.asarray(artist.get_sizes(), dtype=float)
             if sizes.size:
-                s[f'{prefix}_markerSize'] = float(sizes[0])
+                s[f'{prefix}_markerSize'] = (float(sizes[0]) if sizes.size == 1
+                                             else sizes)
             face = artist.get_facecolor()
             if len(face):
-                s[f'{prefix}_markercolor'] = np.asarray(face[0][:3], dtype=float)
+                colors = np.asarray(face[:, :3], dtype=float)
+                s[f'{prefix}_markercolor'] = colors[0] if len(colors) == 1 else colors
+
+        elif isinstance(artist, QuadContourSet):
+            index += 1
+            prefix = unique(f'contour{index}')
+            x_values, y_values, z_values = [], [], []
+            for level, path in zip(artist.levels, artist.get_paths()):
+                for polygon in path.to_polygons(closed_only=False):
+                    if not len(polygon):
+                        continue
+                    x_values.extend(polygon[:, 0].tolist() + [np.nan])
+                    y_values.extend(polygon[:, 1].tolist() + [np.nan])
+                    z_values.extend([float(level)] * len(polygon) + [np.nan])
+            s[f'{prefix}_X'] = np.asarray(x_values, dtype=float)
+            s[f'{prefix}_Y'] = np.asarray(y_values, dtype=float)
+            s[f'{prefix}_Z'] = np.asarray(z_values, dtype=float)
+            s[f'{prefix}_LevelList'] = np.asarray(artist.levels, dtype=float)
+            s[f'{prefix}_LineStyle'] = 0
+            s[f'{prefix}_Fill'] = int(bool(artist.filled))
+            s[f'{prefix}_type'] = 'contour'
+            s[f'{prefix}_cmap'] = np.asarray(
+                artist.get_cmap()(np.linspace(0, 1, 256))[:, :3], dtype=float)
+
+        elif isinstance(artist, Poly3DCollection):
+            vector = np.asarray(getattr(artist, '_vec', np.empty((0, 0))), dtype=float)
+            if vector.ndim != 2 or vector.shape[0] < 3 or not vector.shape[1]:
+                continue
+            index += 1
+            prefix = unique(f'surface{index}')
+            s[f'{prefix}_X'] = vector[0]
+            s[f'{prefix}_Y'] = vector[1]
+            s[f'{prefix}_Z'] = vector[2]
+            s[f'{prefix}_type'] = 'surface'
+            face = np.asarray(artist.get_facecolor(), dtype=float)
+            edge = np.asarray(artist.get_edgecolor(), dtype=float)
+            if face.size:
+                s[f'{prefix}_FaceColor'] = np.atleast_2d(face)[0, :3]
+                s[f'{prefix}_CData'] = np.atleast_2d(face)[:, :3]
+            if edge.size:
+                s[f'{prefix}_EdgeColor'] = np.atleast_2d(edge)[0, :3]
+            s[f'{prefix}_FaceAlpha'] = float(artist.get_alpha() or 1.0)
+            s[f'{prefix}_cmap'] = np.asarray(
+                artist.get_cmap()(np.linspace(0, 1, 256))[:, :3], dtype=float)
 
         elif isinstance(artist, LineCollection):  # e.g. vlines / hlines
             segs = artist.get_segments()
@@ -312,11 +424,13 @@ def axis_to_dict(ax, figure_title: Optional[str] = None) -> Dict[str, object]:
 
         elif isinstance(artist, AxesImage):
             index += 1
-            prefix = f'imageplot{index}'
+            prefix = f'image{index}'
             x0, x1, y0, y1 = artist.get_extent()
             s[f'{prefix}_X'] = np.array([x0, x1], dtype=float)
             s[f'{prefix}_Y'] = np.array([y0, y1], dtype=float)
             s[f'{prefix}_CData'] = np.asarray(artist.get_array(), dtype=float)
+            s[f'{prefix}_CDataMapping'] = 'scaled'
+            s[f'{prefix}_type'] = 'image'
             s[f'{prefix}_cmap'] = np.asarray(
                 artist.get_cmap()(np.linspace(0, 1, 256))[:, :3], dtype=float)
             s[f'{prefix}_waveName'] = prefix
@@ -339,11 +453,43 @@ def axis_to_dict(ax, figure_title: Optional[str] = None) -> Dict[str, object]:
     s['YTickLabelRotation'] = float(ax.get_yticklabels()[0].get_rotation()) if \
         len(ax.get_yticklabels()) else 0.0
 
+    s['XGrid'] = int(any(line.get_visible() for line in ax.get_xgridlines()))
+    s['YGrid'] = int(any(line.get_visible() for line in ax.get_ygridlines()))
+    if is_3d:
+        s['ZGrid'] = int(any(line.get_visible() for line in ax.get_zgridlines()))
+        s['Projection'] = ('orthographic'
+                           if np.isinf(getattr(ax, '_focal_length', np.nan))
+                           else 'perspective')
+    s['Box'] = int(all(ax.spines[name].get_visible()
+                       for name in ('left', 'right', 'bottom', 'top')))
+
+    colorbar = None
+    for mappable in list(ax.images) + list(ax.collections):
+        colorbar = getattr(mappable, 'colorbar', None)
+        if colorbar is not None:
+            break
+    s['HasColorbar'] = int(colorbar is not None)
+    if colorbar is not None:
+        s['ColorbarLabel'] = colorbar.ax.get_ylabel() or colorbar.ax.get_xlabel()
+        limits = getattr(colorbar.mappable, 'get_clim', lambda: None)()
+        if limits is not None:
+            s['ColorbarLimits'] = np.asarray(limits, dtype=float)
+
     if figure_title is None:
         figure_title = ax.get_title() or (ax.figure._suptitle.get_text()
                                           if ax.figure._suptitle else '')
     s['FigureTitle'] = figure_title
     return s
+
+
+def igor_axis_struct(ax, figure_title: Optional[str] = None) -> Dict[str, object]:
+    """Return the flat Igor field mapping without writing an HDF5 file.
+
+    This is the in-memory equivalent of the MATLAB ``s`` struct created by
+    ``makeAxisStructChris`` and is useful when fields need inspection or a
+    project-specific adjustment before export.
+    """
+    return axis_to_dict(ax, figure_title=figure_title)
 
 
 def _write_group(group, fields: Dict[str, object]) -> None:
@@ -401,7 +547,8 @@ def export_figure_to_h5(fig, name: str, basedir: Optional[os.PathLike] = None,
     A single-axes figure writes ``<name>.h5``; multiple axes write
     ``<name>1.h5``, ``<name>2.h5``, ... in figure order.
     """
-    axes = [a for a in fig.axes if a.has_data()]
+    axes = [a for a in fig.axes
+            if a.has_data() and getattr(a, '_colorbar', None) is None]
     if not axes:
         raise ValueError('figure has no axes with data to export')
     out = []
@@ -410,3 +557,30 @@ def export_figure_to_h5(fig, name: str, basedir: Optional[os.PathLike] = None,
         out.append(export_axis_to_h5(ax, stem, basedir=basedir,
                                      overwrite=overwrite, verbose=verbose))
     return out
+
+
+def igor_output(figure_or_axis, name: str,
+                basedir: Optional[os.PathLike] = None,
+                overwrite: bool = True, verbose: bool = True) -> List[Path]:
+    """Export a Matplotlib figure or axis using the Igor HDF5 schema.
+
+    This is the simple package-level counterpart of ``makeAxisStructChris``::
+
+        import retinanalysis as ra
+        ra.igor_output(fig, 'coneDiscCell2', basedir='/path/to/projectHDF5s/linCone')
+
+    The return value is always a list of paths: one file for an axis/single
+    panel, or one numbered file per data axis in a multi-panel figure.
+    """
+    from matplotlib.axes import Axes
+    from matplotlib.figure import Figure
+
+    if isinstance(figure_or_axis, Axes):
+        return [export_axis_to_h5(
+            figure_or_axis, name, basedir=basedir, overwrite=overwrite,
+            verbose=verbose)]
+    if isinstance(figure_or_axis, Figure):
+        return export_figure_to_h5(
+            figure_or_axis, name, basedir=basedir, overwrite=overwrite,
+            verbose=verbose)
+    raise TypeError('figure_or_axis must be a Matplotlib Figure or Axes.')
