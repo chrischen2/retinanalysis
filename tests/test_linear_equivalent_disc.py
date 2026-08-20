@@ -868,6 +868,55 @@ def test_condition_nli_plot_uses_ecdf_and_mean_sem_subplot():
     plt.close('all')
 
 
+def test_condition_sample_pairs_use_full_keys_and_distinct_images_first():
+    analysis = _condition_analysis_for_output()
+
+    assert led.condition_sample_pairs(analysis, n_pairs=2) == [
+        ('00152', 2.0), ('01769', 1.0)]
+
+
+def test_condition_sample_pairs_cover_both_disc_types_when_available():
+    analysis = _condition_analysis_for_output()
+    analysis.patch_responses.loc[:, 'cone_disc_mean'] = np.nan
+    analysis.patch_responses.loc[
+        analysis.patch_responses['patch_key'].eq('00152:1'), 'cone_disc_mean'] = 3.0
+
+    assert led.condition_sample_pairs(analysis, n_pairs=2) == [
+        ('00152', 2.0), ('00152', 1.0)]
+
+
+def test_condition_sample_psth_is_trial_normalized(monkeypatch):
+    import matplotlib.pyplot as plt
+
+    analysis = _condition_analysis_for_output()
+    analysis.patch_responses = analysis.patch_responses.loc[
+        analysis.patch_responses['patch_key'].eq('00152:2')]
+    blocks = pd.DataFrame({
+        'exp_name': ['2026-01-01_E'], 'block_id': [11],
+        'onlineAnalysis': ['extracellular'],
+    })
+    trials = pd.DataFrame([
+        {'imageName': '00152', 'patchIndex': 2.0, 'category': category,
+         'block_id': 11, 'epoch_index': repeat, 'pre_ms': 10.0,
+         'stim_ms': 20.0, 'tail_ms': 10.0, 'time_ms': None,
+         'values': np.array([5.0, 15.0])}
+        for category in ('image', 'disc', 'cone_disc')
+        for repeat in range(2)
+    ])
+    monkeypatch.setattr(led, '_load_condition_sample_trials',
+                        lambda *args, **kwargs: trials)
+
+    figure = led.plot_condition_sample_psths(
+        blocks, analysis, n_pairs=1, bin_ms=10.0, smooth_ms=0.0)
+    axis = figure.axes[0]
+
+    assert len(axis.lines) == 5  # three PSTHs plus onset and offset
+    assert axis.lines[0].get_ydata().max() == pytest.approx(100.0)
+    assert axis.get_ylabel() == 'firing rate (Hz)'
+    assert '00152 : patch 2' in axis.get_title()
+    plt.close('all')
+
+
 def test_example_patch_params_from_blocks_skips_pre_cone_rows(monkeypatch):
     blocks = pd.DataFrame([
         {'exp_name': 'old_E', 'block_id': 1, 'linearizeCones': np.nan},

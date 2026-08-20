@@ -2039,6 +2039,258 @@ def plot_condition(analysis: ConditionAnalysis,
     return per_image_fig, pooled_fig, nli_fig
 
 
+def condition_sample_pairs(analysis: ConditionAnalysis,
+                           n_pairs: int = 3) -> List[Tuple[str, float]]:
+    """Choose reproducible, visibly responsive patch keys for trace checks.
+
+    The strongest standard-disc and cone-disc comparisons are represented when
+    both exist. Remaining slots favor distinct images, then response strength.
+    Selection always uses the full ``(imageName, patchIndex)`` identity.
+    """
+    n_pairs = int(n_pairs)
+    if n_pairs < 1:
+        raise ValueError('n_pairs must be at least 1.')
+    patches = analysis.patch_responses.copy()
+    required = {'imageName', 'patchIndex', 'image_mean'}
+    missing = required.difference(patches.columns)
+    if missing:
+        raise ValueError(f'patch_responses is missing {sorted(missing)}')
+    patches = patches.loc[
+        np.isfinite(pd.to_numeric(patches['patchIndex'], errors='coerce'))
+        & np.isfinite(pd.to_numeric(patches['image_mean'], errors='coerce'))
+    ].copy()
+    if patches.empty:
+        raise ValueError('No finite image/patch responses are available to sample.')
+    patches['_sample_score'] = np.abs(patches['image_mean'].to_numpy(dtype=float))
+    patches = patches.sort_values(
+        ['_sample_score', 'imageName', 'patchIndex'],
+        ascending=[False, True, True], kind='stable')
+
+    selected = []
+    selected_keys = set()
+    selected_images = set()
+    rows = list(patches.itertuples(index=False))
+    for comparison_column in ('disc_mean', 'cone_disc_mean'):
+        if comparison_column not in patches:
+            continue
+        for row in rows:
+            key = (str(row.imageName), float(row.patchIndex))
+            if key in selected_keys:
+                continue
+            if np.isfinite(float(getattr(row, comparison_column))):
+                selected.append(key)
+                selected_keys.add(key)
+                selected_images.add(key[0])
+                break
+        if len(selected) == n_pairs:
+            return selected
+    for distinct_images_only in (True, False):
+        for row in rows:
+            image_name = str(row.imageName)
+            patch_index = float(row.patchIndex)
+            key = (image_name, patch_index)
+            if key in selected_keys:
+                continue
+            if distinct_images_only and image_name in selected_images:
+                continue
+            selected.append(key)
+            selected_keys.add(key)
+            selected_images.add(image_name)
+            if len(selected) == n_pairs:
+                return selected
+    return selected
+
+
+def _load_condition_sample_trials(blocks: pd.DataFrame,
+                                  pairs: Sequence[Tuple[str, float]],
+                                  mode: str,
+                                  detector_kwargs: Optional[dict] = None) -> pd.DataFrame:
+    """Read raw trials for selected image/patch keys."""
+    import contextlib
+    import io
+    import warnings
+
+    import retinanalysis as ra
+    from retinanalysis.utils.datajoint_utils import get_epochblock_amp_data
+    from retinanalysis.utils.spike_detector import detector
+
+    pair_set = {(str(image_name), float(patch_index))
+                for image_name, patch_index in pairs}
+    records = []
+    for row in blocks.itertuples(index=False):
+        block_id = int(row.block_id)
+        exp_name = str(row.exp_name)
+        parameters = list(ra.StimBlock(
+            exp_name, block_id, verbose=False).df_epochs['epoch_parameters'])
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            amp_data, sample_rate = get_epochblock_amp_data(
+                exp_name, block_id, verbose=False)
+        amp_data = np.asarray(amp_data, dtype=float)
+        sample_rate = float(sample_rate)
+        spike_times = None
+        if mode == 'extracellular':
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', category=RuntimeWarning,
+                                        module=r'retinanalysis\.utils\.spike_detector')
+                options = dict(detector_kwargs or {})
+                options.setdefault('verbose', False)
+                spike_times, _, _ = detector(
+                    amp_data, sample_rate=sample_rate, **options)
+
+        for epoch_index, params in enumerate(parameters):
+            if epoch_index >= len(amp_data):
+                continue
+            category = category_of(params.get('stimulusTag'))
+            patch_index = params.get('patchIndex')
+            if patch_index is None:
+                patch_index = params.get('imagePatchIndex', np.nan)
+            try:
+                patch_index = float(patch_index)
+            except (TypeError, ValueError):
+                continue
+            image_name = str(params.get('imageName', getattr(row, 'imageName', '?')))
+            if not category or (image_name, patch_index) not in pair_set:
+                continue
+            pre_ms = float(params['preTime'])
+            stim_ms = float(params['stimTime'])
+            tail_ms = float(params.get('tailTime', 0.0))
+            pre_points = max(0, int(round(pre_ms / 1e3 * sample_rate)))
+            if mode == 'extracellular':
+                values = (np.asarray(spike_times[epoch_index], dtype=float)
+                          / sample_rate * 1e3 - pre_ms)
+                time_ms = None
+            else:
+                trace = amp_data[epoch_index]
+                baseline = float(np.mean(trace[:pre_points])) if pre_points else 0.0
+                sign = -1.0 if mode == 'exc' else 1.0
+                values = sign * (trace - baseline)
+                time_ms = np.arange(trace.size, dtype=float) / sample_rate * 1e3 - pre_ms
+            records.append({
+                'imageName': image_name, 'patchIndex': patch_index,
+                'category': category, 'block_id': block_id,
+                'epoch_index': epoch_index, 'pre_ms': pre_ms,
+                'stim_ms': stim_ms, 'tail_ms': tail_ms,
+                'time_ms': time_ms, 'values': values,
+            })
+    return pd.DataFrame(records)
+
+
+def plot_condition_sample_psths(blocks: pd.DataFrame,
+                                analysis: ConditionAnalysis,
+                                n_pairs: int = 3,
+                                bin_ms: float = 10.0,
+                                smooth_ms: float = 20.0,
+                                detector_kwargs: Optional[dict] = None):
+    """Plot sample PSTHs, or mean current traces for whole-cell conditions."""
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    if blocks.empty:
+        raise ValueError('No condition blocks were supplied.')
+    mode = str(analysis.online_analysis).strip().lower()
+    block_modes = set(blocks['onlineAnalysis'].astype(str).str.strip().str.lower())
+    if block_modes != {mode}:
+        raise ValueError(f'Block mode {sorted(block_modes)} does not match analysis mode {mode!r}.')
+    if bin_ms <= 0 or smooth_ms < 0:
+        raise ValueError('bin_ms must be positive and smooth_ms cannot be negative.')
+
+    pairs = condition_sample_pairs(analysis, n_pairs=n_pairs)
+    sample_blocks = blocks.loc[
+        blocks['block_id'].astype(int).isin(
+            [int(block_id) for block_id in analysis.block_ids])]
+    if sample_blocks.empty:
+        raise ValueError('None of the supplied blocks were used by this analysis.')
+    trials = _load_condition_sample_trials(
+        sample_blocks, pairs, mode=mode, detector_kwargs=detector_kwargs)
+    if trials.empty:
+        raise ValueError('No raw trials matched the selected image/patch keys.')
+
+    style.apply_publication_style()
+    fig, axes = plt.subplots(1, len(pairs), figsize=(4.1 * len(pairs), 3.35),
+                             squeeze=False, sharey=True)
+    colors = {'image': '#222222', 'disc': '#777777', 'cone_disc': '#C44E52'}
+    labels = {'image': 'image', 'disc': 'standard disc',
+              'cone_disc': 'cone-lin disc'}
+
+    for ax, (image_name, patch_index) in zip(axes.flat, pairs):
+        panel = trials.loc[
+            trials['imageName'].astype(str).eq(image_name)
+            & np.isclose(trials['patchIndex'].to_numpy(dtype=float), patch_index)]
+        if panel.empty:
+            ax.set_visible(False)
+            continue
+        stim_ms = float(np.nanmedian(panel['stim_ms']))
+        ax.axvspan(0, stim_ms, color='#EAEAEA', alpha=.75, lw=0, zorder=0)
+        for category in ('image', 'disc', 'cone_disc'):
+            category_trials = panel.loc[panel['category'].eq(category)]
+            if category_trials.empty:
+                continue
+            if mode == 'extracellular':
+                start = -float(np.nanmax(category_trials['pre_ms']))
+                stop = float(np.nanmax(category_trials['stim_ms']
+                                      + category_trials['tail_ms']))
+                edges = np.arange(start, stop + bin_ms, bin_ms)
+                if edges.size < 2:
+                    continue
+                spikes = [np.asarray(values, dtype=float)
+                          for values in category_trials['values']]
+                pooled = np.concatenate(spikes) if spikes else np.array([])
+                rate = np.histogram(pooled, bins=edges)[0].astype(float)
+                rate /= len(category_trials) * (bin_ms / 1e3)
+                if smooth_ms > 0 and rate.size > 2:
+                    sigma = smooth_ms / bin_ms
+                    radius = min(int(np.ceil(3 * sigma)), (rate.size - 1) // 2)
+                    x = np.arange(-radius, radius + 1, dtype=float)
+                    kernel = np.exp(-.5 * (x / sigma) ** 2)
+                    kernel /= kernel.sum()
+                    rate = np.convolve(rate, kernel, mode='same')
+                centers = (edges[:-1] + edges[1:]) / 2
+                ax.plot(centers, rate, color=colors[category], lw=1.5,
+                        label=labels[category])
+            else:
+                start = max(float(np.nanmin(time)) for time in category_trials['time_ms'])
+                stop = min(float(np.nanmax(time)) for time in category_trials['time_ms'])
+                grid = np.arange(start, stop + .5 * bin_ms, bin_ms)
+                if grid.size < 2:
+                    continue
+                interpolated = np.vstack([
+                    np.interp(grid, np.asarray(row.time_ms, dtype=float),
+                              np.asarray(row.values, dtype=float))
+                    for row in category_trials.itertuples(index=False)
+                ])
+                mean = np.mean(interpolated, axis=0)
+                sem = (np.std(interpolated, axis=0, ddof=1) / np.sqrt(len(interpolated))
+                       if len(interpolated) > 1 else np.zeros_like(mean))
+                ax.plot(grid, mean, color=colors[category], lw=1.4,
+                        label=labels[category])
+                ax.fill_between(grid, mean - sem, mean + sem,
+                                color=colors[category], alpha=.16, lw=0)
+        ax.axvline(0, color='#555555', ls='--', lw=.8)
+        ax.axvline(stim_ms, color='#555555', ls='--', lw=.8)
+        ax.set_xlabel('time from stimulus onset (ms)')
+        counts = panel['category'].value_counts()
+        ax.set_title(
+            f'{image_name} : patch {patch_index:g}\n'
+            f'trials: image {counts.get("image", 0)}, disc {counts.get("disc", 0)}, '
+            f'cone {counts.get("cone_disc", 0)}', fontsize=9)
+    axes.flat[0].set_ylabel('firing rate (Hz)' if mode == 'extracellular'
+                            else 'baseline-subtracted current (pA)')
+    legend_entries = {}
+    for ax in axes.flat:
+        handles, legend_labels = ax.get_legend_handles_labels()
+        legend_entries.update(zip(legend_labels, handles))
+    if legend_entries:
+        fig.legend(legend_entries.values(), legend_entries.keys(),
+                   loc='upper center', ncol=3,
+                   bbox_to_anchor=(.5, .98), frameon=False, fontsize=8)
+    fig.suptitle(
+        f'{analysis.exp_name}/{analysis.cell_label} | '
+        f'{"sample PSTHs" if mode == "extracellular" else "sample mean traces"}',
+        y=1.04, fontsize=11)
+    fig.tight_layout(rect=(0, 0, 1, .91))
+    return fig
+
+
 def plot_population_nli(summary: Optional[pd.DataFrame] = None,
                         window: str = 'onset',
                         figsize: Tuple[float, float] = (9.0, 4.4)):
