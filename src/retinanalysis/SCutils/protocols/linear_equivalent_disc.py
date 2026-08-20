@@ -2681,6 +2681,81 @@ def image_patch(image_name: str, patch_location, aperture_diameter: float,
     return background * (1 + patch_contrast), mask, extent_um, background
 
 
+def stimulus_triplet_frames(
+        params: Dict,
+        patch_location=None,
+        equivalent_intensity: Optional[float] = None,
+        equivalent_intensity_cone: Optional[float] = None):
+    """Render the three protocol frames on their recorded background.
+
+    ``LinearEquivalentAnnulus.createPresentation`` keeps the full Stage canvas
+    at ``backgroundIntensity``, replaces only the annulus with the image or an
+    equivalent intensity, and overlays a center spot at
+    ``backgroundIntensity * (1 + centerSpotContrast)``. This function mirrors
+    that layering rather than making the masked regions transparent.
+    """
+    if patch_location is None:
+        patch_location = params.get('currentPatchLocation')
+    if equivalent_intensity is None:
+        equivalent_intensity = float(params.get('equivalentIntensity', np.nan))
+    if equivalent_intensity_cone is None:
+        equivalent_intensity_cone = float(
+            params.get('equivalentIntensityConeLin', np.nan))
+    if not np.isfinite(equivalent_intensity):
+        raise ValueError('the selected image trial has no finite equivalentIntensity')
+    if not np.isfinite(equivalent_intensity_cone):
+        raise ValueError(
+            'the selected block has no cone-linearized equivalent intensity; '
+            'use example_patch_params_from_blocks() to select a compatible block')
+
+    outer = float(params.get('apertureDiameter')
+                  or params.get('annulusOuterDiameter') or 200.0)
+    inner = float(params.get('annulusInnerDiameter') or 0.0)
+    patch, patch_mask, extent, image_background = image_patch(
+        str(params.get('imageName')), patch_location, outer,
+        str(params.get('currentImageSet', 'VHsubsample_20160105')),
+        inner_diameter=inner)
+    background = pd.to_numeric(params.get('backgroundIntensity'), errors='coerce')
+    if not np.isfinite(background):
+        background = image_background
+    if not np.isfinite(background):
+        raise ValueError('the selected image trial has no finite backgroundIntensity')
+    background = float(background)
+
+    if patch is None:
+        shape = (151, 151)
+        extent = outer * .675
+    else:
+        shape = patch.shape
+    x = np.linspace(-extent, extent, shape[1])
+    y = np.linspace(-extent, extent, shape[0])
+    radius = np.hypot(*np.meshgrid(x, y))
+    annulus_mask = (radius <= outer / 2) & (radius >= inner / 2)
+    if patch_mask is not None and patch_mask.shape == shape:
+        annulus_mask &= patch_mask
+
+    def annulus_frame(value):
+        frame = np.full(shape, background, dtype=float)
+        if np.ndim(value):
+            frame[annulus_mask] = np.asarray(value, dtype=float)[annulus_mask]
+        else:
+            frame[annulus_mask] = float(value)
+        center_diameter = float(params.get('centerSpotDiameter') or 0.0)
+        center_contrast = float(params.get('centerSpotContrast') or 0.0)
+        if center_diameter > 0:
+            frame[radius <= center_diameter / 2] = (
+                background * (1 + center_contrast))
+        return frame
+
+    image_value = patch if patch is not None else background
+    frames = (
+        annulus_frame(image_value),
+        annulus_frame(equivalent_intensity),
+        annulus_frame(equivalent_intensity_cone),
+    )
+    return frames, float(extent), background
+
+
 def plot_stimulus_example(params: Dict, patch_location=None,
                           equivalent_intensity: Optional[float] = None,
                           equivalent_intensity_cone: Optional[float] = None,
@@ -2695,57 +2770,33 @@ def plot_stimulus_example(params: Dict, patch_location=None,
     from retinanalysis.utils import style
 
     style.apply_publication_style()
-    if patch_location is None:
-        patch_location = params.get('currentPatchLocation')
     if equivalent_intensity is None:
         equivalent_intensity = float(params.get('equivalentIntensity', np.nan))
     if equivalent_intensity_cone is None:
         equivalent_intensity_cone = float(params.get('equivalentIntensityConeLin', np.nan))
-    if not np.isfinite(equivalent_intensity):
-        raise ValueError('the selected image trial has no finite equivalentIntensity')
-    if not np.isfinite(equivalent_intensity_cone):
-        raise ValueError(
-            'the selected block has no cone-linearized equivalent intensity; '
-            'use example_patch_params_from_blocks() to select a compatible block')
-    # The annulus protocol has no apertureDiameter; its stimulus runs between
-    # the annulus diameters instead.
     outer = params.get('apertureDiameter') or params.get('annulusOuterDiameter') or 200.0
     inner = float(params.get('annulusInnerDiameter') or 0.0)
     aperture = float(outer)
 
-    patch, mask, extent, background = image_patch(
-        str(params.get('imageName')), patch_location, aperture,
-        str(params.get('currentImageSet', 'VHsubsample_20160105')),
-        inner_diameter=inner)
+    frames, extent, background = stimulus_triplet_frames(
+        params, patch_location=patch_location,
+        equivalent_intensity=equivalent_intensity,
+        equivalent_intensity_cone=equivalent_intensity_cone)
 
     fig, axes = plt.subplots(1, 3, figsize=figsize)
-    if patch is None:
-        axes[0].text(0.5, 0.5, f"image imk{params.get('imageName')} not found\n"
-                                'under PROTOCOL_REPOS_ROOT', ha='center', va='center',
-                     transform=axes[0].transAxes, fontsize=8, color='#888888')
-        axes[0].set_xticks([]); axes[0].set_yticks([])
-        vmax = max(v for v in (equivalent_intensity, equivalent_intensity_cone, 1e-6)
-                   if np.isfinite(v))
-    else:
-        shown = np.where(mask, patch, np.nan)
-        vmax = float(np.nanmax([np.nanmax(shown), equivalent_intensity,
-                                equivalent_intensity_cone]))
-        axes[0].imshow(shown, cmap='gray', vmin=0, vmax=vmax, origin='lower',
-                       extent=[-extent, extent, -extent, extent], interpolation='nearest')
-        axes[0].set_xlabel('µm')
-        axes[0].set_ylabel('µm')
+    vmax = float(max(np.nanmax(frame) for frame in frames))
+    axes[0].imshow(frames[0], cmap='gray', vmin=0, vmax=vmax, origin='lower',
+                   extent=[-extent, extent, -extent, extent], interpolation='nearest')
+    axes[0].set_xlabel('µm')
+    axes[0].set_ylabel('µm')
     axes[0].set_title(f"image patch {params.get('imagePatchIndex')}\n"
                       f"imk{params.get('imageName')}", fontsize=9)
 
-    disc_extent = extent if np.isfinite(extent) else aperture * 0.7
-    for ax, value, name in ((axes[1], equivalent_intensity, 'linear-equivalent disc'),
-                            (axes[2], equivalent_intensity_cone, 'cone-linearized disc')):
-        g = np.linspace(-disc_extent, disc_extent, 301)
-        r = np.hypot(*np.meshgrid(g, g))
-        frame = np.full_like(r, np.nan)
-        frame[(r <= aperture / 2) & (r >= inner / 2)] = value
+    for ax, frame, value, name in (
+            (axes[1], frames[1], equivalent_intensity, 'linear-equivalent disc'),
+            (axes[2], frames[2], equivalent_intensity_cone, 'cone-linearized disc')):
         ax.imshow(frame, cmap='gray', vmin=0, vmax=vmax, origin='lower',
-                  extent=[-disc_extent, disc_extent, -disc_extent, disc_extent],
+                  extent=[-extent, extent, -extent, extent],
                   interpolation='nearest')
         ax.set_title(f'{name}\nintensity {value:.4f}', fontsize=9)
         ax.set_xlabel('µm')
@@ -2903,29 +2954,9 @@ def plot_stimulus_sequence(params_sequence: Sequence[Dict],
 
     triplets, finite_values = [], []
     for params in params_sequence:
-        outer = params.get('apertureDiameter') or params.get('annulusOuterDiameter') or 200.0
-        inner = float(params.get('annulusInnerDiameter') or 0.0)
-        patch, mask, _extent, _background = image_patch(
-            str(params.get('imageName')), params.get('currentPatchLocation'), float(outer),
-            str(params.get('currentImageSet', 'VHsubsample_20160105')),
-            inner_diameter=inner)
-        disc = float(params.get('equivalentIntensity', np.nan))
-        cone = float(params.get('equivalentIntensityConeLin', np.nan))
-        if not np.isfinite(disc) or not np.isfinite(cone):
-            raise ValueError('every sequence patch needs both finite equivalent intensities')
-        size = 151
-        grid = np.linspace(-float(outer) * .65, float(outer) * .65, size)
-        radius = np.hypot(*np.meshgrid(grid, grid))
-        aperture_mask = ((radius <= float(outer) / 2) & (radius >= inner / 2))
-        disc_frame = np.where(aperture_mask, disc, np.nan)
-        cone_frame = np.where(aperture_mask, cone, np.nan)
-        if patch is None:
-            patch_frame = np.where(aperture_mask, 0.0, np.nan)
-        else:
-            patch_frame = np.where(mask, patch, np.nan)
-            finite_values.extend(patch_frame[np.isfinite(patch_frame)].tolist())
-        finite_values.extend([disc, cone])
-        triplets.append((patch_frame, disc_frame, cone_frame, params))
+        frames, _extent, _background = stimulus_triplet_frames(params)
+        finite_values.extend(np.concatenate([frame.ravel() for frame in frames]))
+        triplets.append((*frames, params))
 
     vmax = max(finite_values) if finite_values else 1.0
     cmap = plt.get_cmap('gray').copy()
@@ -2961,11 +2992,14 @@ def plot_stimulus_sequence(params_sequence: Sequence[Dict],
                     bbox=dict(facecolor='black', alpha=.45, edgecolor='none', pad=1.2))
 
     transform = Affine2D().skew_deg(0, skew) + ax.transData
-    ax.annotate('', xy=(width * .62, -.18), xytext=(.15, -.18),
-                arrowprops=dict(arrowstyle='-|>', lw=1.3), transform=transform)
-    ax.text(width * .67, -.18, 'x', va='center', fontsize=9, transform=transform)
-    ax.annotate('', xy=(.15, height * .42), xytext=(.15, -.18),
-                arrowprops=dict(arrowstyle='-|>', lw=1.3), transform=transform)
+    ax.add_patch(FancyArrowPatch(
+        (.15, -.18), (width * .62, -.18), arrowstyle='-|>', mutation_scale=11,
+        lw=1.3, color='black', transform=transform, zorder=len(frames) + 4))
+    ax.text(width * .67, -.18, 'x', va='center', fontsize=9,
+            transform=transform, zorder=len(frames) + 4)
+    ax.add_patch(FancyArrowPatch(
+        (.15, -.18), (.15, height * .42), arrowstyle='-|>', mutation_scale=11,
+        lw=1.3, color='black', transform=transform, zorder=len(frames) + 4))
     ax.text(.15, height * .48, 'y', ha='center', fontsize=9, transform=transform)
     last = len(frames) - 1
     time_start = (2 * dx + width * .1, 2 * dy - .7)
@@ -2994,7 +3028,6 @@ def stimulus_example_widget(blocks: pd.DataFrame,
     """Dropdown that redraws a tilted sequence of recorded stimulus triplets."""
     import ipywidgets as widgets
     import matplotlib.pyplot as plt
-    from IPython.display import clear_output, display
 
     if 'imageName' not in blocks:
         raise ValueError('blocks is missing required column: imageName')
@@ -3009,14 +3042,15 @@ def stimulus_example_widget(blocks: pd.DataFrame,
     output = widgets.Output()
 
     def render(_change=None):
-        with output:
-            clear_output(wait=True)
-            params = example_patch_sequence_from_blocks(
-                blocks, patch_index=patch_index, image_name=dropdown.value,
-                count=sequence_length)
-            fig = plot_stimulus_sequence(params)
-            display(fig)
-            plt.close(fig)
+        # Replace the model payload directly so one selection cannot leave a
+        # second copy of the previous sequence in the notebook front end.
+        output.outputs = ()
+        params = example_patch_sequence_from_blocks(
+            blocks, patch_index=patch_index, image_name=dropdown.value,
+            count=sequence_length)
+        fig = plot_stimulus_sequence(params)
+        output.append_display_data(fig)
+        plt.close(fig)
 
     dropdown.observe(render, names='value')
     render()

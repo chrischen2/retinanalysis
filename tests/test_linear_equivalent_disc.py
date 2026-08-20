@@ -884,6 +884,31 @@ def test_plot_stimulus_example_never_labels_a_missing_cone_value_as_nan():
         led.plot_stimulus_example({'equivalentIntensity': 0.2})
 
 
+def test_stimulus_triplet_frames_match_annulus_protocol_layers(monkeypatch):
+    grid = np.linspace(-100, 100, 9)
+    radius = np.hypot(*np.meshgrid(grid, grid))
+    patch = np.full((9, 9), .6)
+    annulus = (radius <= 80) & (radius >= 50)
+    monkeypatch.setattr(
+        led, 'image_patch',
+        lambda *args, **kwargs: (patch, annulus, 100.0, .25))
+    params = {
+        'imageName': '00152', 'currentPatchLocation': [10, 20],
+        'annulusInnerDiameter': 100, 'annulusOuterDiameter': 160,
+        'backgroundIntensity': .2, 'centerSpotDiameter': 40,
+        'centerSpotContrast': .5, 'equivalentIntensity': .4,
+        'equivalentIntensityConeLin': .35,
+    }
+
+    frames, extent, background = led.stimulus_triplet_frames(params)
+
+    assert extent == 100
+    assert background == .2
+    assert [frame[0, 0] for frame in frames] == pytest.approx([.2, .2, .2])
+    assert [frame[4, 4] for frame in frames] == pytest.approx([.3, .3, .3])
+    assert [frame[4, 6] for frame in frames] == pytest.approx([.6, .4, .35])
+
+
 def test_example_patch_params_from_blocks_filters_image_name(monkeypatch):
     blocks = pd.DataFrame([
         {'exp_name': 'X_E', 'block_id': 1, 'linearizeCones': 1,
@@ -924,6 +949,7 @@ def test_stimulus_example_widget_lists_and_redraws_image_names(monkeypatch):
     assert list(dropdown.options) == ['00152', '01769']
     assert rendered == ['00152', '01769']
     assert output is not None
+    assert len(output.outputs) == 1
 
 
 def test_plot_stimulus_sequence_draws_tilted_triplets_and_arrows(monkeypatch):
@@ -938,7 +964,8 @@ def test_plot_stimulus_sequence_draws_tilted_triplets_and_arrows(monkeypatch):
         'imageName': '00152', 'imagePatchIndex': index,
         'currentPatchLocation': [10, 20], 'annulusInnerDiameter': 50,
         'annulusOuterDiameter': 200, 'equivalentIntensity': .4,
-        'equivalentIntensityConeLin': .6,
+        'equivalentIntensityConeLin': .6, 'backgroundIntensity': .2,
+        'centerSpotDiameter': 30, 'centerSpotContrast': .5,
     } for index in (1, 2)]
 
     fig = led.plot_stimulus_sequence(params)
