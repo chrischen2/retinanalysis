@@ -18,6 +18,11 @@ def test_analysis_notebooks_select_retinanalysis_kernel(name):
     notebook = json.loads(notebook_path.read_text())
 
     assert notebook['metadata']['kernelspec']['name'] == 'retinanalysis'
+    assert notebook['metadata']['kernelspec']['display_name'] == (
+        'retinanalysis (Python 3.11)')
+    import_source = ''.join(notebook['cells'][1]['source'])
+    assert 'sys.version_info[:2] != (3, 11)' in import_source
+    assert 'sys.executable' in import_source
 
 
 # --- stimulus tag mapping --------------------------------------------------
