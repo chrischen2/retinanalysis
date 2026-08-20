@@ -34,6 +34,8 @@ _SUBMODULES = {
 }
 
 _ATTR_TO_MODULE = {
+    'apply_publication_style': 'retinanalysis.utils.style',
+    'format_figure': 'retinanalysis.utils.style',
     'get_exp_summary': 'retinanalysis.utils.datajoint_utils',
     'load_canonical_cell_types': 'retinanalysis.utils.cell_type_utils',
     'map_cell_type': 'retinanalysis.utils.cell_type_utils',

@@ -118,6 +118,7 @@ _ATTR_TO_MODULE = {
     'analyze_experiment': 'retinanalysis.analyze',
     'analyze_experiments': 'retinanalysis.analyze',
     'apply_publication_style': 'retinanalysis.utils.style',
+    'format_figure': 'retinanalysis.utils.style',
     'append_animal': 'retinanalysis.utils.database_pop',
     'append_cell': 'retinanalysis.utils.database_pop',
     'append_celltypefiles': 'retinanalysis.utils.database_pop',
