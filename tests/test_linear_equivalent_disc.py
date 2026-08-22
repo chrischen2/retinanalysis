@@ -328,6 +328,59 @@ def test_series_resistance_table_uses_one_batched_path_lookup(tmp_path, monkeypa
     assert sampled.loc[1, 'n_epochs_high_rs'] == 0
 
 
+def test_mode_check_reuses_response_metadata_and_one_trace_per_group(monkeypatch):
+    from retinanalysis.SCutils import recording_mode as rm
+
+    blocks = pd.DataFrame([
+        _one_block(block_id=1, onlineAnalysis='none', group_id=10),
+        _one_block(block_id=2, onlineAnalysis='none', group_id=10),
+        _one_block(block_id=3, onlineAnalysis='extracellular', group_id=11),
+    ])
+    blocks['group_properties'] = [{'recordingTechnique': 'whole-cell'}] * 3
+    response_table = pd.DataFrame({
+        'response_id': [11, 12, 13], 'block_id': [1, 2, 3],
+        'h5path': ['epoch-1/responses/Amp1', 'epoch-2/responses/Amp1',
+                   'epoch-3/responses/Amp1'],
+        'sample_rate': [1e4, 1e4, 1e4],
+    })
+    response_calls = []
+    monkeypatch.setattr(
+        rm, '_amp_response_table',
+        lambda block_ids, amp='Amp1': response_calls.append(list(block_ids)) or response_table)
+    monkeypatch.setattr(
+        rm, 'series_resistance_table',
+        lambda *args, **kwargs: pd.DataFrame({
+            'block_id': [1, 2, 3], 'series_resistance': [0.0, 0.0, 8e6],
+            'series_resistance_min': [0.0, 0.0, 8e6],
+            'series_resistance_max': [0.0, 0.0, 8e6],
+            'n_epochs_rs': [1, 1, 1], 'n_epochs_high_rs': [0, 0, 0],
+        }))
+
+    def trace_samples(df, **kwargs):
+        assert df['block_id'].tolist() == [1, 3]
+        assert kwargs['response_table'] is response_table
+        assert kwargs['n_trials_by_block'] == {3: 1}
+        return {
+            1: (_spiking_trace(), 1e4),
+            3: (np.full((1, 100), -5.0), 1e4),
+        }
+
+    monkeypatch.setattr(rm, '_amp_trace_samples', trace_samples)
+    resolutions = []
+
+    def resolve(label, series_resistance, **kwargs):
+        resolutions.append((label, series_resistance))
+        return ('extracellular' if series_resistance == 0 else 'exc', 'resolved')
+
+    monkeypatch.setattr(rm, 'resolve_recording_mode', resolve)
+
+    result = rm.check_series_resistance(blocks, show=False)
+
+    assert response_calls == [[1, 2, 3]]
+    assert resolutions == [('none', 0.0)]
+    assert result['onlineAnalysis'].tolist() == ['extracellular', 'extracellular', 'exc']
+
+
 def _spiking_trace(n=12, length=3000, seed=0):
     rng = np.random.RandomState(seed)
     data = rng.randn(n, length)

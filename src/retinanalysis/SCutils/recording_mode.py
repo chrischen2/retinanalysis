@@ -71,16 +71,22 @@ def _amp_response_table(block_ids: Sequence[int], amp: str = 'Amp1') -> pd.DataF
 
 
 def _amp_epoch_groups_by_block(block_ids: Sequence[int],
-                               amp: str = 'Amp1') -> Dict[int, List[str]]:
+                               amp: str = 'Amp1',
+                               response_table: Optional[pd.DataFrame] = None
+                               ) -> Dict[int, List[str]]:
     """Fetch amplifier epoch-group paths for many blocks in one query."""
-    paths = _amp_response_table(block_ids, amp=amp)
+    paths = (_amp_response_table(block_ids, amp=amp)
+             if response_table is None else response_table.copy())
     paths['epoch_group'] = paths['h5path'].astype(str).str.split('/responses/').str[0]
     return {int(block_id): group['epoch_group'].tolist()
             for block_id, group in paths.groupby('block_id', sort=False)}
 
 
 def _amp_trace_samples(df: pd.DataFrame, amp: str = 'Amp1', n_trials: int = 12,
-                       verbose: bool = True) -> Dict[int, Tuple[np.ndarray, float]]:
+                       verbose: bool = True,
+                       response_table: Optional[pd.DataFrame] = None,
+                       n_trials_by_block: Optional[Dict[int, int]] = None
+                       ) -> Dict[int, Tuple[np.ndarray, float]]:
     """Load a small raw-trace sample per block without constructing StimBlocks.
 
     Response paths are fetched once, H5 files are opened once per experiment,
@@ -91,7 +97,8 @@ def _amp_trace_samples(df: pd.DataFrame, amp: str = 'Amp1', n_trials: int = 12,
     import h5py
     from retinanalysis.utils.datajoint_utils import get_h5_file
 
-    paths = _amp_response_table(df['block_id'], amp=amp)
+    paths = (_amp_response_table(df['block_id'], amp=amp)
+             if response_table is None else response_table)
     out: Dict[int, Tuple[np.ndarray, float]] = {}
     for exp_name, blocks in df.groupby('exp_name', sort=False):
         try:
@@ -103,7 +110,10 @@ def _amp_trace_samples(df: pd.DataFrame, amp: str = 'Amp1', n_trials: int = 12,
             continue
         with h5:
             for block_id in blocks['block_id']:
-                rows = paths[paths['block_id'].eq(int(block_id))].head(n_trials)
+                block_id = int(block_id)
+                block_trials = (n_trials if n_trials_by_block is None
+                                else n_trials_by_block.get(block_id, n_trials))
+                rows = paths[paths['block_id'].eq(block_id)].head(block_trials)
                 try:
                     rates = rows['sample_rate'].dropna().astype(float).unique()
                     if len(rates) != 1:
@@ -307,7 +317,9 @@ def resolve_recording_mode(online_analysis, series_resistance, amp_data=None,
 def series_resistance_table(df: pd.DataFrame, amp: str = 'Amp1',
                             max_series_resistance: float = MAX_SERIES_RESISTANCE,
                             verbose: bool = True,
-                            sample_one_per_block: bool = False) -> pd.DataFrame:
+                            sample_one_per_block: bool = False,
+                            groups_by_block: Optional[Dict[int, List[str]]] = None
+                            ) -> pd.DataFrame:
     """Read the series resistance of every block in ``df``, one h5 open per date.
 
     Returns one row per ``block_id`` with the median / min / max reading and how
@@ -320,7 +332,8 @@ def series_resistance_table(df: pd.DataFrame, amp: str = 'Amp1',
     import h5py
     from retinanalysis.utils.datajoint_utils import get_h5_file
 
-    groups_by_block = _amp_epoch_groups_by_block(df['block_id'], amp=amp)
+    if groups_by_block is None:
+        groups_by_block = _amp_epoch_groups_by_block(df['block_id'], amp=amp)
     rows = []
     for exp, sub in df.groupby('exp_name', sort=True):
         try:
@@ -412,10 +425,14 @@ def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
     ``recordingTechnique`` metadata do not already settle the mode.
     """
     out = df.copy()
+    response_table = _amp_response_table(out['block_id'], amp=amp)
+    groups_by_block = _amp_epoch_groups_by_block(
+        out['block_id'], amp=amp, response_table=response_table)
     table = series_resistance_table(
         out[['exp_name', 'block_id']], amp=amp,
         max_series_resistance=max_series_resistance, verbose=show,
-        sample_one_per_block=sample_series_resistance)
+        sample_one_per_block=sample_series_resistance,
+        groups_by_block=groups_by_block)
     out = out.merge(table, on='block_id', how='left')
 
     rs = out['series_resistance'].to_numpy(dtype=float)
@@ -460,17 +477,44 @@ def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
     flags.loc[metadata_cell_attached] = (
         "resolved to 'extracellular': recordingTechnique is cell-attached "
         'and series resistance is 0')
-    trace_samples = _amp_trace_samples(
-        out.loc[needs_resolving, ['exp_name', 'block_id']], amp=amp,
-        verbose=show)
+
+    # Blocks in one epoch group belong to the same recording. Resolve a zero-Rs
+    # ambiguity from one representative trace, then reuse that decision across
+    # matching blocks in the group. Positive-Rs whole-cell polarity may change
+    # with holding potential, so those blocks remain independent.
+    resolution_keys = {}
+    representatives = {}
     for i in out.index[needs_resolving]:
+        row = out.loc[i]
+        if row['rs_mode'] == 'whole-cell' or 'group_id' not in out:
+            key = ('block', int(row['block_id']))
+        else:
+            group_id = row['group_id']
+            group_id = int(group_id) if pd.notna(group_id) else int(row['block_id'])
+            key = (str(row['exp_name']), group_id,
+                   str(row['onlineAnalysis']), str(row['rs_mode']))
+        resolution_keys[i] = key
+        representatives.setdefault(key, i)
+
+    representative_indices = list(representatives.values())
+    n_trials_by_block = {
+        int(out.loc[i, 'block_id']): 1 for i in representative_indices
+        if (technique.loc[i] == 'whole-cell'
+            and out.loc[i, 'rs_mode'] != 'cell-attached')
+    }
+    trace_samples = _amp_trace_samples(
+        out.loc[representative_indices, ['exp_name', 'block_id']], amp=amp,
+        verbose=show, response_table=response_table,
+        n_trials_by_block=n_trials_by_block)
+    resolved_groups = {}
+    for key, i in representatives.items():
         row = out.loc[i]
         sample = trace_samples.get(int(row['block_id']))
         if sample is None:
-            flags[i] = 'could not read the trace to resolve the label'
+            resolved_groups[key] = (None, 'could not read the trace to resolve the label')
             continue
         amp_data, sample_rate = sample
-        if row['rs_mode'] == '' and technique.loc[i] == 'whole-cell':
+        if technique.loc[i] == 'whole-cell' and row['rs_mode'] != 'cell-attached':
             mode = 'exc' if float(np.mean(amp_data)) < 0 else 'inh'
             note = (f"'{row['onlineAnalysis']}' resolved to '{mode}': "
                     'recordingTechnique is whole-cell; polarity from the sign '
@@ -479,7 +523,12 @@ def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
             mode, note = resolve_recording_mode(
                 row['onlineAnalysis'], row['series_resistance'], amp_data=amp_data,
                 sample_rate=sample_rate, detector_kwargs=detector_kwargs)
-        out.loc[i, 'onlineAnalysis'] = mode
+        resolved_groups[key] = (mode, note)
+
+    for i, key in resolution_keys.items():
+        mode, note = resolved_groups[key]
+        if mode is not None:
+            out.loc[i, 'onlineAnalysis'] = mode
         flags[i] = note
     flags[all_high & flags.eq('')] = (
         f'series resistance above {max_series_resistance / 1e6:g} MOhm')
