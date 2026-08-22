@@ -396,7 +396,10 @@ def test_group_blocks_prefers_the_pre_relabel_column_for_recorded_labels():
     assert g.loc[0, 'recorded_labels'] == 'none'
 
 
-def test_select_condition_blocks_uses_cell_mode_and_filter_wheel(monkeypatch):
+def test_select_condition_blocks_uses_cell_mode_and_filter_wheel(monkeypatch, capsys):
+    from retinanalysis.SCutils import explore as sc
+
+    monkeypatch.setattr(sc, 'scroll_table', lambda *args, **kwargs: None)
     blocks = pd.DataFrame([
         _one_block(block_id=1, imageName='00152', n_epochs=120,
                    backgroundIntensity=0.2, maxIntensity=1000.0),
@@ -408,9 +411,10 @@ def test_select_condition_blocks_uses_cell_mode_and_filter_wheel(monkeypatch):
     ])
     blocks['start_time'] = pd.date_range('2026-01-01', periods=len(blocks))
     selected = led.select_condition_blocks(
-        blocks, 'Cell1', 'exc', 0.0, show=False)
+        blocks, 'Cell1', 'exc', 0.0, show=True)
 
     assert selected['block_id'].tolist() == [1, 2]
+    assert 'X_E/Cell1 (ON-parasol) | exc | FilterWheel 0' in capsys.readouterr().out
     summary = selected.attrs['image_summary']
     assert summary[['imageName', 'epochs']].to_dict('records') == [
         {'imageName': '00152', 'epochs': 120},

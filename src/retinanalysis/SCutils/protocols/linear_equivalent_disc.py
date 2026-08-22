@@ -611,8 +611,16 @@ def select_condition_blocks(blocks: pd.DataFrame, cell_label: str,
     summary = condition_image_summary(selected)
     selected.attrs['image_summary'] = summary
     if show:
+        cell_type_column = ('cell_type_short' if 'cell_type_short' in selected
+                            else 'cell_type' if 'cell_type' in selected else None)
+        cell_types = ([] if cell_type_column is None else sorted({
+            str(value) for value in selected[cell_type_column].dropna()
+            if str(value).strip()
+        }))
+        cell_type = ', '.join(cell_types) if cell_types else 'Unknown'
         block_ids = ', '.join(str(int(value)) for value in selected['block_id'])
-        print(f'{experiments[0]}/{cell_label} | {mode} | FilterWheel {wheel:g}')
+        print(f'{experiments[0]}/{cell_label} ({cell_type}) | '
+              f'{mode} | FilterWheel {wheel:g}')
         print(f'block_ids: {block_ids}')
         print(f'{len(summary)} imageNames | {int(summary.epochs.sum())} epochs')
         sc.scroll_table(summary, height=height,
