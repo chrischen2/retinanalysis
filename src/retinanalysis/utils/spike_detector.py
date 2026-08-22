@@ -388,22 +388,54 @@ def get_peaks(X, direction):
     return peaks, Ind
 
 def get_rebounds(peaks_ind, trace, search_interval):
+    """Return the first left/right rebound around every candidate peak.
+
+    ``SpikeDetectorNew.m`` uses the first local extremum in each half-window.
+    The previous port reproduced that result by slicing the trace and calling
+    :func:`get_peaks` twice for every candidate. Extracellular noise produces
+    thousands of candidates per epoch, making those tiny Python calls the
+    dominant cost of condition analysis. Precomputing all extrema once and
+    locating the first one in each window with ``searchsorted`` preserves the
+    same boundary and ordering rules without the per-candidate loop.
+    """
+    trace = np.asarray(trace)
+    peaks_ind = np.asarray(peaks_ind, dtype=int)
     peaks = trace[peaks_ind]
     r = {'Left': np.zeros_like(peaks), 'Right': np.zeros_like(peaks)}
 
-    for i in range(len(peaks)):
-        start_point = max(0, peaks_ind[i] - round(search_interval / 2))
-        end_point = min(peaks_ind[i] + round(search_interval / 2), len(trace) - 1)
-        
-        if peaks[i] < 0:  # negative peaks, look for positive rebounds
-            r_left,_ = get_peaks(trace[start_point:peaks_ind[i]], 1)
-            r_right,_ = get_peaks(trace[peaks_ind[i]:end_point], 1)
-        elif peaks[i] > 0:  # positive peaks, look for negative rebounds
-            r_left,_ = get_peaks(trace[start_point:peaks_ind[i]], -1)
-            r_right,_ = get_peaks(trace[peaks_ind[i]:end_point], -1)
+    if not len(peaks_ind):
+        return r
 
-        r['Left'][i] = r_left[0] if r_left.size > 0 else 0
-        r['Right'][i] = r_right[0] if r_right.size > 0 else 0
+    half_window = round(search_interval / 2)
+    _, maxima = get_peaks(trace, 1)
+    _, minima = get_peaks(trace, -1)
+
+    def assign_first(mask, extrema_ind):
+        selected = np.flatnonzero(mask)
+        if not len(selected) or not len(extrema_ind):
+            return
+        candidate_times = peaks_ind[selected]
+        start_points = np.maximum(0, candidate_times - half_window)
+        end_points = np.minimum(candidate_times + half_window, len(trace) - 1)
+
+        # get_peaks(trace[start:peak]) can only select [start + 1, peak - 2].
+        left_positions = np.searchsorted(extrema_ind, start_points + 1)
+        left_safe = np.minimum(left_positions, len(extrema_ind) - 1)
+        left_valid = ((left_positions < len(extrema_ind))
+                      & (extrema_ind[left_safe] <= candidate_times - 2))
+        left_rows = selected[left_valid]
+        r['Left'][left_rows] = trace[extrema_ind[left_safe[left_valid]]]
+
+        # get_peaks(trace[peak:end]) can only select [peak + 1, end - 2].
+        right_positions = np.searchsorted(extrema_ind, candidate_times + 1)
+        right_safe = np.minimum(right_positions, len(extrema_ind) - 1)
+        right_valid = ((right_positions < len(extrema_ind))
+                       & (extrema_ind[right_safe] <= end_points - 2))
+        right_rows = selected[right_valid]
+        r['Right'][right_rows] = trace[extrema_ind[right_safe[right_valid]]]
+
+    assign_first(peaks < 0, maxima)
+    assign_first(peaks > 0, minima)
 
     return r
 
