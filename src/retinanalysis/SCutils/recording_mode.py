@@ -638,12 +638,25 @@ def read_stage_ndfs(exp_name: str, block_id: int, amp: str = 'Amp1', h5=None) ->
 
 
 def stage_ndf_table(df: pd.DataFrame, amp: str = 'Amp1', verbose: bool = True) -> pd.DataFrame:
-    """Read the fixed filter stack of every block in ``df``, one h5 open per date."""
+    """Read fixed filter stacks with one DB query and one H5 open per date."""
     import h5py
     from retinanalysis.utils.datajoint_utils import get_h5_file
 
+    wanted = df[['exp_name', 'block_id']].drop_duplicates().copy()
+    wanted['block_id'] = wanted['block_id'].astype(int)
+    if wanted.empty:
+        return pd.DataFrame(columns=['block_id', 'stage_ndfs'])
+    try:
+        paths_by_block = _amp_epoch_groups_by_block(
+            wanted['block_id'].tolist(), amp=amp)
+    except Exception as exc:
+        if verbose:
+            print(f'  cannot batch-read amplifier paths ({exc}); fixed-filter '
+                  'readings are unavailable')
+        paths_by_block = {}
+
     rows = []
-    for exp, sub in df.groupby('exp_name', sort=True):
+    for exp, sub in wanted.groupby('exp_name', sort=True):
         try:
             f = h5py.File(get_h5_file(str(exp)), 'r')
         except Exception:
@@ -655,7 +668,9 @@ def stage_ndf_table(df: pd.DataFrame, amp: str = 'Amp1', verbose: bool = True) -
             value = ''
             if f is not None:
                 try:
-                    value = read_stage_ndfs(str(exp), int(bid), amp=amp, h5=f)
+                    paths = paths_by_block.get(int(bid), [])
+                    node = f.get(paths[0]) if paths else None
+                    value = _stage_ndfs_from_group(node) if node is not None else ''
                 except Exception:
                     value = ''
             rows.append({'block_id': int(bid), 'stage_ndfs': value})

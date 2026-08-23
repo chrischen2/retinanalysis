@@ -46,6 +46,7 @@ blocks; :func:`find_blocks` applies it and reports what it dropped.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -458,6 +459,167 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
             sc.scroll_table(protocol_df[display_columns], height=height,
                             num_cols=('filter_wheel_ndf', 'maxIntensity', 'n_epochs'))
     return df
+
+
+def _manual_ndf_setting(value) -> Tuple[str, float, str]:
+    """Return fixed-filter label, nominal total OD, and any parsing problem.
+
+    The LightCrafter filter names used for these experiments encode their
+    nominal density: ``EL3`` is OD 3 and ``EL06`` is OD 0.6. Embedded ``FW``
+    labels are deliberately ignored because the numeric FilterWheel reading is
+    authoritative.
+    """
+    from retinanalysis.utils.isomerization import split_stage_ndfs
+
+    fixed, _embedded_wheel = split_stage_ndfs(value)
+    if not fixed:
+        return '(not recorded)', np.nan, 'manual NDF not recorded'
+    densities = []
+    unknown = []
+    for name in fixed:
+        match = re.fullmatch(r'EL(\d+(?:\.\d+)?)', str(name), flags=re.IGNORECASE)
+        if match is None:
+            unknown.append(str(name))
+            continue
+        token = match.group(1)
+        densities.append(float(f'0.{token[1:]}') if token.startswith('0')
+                         and len(token) > 1 and '.' not in token else float(token))
+    label = ', '.join(fixed)
+    if unknown:
+        return label, np.nan, f"unrecognized manual NDF: {', '.join(unknown)}"
+    return label, float(np.sum(densities)), ''
+
+
+def _qc_numeric_intensity(value) -> Tuple[float, str]:
+    """Parse one intensity, choosing the larger value in a comma conflict."""
+    if isinstance(value, str) and ',' in value:
+        candidates = pd.to_numeric(
+            pd.Series([part.strip() for part in value.split(',')]),
+            errors='coerce').dropna().to_numpy(dtype=float)
+        if candidates.size:
+            selected = float(np.max(candidates))
+            return selected, f'{value!r} -> {selected:g}'
+    numeric = pd.to_numeric(pd.Series([value]), errors='coerce').iloc[0]
+    return (float(numeric), '') if pd.notna(numeric) else (np.nan, '')
+
+
+def estimate_rig_max_intensity(
+        protocols: Optional[Sequence[str]] = None,
+        blocks: Optional[pd.DataFrame] = None,
+        show: bool = True,
+        height: int = 360) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Estimate each rig's unattenuated ``maxIntensity`` as a metadata QC.
+
+    For every block, the estimate reverses the nominal manual NDF stack and the
+    authoritative numeric FilterWheel OD::
+
+        rig maxIntensity = recorded maxIntensity * 10 ** (manual OD + wheel OD)
+
+    This reads only block metadata and one Stage setting per block; it does not
+    load traces or run response analysis. The first returned table is the rig
+    map and the second preserves the per-NDF-combination evidence.
+    """
+    from retinanalysis.SCutils import explore as sc
+
+    if blocks is None:
+        frame = find_blocks(
+            protocols=protocols, include_stage_ndfs=True, show=False)
+    else:
+        frame = blocks.copy()
+        if 'stage_ndfs' not in frame:
+            frame = frame.merge(
+                stage_ndf_table(frame[['exp_name', 'block_id']], verbose=show),
+                on='block_id', how='left')
+    columns = [
+        'rig', 'data_source', 'manual_ndfs', 'manual_ndf_od',
+        'filter_wheel_ndf', 'recorded_maxIntensity',
+        'estimated_rig_maxIntensity', 'estimate_min', 'estimate_max',
+        'blocks', 'experiment_dates', 'status',
+    ]
+    summary_columns = [
+        'rig', 'data_source', 'estimated_rig_maxIntensity', 'estimate_min',
+        'estimate_max', 'manual_ndfs', 'filter_wheel_ndfs', 'blocks',
+        'experiment_dates',
+    ]
+    if frame.empty:
+        return pd.DataFrame(columns=summary_columns), pd.DataFrame(columns=columns)
+
+    frame = frame.drop_duplicates('block_id').copy()
+    frame['rig'] = frame['exp_name'].astype(str).str.extract(
+        r'^\d{4}-\d{2}-\d{2}_([A-Za-z])', expand=False).str.upper()
+    frame['data_source'] = frame['rig'].map({'E': 'fred_data', 'G': 'chris_data'}).fillna('other')
+    manual = frame.get('stage_ndfs', pd.Series('', index=frame.index)).apply(
+        _manual_ndf_setting)
+    frame[['manual_ndfs', 'manual_ndf_od', 'status']] = pd.DataFrame(
+        manual.tolist(), index=frame.index)
+    parsed = frame['maxIntensity'].apply(_qc_numeric_intensity)
+    frame['recorded_maxIntensity'] = [value for value, _ in parsed]
+    frame['intensity_correction'] = [note for _, note in parsed]
+    frame['filter_wheel_ndf'] = pd.to_numeric(
+        frame['filter_wheel_ndf'], errors='coerce')
+    frame['estimated_rig_maxIntensity'] = (
+        frame['recorded_maxIntensity']
+        * 10.0 ** (frame['manual_ndf_od'] + frame['filter_wheel_ndf']))
+
+    keys = ['rig', 'data_source', 'manual_ndfs', 'manual_ndf_od',
+            'filter_wheel_ndf']
+
+    def values_text(values):
+        numeric = pd.to_numeric(values, errors='coerce').dropna().unique()
+        return ', '.join(f'{value:g}' for value in sorted(numeric))
+
+    def text_join(values):
+        return ' | '.join(sorted({str(value) for value in values if str(value)}))
+
+    evidence = (frame.groupby(keys, dropna=False, sort=True)
+                .agg(recorded_maxIntensity=('recorded_maxIntensity', values_text),
+                     estimated_rig_maxIntensity=('estimated_rig_maxIntensity', 'median'),
+                     estimate_min=('estimated_rig_maxIntensity', 'min'),
+                     estimate_max=('estimated_rig_maxIntensity', 'max'),
+                     blocks=('block_id', 'nunique'),
+                     experiment_dates=('exp_name', 'nunique'),
+                     status=('status', text_join))
+                .reset_index()[columns])
+    inconsistent = (evidence['estimate_min'].gt(0)
+                    & evidence['estimate_max'].div(evidence['estimate_min']).gt(1.25))
+    evidence.loc[inconsistent & evidence['status'].eq(''), 'status'] = (
+        'inconsistent estimates (>25% spread)')
+    valid = frame.dropna(subset=['rig', 'estimated_rig_maxIntensity'])
+    summary = (valid.groupby(['rig', 'data_source'], sort=True)
+               .agg(estimated_rig_maxIntensity=('estimated_rig_maxIntensity', 'median'),
+                    estimate_min=('estimated_rig_maxIntensity', 'min'),
+                    estimate_max=('estimated_rig_maxIntensity', 'max'),
+                    manual_ndfs=('manual_ndfs', text_join),
+                    filter_wheel_ndfs=('filter_wheel_ndf', values_text),
+                    blocks=('block_id', 'nunique'),
+                    experiment_dates=('exp_name', 'nunique'))
+               .reset_index()[summary_columns])
+
+    if show:
+        print('Formula: recorded maxIntensity × 10^(manual NDF OD + FilterWheel OD)')
+        corrections = frame.loc[frame['intensity_correction'].ne(''),
+                                ['exp_name', 'block_id', 'intensity_correction']]
+        for row in corrections.itertuples(index=False):
+            print(f'ALERT: corrected {row.exp_name} block {row.block_id}: '
+                  f'{row.intensity_correction}')
+        unavailable = int(frame['estimated_rig_maxIntensity'].isna().sum())
+        if unavailable:
+            print(f'ALERT: {unavailable} block(s) could not be estimated because '
+                  'manual NDF, wheel NDF, or maxIntensity was unavailable.')
+        for row in evidence.loc[inconsistent].itertuples(index=False):
+            print(f'ALERT: rig {row.rig}, {row.manual_ndfs}, '
+                  f'FW{row.filter_wheel_ndf:g} spans '
+                  f'{row.estimate_min:g}–{row.estimate_max:g}; check its blocks.')
+        print('\nRig maxIntensity map (median with full observed range):')
+        sc.scroll_table(summary, height=220,
+                        num_cols=('estimated_rig_maxIntensity', 'estimate_min',
+                                  'estimate_max', 'blocks', 'experiment_dates'))
+        print('\nEvidence by manual-NDF and FilterWheel combination:')
+        sc.scroll_table(evidence, height=height,
+                        num_cols=('manual_ndf_od', 'filter_wheel_ndf',
+                                  'estimated_rig_maxIntensity', 'estimate_min',
+                                  'estimate_max', 'blocks', 'experiment_dates'))
+    return summary, evidence
 
 
 def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420) -> pd.DataFrame:

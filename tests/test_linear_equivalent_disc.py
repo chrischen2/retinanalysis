@@ -123,6 +123,53 @@ def test_only_linear_equivalent_disc_needs_the_filter():
                                   'LinearEquivalentDisc'}
 
 
+@pytest.mark.parametrize('value, label, optical_density', [
+    ('EL3', 'EL3', 3.0),
+    ('EL06, EL2, FW1', 'EL06, EL2', 2.6),
+    ('["EL06", "EL2"]', 'EL06, EL2', 2.6),
+])
+def test_manual_ndf_setting_uses_nominal_el_density_and_ignores_fw(
+        value, label, optical_density):
+    found_label, found_density, status = led._manual_ndf_setting(value)
+    assert found_label == label
+    assert found_density == pytest.approx(optical_density)
+    assert status == ''
+
+
+def test_manual_ndf_setting_flags_missing_metadata():
+    label, density, status = led._manual_ndf_setting('')
+    assert label == '(not recorded)'
+    assert np.isnan(density)
+    assert status == 'manual NDF not recorded'
+
+
+def test_estimate_rig_max_intensity_reverses_fixed_and_wheel_ndfs():
+    blocks = pd.DataFrame({
+        'exp_name': ['2026-01-01_E', '2026-01-02_E', '2026-01-03_G'],
+        'block_id': [1, 2, 3],
+        'stage_ndfs': ['EL3', 'EL3', 'EL06, EL2, FW1'],
+        'filter_wheel_ndf': [0.0, 1.0, 1.0],
+        'maxIntensity': [30000.0, 3000.0, 7700.0],
+    })
+    summary, evidence = led.estimate_rig_max_intensity(blocks=blocks, show=False)
+
+    assert summary.set_index('rig').loc['E', 'estimated_rig_maxIntensity'] == pytest.approx(3e7)
+    assert summary.set_index('rig').loc['G', 'estimated_rig_maxIntensity'] == pytest.approx(
+        7700 * 10 ** 3.6)
+    assert set(evidence['manual_ndfs']) == {'EL3', 'EL06, EL2'}
+    assert summary.set_index('rig').loc['E', 'data_source'] == 'fred_data'
+    assert summary.set_index('rig').loc['G', 'data_source'] == 'chris_data'
+
+
+def test_estimate_rig_max_intensity_repairs_comma_conflict():
+    blocks = pd.DataFrame({
+        'exp_name': ['2026-01-01_E'], 'block_id': [1], 'stage_ndfs': ['EL3'],
+        'filter_wheel_ndf': [0.0], 'maxIntensity': ['1199.85, 11998.5'],
+    })
+    summary, _ = led.estimate_rig_max_intensity(blocks=blocks, show=False)
+    assert summary.loc[0, 'estimated_rig_maxIntensity'] == pytest.approx(11998.5e3)
+
+
 def test_find_blocks_display_is_compact():
     from retinanalysis.SCutils import explore as sc
 
@@ -326,6 +373,41 @@ def test_series_resistance_table_uses_one_batched_path_lookup(tmp_path, monkeypa
     assert sampled.loc[1, 'series_resistance'] == pytest.approx(8e6)
     assert sampled.loc[1, 'n_epochs_rs'] == 2
     assert sampled.loc[1, 'n_epochs_high_rs'] == 0
+
+
+def test_stage_ndf_table_uses_one_batched_path_lookup(tmp_path, monkeypatch):
+    import h5py
+    from retinanalysis.SCutils import recording_mode as rm
+    from retinanalysis.utils import datajoint_utils
+
+    h5_path = tmp_path / 'recordings.h5'
+    with h5py.File(h5_path, 'w') as h5:
+        for block_id, ndfs in {1: ['EL3'], 2: ['EL06', 'EL2', 'FW1']}.items():
+            epoch = h5.create_group(f'block-{block_id}/epoch-0')
+            stage = epoch.create_group(
+                'backgrounds/Stage/dataConfigurationSpans/span_0/Stage')
+            stage.attrs['ndfs'] = json.dumps(ndfs)
+
+    calls = []
+
+    def batched(block_ids, amp='Amp1'):
+        calls.append((list(block_ids), amp))
+        return {block_id: [f'block-{block_id}/epoch-0'] for block_id in block_ids}
+
+    monkeypatch.setattr(rm, '_amp_epoch_groups_by_block', batched)
+    monkeypatch.setattr(datajoint_utils, 'get_h5_file', lambda exp_name: str(h5_path))
+    monkeypatch.setattr(
+        rm, 'read_stage_ndfs',
+        lambda *args, **kwargs: pytest.fail('per-block response query should not run'))
+
+    blocks = pd.DataFrame({'exp_name': ['X_E', 'X_E'], 'block_id': [1, 2]})
+    result = rm.stage_ndf_table(blocks, verbose=False)
+
+    assert calls == [([1, 2], 'Amp1')]
+    assert result.to_dict('records') == [
+        {'block_id': 1, 'stage_ndfs': 'EL3'},
+        {'block_id': 2, 'stage_ndfs': 'EL06, EL2, FW1'},
+    ]
 
 
 def test_mode_check_reuses_response_metadata_and_one_trace_per_group(monkeypatch):
