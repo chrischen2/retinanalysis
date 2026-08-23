@@ -743,6 +743,67 @@ def test_patch_nli_loader_reads_h5_without_averaging_or_other_protocols(tmp_path
     assert patches['meanIntensity'].tolist() == [200.0, 200.0, 100.0]
 
 
+def test_center_disc_mat_export_matches_reference_cell_struct(tmp_path, capsys):
+    from dataclasses import replace
+    from scipy.io import loadmat, whosmat
+
+    analysis = _condition_analysis_for_output()
+    images = analysis.image_summary.copy()
+    images[['maxIntensity', 'meanIntensity']] = images[[
+        'maxIntensity', 'meanIntensity']].astype(object)
+    images.loc[0, 'maxIntensity'] = '7700, 77000'
+    images.loc[0, 'meanIntensity'] = '1199.85, 11998.5'
+    led.save_condition_output(
+        replace(analysis, protocols=['LinearEquivalentDiscConeLin'], site='center',
+                image_summary=images), output_dir=tmp_path, verbose=False)
+    led.save_condition_output(
+        replace(analysis, cell_label='Cell2', cell_type='OFF-parasol',
+                protocols=['LinearEquivalentDiscConeLin'], site='center'),
+        output_dir=tmp_path, verbose=False)
+
+    output_dir = tmp_path / 'matlab'
+    written = led.export_center_disc_population_mat_files(
+        output_dir=output_dir, source_dir=tmp_path)
+    output = capsys.readouterr().out
+
+    assert set(written) == {'ON-parasol', 'OFF-parasol'}
+    assert written['ON-parasol'].name == 'OnParasolLinEquivCenterDisc.mat'
+    assert written['OFF-parasol'].name == 'OffParasolLinEquivCenterDisc.mat'
+    assert 'CORRECTED:' in output
+    assert "meanIntensity='1199.85, 11998.5' -> 11998.5" in output
+    assert whosmat(written['ON-parasol']) == [('collectedResults', (1, 2), 'cell')]
+
+    collected = loadmat(
+        written['ON-parasol'], squeeze_me=False,
+        struct_as_record=False)['collectedResults']
+    outer = collected[0, 0].item()
+    result = outer.results.item()
+    assert result._fieldnames == list(led.MATLAB_RESULT_FIELDS)
+    assert result.NLI.shape == (1, 2)
+    assert result.ImageResp.shape == (1, 2)
+    assert result.imageID.item() == '00152'
+    assert result.cell.item() == 'Cell1'
+    assert result.cellType.item() == 'RGC\\ON-parasol'
+    assert result.nd.item() == 0.0
+    assert result.maxIntensity.item() == 77000.0
+    assert result.meanIntensity.item() == 11998.5
+
+
+def test_center_disc_mat_export_preserves_reference_field_prefix():
+    from scipy.io import loadmat
+
+    reference = (Path(__file__).parents[1] / 'SingCell_Notebooks'
+                 / 'OffParasolLinEquiv.mat')
+    collected = loadmat(
+        reference, squeeze_me=False,
+        struct_as_record=False)['collectedResults']
+    reference_fields = collected[0, 0].item().results.item()._fieldnames
+
+    assert list(led.MATLAB_RESULT_FIELDS[:len(reference_fields)]) == reference_fields
+    assert led.MATLAB_RESULT_FIELDS[len(reference_fields):] == (
+        'maxIntensity', 'meanIntensity')
+
+
 def test_population_loaders_accept_both_center_protocol_names(tmp_path):
     from dataclasses import replace
 

@@ -1744,6 +1744,137 @@ def load_condition_patch_nli(
                          ignore_index=True))
 
 
+MATLAB_CENTER_DISC_PROTOCOLS = (
+    'LinearEquivalentDiscConeLin', 'LinearEquivalentDisc')
+MATLAB_RESULT_FIELDS = (
+    'NLI', 'NLIConeLin', 'ImageResp', 'DiscResp', 'LinDiscResp',
+    'ImageRespSEM', 'DiscRespSEM', 'LinDiscRespSEM', 'imageID', 'date',
+    'cell', 'nd', 'cellType', 'maxIntensity', 'meanIntensity',
+)
+
+
+def _matlab_cell_type_name(cell_type: str) -> str:
+    """Convert ``OFF-parasol`` to the reference filename label ``OffParasol``."""
+    import re
+
+    words = re.findall(r'[A-Za-z0-9]+', str(cell_type))
+    return ''.join(word.lower().capitalize() for word in words) or 'Unknown'
+
+
+def _matlab_result_element(group: pd.DataFrame):
+    """Build one nested ``{results: struct}`` element like the reference MAT file."""
+    ordered = group.sort_values('patchIndex', kind='stable')
+
+    def vector(column):
+        return pd.to_numeric(ordered[column], errors='coerce').to_numpy(
+            dtype=float)[None, :]
+
+    def scalar(column):
+        values = pd.to_numeric(ordered[column], errors='coerce').dropna().unique()
+        if len(values) != 1:
+            key = tuple(ordered.iloc[0][
+                ['date', 'cell_label', 'filter_wheel_ndf', 'imageName']])
+            raise ValueError(
+                f'{key}: expected one numeric {column}, found {values.tolist()}')
+        return float(values[0])
+
+    first = ordered.iloc[0]
+    cell_type = str(first['cell_type'])
+    values = {
+        'NLI': vector('nli_image_vs_disc'),
+        'NLIConeLin': vector('nli_image_vs_cone_disc'),
+        'ImageResp': vector('image_response'),
+        'DiscResp': vector('disc_response'),
+        'LinDiscResp': vector('cone_disc_response'),
+        'ImageRespSEM': vector('image_response_sem'),
+        'DiscRespSEM': vector('disc_response_sem'),
+        'LinDiscRespSEM': vector('cone_disc_response_sem'),
+        'imageID': str(first['imageName']),
+        'date': str(first['date']),
+        'cell': str(first['cell_label']),
+        'nd': float(first['filter_wheel_ndf']),
+        'cellType': (cell_type if '\\' in cell_type else f'RGC\\{cell_type}'),
+        'maxIntensity': scalar('maxIntensity'),
+        'meanIntensity': scalar('meanIntensity'),
+    }
+    results = np.empty((1, 1), dtype=[(name, 'O') for name in MATLAB_RESULT_FIELDS])
+    for name in MATLAB_RESULT_FIELDS:
+        results[name][0, 0] = values[name]
+    element = np.empty((1, 1), dtype=[('results', 'O')])
+    element['results'][0, 0] = results
+    return element
+
+
+def export_center_disc_population_mat_files(
+        output_dir=None, source_dir=None, online_analysis: str = 'extracellular',
+        verbose: bool = True):
+    """Write one reference-compatible center-disc MAT file per cell type.
+
+    The reference ``OffParasolLinEquiv.mat`` contains a ``1 x N`` cell array
+    named ``collectedResults``. Each element is one unique date/cell/ND/image
+    condition and contains a nested ``results`` struct. This export preserves
+    its field order and appends scalar ``maxIntensity`` and ``meanIntensity``.
+
+    The reference schema has no recording-mode field, so the default exports
+    extracellular records only. Comma-joined saved intensities are corrected
+    to their larger numeric candidate by :func:`_read_condition_h5`; every
+    correction is printed for manual review.
+    """
+    from pathlib import Path
+    import warnings
+    from scipy.io import savemat
+
+    if output_dir is None:
+        output_dir = condition_output_dir(MATLAB_CENTER_DISC_PROTOCOLS) / 'matlab_exports'
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always', RuntimeWarning)
+        population = load_condition_outputs(
+            output_dir=source_dir, protocol=MATLAB_CENTER_DISC_PROTOCOLS)
+    corrections = [str(item.message) for item in caught
+                   if 'conflicting saved intensity metadata' in str(item.message)]
+    if verbose:
+        if corrections:
+            for message in corrections:
+                print(f'CORRECTED: {message}')
+        else:
+            print('No conflicting saved intensity metadata found.')
+
+    if population.empty:
+        raise ValueError('no saved center-disc population conditions were found')
+    mode = str(online_analysis).strip().lower()
+    population = population.loc[
+        population['onlineAnalysis'].astype(str).str.strip().str.lower().eq(mode)
+    ].copy()
+    if population.empty:
+        raise ValueError(f'no saved center-disc conditions use onlineAnalysis={mode!r}')
+
+    keys = ['date', 'cell_label', 'filter_wheel_ndf', 'imageName']
+    duplicate_types = (population[keys + ['cell_type']].drop_duplicates()
+                       .groupby(keys, dropna=False)['cell_type'].nunique())
+    if duplicate_types.gt(1).any():
+        raise ValueError('a date/cell/ND/image condition has multiple cell types')
+
+    written = {}
+    for cell_type, cell_rows in population.groupby('cell_type', sort=True):
+        elements = [
+            _matlab_result_element(group)
+            for _, group in cell_rows.groupby(keys, sort=True, dropna=False)
+        ]
+        collected = np.empty((1, len(elements)), dtype=object)
+        for index, element in enumerate(elements):
+            collected[0, index] = element
+        filename = f'{_matlab_cell_type_name(cell_type)}LinEquivCenterDisc.mat'
+        path = output_dir / filename
+        savemat(path, {'collectedResults': collected}, do_compression=True)
+        written[str(cell_type)] = path
+        if verbose:
+            print(f'wrote {cell_type}: {len(elements)} conditions to {path}')
+    return written
+
+
 def summarize_image_nli_light_levels(
         image_summary: pd.DataFrame,
         light_groups: Sequence[Tuple[float, float]] = LIGHT_LEVEL_GROUPS,
