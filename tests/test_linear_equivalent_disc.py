@@ -701,6 +701,30 @@ def test_image_nli_summary_keeps_one_row_per_cell_fw_and_image(tmp_path):
     assert set(summary['cell_type']) == {'ON-parasol', 'OFF-parasol'}
 
 
+def test_saved_condition_uses_larger_conflicting_intensity_with_warning(tmp_path):
+    from dataclasses import replace
+
+    analysis = _condition_analysis_for_output()
+    image_summary = analysis.image_summary.copy()
+    image_summary[['maxIntensity', 'meanIntensity']] = image_summary[[
+        'maxIntensity', 'meanIntensity']].astype(object)
+    image_summary.loc[0, 'maxIntensity'] = '7700, 77000'
+    image_summary.loc[0, 'meanIntensity'] = '1199.85, 11998.5'
+    path = led.save_condition_output(
+        replace(analysis, image_summary=image_summary),
+        output_dir=tmp_path, verbose=False)
+
+    with pytest.warns(RuntimeWarning, match='using larger value') as warnings:
+        loaded = led._read_condition_h5(path)
+
+    corrected = loaded.image_summary.loc[
+        loaded.image_summary['imageName'].eq('00152')].iloc[0]
+    assert corrected['maxIntensity'] == 77000.0
+    assert corrected['meanIntensity'] == 11998.5
+    assert len(warnings) == 1
+    assert "meanIntensity='1199.85, 11998.5' -> 11998.5" in str(warnings[0].message)
+
+
 def test_patch_nli_loader_reads_h5_without_averaging_or_other_protocols(tmp_path):
     from dataclasses import replace
 

@@ -1418,6 +1418,47 @@ def _read_condition_frame(group) -> pd.DataFrame:
     return frame
 
 
+def _normalize_saved_condition_intensities(frame: pd.DataFrame, path) -> pd.DataFrame:
+    """Temporarily resolve comma-joined intensity metadata to its larger value.
+
+    A small number of saved blocks contain two typed ``maxIntensity`` values
+    for one FilterWheel condition. ``condition_image_summary`` preserves that
+    conflict as a comma-joined string, but population analysis requires one
+    numeric x value. Prefer the larger candidate and warn so the source data
+    remains visibly abnormal until it can be corrected upstream.
+    """
+    import warnings
+
+    normalized = frame.copy()
+    for column in ('maxIntensity', 'meanIntensity'):
+        if column in normalized:
+            normalized[column] = normalized[column].astype(object)
+    for row_index, row in normalized.iterrows():
+        corrections = []
+        for column in ('maxIntensity', 'meanIntensity'):
+            value = row.get(column, np.nan)
+            if not isinstance(value, str) or ',' not in value:
+                continue
+            candidates = pd.to_numeric(
+                pd.Series([part.strip() for part in value.split(',')]),
+                errors='coerce').dropna().to_numpy(dtype=float)
+            if candidates.size < 2:
+                continue
+            selected = float(np.max(candidates))
+            normalized.at[row_index, column] = selected
+            corrections.append(f'{column}={value!r} -> {selected:g}')
+        if corrections:
+            image_name = row.get('imageName', '?')
+            warnings.warn(
+                f'{path}: imageName {image_name}: conflicting saved intensity '
+                f'metadata; using larger value ({"; ".join(corrections)})',
+                RuntimeWarning, stacklevel=2)
+    for column in ('maxIntensity', 'meanIntensity'):
+        if column in normalized:
+            normalized[column] = pd.to_numeric(normalized[column], errors='raise')
+    return normalized
+
+
 def _read_condition_h5(path) -> ConditionAnalysis:
     """Read one complete condition record without DataJoint or raw-data access."""
     import h5py
@@ -1428,7 +1469,8 @@ def _read_condition_h5(path) -> ConditionAnalysis:
     with h5py.File(path, 'r') as h5:
         if int(h5.attrs.get('output_version', -1)) != CONDITION_OUTPUT_VERSION:
             raise ValueError('condition output version does not match')
-        image_summary = _read_condition_frame(h5['image_summary'])
+        image_summary = _normalize_saved_condition_intensities(
+            _read_condition_frame(h5['image_summary']), path)
         patch_responses = _read_condition_frame(h5['patch_responses'])
         protocols = text(h5.attrs['protocols']).split('\n')
         return ConditionAnalysis(
@@ -1729,6 +1771,7 @@ def summarize_image_nli_light_levels(
 
     frame = image_summary.copy()
     intensity = pd.to_numeric(frame['meanIntensity'], errors='coerce')
+    frame['meanIntensity'] = intensity
     group_index = np.full(len(frame), -1, dtype=int)
     for index, (lower, upper) in enumerate(groups):
         upper_keep = intensity.le(upper) if index == len(groups) - 1 else intensity.lt(upper)
@@ -1790,6 +1833,7 @@ def summarize_cell_patch_nli_light_levels(
 
     frame = patch_nli.copy()
     intensity = pd.to_numeric(frame['meanIntensity'], errors='coerce')
+    frame['meanIntensity'] = intensity
     group_index = np.full(len(frame), -1, dtype=int)
     for index, (lower, upper) in enumerate(groups):
         upper_keep = intensity.le(upper) if index == len(groups) - 1 else intensity.lt(upper)
@@ -1846,6 +1890,7 @@ def summarize_cell_patch_nli_above(
 
     frame = patch_nli.copy()
     intensity = pd.to_numeric(frame['meanIntensity'], errors='coerce')
+    frame['meanIntensity'] = intensity
     frame = frame.loc[intensity.ge(cutoff)].copy()
     if frame.empty:
         return pd.DataFrame(columns=HIGH_LIGHT_CELL_NLI_COLUMNS)
