@@ -1245,8 +1245,60 @@ def _condition_output_name(analysis: ConditionAnalysis) -> str:
         analysis.site, analysis.protocols, analysis.filter_wheel_ndf)
 
 
+def matching_condition_outputs(analysis: ConditionAnalysis, output_dir=None):
+    """Saved files matching one date/cell/mode/site/FilterWheel condition.
+
+    Protocol names are deliberately not part of this identity. The two center
+    protocol implementations belong to one analysis family, so saving the same
+    cell condition once under each protocol name would otherwise duplicate it
+    in population analysis. Both routed HDF5 files and legacy HDF5/CSV files
+    are checked using their stored metadata rather than their filenames.
+    """
+    import h5py
+
+    def _text(value):
+        return value.decode('utf-8') if isinstance(value, bytes) else str(value)
+
+    target = (
+        str(analysis.exp_name), str(analysis.cell_label),
+        str(analysis.online_analysis).strip().lower(), str(analysis.site).strip().lower(),
+        float(analysis.filter_wheel_ndf),
+    )
+    matches = []
+    seen = set()
+    for directory in _condition_read_directories(output_dir, analysis.protocols):
+        if not directory.exists():
+            continue
+        for path in sorted((*directory.glob('*.h5'), *directory.glob('*.csv'))):
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            try:
+                if path.suffix.lower() == '.h5':
+                    with h5py.File(path, 'r') as saved:
+                        identity = (
+                            _text(saved.attrs['exp_name']), _text(saved.attrs['cell_label']),
+                            _text(saved.attrs['online_analysis']).strip().lower(),
+                            _text(saved.attrs['site']).strip().lower(),
+                            float(saved.attrs['filter_wheel_ndf']),
+                        )
+                else:
+                    row = pd.read_csv(path, nrows=1).iloc[0]
+                    identity = (
+                        str(row['date']), str(row['cell_label']),
+                        str(row['onlineAnalysis']).strip().lower(),
+                        str(row['site']).strip().lower(), float(row['filter_wheel_ndf']),
+                    )
+            except (OSError, ValueError, KeyError, IndexError):
+                continue
+            if identity[:4] == target[:4] and np.isclose(identity[4], target[4]):
+                matches.append(path)
+    return matches
+
+
 def save_condition_output(analysis: ConditionAnalysis, output_dir=None,
-                          verbose: bool = True):
+                          verbose: bool = True, remove_duplicates: bool = True):
     """Idempotently save one cell condition as compressed typed arrays.
 
     By default, center-disc and annulus-disc conditions are routed to separate
@@ -1267,6 +1319,18 @@ def save_condition_output(analysis: ConditionAnalysis, output_dir=None,
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / _condition_output_name(analysis)
     temporary = path.with_suffix(path.suffix + '.tmp')
+    existing = (matching_condition_outputs(analysis, output_dir=output_dir)
+                if remove_duplicates else [])
+    if verbose:
+        label = (f'{analysis.exp_name}/{analysis.cell_label} '
+                 f'({analysis.online_analysis}, {analysis.site}, '
+                 f'FW{analysis.filter_wheel_ndf:g})')
+        if existing:
+            print(f'ALERT: found {len(existing)} saved copy/copies of {label}:')
+            for existing_path in existing:
+                print(f'  {existing_path}')
+        else:
+            print(f'No existing saved copy found for {label}.')
 
     with h5py.File(temporary, 'w') as h5:
         h5.attrs['output_version'] = CONDITION_OUTPUT_VERSION
@@ -1283,7 +1347,27 @@ def save_condition_output(analysis: ConditionAnalysis, output_dir=None,
         _write_condition_frame(h5.create_group('image_summary'), analysis.image_summary)
         _write_condition_frame(h5.create_group('patch_responses'), analysis.patch_responses)
     temporary.replace(path)
+
+    removed = []
+    failed = []
+    for duplicate in existing:
+        if duplicate.resolve() == path.resolve():
+            continue
+        try:
+            duplicate.unlink()
+            removed.append(duplicate)
+        except OSError as error:
+            failed.append((duplicate, error))
     if verbose:
+        if any(existing_path.resolve() == path.resolve()
+               for existing_path in existing):
+            print(f'ALERT: replaced the existing canonical saved condition at {path}')
+        if removed:
+            print(f'ALERT: removed {len(removed)} duplicate saved copy/copies:')
+            for duplicate in removed:
+                print(f'  {duplicate}')
+        for duplicate, error in failed:
+            print(f'WARNING: could not remove duplicate {duplicate}: {error}')
         print(f'saved 1 condition ({len(analysis.patch_responses)} patches as arrays) to {path}')
     return path
 

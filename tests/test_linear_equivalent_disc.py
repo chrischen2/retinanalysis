@@ -566,6 +566,41 @@ def test_condition_output_save_is_idempotent_and_loads_population_rows(tmp_path)
     assert loaded['imageName'].tolist() == ['00152', '00152', '01769']
 
 
+def test_condition_save_alerts_and_removes_matching_h5_and_legacy_csv(
+        tmp_path, capsys):
+    import shutil
+
+    analysis = _condition_analysis_for_output()
+    canonical = led.save_condition_output(analysis, output_dir=tmp_path, verbose=False)
+    duplicate_h5 = tmp_path / 'duplicate-name.h5'
+    shutil.copyfile(canonical, duplicate_h5)
+    duplicate_csv = tmp_path / 'legacy-copy.csv'
+    led.condition_population_table(analysis).to_csv(duplicate_csv, index=False)
+
+    saved = led.save_condition_output(analysis, output_dir=tmp_path, verbose=True)
+    output = capsys.readouterr().out
+
+    assert saved == canonical and canonical.exists()
+    assert not duplicate_h5.exists()
+    assert not duplicate_csv.exists()
+    assert 'ALERT: found 3 saved copy/copies' in output
+    assert 'ALERT: replaced the existing canonical saved condition' in output
+    assert 'ALERT: removed 2 duplicate saved copy/copies' in output
+
+
+def test_condition_save_does_not_remove_a_different_filter_wheel(tmp_path):
+    from dataclasses import replace
+
+    analysis = _condition_analysis_for_output()
+    other = replace(analysis, filter_wheel_ndf=1.0)
+    other_path = led.save_condition_output(other, output_dir=tmp_path, verbose=False)
+
+    led.save_condition_output(analysis, output_dir=tmp_path, verbose=False)
+
+    assert other_path.exists()
+    assert len(list(tmp_path.glob('*.h5'))) == 2
+
+
 def test_default_condition_outputs_use_separate_center_and_annulus_folders(
         tmp_path, monkeypatch):
     from dataclasses import replace
