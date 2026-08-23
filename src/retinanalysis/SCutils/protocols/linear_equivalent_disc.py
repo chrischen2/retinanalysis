@@ -1746,6 +1746,7 @@ def load_condition_patch_nli(
 
 MATLAB_CENTER_DISC_PROTOCOLS = (
     'LinearEquivalentDiscConeLin', 'LinearEquivalentDisc')
+MATLAB_ANNULUS_DISC_PROTOCOLS = ('LinearEquivalentAnnulus',)
 MATLAB_RESULT_FIELDS = (
     'NLI', 'NLIConeLin', 'ImageResp', 'DiscResp', 'LinDiscResp',
     'ImageRespSEM', 'DiscRespSEM', 'LinDiscRespSEM', 'imageID', 'date',
@@ -1805,10 +1806,10 @@ def _matlab_result_element(group: pd.DataFrame):
     return element
 
 
-def export_center_disc_population_mat_files(
-        output_dir=None, source_dir=None, online_analysis: str = 'extracellular',
-        verbose: bool = True):
-    """Write one reference-compatible center-disc MAT file per cell type.
+def _export_population_mat_files(
+        protocols, output_label: str, output_dir=None, source_dir=None,
+        online_analysis: str = 'extracellular', verbose: bool = True):
+    """Write one reference-compatible MAT file per cell type and protocol family.
 
     The reference ``OffParasolLinEquiv.mat`` contains a ``1 x N`` cell array
     named ``collectedResults``. Each element is one unique date/cell/ND/image
@@ -1825,14 +1826,14 @@ def export_center_disc_population_mat_files(
     from scipy.io import savemat
 
     if output_dir is None:
-        output_dir = condition_output_dir(MATLAB_CENTER_DISC_PROTOCOLS) / 'matlab_exports'
+        output_dir = condition_output_dir(protocols) / 'matlab_exports'
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always', RuntimeWarning)
         population = load_condition_outputs(
-            output_dir=source_dir, protocol=MATLAB_CENTER_DISC_PROTOCOLS)
+            output_dir=source_dir, protocol=protocols)
     corrections = [str(item.message) for item in caught
                    if 'conflicting saved intensity metadata' in str(item.message)]
     if verbose:
@@ -1843,13 +1844,15 @@ def export_center_disc_population_mat_files(
             print('No conflicting saved intensity metadata found.')
 
     if population.empty:
-        raise ValueError('no saved center-disc population conditions were found')
+        raise ValueError(
+            f'no saved {output_label} population conditions were found')
     mode = str(online_analysis).strip().lower()
     population = population.loc[
         population['onlineAnalysis'].astype(str).str.strip().str.lower().eq(mode)
     ].copy()
     if population.empty:
-        raise ValueError(f'no saved center-disc conditions use onlineAnalysis={mode!r}')
+        raise ValueError(
+            f'no saved {output_label} conditions use onlineAnalysis={mode!r}')
 
     keys = ['date', 'cell_label', 'filter_wheel_ndf', 'imageName']
     duplicate_types = (population[keys + ['cell_type']].drop_duplicates()
@@ -1866,13 +1869,85 @@ def export_center_disc_population_mat_files(
         collected = np.empty((1, len(elements)), dtype=object)
         for index, element in enumerate(elements):
             collected[0, index] = element
-        filename = f'{_matlab_cell_type_name(cell_type)}LinEquivCenterDisc.mat'
+        filename = f'{_matlab_cell_type_name(cell_type)}LinEquiv{output_label}.mat'
         path = output_dir / filename
         savemat(path, {'collectedResults': collected}, do_compression=True)
         written[str(cell_type)] = path
         if verbose:
             print(f'wrote {cell_type}: {len(elements)} conditions to {path}')
     return written
+
+
+def export_center_disc_population_mat_files(
+        output_dir=None, source_dir=None, online_analysis: str = 'extracellular',
+        verbose: bool = True):
+    """Write one ``*LinEquivCenterDisc.mat`` file per saved cell type."""
+    return _export_population_mat_files(
+        MATLAB_CENTER_DISC_PROTOCOLS, 'CenterDisc', output_dir=output_dir,
+        source_dir=source_dir, online_analysis=online_analysis, verbose=verbose)
+
+
+def export_annulus_disc_population_mat_files(
+        output_dir=None, source_dir=None, online_analysis: str = 'extracellular',
+        verbose: bool = True):
+    """Write one ``*LinEquivAnnulusDisc.mat`` file per saved cell type."""
+    return _export_population_mat_files(
+        MATLAB_ANNULUS_DISC_PROTOCOLS, 'AnnulusDisc', output_dir=output_dir,
+        source_dir=source_dir, online_analysis=online_analysis, verbose=verbose)
+
+
+MATLAB_RIG_SOURCES = {'E': 'fred_data', 'G': 'chris_data'}
+MATLAB_RIG_SUMMARY_COLUMNS = (
+    'scope', 'rig', 'data_source', 'condition_entries', 'unique_cells',
+    'experiment_dates')
+
+
+def summarize_matlab_export_rigs(mat_files) -> pd.DataFrame:
+    """Count exported MATLAB conditions and cells from rigs E and G.
+
+    ``mat_files`` is the cell-type-to-path mapping returned by either MATLAB
+    exporter. Counts are derived from the written ``collectedResults`` arrays,
+    not from the pre-export DataFrame. ``scope='ALL'`` rows provide protocol
+    totals, followed by the per-cell-type breakdown.
+    """
+    import re
+    from scipy.io import loadmat
+
+    records = []
+    for cell_type, path in mat_files.items():
+        collected = loadmat(
+            path, squeeze_me=False,
+            struct_as_record=False)['collectedResults']
+        for raw in collected.ravel(order='F'):
+            result = raw.item().results.item()
+            date = str(result.date.item())
+            match = re.search(r'(?:^|_)([EG])(?:_|$)', date)
+            rig = match.group(1) if match else '?'
+            records.append({
+                'scope': str(cell_type), 'rig': rig,
+                'date': date, 'cell': str(result.cell.item()),
+            })
+    if not records:
+        return pd.DataFrame(columns=MATLAB_RIG_SUMMARY_COLUMNS)
+
+    frame = pd.DataFrame(records)
+
+    def aggregate(values, scope):
+        return {
+            'scope': scope,
+            'rig': str(values['rig'].iloc[0]),
+            'data_source': MATLAB_RIG_SOURCES.get(
+                str(values['rig'].iloc[0]), 'unknown'),
+            'condition_entries': int(len(values)),
+            'unique_cells': int(values[['date', 'cell']].drop_duplicates().shape[0]),
+            'experiment_dates': int(values['date'].nunique()),
+        }
+
+    rows = [aggregate(group, 'ALL') for _, group in frame.groupby('rig', sort=True)]
+    rows.extend(
+        aggregate(group, str(scope))
+        for (scope, _), group in frame.groupby(['scope', 'rig'], sort=True))
+    return pd.DataFrame(rows, columns=MATLAB_RIG_SUMMARY_COLUMNS)
 
 
 def summarize_image_nli_light_levels(

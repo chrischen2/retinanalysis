@@ -804,6 +804,38 @@ def test_center_disc_mat_export_preserves_reference_field_prefix():
         'maxIntensity', 'meanIntensity')
 
 
+def test_annulus_mat_export_and_rig_summary_use_written_conditions(tmp_path):
+    from dataclasses import replace
+    from scipy.io import whosmat
+
+    analysis = _condition_analysis_for_output()
+    led.save_condition_output(
+        replace(analysis, exp_name='2026-01-01_E',
+                protocols=['LinearEquivalentAnnulus'], site='surround'),
+        output_dir=tmp_path, verbose=False)
+    led.save_condition_output(
+        replace(analysis, exp_name='2026-01-02_G', cell_label='Cell2',
+                cell_type='OFF-parasol', protocols=['LinearEquivalentAnnulus'],
+                site='surround'), output_dir=tmp_path, verbose=False)
+
+    written = led.export_annulus_disc_population_mat_files(
+        output_dir=tmp_path / 'matlab', source_dir=tmp_path, verbose=False)
+    summary = led.summarize_matlab_export_rigs(written)
+
+    assert written['ON-parasol'].name == 'OnParasolLinEquivAnnulusDisc.mat'
+    assert written['OFF-parasol'].name == 'OffParasolLinEquivAnnulusDisc.mat'
+    assert whosmat(written['ON-parasol']) == [
+        ('collectedResults', (1, 2), 'cell')]
+    assert summary.columns.tolist() == list(led.MATLAB_RIG_SUMMARY_COLUMNS)
+    totals = summary.loc[summary['scope'].eq('ALL')].set_index('rig')
+    assert totals.loc['E'].to_dict() == {
+        'scope': 'ALL', 'data_source': 'fred_data', 'condition_entries': 2,
+        'unique_cells': 1, 'experiment_dates': 1}
+    assert totals.loc['G'].to_dict() == {
+        'scope': 'ALL', 'data_source': 'chris_data', 'condition_entries': 2,
+        'unique_cells': 1, 'experiment_dates': 1}
+
+
 def test_population_loaders_accept_both_center_protocol_names(tmp_path):
     from dataclasses import replace
 
