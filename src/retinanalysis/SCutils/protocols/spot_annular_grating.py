@@ -42,6 +42,7 @@ DEFAULTS = dict(
     psth_sigma_ms=10.0,
     wc_offset=100,         # samples, whole-cell response window offset
     smooth_ms=10.0,        # box-car width for whole-cell traces
+    spike_offset=300,      # reversing-protocol compatibility; flashed analysis ignores it
     cone_i0=2000.0,        # Weber I0 (R*) for the cancellation prediction
 )
 
@@ -1765,22 +1766,68 @@ def load_records(keys: Optional[Sequence[str]] = None, path=None) -> Dict[str, D
 # --------------------------------------------------------------------------
 
 def plot_group(rec: GratingRecord, figsize: Tuple[float, float] = (7.2, 7.6)):
-    """Mean traces per dark-bar contrast (top) + contrast tuning curve (bottom).
+    """Raster, mean PSTHs, and contrast tuning for one recording group.
 
-    Mirrors plotMeanTraces / plotTuningCurve in the MATLAB.
+    Extracellular records built with ``keep_raw=True`` gain a spike raster above
+    the mean PSTHs, with rows grouped by dark-bar contrast. Whole-cell and
+    stored records without raw spike times retain the two-panel layout.
     """
     import matplotlib.pyplot as plt
     from retinanalysis.utils import style
 
     style.apply_publication_style()
-    fig, (ax_t, ax_c) = plt.subplots(2, 1, figsize=figsize,
-                                     gridspec_kw={'height_ratios': [1.15, 1.0], 'hspace': 0.34})
+    raw = rec.raw or {}
+    raw_spikes = raw.get('spike_times_ms', [])
+    has_raster = (rec.online_analysis == 'extracellular'
+                  and len(raw_spikes) > 0
+                  and all(spikes is not None for spikes in raw_spikes)
+                  and len(raw.get('dark', [])) == len(raw_spikes))
+    if has_raster:
+        fig = plt.figure(figsize=(figsize[0], figsize[1] + 2.0))
+        grid = fig.add_gridspec(3, 1, height_ratios=[0.9, 1.15, 1.0], hspace=0.38)
+        ax_r = fig.add_subplot(grid[0])
+        ax_t = fig.add_subplot(grid[1])
+        ax_c = fig.add_subplot(grid[2])
+    else:
+        fig, (ax_t, ax_c) = plt.subplots(
+            2, 1, figsize=figsize,
+            gridspec_kw={'height_ratios': [1.15, 1.0], 'hspace': 0.34})
+        ax_r = None
     colors = style.colors_for_conditions(list(rec.dark_contrasts))
+
+    if ax_r is not None:
+        raw_dark = np.asarray(raw['dark'], dtype=float)
+        row_position = 0
+        tick_positions, tick_labels = [], []
+        for contrast in rec.dark_contrasts:
+            epoch_indices = np.flatnonzero(np.isclose(raw_dark, contrast))
+            if not len(epoch_indices):
+                continue
+            start = row_position
+            for epoch_index in epoch_indices:
+                ax_r.eventplot(
+                    np.asarray(raw_spikes[epoch_index], dtype=float),
+                    lineoffsets=row_position, linelengths=0.75, linewidths=0.7,
+                    colors=colors[contrast])
+                row_position += 1
+            tick_positions.append((start + row_position - 1) / 2.0)
+            tick_labels.append(f'{contrast:g}')
+            ax_r.axhline(row_position - 0.5, color='#DDDDDD', lw=0.6, zorder=0)
+        ax_r.axvspan(rec.pre_time_ms, rec.pre_time_ms + rec.stim_time_ms,
+                     color='#000000', alpha=0.06, lw=0, zorder=0)
+        ax_r.set_ylim(max(row_position - 0.5, 0.5), -0.5)
+        ax_r.set_yticks(tick_positions, tick_labels, fontsize=7)
+        ax_r.set_ylabel('dark contrast', fontsize=8)
+        ax_r.set_title('Spike raster — epochs grouped by dark-bar contrast', fontsize=9)
+        ax_r.tick_params(axis='x', labelbottom=False)
 
     for c, tr in zip(rec.dark_contrasts, rec.traces):
         ax_t.plot(rec.trace_time_ms, tr, lw=1.2, color=colors[c], label=f'{c:g}')
     ax_t.axvspan(rec.pre_time_ms, rec.pre_time_ms + rec.stim_time_ms,
                  color='#000000', alpha=0.06, lw=0, zorder=0)
+    if ax_r is not None and len(rec.trace_time_ms):
+        ax_r.set_xlim(float(rec.trace_time_ms[0]), float(rec.trace_time_ms[-1]))
+        ax_t.set_xlim(float(rec.trace_time_ms[0]), float(rec.trace_time_ms[-1]))
     ax_t.set_xlabel('Time (ms)')
     ax_t.set_ylabel('Rate (Hz)' if 'Hz' in rec.units else rec.units)
     light_path = rec.config.get('ndf_combination', f'FW{rec.ndf:g}')

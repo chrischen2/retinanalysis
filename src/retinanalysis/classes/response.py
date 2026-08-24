@@ -83,7 +83,8 @@ class ResponseBlock:
         self.exp_name = exp_name
         self.block_id = block_id    
         self.h5_file = h5_file
-        self.d_timing = get_epochblock_timing(self.exp_name, self.block_id, b_LED=self.b_LED)
+        self.d_timing = get_epochblock_timing(
+            self.exp_name, self.block_id, b_LED=self.b_LED, verbose=self.verbose)
 
         if b_load_fd:
             frame_data, frame_sample_rate = get_epochblock_frame_data(self.exp_name, self.block_id, str_h5=self.h5_file, verbose = self.verbose)

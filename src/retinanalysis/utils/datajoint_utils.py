@@ -940,7 +940,8 @@ def get_epochblock_query(exp_name: str, block_id: int):
     eb_q = eb_q & f'block_id={block_id}'
     return eb_q
 
-def get_epochblock_timing(exp_name: str, block_id: int, b_LED: bool=False) -> dict:
+def get_epochblock_timing(exp_name: str, block_id: int, b_LED: bool=False,
+                          verbose: bool=True) -> dict:
     eb_q = get_epochblock_query(exp_name, block_id)
     df = eb_q.fetch(format='frame').reset_index()
     if len(df) > 1:
@@ -1066,15 +1067,17 @@ def get_epochblock_timing(exp_name: str, block_id: int, b_LED: bool=False) -> di
     if not b_LED:
         stage_frame_rate = df_transitions.loc[0, 'stage_frame_rate']
         if stage_frame_rate is None:
-            print(f'Warning: for {exp_name} block {block_id}, error in finding stage frame rate.')
-            print(f'If this is for an LED stimulus, be sure to set b_LED=True!\n')
+            if verbose:
+                print(f'Warning: for {exp_name} block {block_id}, '
+                      'error in finding stage frame rate.')
+                print('If this is for an LED stimulus, be sure to set b_LED=True!\n')
         else:
             stage_frame_rate = float(stage_frame_rate)
 
         d_timing['stage_frame_rate'] = stage_frame_rate
     
 
-    if not b_LED:
+    if not b_LED and stage_frame_rate is not None:
         try:
             # Set transition times from measured frame times
             pre_frames = np.floor(pre_time_ms * 1e-3 * stage_frame_rate).astype(int)
@@ -1089,14 +1092,20 @@ def get_epochblock_timing(exp_name: str, block_id: int, b_LED: bool=False) -> di
         
         # Exceptions can occur when frame_times_ms are messed up and don't have correct number of frames.
         except Exception as e:
-            print(f'Error occurred while getting actual onset/offset times: {e}')
-            print('It could be that frame_times_ms do not have the correct number of frames due to some error in frame detection.')
-            print('Check the frame monitor sample rate! On MEA Rigs, prefer 1k, errors likely with 10k.')
+            if verbose:
+                print(f'Error occurred while getting actual onset/offset times: {e}')
+                print('It could be that frame_times_ms do not have the correct number '
+                      'of frames due to some error in frame detection.')
+                print('Check the frame monitor sample rate! On MEA Rigs, prefer 1k, '
+                      'errors likely with 10k.')
             actual_onset_times_ms = []
             actual_offset_times_ms = []
 
         d_timing['actual_onset_times_ms'] = actual_onset_times_ms
         d_timing['actual_offset_times_ms'] = actual_offset_times_ms
+    elif not b_LED:
+        d_timing['actual_onset_times_ms'] = []
+        d_timing['actual_offset_times_ms'] = []
 
     return d_timing
 

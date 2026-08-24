@@ -846,6 +846,55 @@ def _tiny_record(exp='2026-04-23_E', cell='Cell1', mode='extracellular',
         pre_time_ms=250.0, stim_time_ms=250.0, n_epochs=30, block_ids=[1])
 
 
+def test_plot_group_adds_raster_above_extracellular_psth():
+    import matplotlib.pyplot as plt
+
+    rec = _tiny_record()
+    rec.trace_time_ms = np.linspace(0.0, 600.0, 61)
+    rec.traces = np.zeros((3, 61))
+    rec.pre_time_ms = 200.0
+    rec.stim_time_ms = 200.0
+    rec.raw = {
+        'dark': np.array([-1.0, -1.0, -0.5, -0.5, 0.0, 0.0]),
+        'spike_times_ms': [
+            np.array([50.0, 220.0]), np.array([210.0]),
+            np.array([100.0, 300.0]), np.array([250.0]),
+            np.array([]), np.array([180.0]),
+        ],
+    }
+    fig = sag.plot_group(rec)
+    assert len(fig.axes) == 3
+    assert fig.axes[0].get_title().startswith('Spike raster')
+    assert [tick.get_text() for tick in fig.axes[0].get_yticklabels()] == ['-1', '-0.5', '0']
+    plt.close(fig)
+
+
+def test_plot_group_without_raw_spikes_keeps_two_panels():
+    import matplotlib.pyplot as plt
+
+    fig = sag.plot_group(_tiny_record(mode='exc'))
+    assert len(fig.axes) == 2
+    plt.close(fig)
+
+
+def test_response_block_forwards_quiet_mode_to_timing_reader(monkeypatch):
+    import pandas as pd
+    from retinanalysis.classes import response as response_module
+
+    called = {}
+
+    def fake_timing(exp_name, block_id, b_LED=False, verbose=True):
+        called['verbose'] = verbose
+        return {}
+
+    monkeypatch.setattr(response_module, 'get_epochblock_timing', fake_timing)
+    monkeypatch.setattr(
+        response_module, 'get_exp_summary',
+        lambda exp_name: pd.DataFrame([{'block_id': 1, 'protocol_name': 'test'}]))
+    response_module.ResponseBlock('X_E', 1, b_load_fd=False, verbose=False)
+    assert called['verbose'] is False
+
+
 def test_prune_records_removes_only_what_is_not_kept(tmp_path):
     keep = _tiny_record(cell='Cell1')
     drop = _tiny_record(cell='Cell2')
