@@ -1109,6 +1109,17 @@ def _spike_window_rates(spike_times, pre_pts: int, stim_pts: int,
     return stim_rate, baseline_rate
 
 
+def _subtract_global_baseline(response_means, baseline_rates) -> Tuple[float, np.ndarray]:
+    """Subtract one across-epoch mean baseline from every contrast response.
+
+    ``baseline_rates`` contains one duration-normalized preTime firing rate per
+    valid epoch. They are averaged once across all epochs; baselines are not
+    paired with and subtracted from individual stimulus epochs.
+    """
+    baseline_mean = float(np.nanmean(np.asarray(baseline_rates, dtype=float)))
+    return baseline_mean, np.asarray(response_means, dtype=float) - baseline_mean
+
+
 def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Optional[str] = None,
                   spike_th: float = DEFAULTS['spike_th'],
                   wc_offset: int = DEFAULTS['wc_offset'],
@@ -1295,10 +1306,9 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
         for c, n in zip(contrasts, resp_n)])
     traces = np.vstack([traces_all[valid & (dark == c)].mean(axis=0) for c in contrasts])
 
-    baseline_mean = float(np.nanmean(resp_base[valid]))
+    baseline_mean, rel = _subtract_global_baseline(resp_mean, resp_base[valid])
     baseline_sem = float(np.nanstd(resp_base[valid], ddof=0) / np.sqrt(max(valid.sum(), 1)))
 
-    rel = resp_mean - baseline_mean
     crossing_nearest = float(contrasts[int(np.argmin(np.abs(rel)))])
     crossing_interp = interp_zero_crossing(contrasts, rel)
 

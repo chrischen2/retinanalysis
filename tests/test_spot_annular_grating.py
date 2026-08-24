@@ -772,6 +772,14 @@ def test_spike_window_rates_use_exact_pre_and_stimulus_boundaries():
     assert baseline == 20.0
 
 
+def test_one_mean_baseline_is_subtracted_across_all_epochs():
+    baseline, relative = sag._subtract_global_baseline(
+        response_means=np.array([25.0, 45.0]),
+        baseline_rates=np.array([0.0, 20.0, 40.0, 60.0]))
+    assert baseline == 30.0
+    assert relative.tolist() == [-5.0, 15.0]
+
+
 def test_analyze_cell_conditions_wraps_section3_workflow(monkeypatch):
     import pandas as pd
     from retinanalysis.SCutils import explore as sc
