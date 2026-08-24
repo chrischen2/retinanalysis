@@ -468,6 +468,16 @@ def test_record_key_distinguishes_fixed_filter_combinations():
     assert sag.record_key(*base, 'EL3 + FW1') != sag.record_key(*base, 'EL2 + FW1')
 
 
+def test_record_key_distinguishes_bright_contrast_and_bar_width():
+    base = ('2026-05-08_E', 'Cell1', 'exc', 'center', 1.0, 0.15,
+            'EL3 + FW1')
+    a = sag.record_key(*base, 0.9, [100.0])
+    b = sag.record_key(*base, 0.5, [100.0])
+    c = sag.record_key(*base, 0.9, [200.0])
+    assert len({a, b, c}) == 3
+    assert '__bright0p9__bar100' in a
+
+
 # --- canonical condition selection ----------------------------------------
 
 def _groups_frame():
@@ -515,7 +525,8 @@ def test_add_condition_labels_from_cell_type_and_site():
     summary = pd.DataFrame({'cell_type': ['RGC\\ON-parasol', 'RGC\\OFF-parasol', 'RGC\\ON-midget'],
                             'grating_site': ['surround', 'center', 'surround']})
     out = sag.add_condition(summary)
-    assert out['condition'].tolist() == ['ON-parasol / surround', 'OFF-parasol / center', 'other']
+    assert out['condition'].tolist() == [
+        'ON-parasol / surround', 'OFF-parasol / center', 'ON-midget / surround']
 
 
 # --- series resistance vs onlineAnalysis -----------------------------------
@@ -731,6 +742,16 @@ def test_group_blocks_bright_is_a_bare_value_when_there_is_only_one():
     assert g.loc[0, 'bright'] == '0.9'
 
 
+def test_group_blocks_can_separate_bright_contrast_and_bar_width():
+    blocks = _groupable_blocks([0.9, 0.5, 0.9], bar_widths=[100.0, 100.0, 200.0])
+    grouped = sag.group_blocks(
+        blocks, show=False, allowed_bright_contrast=None, min_bar_width=None,
+        min_epochs=None, separate_bright_contrast=True, collapse_bar_widths=False)
+    assert len(grouped) == 3
+    assert set(zip(grouped['bright'], grouped['bar_width'])) == {
+        (0.9, 100.0), (0.5, 100.0), (0.9, 200.0)}
+
+
 def test_group_blocks_keeps_light_paths_as_separate_conditions():
     blocks = _groupable_blocks([0.9, 0.9])
     blocks['ndf_combination'] = ['EL3 + FW1', 'EL2 + FW1']
@@ -773,6 +794,21 @@ def test_prune_records_removes_only_what_is_not_kept(tmp_path):
     assert list(arrays['dark_contrasts']) == [-1.0, -0.5, 0.0]
 
 
+def test_save_records_keeps_separate_bright_and_bar_conditions(tmp_path):
+    bright_09 = _tiny_record()
+    bright_05 = _tiny_record()
+    bright_05.bright_bar_contrast = 0.5
+    bar_200 = _tiny_record()
+    bar_200.bar_widths = np.array([200.0])
+
+    sag.save_records([bright_09, bright_05, bar_200], path=tmp_path, verbose=False)
+    saved = sag.load_summary(path=tmp_path)
+    assert len(saved) == 3
+    assert saved['key'].nunique() == 3
+    assert set(saved['bright_bar_contrast']) == {0.5, 0.9}
+    assert set(saved['bar_widths']) == {'100', '200'}
+
+
 def test_prune_records_dry_run_touches_nothing(tmp_path):
     a, b = _tiny_record(cell='Cell1'), _tiny_record(cell='Cell2')
     sag.save_records([a, b], path=tmp_path, verbose=False)
@@ -807,7 +843,8 @@ def test_prune_records_keys_on_the_resolved_recording_mode(tmp_path):
     sag.save_records([rec], path=tmp_path, verbose=False)
     resolved = pd.DataFrame([{'exp_name': rec.exp_name, 'cell_label': rec.cell_label,
                               'onlineAnalysis': 'extracellular', 'grating_site': 'center',
-                              'filter_wheel_ndf': 0.0, 'backgroundIntensity': 0.5}])
+                              'filter_wheel_ndf': 0.0, 'backgroundIntensity': 0.5,
+                              'bright': 0.9, 'bar_width': 100.0}])
     assert sag.group_keys(resolved) == [rec.key]
     assert sag.prune_records(resolved, path=tmp_path, verbose=False) == []
     # The pre-relabel table would not match, and would orphan a live record.

@@ -693,7 +693,9 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
                  allowed_bright_contrast: Optional[Sequence[float]]
                  = ALLOWED_BRIGHT_CONTRAST,
                  min_bar_width: Optional[float] = MIN_BAR_WIDTH,
-                 min_epochs: Optional[int] = MIN_EPOCHS) -> pd.DataFrame:
+                 min_epochs: Optional[int] = MIN_EPOCHS,
+                 separate_bright_contrast: bool = False,
+                 collapse_bar_widths: bool = True) -> pd.DataFrame:
     """Collapse the block table to one row per recording group.
 
     A group is the MATLAB epoch-tree leaf: (experiment, cell, recording mode,
@@ -721,6 +723,13 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
     :data:`MIN_EPOCHS` (16) epochs. Unlike the others this is a test on the
     *group*, applied after the blocks are pooled, since a cell can reach a
     usable count by having been run twice. ``None`` keeps every group.
+
+    ``separate_bright_contrast=True`` makes bright-bar contrast part of the
+    condition key instead of pooling a contrast sweep. ``collapse_bar_widths``
+    defaults to the historical pooled behavior; set it to ``False`` to make
+    each recorded bar width a separate condition. These switches are used by
+    the interactive notebooks so every saved entry describes one unambiguous
+    stimulus condition.
     """
     from retinanalysis.SCutils import explore as sc
 
@@ -781,6 +790,13 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
             'grating_site', 'filter_wheel_ndf', 'backgroundIntensity']
     if 'ndf_combination' in df.columns:
         keys.append('ndf_combination')
+    df = df.copy()
+    if separate_bright_contrast and 'brightBarContrast' in df.columns:
+        df['_condition_bright'] = df['brightBarContrast']
+        keys.append('_condition_bright')
+    if not collapse_bar_widths and 'bar_width' in df.columns:
+        df['_condition_bar_width'] = df['bar_width']
+        keys.append('_condition_bar_width')
     agg = dict(blocks=('block_id', 'size'), epochs=('n_epochs', 'sum'),
                light_setting=('light_setting', 'first'),
                light_level=('light_level', 'first'),
@@ -790,24 +806,19 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
                annulus_inner=('annulusInnerDiameter', 'first'),
                annulus_outer=('annulusOuterDiameter', 'first'),
                spot_intensity=('spotIntensity', 'first'),
-               # Joined like bright: bar width is not a grouping key either, and
-               # analyze_group pools across it, so a group spanning two widths
-               # has to say so rather than report whichever came first.
-               bar_width=('bar_width',
-                          lambda s: ', '.join(f'{v:g}' for v in sorted(set(s)))),
                # Joined for the same reason as bright: the aperture is not a
                # grouping key either, so a group that ever mixed spot with no
                # spot has to show it rather than report whichever came first.
                center_spot=('center_spot',
                             lambda s: ', '.join(sorted(set(str(v) for v in s)))),
-               # Joined, not 'first': brightBarContrast is a block-level setting
-               # (constant within a block, varied between them) but it is *not*
-               # a grouping key, so a cell that was swept over bright contrast
-               # lands in one group. Showing only the first would hide that the
-               # tuning curve underneath averages different stimuli.
-               bright=('brightBarContrast',
-                       lambda s: ', '.join(f'{v:g}' for v in sorted(set(s), reverse=True))),
                block_ids=('block_id', lambda s: ', '.join(str(int(b)) for b in sorted(s))))
+    if collapse_bar_widths:
+        agg['bar_width'] = ('bar_width',
+                            lambda s: ', '.join(f'{v:g}' for v in sorted(set(s))))
+    if not separate_bright_contrast:
+        agg['bright'] = ('brightBarContrast',
+                         lambda s: ', '.join(
+                             f'{v:g}' for v in sorted(set(s), reverse=True)))
     if 'stage_ndfs' in df.columns:
         # Joined rather than 'first': a group can span blocks run behind
         # different fixed filters, and silently showing one would hide that.
@@ -825,6 +836,10 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
         agg['rs_mohm'] = ('series_resistance', lambda s: np.round(np.nanmedian(s) / 1e6, 2))
         agg['epochs_high_rs'] = ('n_epochs_high_rs', 'sum')
     g = df.groupby(keys, dropna=False, sort=False).agg(**agg).reset_index()
+    if separate_bright_contrast and '_condition_bright' in g.columns:
+        g['bright'] = g.pop('_condition_bright')
+    if not collapse_bar_widths and '_condition_bar_width' in g.columns:
+        g['bar_width'] = g.pop('_condition_bar_width')
 
     # After pooling, not before: a cell run twice at the same condition reaches a
     # usable count between them, and dropping its blocks individually would lose
@@ -849,7 +864,7 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
         # The cone prediction is a function of the bright bar the dark bar has to
         # cancel, so pooling several bright contrasts into one tuning curve makes
         # the measured crossing uninterpretable against it.
-        mixed = g[g['bright'].str.contains(',')]
+        mixed = g[g['bright'].astype(str).str.contains(',')]
         if len(mixed):
             print(f'  WARNING: {len(mixed)} group(s) pool more than one '
                   f'brightBarContrast -- their tuning curve averages different '
@@ -983,7 +998,8 @@ class GratingRecord:
     def key(self) -> str:
         return record_key(self.exp_name, self.cell_label, self.online_analysis,
                           self.grating_site, self.ndf, self.background_intensity,
-                          self.config.get('ndf_combination'))
+                          self.config.get('ndf_combination'),
+                          self.bright_bar_contrast, self.bar_widths)
 
     def summary_row(self) -> Dict:
         """Scalar fields only -- what goes in the population index."""
@@ -1276,9 +1292,13 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
     fixed_ndfs = light_settings.loc[0, 'fixed_ndfs']
     ndf = float(light_settings.loc[0, 'filter_wheel_ndf'])
     ndf_combination = str(combinations.iloc[0])
-    max_light_level = ra.visual_stimulus_max(rig_of(exp_name), fixed_ndfs, ndf)
+    try:
+        max_light_level = ra.visual_stimulus_max(rig_of(exp_name), fixed_ndfs, ndf)
+    except (KeyError, TypeError, ValueError):
+        max_light_level = np.nan
     rstar = max_light_level * bg
-    light_label = f'{round_rstar(rstar):g}R*'
+    light_label = (f'{round_rstar(rstar):g}R*' if np.isfinite(rstar)
+                   else f'{ndf_combination} (?R*)')
 
     sr = float(first_params['sampleRate'])
     trace_ms = (psth_time_axis(traces.shape[1], 1000.0) if 'Hz' in units
@@ -1403,12 +1423,14 @@ def describe_group_row(row, index: Optional[int] = None, total: Optional[int] = 
 
 def record_key(exp_name: str, cell_label: str, online_analysis: str, site: str,
                ndf: float, background_intensity: float,
-               ndf_combination: Optional[str] = None) -> str:
+               ndf_combination: Optional[str] = None,
+               bright_bar_contrast: Optional[float] = None,
+               bar_widths=None) -> str:
     """Stable identifier for one recording group, safe as an HDF5 group name.
 
     Same key the MATLAB upserts on (date, cell, mode, FW, background), plus the
-    grating site, since a cell can be recorded with the grating over the center
-    and over the surround.
+    grating site, fixed-NDF path, bright contrast, and bar width. The latter two
+    keep separately analyzed stimulus conditions from overwriting each other.
     """
     def num(v):
         return 'NaN' if v is None or (isinstance(v, float) and np.isnan(v)) else f'{v:g}'.replace('.', 'p')
@@ -1416,8 +1438,28 @@ def record_key(exp_name: str, cell_label: str, online_analysis: str, site: str,
     if ndf_combination:
         safe = re.sub(r'[^A-Za-z0-9.-]+', '-', str(ndf_combination)).strip('-')
         light_path = f'__{safe}'
+    bright_path = ''
+    if bright_bar_contrast is not None and not pd.isna(bright_bar_contrast):
+        bright_path = f'__bright{num(float(bright_bar_contrast))}'
+    bar_path = ''
+    if bar_widths is not None:
+        if isinstance(bar_widths, str):
+            values = [value.strip() for value in bar_widths.split(',') if value.strip()]
+        elif np.isscalar(bar_widths):
+            values = [bar_widths]
+        else:
+            values = list(np.asarray(bar_widths).ravel())
+        normalized = []
+        for value in values:
+            try:
+                normalized.append(num(float(value)))
+            except (TypeError, ValueError):
+                normalized.append(re.sub(r'[^A-Za-z0-9-]+', '-', str(value)).strip('-'))
+        if normalized:
+            bar_path = f'__bar{"-".join(normalized)}'
     return (f'{exp_name}__{cell_label}__{online_analysis}__{site}'
-            f'__FW{num(ndf)}__bg{num(background_intensity)}{light_path}')
+            f'__FW{num(ndf)}__bg{num(background_intensity)}{light_path}'
+            f'{bright_path}{bar_path}')
 
 
 _ARRAY_FIELDS = ('dark_contrasts', 'resp_mean', 'resp_sem', 'resp_n', 'bar_widths',
@@ -1434,7 +1476,7 @@ def group_keys(groups: pd.DataFrame) -> List[str]:
     """
     return [record_key(r['exp_name'], r['cell_label'], r['onlineAnalysis'],
                        r['grating_site'], r['filter_wheel_ndf'], r['backgroundIntensity'],
-                       r.get('ndf_combination'))
+                       r.get('ndf_combination'), r.get('bright'), r.get('bar_width'))
             for _, r in groups.iterrows()]
 
 
@@ -2393,12 +2435,17 @@ def plot_model_tuning(light_levels: Sequence[float] = (1000.0, 2000.0, 4000.0,
 
 
 def add_condition(summary: pd.DataFrame) -> pd.DataFrame:
-    """Attach the canonical ``condition`` label to a stored summary table."""
+    """Attach a ``cell type / grating site`` label to a stored summary table.
+
+    The canonical ON-parasol/surround and OFF-parasol/center labels remain
+    unchanged, while every other recorded cell type retains its own identity
+    instead of being collapsed into an undifferentiated ``other`` group.
+    """
     short = summary['cell_type'].astype(str).str.split('\\').str[-1]
-    keys = list(zip(short, summary['grating_site']))
     out = summary.copy()
     out['cell_type_short'] = short
-    out['condition'] = [CANONICAL_CONDITIONS.get(k, 'other') for k in keys]
+    out['condition'] = [f'{cell_type} / {site}'
+                        for cell_type, site in zip(short, summary['grating_site'])]
     return out
 
 
@@ -2591,8 +2638,8 @@ def plot_condition_examples(records: Optional[Dict[str, Dict]] = None,
         for j, mode in enumerate(modes):
             ax = axes[i][j]
             pool = [r for r in rows
-                    if CANONICAL_CONDITIONS.get(
-                        (str(r['cell_type']).split('\\')[-1], r['grating_site'])) == cond
+                    if (f"{str(r['cell_type']).split(chr(92))[-1]} / "
+                        f"{r['grating_site']}" == cond)
                     and r['online_analysis'] == mode]
             if not pool:
                 ax.text(0.5, 0.5, f'no {cond}\n{mode} recordings', ha='center', va='center',
