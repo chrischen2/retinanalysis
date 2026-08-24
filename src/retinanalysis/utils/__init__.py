@@ -55,6 +55,7 @@ _ATTR_TO_MODULE = {
     'isomerization_converter_widget': 'retinanalysis.utils.isomerization',
     'isomerization_converter_browser': 'retinanalysis.utils.isomerization',
     'isomerizations_per_watt': 'retinanalysis.utils.isomerization',
+    'read_block_light_settings': 'retinanalysis.utils.light_levels',
     'visual_stimulus_max': 'retinanalysis.utils.light_levels',
     'select_flux_factor': 'retinanalysis.utils.isomerization',
 }

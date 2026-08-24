@@ -186,4 +186,151 @@ def visual_stimulus_max(
     return basis_maximum / 10.0 ** (wheel - basis_wheel)
 
 
-__all__ = ["VISUAL_STIMULUS_MAX", "visual_stimulus_max"]
+def _read_epoch_filter_wheel_parameters(block_ids):
+    """Fetch epoch IDs and parameters for the requested parent blocks."""
+    from retinanalysis.config import schema
+
+    epochs = schema.Epoch() & [
+        {"parent_id": int(block_id)} for block_id in block_ids
+    ]
+    if not len(epochs):
+        return []
+    return epochs.fetch("id", "parent_id", "parameters", as_dict=True)
+
+
+def _block_filter_wheel_table(block_ids, epoch_rows=None):
+    """Consolidate protected per-epoch FilterWheel metadata by parent block."""
+    import pandas as pd
+
+    ids = [int(block_id) for block_id in block_ids]
+    rows = (_read_epoch_filter_wheel_parameters(ids)
+            if epoch_rows is None else list(epoch_rows))
+    grouped = {block_id: [] for block_id in ids}
+    for row in rows:
+        block_id = int(row["parent_id"])
+        if block_id in grouped:
+            grouped[block_id].append(row)
+
+    columns = [
+        "block_id", "filter_wheel_ndf", "filter_wheel_status", "n_epochs",
+        "n_filter_wheel_readings",
+    ]
+    result = []
+    for block_id in ids:
+        block_epochs = grouped[block_id]
+        values = []
+        n_recorded = 0
+        n_invalid = 0
+        for epoch in block_epochs:
+            parameters = epoch.get("parameters")
+            parameters = parameters if isinstance(parameters, Mapping) else {}
+            if "NDF" not in parameters or parameters["NDF"] is None:
+                continue
+            n_recorded += 1
+            value = pd.to_numeric(parameters["NDF"], errors="coerce")
+            if pd.isna(value):
+                n_invalid += 1
+            else:
+                values.append(float(value))
+        unique = sorted(set(values))
+        if len(unique) > 1:
+            joined = ", ".join(f"{value:g}" for value in unique)
+            raise ValueError(
+                f"Epoch block {block_id} has conflicting FilterWheel metadata: {joined}"
+            )
+        if n_invalid:
+            status = "invalid"
+        elif not block_epochs:
+            status = "no epochs"
+        elif not unique:
+            status = "not recorded"
+        elif n_recorded < len(block_epochs):
+            status = "partially recorded"
+        else:
+            status = "recorded"
+        result.append({
+            "block_id": block_id,
+            "filter_wheel_ndf": unique[0] if unique else float("nan"),
+            "filter_wheel_status": status,
+            "n_epochs": len(block_epochs),
+            "n_filter_wheel_readings": len(values),
+        })
+    return pd.DataFrame(result, columns=columns)
+
+
+def read_block_light_settings(blocks, block_id=None, *, amp="Amp1", verbose=True):
+    """Read one trusted fixed-NDF + FilterWheel setting per epoch block.
+
+    ``blocks`` may be a frame containing ``exp_name`` and ``block_id``, or one
+    experiment name when ``block_id`` is supplied separately.  Fixed EL filters
+    come from the raw Stage device configurator.  Any ``FW`` token found in
+    that list is ignored.  The numeric wheel OD comes independently from the
+    protected ``FilterWheel:NDF`` metadata and is checked across every epoch in
+    the block before being consolidated.
+
+    The returned frame has one row per requested block.  ``fixed_ndfs`` and
+    ``filter_wheel_ndf`` can be passed directly to :func:`visual_stimulus_max`;
+    ``ndf_combination`` is the readable combined setting.
+
+    Examples
+    --------
+    >>> settings = read_block_light_settings("2026-08-10_G", 12345)
+    >>> row = settings.iloc[0]
+    >>> visual_stimulus_max(row.rig, row.fixed_ndfs, row.filter_wheel_ndf)
+    """
+    import pandas as pd
+    from retinanalysis.SCutils.recording_mode import stage_ndf_table
+    from retinanalysis.utils.isomerization import split_stage_ndfs
+
+    if isinstance(blocks, str):
+        if block_id is None:
+            raise TypeError("block_id is required when blocks is an experiment name")
+        wanted = pd.DataFrame({"exp_name": [blocks], "block_id": [block_id]})
+    elif block_id is not None:
+        raise TypeError("block_id must be omitted when blocks is a table")
+    else:
+        wanted = pd.DataFrame(blocks).copy()
+    required = {"exp_name", "block_id"}
+    missing = required.difference(wanted.columns)
+    if missing:
+        raise ValueError(f"blocks is missing required column(s): {', '.join(sorted(missing))}")
+    wanted = wanted[["exp_name", "block_id"]].drop_duplicates().reset_index(drop=True)
+    wanted["block_id"] = pd.to_numeric(wanted["block_id"], errors="raise").astype(int)
+    if wanted["block_id"].duplicated().any():
+        duplicates = wanted.loc[wanted["block_id"].duplicated(False), "block_id"].tolist()
+        raise ValueError(f"block_id must identify one experiment; duplicated: {duplicates}")
+
+    output_columns = [
+        "exp_name", "block_id", "rig", "fixed_ndfs", "filter_wheel_ndf",
+        "ndf_combination", "filter_wheel_status", "n_epochs",
+        "n_filter_wheel_readings", "ignored_stage_fw_tokens",
+    ]
+    if wanted.empty:
+        return pd.DataFrame(columns=output_columns)
+
+    fixed_table = stage_ndf_table(wanted, amp=amp, verbose=verbose)
+    wheel_table = _block_filter_wheel_table(wanted["block_id"].tolist())
+    result = (wanted.merge(fixed_table, on="block_id", how="left", validate="one_to_one")
+              .merge(wheel_table, on="block_id", how="left", validate="one_to_one"))
+
+    fixed_values = []
+    embedded_values = []
+    for raw in result["stage_ndfs"].fillna(""):
+        fixed, embedded = split_stage_ndfs(raw)
+        fixed_values.append(tuple(sorted(fixed)))
+        embedded_values.append(tuple(embedded))
+    result["fixed_ndfs"] = fixed_values
+    result["ignored_stage_fw_tokens"] = embedded_values
+    result["rig"] = result["exp_name"].astype(str).str.extract(
+        r"_([A-Za-z])(?:_\d+)?$", expand=False).str.upper()
+    result["ndf_combination"] = [
+        " + ".join([*fixed, f"FW{wheel:g}"])
+        if pd.notna(wheel) else (" + ".join(fixed) or "not recorded")
+        for fixed, wheel in zip(result["fixed_ndfs"], result["filter_wheel_ndf"])
+    ]
+    return result[output_columns]
+
+
+__all__ = [
+    "VISUAL_STIMULUS_MAX", "read_block_light_settings", "visual_stimulus_max",
+]

@@ -265,6 +265,7 @@ _ATTR_TO_MODULE = {
     'isomerization_converter_widget': 'retinanalysis.utils.isomerization',
     'isomerization_converter_browser': 'retinanalysis.utils.isomerization',
     'isomerizations_per_watt': 'retinanalysis.utils.isomerization',
+    'read_block_light_settings': 'retinanalysis.utils.light_levels',
     'visual_stimulus_max': 'retinanalysis.utils.light_levels',
     'get_h5_file': 'retinanalysis.utils.datajoint_utils',
     'get_image_paths_across_epochs': 'retinanalysis.utils.regen',
