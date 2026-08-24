@@ -881,7 +881,7 @@ def test_save_records_prune_to_deletes_in_one_call(tmp_path):
     assert list(sag.load_summary(path=tmp_path)['key']) == [fresh.key]
 
 
-def _pop_summary_and_records(curves):
+def _pop_summary_and_records(curves, mode='extracellular'):
     """A summary + record store for population_tuning.
 
     ``curves`` maps cell label -> (rstar_level, baseline, [responses]) on a shared
@@ -894,23 +894,34 @@ def _pop_summary_and_records(curves):
         key = f'k{i}'
         rows.append({'key': key, 'exp_name': 'X_E', 'cell_label': cell,
                      'cell_type': 'ON-parasol', 'grating_site': 'surround',
-                     'online_analysis': 'extracellular', 'units': 'rate (Hz)',
+                     'online_analysis': mode,
+                     'units': 'rate (Hz)' if mode == 'extracellular' else 'excitation (pA)',
                      'rstar_level': lvl, 'bright_bar_contrast': 0.9})
         recs[key] = {'dark_contrasts': contrasts, 'resp_mean': np.asarray(resp, dtype=float),
                      'baseline_mean': float(base)}
     return pd.DataFrame(rows), recs
 
 
-def test_population_tuning_subtracts_each_cells_own_baseline():
-    """Cells are poolable only relative to their own spontaneous rate."""
+def test_population_tuning_keeps_raw_extracellular_firing_rate():
+    """PreTime firing rate is retained for QC, not subtracted from spike rate."""
     summary, recs = _pop_summary_and_records({
-        'Cell1': (1000.0, 10.0, [30.0, 20.0, 10.0]),   # rel  20, 10, 0
-        'Cell2': (1000.0, 50.0, [70.0, 60.0, 50.0]),   # rel  20, 10, 0 -- same curve
+        'Cell1': (1000.0, 10.0, [30.0, 20.0, 10.0]),
+        'Cell2': (1000.0, 50.0, [70.0, 60.0, 50.0]),
     })
     t = sag.population_tuning(summary, records=recs, normalize=False)
-    assert t['mean'].tolist() == [20.0, 10.0, 0.0]
+    assert t['mean'].tolist() == [50.0, 40.0, 30.0]
     assert t['n_cells'].tolist() == [2, 2, 2]
-    assert t['sem'].eq(0).all()                        # identical after baselining
+    assert t['sem'].tolist() == [20.0, 20.0, 20.0]
+
+
+def test_population_tuning_still_subtracts_whole_cell_baseline():
+    summary, recs = _pop_summary_and_records({
+        'Cell1': (1000.0, 10.0, [30.0, 20.0, 10.0]),
+        'Cell2': (1000.0, 50.0, [70.0, 60.0, 50.0]),
+    }, mode='exc')
+    t = sag.population_tuning(summary, records=recs, normalize=False)
+    assert t['mean'].tolist() == [20.0, 10.0, 0.0]
+    assert t['sem'].eq(0).all()
 
 
 def test_population_tuning_normalization_preserves_the_zero_crossing():

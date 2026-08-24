@@ -2472,21 +2472,20 @@ def population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Dict]] 
                       = ALLOWED_BRIGHT_CONTRAST) -> pd.DataFrame:
     """Mean response-vs-dark-contrast curve per light level, pooled over cells.
 
-    The per-recording tuning curve is ``resp_mean - baseline_mean``: the
-    response relative to that cell's own pre-stimulus baseline, which is the
-    quantity whose zero crossing is the balancing contrast. Subtracting the
-    baseline per cell is what makes cells poolable at all — the raw rate says as
-    much about the cell's spontaneous activity as about the stimulus.
+    Extracellular tuning curves use the raw stimulus-window firing rate in
+    ``resp_mean``; the pre-stimulus rate is retained in ``baseline_mean`` for
+    QC and cancellation-point calculation but is not subtracted from the plotted
+    response. Whole-cell curves remain ``resp_mean - baseline_mean``.
 
-    ``normalize`` (default) then divides each cell's curve by its own peak
-    ``|response - baseline|``. Two reasons it is the default:
+    ``normalize`` (default) then divides each cell's curve by the largest
+    absolute plotted response. Two reasons it is the default:
 
     - Cells differ enormously in absolute response — in this dataset the
       excitatory-current records span 1.2 to 538 pA, so a raw mean is just the
       loudest cell with a little noise added. Firing rates are milder (16 to 92
       Hz) but still 6-fold.
-    - It is a *positive* scalar, so it leaves every zero crossing exactly where
-      it was. The balancing contrast — the thing being measured — is unchanged.
+    - It is a *positive* scalar, so it preserves curve shape and any zero
+      crossing. The separately stored cancellation-point calculation is unchanged.
 
     Set ``normalize=False`` to keep the recorded units, which is only meaningful
     within one recording mode.
@@ -2516,7 +2515,9 @@ def population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Dict]] 
         contrasts = np.asarray(rec['dark_contrasts'], dtype=float)
         if contrasts.size < min_contrasts:
             continue
-        rel = np.asarray(rec['resp_mean'], dtype=float) - float(rec['baseline_mean'])
+        rel = np.asarray(rec['resp_mean'], dtype=float)
+        if str(r['online_analysis']).lower() != 'extracellular':
+            rel = rel - float(rec['baseline_mean'])
         if normalize:
             peak = np.nanmax(np.abs(rel))
             if not np.isfinite(peak) or peak == 0:
@@ -2612,7 +2613,9 @@ def plot_population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Di
             if i == len(conditions) - 1:
                 ax.set_xlabel('dark bar contrast')
             if j == 0:
-                ax.set_ylabel(f'response − baseline\n({units})')
+                quantity = ('response' if mode == 'extracellular'
+                            else 'response − baseline')
+                ax.set_ylabel(f'{quantity}\n({units})')
     fig.suptitle('Population tuning curves by light level'
                  + ('' if normalize else '  (recorded units — never pooled across modes)'),
                  fontsize=11)
