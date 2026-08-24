@@ -31,6 +31,7 @@ _SUBMODULES = {
     'datajoint_utils': 'retinanalysis.utils.datajoint_utils',
     'cell_type_utils': 'retinanalysis.utils.cell_type_utils',
     'isomerization': 'retinanalysis.utils.isomerization',
+    'light_levels': 'retinanalysis.utils.light_levels',
 }
 
 _ATTR_TO_MODULE = {
@@ -54,6 +55,7 @@ _ATTR_TO_MODULE = {
     'isomerization_converter_widget': 'retinanalysis.utils.isomerization',
     'isomerization_converter_browser': 'retinanalysis.utils.isomerization',
     'isomerizations_per_watt': 'retinanalysis.utils.isomerization',
+    'visual_stimulus_max': 'retinanalysis.utils.light_levels',
     'select_flux_factor': 'retinanalysis.utils.isomerization',
 }
 
