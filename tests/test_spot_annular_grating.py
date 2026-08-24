@@ -809,6 +809,27 @@ def test_save_records_keeps_separate_bright_and_bar_conditions(tmp_path):
     assert set(saved['bar_widths']) == {'100', '200'}
 
 
+def test_save_records_replaces_legacy_unsplit_key(tmp_path):
+    import h5py
+
+    rec = _tiny_record()
+    legacy = sag.record_key(
+        rec.exp_name, rec.cell_label, rec.online_analysis, rec.grating_site,
+        rec.ndf, rec.background_intensity)
+    h5_path = tmp_path / 'records.h5'
+    with h5py.File(h5_path, 'w') as store:
+        old = store.create_group(legacy)
+        old.attrs['key'] = legacy
+        old.attrs['exp_name'] = rec.exp_name
+        old.attrs['cell_label'] = rec.cell_label
+        old.attrs['cell_type'] = rec.cell_type
+
+    sag.save_records([rec], path=tmp_path, verbose=False)
+    with h5py.File(h5_path, 'r') as store:
+        assert legacy not in store
+        assert rec.key in store
+
+
 def test_prune_records_dry_run_touches_nothing(tmp_path):
     a, b = _tiny_record(cell='Cell1'), _tiny_record(cell='Cell2')
     sag.save_records([a, b], path=tmp_path, verbose=False)

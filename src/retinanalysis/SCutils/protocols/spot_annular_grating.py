@@ -1581,6 +1581,21 @@ def save_records(records: Sequence[GratingRecord], path=None, verbose: bool = Tr
 
     with h5py.File(h5_path, 'a') as f:
         for rec in records:
+            # Records written before bright contrast and bar width became part
+            # of the key would otherwise survive beside the new split records
+            # and be counted twice in population analysis. Remove only the two
+            # exact historical forms for this same date/cell/mode/site/FW/bg.
+            legacy_keys = {
+                record_key(rec.exp_name, rec.cell_label, rec.online_analysis,
+                           rec.grating_site, rec.ndf, rec.background_intensity),
+                record_key(rec.exp_name, rec.cell_label, rec.online_analysis,
+                           rec.grating_site, rec.ndf, rec.background_intensity,
+                           rec.config.get('ndf_combination')),
+            }
+            legacy_keys.discard(rec.key)
+            removed_legacy = [key for key in legacy_keys if key in f]
+            for key in removed_legacy:
+                del f[key]
             if rec.key in f:
                 del f[rec.key]
                 action = 'overwrote'
@@ -1597,6 +1612,8 @@ def save_records(records: Sequence[GratingRecord], path=None, verbose: bool = Tr
                 if v is not None and not isinstance(v, (list, tuple, dict)):
                     g.attrs[f'cfg_{k}'] = v
             if verbose:
+                for key in removed_legacy:
+                    print(f'  replaced legacy unsplit record {key}')
                 print(f'  {action} {rec.key}')
 
     if prune_to is not None:
