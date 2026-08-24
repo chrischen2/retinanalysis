@@ -762,6 +762,65 @@ def test_group_blocks_keeps_light_paths_as_separate_conditions():
     assert grouped['max_light_level'].tolist() == [3000.0, 10000.0]
 
 
+def test_spike_window_rates_use_exact_pre_and_stimulus_boundaries():
+    # Baseline [0, 100): 2 spikes. Stimulus [100, 300): 3 spikes. The spike at
+    # 300 is excluded, so no post-stimulus activity leaks into the response.
+    stim, baseline = sag._spike_window_rates(
+        np.array([0, 99, 100, 150, 299, 300, 450]),
+        pre_pts=100, stim_pts=200, sample_rate=1000.0)
+    assert stim == 15.0
+    assert baseline == 20.0
+
+
+def test_analyze_cell_conditions_wraps_section3_workflow(monkeypatch):
+    import pandas as pd
+    from retinanalysis.SCutils import explore as sc
+
+    blocks = _groupable_blocks([0.9, 0.9])
+    blocks['filter_wheel_ndf'] = [0.0, 1.0]
+    blocks['backgroundIntensity'] = [0.15, 0.30]
+    blocks['light_setting'] = ['FW0/bg0.15', 'FW1/bg0.30']
+    blocks['light_level'] = ['10000R*', '2000R*']
+    blocks['rstar'] = [11550.0, 2280.0]
+    blocks['rstar_level'] = [10000.0, 2000.0]
+    blocks['ndf_combination'] = ['EL2 + FW0', 'EL2 + FW1']
+    blocks['fixed_ndfs'] = [('EL2',), ('EL2',)]
+    blocks['max_light_level'] = [77000.0, 7600.0]
+
+    monkeypatch.setattr(
+        sc, 'find_blocks',
+        lambda protocol, show=False: pd.DataFrame({'exp_name': ['2026-04-04_E']}))
+    monkeypatch.setattr(sag, 'find_blocks', lambda exp_names=None, show=False: blocks.copy())
+    monkeypatch.setattr(sag, 'check_series_resistance', lambda frame, **kwargs: frame)
+
+    analyzed = []
+
+    def fake_analyze(exp_name, block_ids, **kwargs):
+        record = {'exp_name': exp_name, 'block_ids': list(block_ids)}
+        analyzed.append((record, kwargs))
+        return record
+
+    overlay = {}
+    monkeypatch.setattr(sag, 'analyze_group', fake_analyze)
+    monkeypatch.setattr(sag, 'plot_group', lambda record: f"plot-{record['block_ids'][0]}")
+
+    def fake_overlay(records, **kwargs):
+        overlay.update(kwargs)
+        return 'overlay-figure'
+
+    monkeypatch.setattr(sag, 'plot_tuning_overlay', fake_overlay)
+    result = sag.analyze_cell_conditions(
+        date_index=1, cell_label='Cell1', online_analysis='extracellular',
+        show=False, plot=True, verbose=False)
+
+    assert result.exp_name == '2026-04-04_E'
+    assert len(result.condition_rows) == len(result.records) == 2
+    assert result.condition_figures == ['plot-1', 'plot-2']
+    assert result.light_tuning_figure == 'overlay-figure'
+    assert overlay['subtract_baseline'] is True
+    assert all(call[1]['keep_raw'] is True for call in analyzed)
+
+
 def _tiny_record(exp='2026-04-23_E', cell='Cell1', mode='extracellular',
                  site='center', ndf=0.0, bg=0.5):
     """A minimal GratingRecord that save_records can write."""
@@ -902,25 +961,15 @@ def _pop_summary_and_records(curves, mode='extracellular'):
     return pd.DataFrame(rows), recs
 
 
-def test_population_tuning_keeps_raw_extracellular_firing_rate():
-    """PreTime firing rate is retained for QC, not subtracted from spike rate."""
+@pytest.mark.parametrize('mode', ['extracellular', 'exc'])
+def test_population_tuning_subtracts_each_cells_own_baseline(mode):
     summary, recs = _pop_summary_and_records({
         'Cell1': (1000.0, 10.0, [30.0, 20.0, 10.0]),
         'Cell2': (1000.0, 50.0, [70.0, 60.0, 50.0]),
-    })
-    t = sag.population_tuning(summary, records=recs, normalize=False)
-    assert t['mean'].tolist() == [50.0, 40.0, 30.0]
-    assert t['n_cells'].tolist() == [2, 2, 2]
-    assert t['sem'].tolist() == [20.0, 20.0, 20.0]
-
-
-def test_population_tuning_still_subtracts_whole_cell_baseline():
-    summary, recs = _pop_summary_and_records({
-        'Cell1': (1000.0, 10.0, [30.0, 20.0, 10.0]),
-        'Cell2': (1000.0, 50.0, [70.0, 60.0, 50.0]),
-    }, mode='exc')
+    }, mode=mode)
     t = sag.population_tuning(summary, records=recs, normalize=False)
     assert t['mean'].tolist() == [20.0, 10.0, 0.0]
+    assert t['n_cells'].tolist() == [2, 2, 2]
     assert t['sem'].eq(0).all()
 
 

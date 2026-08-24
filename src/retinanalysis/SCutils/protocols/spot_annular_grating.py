@@ -42,7 +42,6 @@ DEFAULTS = dict(
     psth_sigma_ms=10.0,
     wc_offset=100,         # samples, whole-cell response window offset
     smooth_ms=10.0,        # box-car width for whole-cell traces
-    spike_offset=300,      # samples, spiking response window offset
     cone_i0=2000.0,        # Weber I0 (R*) for the cancellation prediction
 )
 
@@ -1054,16 +1053,29 @@ class GratingRecord:
         light_path = self.config.get('ndf_combination', f'FW{self.ndf:g}')
         maximum = self.config.get('max_light_level', np.nan)
         maximum_text = f', max={maximum:g}R*/s' if np.isfinite(maximum) else ''
+        response_relative = self.resp_mean - self.baseline_mean
         return (f'{self.exp_name} | {self.cell_type} | {self.cell_label} | '
                 f'{mode} | grating {self.grating_site} | '
                 f'{light_path}{maximum_text} bg={self.background_intensity:.2f} '
                 f'({self.light_level}) | '
                 f'{self.n_epochs} epochs{rs}\n'
                 f'  dark contrasts : {np.round(self.dark_contrasts, 3)}\n'
-                f'  response       : {np.round(self.resp_mean, 3)}\n'
+                f'  response − baseline: {np.round(response_relative, 3)}\n'
                 f'  baseline={self.baseline_mean:.3f} | crossing nearest='
                 f'{self.crossing_nearest:.3f} interp={self.crossing_interp:.3f} | '
                 f'cone pred={self.cone_pred_dark:.3f}')
+
+
+@dataclass
+class CellConditionAnalysis:
+    """Outputs from :func:`analyze_cell_conditions` for notebook reuse."""
+
+    exp_name: str
+    condition_rows: pd.DataFrame
+    light_conditions: pd.DataFrame
+    records: List[GratingRecord]
+    condition_figures: List[object] = field(default_factory=list)
+    light_tuning_figure: Optional[object] = None
 
 
 def _epoch_param(df_epochs: pd.DataFrame, name: str) -> np.ndarray:
@@ -1078,9 +1090,27 @@ def _epoch_param(df_epochs: pd.DataFrame, name: str) -> np.ndarray:
     return np.array([float(p.get(name, np.nan)) for p in df_epochs['epoch_parameters']])
 
 
+def _spike_window_rates(spike_times, pre_pts: int, stim_pts: int,
+                        sample_rate: float) -> Tuple[float, float]:
+    """Stimulus and baseline firing rates from non-overlapping exact windows.
+
+    The response window is ``[preTime, preTime + stimTime)`` and the baseline
+    window is ``[0, preTime)``. Spike times and window boundaries are in sample
+    points; returned values are Hz.
+    """
+    if sample_rate <= 0 or stim_pts <= 0:
+        raise ValueError('sample_rate and stim_pts must be positive')
+    st = np.asarray(spike_times, dtype=float)
+    stim_n = np.sum((st >= pre_pts) & (st < pre_pts + stim_pts))
+    baseline_n = np.sum((st >= 0) & (st < pre_pts))
+    stim_rate = float(stim_n) / (float(stim_pts) / sample_rate)
+    baseline_rate = (float(baseline_n) / (float(pre_pts) / sample_rate)
+                     if pre_pts > 0 else np.nan)
+    return stim_rate, baseline_rate
+
+
 def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Optional[str] = None,
                   spike_th: float = DEFAULTS['spike_th'],
-                  spike_offset: int = DEFAULTS['spike_offset'],
                   wc_offset: int = DEFAULTS['wc_offset'],
                   smooth_ms: float = DEFAULTS['smooth_ms'],
                   psth_sigma_ms: float = DEFAULTS['psth_sigma_ms'],
@@ -1208,20 +1238,13 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
                 raw['series_resistance'].append(float(rs[i]))
 
         if spiking:
-            # Firing rate in the stimulus window, with a pre-stim baseline rate
-            # for comparison. The MATLAB reports raw spike counts; dividing by
-            # the window duration puts the tuning curve in Hz, on the same scale
-            # as the PSTH traces above it. It is a constant factor within a
-            # recording, so the crossing is unchanged.
-            stim_s = stim_pts / sr
-            pre_s = pre_pts / sr
+            # Count only [preTime, preTime + stimTime); the old MATLAB-derived
+            # 300-sample shift leaked post-stimulus time into this window.
             for i in keep:
                 st = np.asarray(rb.spike_times[i], dtype=float)
-                stim_n = np.sum((st > pre_pts + spike_offset)
-                                & (st < pre_pts + stim_pts + spike_offset))
-                base_n = np.sum(st < pre_pts)
-                resp_stim.append(float(stim_n) / stim_s)
-                resp_base.append(float(base_n) / pre_s if pre_pts else np.nan)
+                stim_rate, baseline_rate = _spike_window_rates(st, pre_pts, stim_pts, sr)
+                resp_stim.append(stim_rate)
+                resp_base.append(baseline_rate)
                 traces_all.append(spike_times_to_psth(st / sr * 1000.0,
                                                       rb.amp_data.shape[1] / sr * 1000.0,
                                                       psth_sigma_ms, 1000.0))
@@ -1756,10 +1779,11 @@ def plot_group(rec: GratingRecord, figsize: Tuple[float, float] = (7.2, 7.6)):
                    f'bg={rec.background_intensity:g} ({rec.light_level})', fontsize=9)
     ax_t.legend(frameon=False, fontsize=6.5, ncol=2, title='dark contrast', title_fontsize=7)
 
-    ax_c.errorbar(rec.dark_contrasts, rec.resp_mean, yerr=rec.resp_sem, fmt='o-',
+    response_relative = rec.resp_mean - rec.baseline_mean
+    ax_c.errorbar(rec.dark_contrasts, response_relative, yerr=rec.resp_sem, fmt='o-',
                   ms=4, lw=1.4, color='#0072B2', ecolor='#0072B2', capsize=3,
-                  label='response', zorder=3)
-    ax_c.axhline(rec.baseline_mean, color='#666666', ls='--', lw=1.1, label='baseline')
+                  label='response − baseline', zorder=3)
+    ax_c.axhline(0.0, color='#666666', ls='--', lw=1.1, label='baseline')
     ax_c.axvline(rec.crossing_nearest, color='#D55E00', ls=':', lw=1.3, label='crossing')
     if np.isfinite(rec.cone_pred_dark):
         ax_c.axvline(rec.cone_pred_dark, color='#009E73', ls='-.', lw=1.3, label='conepred')
@@ -1991,6 +2015,144 @@ def plot_tuning_overlay(records: Sequence, labels: Optional[Sequence[str]] = Non
                  f"{', '.join(cells)} — {long['position'].nunique()} recordings"
                  + ('  (▾ = interpolated crossing)' if mark_crossing else ''), fontsize=10)
     return fig
+
+
+def analyze_cell_conditions(date_index: int, cell_label: str, online_analysis: str,
+                            site: str = 'center', collapse_bar_widths: bool = False,
+                            max_series_resistance: Optional[float] = MAX_SERIES_RESISTANCE,
+                            keep_raw: bool = True, plot: bool = True,
+                            show: bool = True, verbose: bool = True) -> CellConditionAnalysis:
+    """Discover, analyze, and plot every condition for one selected cell.
+
+    This is the reusable implementation behind Section 3 of
+    ``analyzeCenterGrating.ipynb``. ``date_index`` addresses the complete sorted
+    protocol-date list. Conditions remain separate by fixed-NDF path, numeric
+    FilterWheel, background intensity, bright-bar contrast, and (unless
+    ``collapse_bar_widths`` is true) bar width.
+
+    Extracellular records count spikes only in ``[preTime, preTime + stimTime)``.
+    Tuning overlays subtract the firing rate measured during preTime; whole-cell
+    overlays retain the same baseline-subtracted convention.
+    """
+    from retinanalysis.SCutils import explore as sc
+    if show:
+        from IPython.display import display
+
+    protocol_index = sc.find_blocks(PROTOCOL, show=False)
+    protocol_dates = sorted(protocol_index.exp_name.dropna().unique())
+    if not 1 <= int(date_index) <= len(protocol_dates):
+        raise ValueError(f'date_index {date_index} is outside 1-{len(protocol_dates)}')
+    exp_name = protocol_dates[int(date_index) - 1]
+
+    date_blocks = find_blocks(exp_names=[exp_name], show=False)
+    date_blocks = check_series_resistance(
+        date_blocks, max_series_resistance=max_series_resistance, show=False)
+    date_blocks = date_blocks[date_blocks.grating_site.eq(site)].copy()
+    cell_blocks = date_blocks[
+        date_blocks.cell_label.eq(cell_label)
+        & date_blocks.onlineAnalysis.eq(online_analysis)
+    ].copy()
+    if cell_blocks.empty:
+        available_columns = ['cell_label', 'cell_type_short', 'onlineAnalysis']
+        available = (date_blocks[available_columns].drop_duplicates()
+                     .sort_values(['cell_label', 'onlineAnalysis']))
+        if show:
+            display(available)
+        raise ValueError(
+            f'No {site}-grating blocks for {exp_name} {cell_label} {online_analysis}')
+
+    bright_values = sorted(
+        cell_blocks['brightBarContrast'].dropna().astype(float).unique())
+    if show and len(bright_values) > 1:
+        print(f'ALERT: multiple bright-bar contrasts were recorded: {bright_values}.')
+
+    bar_width_values = sorted(cell_blocks.bar_width.dropna().astype(float).unique())
+    if show and len(bar_width_values) > 1:
+        action = ('COLLAPSING them by request' if collapse_bar_widths
+                  else 'keeping them separate')
+        print(f'ALERT: multiple bar widths were recorded: {bar_width_values} µm; {action}.')
+
+    condition_rows = group_blocks(
+        cell_blocks, show=False, require_filter_wheel=False,
+        allowed_bright_contrast=None, min_bar_width=None, min_epochs=None,
+        separate_bright_contrast=True,
+        collapse_bar_widths=collapse_bar_widths)
+    if condition_rows.empty:
+        raise ValueError(f'No conditions found for {exp_name} {cell_label}')
+    condition_rows = condition_rows.sort_values(
+        ['ndf_combination', 'backgroundIntensity', 'bright', 'bar_width'],
+        na_position='last').reset_index(drop=True)
+    condition_rows.insert(0, 'condition_index', np.arange(1, len(condition_rows) + 1))
+
+    condition_view_columns = [
+        'condition_index', 'ndf_combination', 'filter_wheel_ndf',
+        'backgroundIntensity', 'bright', 'bar_width', 'max_light_level', 'rstar',
+        'blocks', 'epochs', 'block_ids',
+    ]
+    condition_view_columns = [c for c in condition_view_columns if c in condition_rows]
+    if show and len(condition_rows) > 1:
+        print(f'ALERT: {len(condition_rows)} unique conditions found; '
+              'each will be analyzed separately:')
+        display(condition_rows[condition_view_columns])
+
+    light_columns = ['ndf_combination', 'filter_wheel_ndf', 'backgroundIntensity']
+    light_conditions = condition_rows[light_columns].drop_duplicates()
+    if show and len(light_conditions) > 1:
+        print(f'ALERT: {len(light_conditions)} NDF/FilterWheel/background '
+              'combinations found; each becomes a separate saved entry and '
+              'their tuning curves will be overlaid.')
+
+    records: List[GratingRecord] = []
+    condition_figures: List[object] = []
+    for _, row in condition_rows.iterrows():
+        block_ids = [int(value) for value in str(row.block_ids).split(',')]
+        if show:
+            metadata = pd.DataFrame([{
+                'condition_index': int(row.condition_index),
+                'cell_label': row.cell_label,
+                'cell_type': row.cell_type_short,
+                'onlineAnalysis': row.onlineAnalysis,
+                'spotIntensity': row.spot_intensity,
+                'brightBarContrast': row.bright,
+                'barWidth_um': row.bar_width,
+                'apertureDiameter_um': row.aperture,
+                'annulusInnerDiameter_um': row.annulus_inner,
+                'annulusOuterDiameter_um': row.annulus_outer,
+                'background_Rstar_per_s': row.rstar,
+            }])
+            print(f'Condition {int(row.condition_index)}/{len(condition_rows)} metadata:')
+            display(metadata)
+        record = analyze_group(
+            exp_name, block_ids, online_analysis=online_analysis,
+            max_series_resistance=max_series_resistance,
+            keep_raw=keep_raw, verbose=verbose)
+        records.append(record)
+        if plot:
+            condition_figures.append(plot_group(record))
+
+    light_tuning_figure = None
+    if plot and len(light_conditions) > 1:
+        labels = [
+            (f'C{int(row.condition_index)}: NDF={row.ndf_combination}, '
+             f'FW={row.filter_wheel_ndf}, background={row.backgroundIntensity}, '
+             f'bright={row.bright}, width={row.bar_width} µm')
+            for _, row in condition_rows.iterrows()
+        ]
+        if show:
+            print('Overlaying baseline-subtracted tuning curves across the '
+                  'recorded light conditions.')
+        light_tuning_figure = plot_tuning_overlay(
+            records, labels=labels, subtract_baseline=True,
+            title=f'{exp_name} {cell_label}: tuning curves by light condition')
+
+    if show:
+        print(f'Analyzed {len(records)} separate condition(s) for '
+              f'{exp_name} {cell_label}.')
+    return CellConditionAnalysis(
+        exp_name=exp_name, condition_rows=condition_rows,
+        light_conditions=light_conditions, records=records,
+        condition_figures=condition_figures,
+        light_tuning_figure=light_tuning_figure)
 
 
 def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
@@ -2472,10 +2634,9 @@ def population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Dict]] 
                       = ALLOWED_BRIGHT_CONTRAST) -> pd.DataFrame:
     """Mean response-vs-dark-contrast curve per light level, pooled over cells.
 
-    Extracellular tuning curves use the raw stimulus-window firing rate in
-    ``resp_mean``; the pre-stimulus rate is retained in ``baseline_mean`` for
-    QC and cancellation-point calculation but is not subtracted from the plotted
-    response. Whole-cell curves remain ``resp_mean - baseline_mean``.
+    Every per-recording tuning curve is ``resp_mean - baseline_mean``. For
+    extracellular records this subtracts the firing rate measured during
+    preTime from the firing rate measured strictly during the stimulus window.
 
     ``normalize`` (default) then divides each cell's curve by the largest
     absolute plotted response. Two reasons it is the default:
@@ -2515,9 +2676,7 @@ def population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Dict]] 
         contrasts = np.asarray(rec['dark_contrasts'], dtype=float)
         if contrasts.size < min_contrasts:
             continue
-        rel = np.asarray(rec['resp_mean'], dtype=float)
-        if str(r['online_analysis']).lower() != 'extracellular':
-            rel = rel - float(rec['baseline_mean'])
+        rel = np.asarray(rec['resp_mean'], dtype=float) - float(rec['baseline_mean'])
         if normalize:
             peak = np.nanmax(np.abs(rel))
             if not np.isfinite(peak) or peak == 0:
@@ -2613,9 +2772,7 @@ def plot_population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Di
             if i == len(conditions) - 1:
                 ax.set_xlabel('dark bar contrast')
             if j == 0:
-                quantity = ('response' if mode == 'extracellular'
-                            else 'response − baseline')
-                ax.set_ylabel(f'{quantity}\n({units})')
+                ax.set_ylabel(f'response − baseline\n({units})')
     fig.suptitle('Population tuning curves by light level'
                  + ('' if normalize else '  (recorded units — never pooled across modes)'),
                  fontsize=11)
@@ -2670,10 +2827,12 @@ def plot_condition_examples(records: Optional[Dict[str, Dict]] = None,
             calibrated = [r for r in pool if np.isfinite(float(r['rstar']))]
             choose_from = calibrated if (prefer_calibrated and calibrated) else pool
             rec = max(choose_from, key=lambda r: float(r['n_epochs']))
-            ax.errorbar(rec['dark_contrasts'], rec['resp_mean'], yerr=rec['resp_sem'],
+            response_relative = (np.asarray(rec['resp_mean'], dtype=float)
+                                 - float(rec['baseline_mean']))
+            ax.errorbar(rec['dark_contrasts'], response_relative, yerr=rec['resp_sem'],
                         fmt='o-', ms=4, lw=1.4, color='#0072B2', ecolor='#0072B2',
-                        capsize=3, label='response')
-            ax.axhline(float(rec['baseline_mean']), color='#666666', ls='--', lw=1.1,
+                        capsize=3, label='response − baseline')
+            ax.axhline(0.0, color='#666666', ls='--', lw=1.1,
                        label='baseline')
             ax.axvline(float(rec['crossing_nearest']), color='#D55E00', ls=':', lw=1.4,
                        label=f"nearest {float(rec['crossing_nearest']):.2f}")
