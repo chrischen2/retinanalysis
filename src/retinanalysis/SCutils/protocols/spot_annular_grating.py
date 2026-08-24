@@ -40,9 +40,9 @@ PROTOCOL = 'spotWithAnnularGrating'
 DEFAULTS = dict(
     spike_th=3,            # thresholdSpikeFactor (SpikeDetectorNew)
     psth_sigma_ms=10.0,
-    wc_offset=100,         # samples, whole-cell response window offset
+    spike_offset=100.0,    # ms after stimulus onset
+    wc_offset=100.0,       # ms after stimulus onset
     smooth_ms=10.0,        # box-car width for whole-cell traces
-    spike_offset=300,      # reversing-protocol compatibility; flashed analysis ignores it
     cone_i0=2000.0,        # Weber I0 (R*) for the cancellation prediction
 )
 
@@ -1032,6 +1032,8 @@ class GratingRecord:
             'fixed_ndfs': self.config.get('fixed_ndfs', ''),
             'ndf_combination': self.config.get('ndf_combination', ''),
             'max_light_level': self.config.get('max_light_level', np.nan),
+            'spike_offset_ms': self.config.get('spike_offset_ms', np.nan),
+            'wc_offset_ms': self.config.get('wc_offset_ms', np.nan),
         }
 
     def describe(self) -> str:
@@ -1054,12 +1056,15 @@ class GratingRecord:
         light_path = self.config.get('ndf_combination', f'FW{self.ndf:g}')
         maximum = self.config.get('max_light_level', np.nan)
         maximum_text = f', max={maximum:g}R*/s' if np.isfinite(maximum) else ''
+        offset_key = 'spike_offset_ms' if self.online_analysis == 'extracellular' else 'wc_offset_ms'
+        offset = self.config.get(offset_key, np.nan)
+        offset_text = f'  offset={float(offset):g} ms' if np.isfinite(float(offset)) else ''
         response_relative = self.resp_mean - self.baseline_mean
         return (f'{self.exp_name} | {self.cell_type} | {self.cell_label} | '
                 f'{mode} | grating {self.grating_site} | '
                 f'{light_path}{maximum_text} bg={self.background_intensity:.2f} '
                 f'({self.light_level}) | '
-                f'{self.n_epochs} epochs{rs}\n'
+                f'{self.n_epochs} epochs{rs}{offset_text}\n'
                 f'  dark contrasts : {np.round(self.dark_contrasts, 3)}\n'
                 f'  response − baseline: {np.round(response_relative, 3)}\n'
                 f'  baseline={self.baseline_mean:.3f} | crossing nearest='
@@ -1092,19 +1097,25 @@ def _epoch_param(df_epochs: pd.DataFrame, name: str) -> np.ndarray:
 
 
 def _spike_window_rates(spike_times, pre_pts: int, stim_pts: int,
-                        sample_rate: float) -> Tuple[float, float]:
+                        sample_rate: float, offset_ms: float = 0.0) -> Tuple[float, float]:
     """Stimulus and baseline firing rates from non-overlapping exact windows.
 
-    The response window is ``[preTime, preTime + stimTime)`` and the baseline
-    window is ``[0, preTime)``. Spike times and window boundaries are in sample
-    points; returned values are Hz.
+    The response window is ``[preTime + offset, preTime + stimTime)`` and the
+    baseline window is ``[0, preTime)``. Spike times and the pre/stim boundaries
+    are in sample points; ``offset_ms`` is explicit milliseconds. Returned
+    values are Hz, each normalized by its actual window duration.
     """
     if sample_rate <= 0 or stim_pts <= 0:
         raise ValueError('sample_rate and stim_pts must be positive')
+    offset_pts = int(round(float(offset_ms) / 1e3 * sample_rate))
+    if offset_pts < 0 or offset_pts >= stim_pts:
+        raise ValueError('offset_ms must satisfy 0 <= offset < stimTime')
     st = np.asarray(spike_times, dtype=float)
-    stim_n = np.sum((st >= pre_pts) & (st < pre_pts + stim_pts))
+    stim_start = pre_pts + offset_pts
+    stim_stop = pre_pts + stim_pts
+    stim_n = np.sum((st >= stim_start) & (st < stim_stop))
     baseline_n = np.sum((st >= 0) & (st < pre_pts))
-    stim_rate = float(stim_n) / (float(stim_pts) / sample_rate)
+    stim_rate = float(stim_n) / (float(stim_pts - offset_pts) / sample_rate)
     baseline_rate = (float(baseline_n) / (float(pre_pts) / sample_rate)
                      if pre_pts > 0 else np.nan)
     return stim_rate, baseline_rate
@@ -1123,7 +1134,8 @@ def _subtract_global_baseline(response_means, baseline_rates) -> Tuple[float, np
 
 def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Optional[str] = None,
                   spike_th: float = DEFAULTS['spike_th'],
-                  wc_offset: int = DEFAULTS['wc_offset'],
+                  spike_offset: float = DEFAULTS['spike_offset'],
+                  wc_offset: float = DEFAULTS['wc_offset'],
                   smooth_ms: float = DEFAULTS['smooth_ms'],
                   psth_sigma_ms: float = DEFAULTS['psth_sigma_ms'],
                   cone_i0: float = DEFAULTS['cone_i0'],
@@ -1141,7 +1153,8 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
     Extracellular responses are firing rates in the stimulus window (Hz);
     whole-cell responses are the mean smoothed current in pA (box-car of
     ``smooth_ms``), with the sign flipped for 'exc' so larger always means a
-    larger response.
+    larger response. ``spike_offset`` and ``wc_offset`` are milliseconds after
+    stimulus onset; the response window always ends at ``preTime + stimTime``.
 
     Every block is checked against the amplifier's ``seriesResistance`` before
     it is used, by the same :func:`resolve_recording_mode` rule
@@ -1250,11 +1263,12 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
                 raw['series_resistance'].append(float(rs[i]))
 
         if spiking:
-            # Count only [preTime, preTime + stimTime); the old MATLAB-derived
-            # 300-sample shift leaked post-stimulus time into this window.
+            # Offset the start within the stimulus, never the stimulus end, so
+            # the response window cannot leak into tailTime.
             for i in keep:
                 st = np.asarray(rb.spike_times[i], dtype=float)
-                stim_rate, baseline_rate = _spike_window_rates(st, pre_pts, stim_pts, sr)
+                stim_rate, baseline_rate = _spike_window_rates(
+                    st, pre_pts, stim_pts, sr, offset_ms=spike_offset)
                 resp_stim.append(stim_rate)
                 resp_base.append(baseline_rate)
                 traces_all.append(spike_times_to_psth(st / sr * 1000.0,
@@ -1272,7 +1286,11 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
             width = max(int(round(smooth_ms / 1e3 * sr)), 1)
             data = uniform_filter1d(np.asarray(rb.amp_data, dtype=float), size=width, axis=1)
             data = data - data[:, :pre_pts].mean(axis=1, keepdims=True)
-            lo, hi = pre_pts + wc_offset, min(pre_pts + stim_pts + wc_offset, data.shape[1])
+            wc_offset_pts = int(round(float(wc_offset) / 1e3 * sr))
+            if wc_offset_pts < 0 or wc_offset_pts >= stim_pts:
+                raise ValueError('wc_offset must satisfy 0 <= offset < stimTime')
+            lo = pre_pts + wc_offset_pts
+            hi = min(pre_pts + stim_pts, data.shape[1])
             for i in keep:
                 resp_stim.append(sign * float(data[i, lo:hi].mean()))
                 resp_base.append(sign * float(data[i, :pre_pts].mean()))
@@ -1369,7 +1387,9 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
         config={**{k: first_params.get(k) for k in CONFIG_KEYS},
                 'fixed_ndfs': ', '.join(fixed_ndfs),
                 'ndf_combination': ndf_combination,
-                'max_light_level': max_light_level},
+                'max_light_level': max_light_level,
+                'spike_offset_ms': float(spike_offset),
+                'wc_offset_ms': float(wc_offset)},
         units=units, raw=raw)
     if verbose:
         print(rec.describe())
@@ -1794,6 +1814,10 @@ def plot_group(rec: GratingRecord, figsize: Tuple[float, float] = (7.2, 7.6)):
             gridspec_kw={'height_ratios': [1.15, 1.0], 'hspace': 0.34})
         ax_r = None
     colors = style.colors_for_conditions(list(rec.dark_contrasts))
+    offset_key = ('spike_offset_ms' if rec.online_analysis == 'extracellular'
+                  else 'wc_offset_ms')
+    response_offset_ms = float(rec.config.get(offset_key, 0.0))
+    response_start_ms = rec.pre_time_ms + response_offset_ms
 
     if ax_r is not None:
         raw_dark = np.asarray(raw['dark'], dtype=float)
@@ -1815,6 +1839,7 @@ def plot_group(rec: GratingRecord, figsize: Tuple[float, float] = (7.2, 7.6)):
             ax_r.axhline(row_position - 0.5, color='#DDDDDD', lw=0.6, zorder=0)
         ax_r.axvspan(rec.pre_time_ms, rec.pre_time_ms + rec.stim_time_ms,
                      color='#000000', alpha=0.06, lw=0, zorder=0)
+        ax_r.axvline(response_start_ms, color='#D55E00', ls=':', lw=1.0, zorder=2)
         ax_r.set_ylim(max(row_position - 0.5, 0.5), -0.5)
         ax_r.set_yticks(tick_positions, tick_labels, fontsize=7)
         ax_r.set_ylabel('dark contrast', fontsize=8)
@@ -1825,6 +1850,8 @@ def plot_group(rec: GratingRecord, figsize: Tuple[float, float] = (7.2, 7.6)):
         ax_t.plot(rec.trace_time_ms, tr, lw=1.2, color=colors[c], label=f'{c:g}')
     ax_t.axvspan(rec.pre_time_ms, rec.pre_time_ms + rec.stim_time_ms,
                  color='#000000', alpha=0.06, lw=0, zorder=0)
+    ax_t.axvline(response_start_ms, color='#D55E00', ls=':', lw=1.0,
+                 label=f'response start (+{response_offset_ms:g} ms)')
     if ax_r is not None and len(rec.trace_time_ms):
         ax_r.set_xlim(float(rec.trace_time_ms[0]), float(rec.trace_time_ms[-1]))
         ax_t.set_xlim(float(rec.trace_time_ms[0]), float(rec.trace_time_ms[-1]))
@@ -2077,6 +2104,8 @@ def plot_tuning_overlay(records: Sequence, labels: Optional[Sequence[str]] = Non
 def analyze_cell_conditions(date_index: int, cell_label: str, online_analysis: str,
                             site: str = 'center', collapse_bar_widths: bool = False,
                             max_series_resistance: Optional[float] = MAX_SERIES_RESISTANCE,
+                            spike_offset: float = DEFAULTS['spike_offset'],
+                            wc_offset: float = DEFAULTS['wc_offset'],
                             keep_raw: bool = True, plot: bool = True,
                             show: bool = True, verbose: bool = True) -> CellConditionAnalysis:
     """Discover, analyze, and plot every condition for one selected cell.
@@ -2087,8 +2116,9 @@ def analyze_cell_conditions(date_index: int, cell_label: str, online_analysis: s
     FilterWheel, background intensity, bright-bar contrast, and (unless
     ``collapse_bar_widths`` is true) bar width.
 
-    Extracellular records count spikes only in ``[preTime, preTime + stimTime)``.
-    Tuning overlays subtract the firing rate measured during preTime; whole-cell
+    ``spike_offset`` and ``wc_offset`` are milliseconds after stimulus onset;
+    both response windows still end at ``preTime + stimTime``. Extracellular
+    tuning overlays subtract the firing rate measured during preTime; whole-cell
     overlays retain the same baseline-subtracted convention.
     """
     from retinanalysis.SCutils import explore as sc
@@ -2169,6 +2199,8 @@ def analyze_cell_conditions(date_index: int, cell_label: str, online_analysis: s
                 'cell_label': row.cell_label,
                 'cell_type': row.cell_type_short,
                 'onlineAnalysis': row.onlineAnalysis,
+                'spikeOffset_ms': float(spike_offset),
+                'wholeCellOffset_ms': float(wc_offset),
                 'spotIntensity': row.spot_intensity,
                 'brightBarContrast': row.bright,
                 'barWidth_um': row.bar_width,
@@ -2182,6 +2214,7 @@ def analyze_cell_conditions(date_index: int, cell_label: str, online_analysis: s
         record = analyze_group(
             exp_name, block_ids, online_analysis=online_analysis,
             max_series_resistance=max_series_resistance,
+            spike_offset=spike_offset, wc_offset=wc_offset,
             keep_raw=keep_raw, verbose=verbose)
         records.append(record)
         if plot:

@@ -772,6 +772,20 @@ def test_spike_window_rates_use_exact_pre_and_stimulus_boundaries():
     assert baseline == 20.0
 
 
+def test_visible_offsets_default_to_100_ms():
+    assert sag.DEFAULTS['spike_offset'] == 100.0
+    assert sag.DEFAULTS['wc_offset'] == 100.0
+
+
+def test_spike_offset_delays_start_but_never_extends_past_stimulus():
+    # preTime=100 ms, stimTime=200 ms, offset=50 ms -> [150, 300), 150 ms.
+    stim, baseline = sag._spike_window_rates(
+        np.array([0, 99, 100, 149, 150, 299, 300]),
+        pre_pts=100, stim_pts=200, sample_rate=1000.0, offset_ms=50.0)
+    assert stim == pytest.approx(2 / 0.15)
+    assert baseline == 20.0
+
+
 def test_one_mean_baseline_is_subtracted_across_all_epochs():
     baseline, relative = sag._subtract_global_baseline(
         response_means=np.array([25.0, 45.0]),
@@ -819,6 +833,7 @@ def test_analyze_cell_conditions_wraps_section3_workflow(monkeypatch):
     monkeypatch.setattr(sag, 'plot_tuning_overlay', fake_overlay)
     result = sag.analyze_cell_conditions(
         date_index=1, cell_label='Cell1', online_analysis='extracellular',
+        spike_offset=125.0, wc_offset=75.0,
         show=False, plot=True, verbose=False)
 
     assert result.exp_name == '2026-04-04_E'
@@ -827,6 +842,8 @@ def test_analyze_cell_conditions_wraps_section3_workflow(monkeypatch):
     assert result.light_tuning_figure == 'overlay-figure'
     assert overlay['subtract_baseline'] is True
     assert all(call[1]['keep_raw'] is True for call in analyzed)
+    assert all(call[1]['spike_offset'] == 125.0 for call in analyzed)
+    assert all(call[1]['wc_offset'] == 75.0 for call in analyzed)
 
 
 def _tiny_record(exp='2026-04-23_E', cell='Cell1', mode='extracellular',
@@ -854,6 +871,7 @@ def test_plot_group_adds_raster_above_extracellular_psth():
     rec.traces = np.zeros((3, 61))
     rec.pre_time_ms = 200.0
     rec.stim_time_ms = 200.0
+    rec.config['spike_offset_ms'] = 100.0
     rec.raw = {
         'dark': np.array([-1.0, -1.0, -0.5, -0.5, 0.0, 0.0]),
         'spike_times_ms': [
@@ -866,6 +884,7 @@ def test_plot_group_adds_raster_above_extracellular_psth():
     assert len(fig.axes) == 3
     assert fig.axes[0].get_title().startswith('Spike raster')
     assert [tick.get_text() for tick in fig.axes[0].get_yticklabels()] == ['-1', '-0.5', '0']
+    assert any(np.allclose(line.get_xdata(), [300.0, 300.0]) for line in fig.axes[0].lines)
     plt.close(fig)
 
 

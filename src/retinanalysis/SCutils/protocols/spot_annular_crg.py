@@ -78,6 +78,10 @@ from retinanalysis.SCutils.recording_mode import (  # noqa: F401
 PROTOCOL = 'spotWithAnnularContrastReversingGrating'
 
 DEFAULTS = dict(sag.DEFAULTS)
+# This reversing analysis still expresses its legacy offsets in amplifier
+# samples. Keep those local rather than inheriting the flashed protocol's new
+# visible millisecond controls.
+DEFAULTS.update(spike_offset=300, wc_offset=100)
 DEFAULTS.update(
     cycles_to_drop=1,   # skip the first reversal cycle (onset transient)
 )
