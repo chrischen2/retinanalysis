@@ -20,14 +20,15 @@ polarity as intended -- grating over the center for OFF cells, over the surround
 for ON cells -- but the two parameters are independent, so group on
 :func:`grating_site`.
 
-Light level is keyed on (filter-wheel NDF, backgroundIntensity) and mapped to R*
-by :func:`light_level_rstar`, which needs the rig -- E and G differ by 2.6x at
-the same setting. The exact value lives in ``rstar``; ``rstar_level`` snaps it
-to the nearest nominal rung in :data:`RSTAR_LEVELS` for grouping and labelling.
+Light level is keyed on the fixed Stage EL filters, protected numeric
+FilterWheel reading, rig, and ``backgroundIntensity``. The intensity-1 maximum
+comes from :func:`retinanalysis.visual_stimulus_max`; the exact background value
+lives in ``rstar`` and ``rstar_level`` snaps it to the nearest nominal rung.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -536,13 +537,12 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
     # (verified equal to read_filter_wheel_ndf on every sampled block). A rig
     # with no filter wheel leaves it missing -- those blocks have no defined
     # light level and should not enter the Weber comparison.
-    df = df.rename(columns={'NDF': 'filter_wheel_ndf', 'barWidth': 'bar_width'})
-    df['has_filter_wheel'] = df['filter_wheel_ndf'].notna()
+    df = df.rename(columns={'NDF': 'filter_wheel_ndf_recorded', 'barWidth': 'bar_width'})
     if verify_fw:
         mismatch = []
         for _, r in df.iterrows():
             h5_fw = read_filter_wheel_ndf(r['exp_name'], r['block_id'])
-            db_fw = r['filter_wheel_ndf']
+            db_fw = r['filter_wheel_ndf_recorded']
             if not (np.isclose(h5_fw, db_fw) or (np.isnan(h5_fw) and pd.isna(db_fw))):
                 mismatch.append((r['exp_name'], int(r['block_id']), db_fw, h5_fw))
         print(f'filter-wheel verification against the h5: '
@@ -550,25 +550,32 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
         for exp, bid, db_fw, h5_fw in mismatch:
             print(f'  MISMATCH {exp} block {bid}: database {db_fw} vs h5 {h5_fw}')
 
-    # The fixed filters in the light path, which the wheel setting does not
-    # cover and which change between blocks on some dates.
-    df = df.merge(stage_ndf_table(df[['exp_name', 'block_id']], verbose=show),
-                  on='block_id', how='left')
-    df['stage_ndfs'] = df['stage_ndfs'].fillna('')
+    # Fixed filters come from the raw Stage device configurator. The numeric
+    # wheel reading is consolidated independently from protected metadata over
+    # every epoch in each block; embedded Stage FW labels are never trusted.
+    settings = ra.read_block_light_settings(
+        df[['exp_name', 'block_id']], verbose=show)
+    df = (df.drop(columns=['filter_wheel_ndf_recorded'])
+          .merge(settings.drop(columns=['exp_name', 'rig', 'n_epochs']), on='block_id',
+                 how='left', validate='one_to_one'))
+    df['has_filter_wheel'] = df['filter_wheel_ndf'].notna()
 
-    # R* comes from the rig's measured ceiling, so the rig has to come with the
-    # wheel setting -- the two rigs differ by 2.6x at the same setting.
-    rs = [light_level_rstar(n, b, rig=r)
-          for n, b, r in zip(df['filter_wheel_ndf'], df['backgroundIntensity'], df['rig'])]
-    df['rstar'] = [r for r, _ in rs]
-    df['light_level'] = [lab for _, lab in rs]
-    df['rstar_level'] = [round_rstar(r) for r, _ in rs]
+    maxima = []
+    for rig, fixed, wheel in zip(df['rig'], df['fixed_ndfs'], df['filter_wheel_ndf']):
+        try:
+            maxima.append(ra.visual_stimulus_max(rig, fixed, wheel))
+        except (KeyError, ValueError):
+            maxima.append(np.nan)
+    df['max_light_level'] = maxima
+    df['rstar'] = df['max_light_level'] * df['backgroundIntensity']
+    df['light_level'] = [f'{round_rstar(value):g}R*' if np.isfinite(value)
+                         else f'{combo} (?R*)'
+                         for value, combo in zip(df['rstar'], df['ndf_combination'])]
+    df['rstar_level'] = [round_rstar(value) for value in df['rstar']]
     df['light_setting'] = [light_setting(n, b)
                            for n, b in zip(df['filter_wheel_ndf'], df['backgroundIntensity'])]
-    df['rstar_measured'] = [is_calibrated(n, b, rig=r)
-                            for n, b, r in zip(df['filter_wheel_ndf'],
-                                               df['backgroundIntensity'], df['rig'])]
-    df['max_rstar'] = [max_rstar(r, n) for r, n in zip(df['rig'], df['filter_wheel_ndf'])]
+    df['rstar_measured'] = df['max_light_level'].notna()
+    df['max_rstar'] = df['max_light_level']
     df = df.sort_values(['exp_name', 'cell_label', 'start_time']).reset_index(drop=True)
 
     if show:
@@ -577,7 +584,8 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
         # balancing contrast is a function of the pair, not of the light level
         # alone. See cone_predict_dark_contrast().
         cols = ['exp_name', 'cell_label', 'cell_type_short', 'onlineAnalysis', 'grating_site',
-                'center_spot', 'filter_wheel_ndf', 'stage_ndfs', 'backgroundIntensity',
+                'center_spot', 'ndf_combination', 'max_light_level',
+                'filter_wheel_ndf', 'stage_ndfs', 'backgroundIntensity',
                 'light_level', 'apertureDiameter', 'annulusInnerDiameter',
                 'annulusOuterDiameter', 'brightBarContrast', 'bar_width',
                 'n_epochs', 'block_id']
@@ -604,7 +612,8 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
                                       zip(off['rstar'], off['rstar_level'])})))
         sc.scroll_table(df[cols], height=height,
                         num_cols=('n_epochs', 'block_id', 'filter_wheel_ndf',
-                                  'backgroundIntensity', 'brightBarContrast', 'bar_width'))
+                                  'max_light_level', 'backgroundIntensity',
+                                  'brightBarContrast', 'bar_width'))
     return df
 
 
@@ -770,6 +779,8 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
 
     keys = ['exp_name', 'rig', 'cell_label', 'cell_type_short', 'onlineAnalysis',
             'grating_site', 'filter_wheel_ndf', 'backgroundIntensity']
+    if 'ndf_combination' in df.columns:
+        keys.append('ndf_combination')
     agg = dict(blocks=('block_id', 'size'), epochs=('n_epochs', 'sum'),
                light_setting=('light_setting', 'first'),
                light_level=('light_level', 'first'),
@@ -802,6 +813,10 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
         # different fixed filters, and silently showing one would hide that.
         agg['stage_ndfs'] = ('stage_ndfs',
                              lambda s: ' | '.join(sorted({str(v) for v in s})))
+    if 'fixed_ndfs' in df.columns:
+        agg['fixed_ndfs'] = ('fixed_ndfs', 'first')
+    if 'max_light_level' in df.columns:
+        agg['max_light_level'] = ('max_light_level', 'first')
     # Carry the amplifier reading through when check_series_resistance() has run,
     # so the recording-group table shows how each cell was actually held. In
     # MOhm here because the table is for reading; the ohms stay canonical.
@@ -967,7 +982,8 @@ class GratingRecord:
     @property
     def key(self) -> str:
         return record_key(self.exp_name, self.cell_label, self.online_analysis,
-                          self.grating_site, self.ndf, self.background_intensity)
+                          self.grating_site, self.ndf, self.background_intensity,
+                          self.config.get('ndf_combination'))
 
     def summary_row(self) -> Dict:
         """Scalar fields only -- what goes in the population index."""
@@ -977,8 +993,8 @@ class GratingRecord:
             'grating_site': self.grating_site, 'ndf': self.ndf,
             'background_intensity': self.background_intensity, 'rstar': self.rstar,
             'rstar_level': round_rstar(self.rstar), 'rig': rig_of(self.exp_name),
-            'rstar_measured': is_calibrated(self.ndf, self.background_intensity,
-                                            rig=rig_of(self.exp_name)),
+            'rstar_measured': np.isfinite(
+                float(self.config.get('max_light_level', np.nan))),
             'light_setting': light_setting(self.ndf, self.background_intensity),
             'light_level': self.light_level, 'baseline_mean': self.baseline_mean,
             'baseline_sem': self.baseline_sem, 'crossing_nearest': self.crossing_nearest,
@@ -997,6 +1013,9 @@ class GratingRecord:
             'annulus_inner': self.config.get('annulusInnerDiameter', np.nan),
             'annulus_outer': self.config.get('annulusOuterDiameter', np.nan),
             'spot_intensity': self.config.get('spotIntensity', np.nan),
+            'fixed_ndfs': self.config.get('fixed_ndfs', ''),
+            'ndf_combination': self.config.get('ndf_combination', ''),
+            'max_light_level': self.config.get('max_light_level', np.nan),
         }
 
     def describe(self) -> str:
@@ -1016,9 +1035,13 @@ class GratingRecord:
         if self.mode_mismatch:
             mode = f"{mode} (recorded as '{self.online_analysis_recorded}', " \
                    f'relabelled from the amplifier)'
+        light_path = self.config.get('ndf_combination', f'FW{self.ndf:g}')
+        maximum = self.config.get('max_light_level', np.nan)
+        maximum_text = f', max={maximum:g}R*/s' if np.isfinite(maximum) else ''
         return (f'{self.exp_name} | {self.cell_type} | {self.cell_label} | '
                 f'{mode} | grating {self.grating_site} | '
-                f'FW={self.ndf} bg={self.background_intensity:.2f} ({self.light_level}) | '
+                f'{light_path}{maximum_text} bg={self.background_intensity:.2f} '
+                f'({self.light_level}) | '
                 f'{self.n_epochs} epochs{rs}\n'
                 f'  dark contrasts : {np.round(self.dark_contrasts, 3)}\n'
                 f'  response       : {np.round(self.resp_mean, 3)}\n'
@@ -1243,7 +1266,19 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
     bright_mode = float(pd.Series(bright[valid]).mode().iloc[0]) if valid.any() else np.nan
     ndf = float(first_params.get('NDF', np.nan))
     bg = float(first_params['backgroundIntensity'])
-    rstar, light_label = light_level_rstar(ndf, bg, rig=rig_of(exp_name))
+    light_settings = ra.read_block_light_settings(
+        pd.DataFrame({'exp_name': exp_name, 'block_id': used_blocks}), verbose=False)
+    combinations = light_settings['ndf_combination'].drop_duplicates()
+    if len(combinations) != 1:
+        raise ValueError(
+            f'{exp_name} blocks {used_blocks} span multiple NDF combinations: '
+            f'{combinations.tolist()}')
+    fixed_ndfs = light_settings.loc[0, 'fixed_ndfs']
+    ndf = float(light_settings.loc[0, 'filter_wheel_ndf'])
+    ndf_combination = str(combinations.iloc[0])
+    max_light_level = ra.visual_stimulus_max(rig_of(exp_name), fixed_ndfs, ndf)
+    rstar = max_light_level * bg
+    light_label = f'{round_rstar(rstar):g}R*'
 
     sr = float(first_params['sampleRate'])
     trace_ms = (psth_time_axis(traces.shape[1], 1000.0) if 'Hz' in units
@@ -1277,7 +1312,11 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
         n_epochs=int(valid.sum()), block_ids=used_blocks,
         series_resistance=rs_median, n_epochs_high_rs=n_high_rs,
         mode_mismatch=mode_mismatch, online_analysis_recorded=recorded_mode,
-        config={k: first_params.get(k) for k in CONFIG_KEYS}, units=units, raw=raw)
+        config={**{k: first_params.get(k) for k in CONFIG_KEYS},
+                'fixed_ndfs': ', '.join(fixed_ndfs),
+                'ndf_combination': ndf_combination,
+                'max_light_level': max_light_level},
+        units=units, raw=raw)
     if verbose:
         print(rec.describe())
     return rec
@@ -1352,15 +1391,19 @@ def describe_group_row(row, index: Optional[int] = None, total: Optional[int] = 
     rstar = get('rstar')
     calibrated = rstar is not None and not (isinstance(rstar, float) and np.isnan(rstar))
     rstar_txt = f" = {num(rstar)}R*" if calibrated else ' (no R* calibration yet)'
-    light = (f"wheel NDF {num(get('filter_wheel_ndf'))} + fixed filters {ndfs}, "
-             f"{get('light_setting', '?')}{rstar_txt}")
+    maximum = get('max_light_level')
+    maximum_txt = (f", max {num(maximum)}R*/s" if maximum is not None
+                   and not (isinstance(maximum, float) and np.isnan(maximum)) else '')
+    light = (f"wheel NDF {num(get('filter_wheel_ndf'))} + fixed filters {ndfs}"
+             f"{maximum_txt}, {get('light_setting', '?')}{rstar_txt}")
     light_line = f"  {'light':<22s} {light}"
 
     return '\n'.join([head, site_line, mode_line, stim_line, light_line])
 
 
 def record_key(exp_name: str, cell_label: str, online_analysis: str, site: str,
-               ndf: float, background_intensity: float) -> str:
+               ndf: float, background_intensity: float,
+               ndf_combination: Optional[str] = None) -> str:
     """Stable identifier for one recording group, safe as an HDF5 group name.
 
     Same key the MATLAB upserts on (date, cell, mode, FW, background), plus the
@@ -1369,7 +1412,12 @@ def record_key(exp_name: str, cell_label: str, online_analysis: str, site: str,
     """
     def num(v):
         return 'NaN' if v is None or (isinstance(v, float) and np.isnan(v)) else f'{v:g}'.replace('.', 'p')
-    return f'{exp_name}__{cell_label}__{online_analysis}__{site}__FW{num(ndf)}__bg{num(background_intensity)}'
+    light_path = ''
+    if ndf_combination:
+        safe = re.sub(r'[^A-Za-z0-9.-]+', '-', str(ndf_combination)).strip('-')
+        light_path = f'__{safe}'
+    return (f'{exp_name}__{cell_label}__{online_analysis}__{site}'
+            f'__FW{num(ndf)}__bg{num(background_intensity)}{light_path}')
 
 
 _ARRAY_FIELDS = ('dark_contrasts', 'resp_mean', 'resp_sem', 'resp_n', 'bar_widths',
@@ -1385,7 +1433,8 @@ def group_keys(groups: pd.DataFrame) -> List[str]:
     was actually saved under.
     """
     return [record_key(r['exp_name'], r['cell_label'], r['onlineAnalysis'],
-                       r['grating_site'], r['filter_wheel_ndf'], r['backgroundIntensity'])
+                       r['grating_site'], r['filter_wheel_ndf'], r['backgroundIntensity'],
+                       r.get('ndf_combination'))
             for _, r in groups.iterrows()]
 
 
@@ -1519,14 +1568,12 @@ def save_records(records: Sequence[GratingRecord], path=None, verbose: bool = Tr
 
 
 def refresh_rstar(summary: pd.DataFrame) -> pd.DataFrame:
-    """Recompute ``rstar`` / ``light_level`` from the stored setting and the rig.
+    """Recompute ``rstar`` from stored fixed filters, wheel, rig, and background.
 
-    What a record stores is the *setting* — filter-wheel NDF and background
-    intensity — which is a fact about the experiment. R* is a fact about the
-    rig, and it can be restated whenever the calibration is. Since the analysis
-    never uses R* (the crossings come from the tuning curves), doing the
-    conversion on read means a change to :data:`RIG_MAX_RSTAR` reaches records
-    that were analyzed before it, with no re-analysis.
+    New records retain the fixed EL stack separately from the protected wheel
+    reading. Their intensity-1 ceiling is recalculated through
+    :func:`retinanalysis.visual_stimulus_max`. Records created before that
+    field existed retain the legacy rig/wheel fallback for compatibility.
 
     Returns a copy with ``rstar``, ``rstar_level``, ``light_level`` and
     ``rstar_measured`` brought up to date.
@@ -1544,14 +1591,29 @@ def refresh_rstar(summary: pd.DataFrame) -> pd.DataFrame:
     if 'rig' in out.columns:
         stored = out['rig']
         rigs = stored.where(stored.notna() & (stored.astype(str).str.strip() != ''), rigs)
-    values = [light_level_rstar(n, b, rig=r)
-              for n, b, r in zip(out['ndf'], out['background_intensity'], rigs)]
+    values = []
+    maxima = []
+    for _, row in out.assign(_rig=list(rigs)).iterrows():
+        fixed = row.get('fixed_ndfs', '')
+        if fixed is not None and str(fixed).strip():
+            try:
+                from retinanalysis.utils.light_levels import visual_stimulus_max
+                maximum = visual_stimulus_max(row['_rig'], fixed, row['ndf'])
+                rstar = maximum * float(row['background_intensity'])
+                values.append((rstar, f'{round_rstar(rstar):g}R*'))
+                maxima.append(maximum)
+                continue
+            except (KeyError, TypeError, ValueError):
+                pass
+        value = light_level_rstar(row['ndf'], row['background_intensity'], rig=row['_rig'])
+        values.append(value)
+        maxima.append(max_rstar(row['_rig'], row['ndf']))
     out['rig'] = list(rigs)
+    out['max_light_level'] = maxima
     out['rstar'] = [v for v, _ in values]
     out['light_level'] = [lab for _, lab in values]
     out['rstar_level'] = [round_rstar(v) for v, _ in values]
-    out['rstar_measured'] = [is_calibrated(n, b, rig=r)
-                             for n, b, r in zip(out['ndf'], out['background_intensity'], rigs)]
+    out['rstar_measured'] = np.isfinite(out['max_light_level'])
     return out
 
 
@@ -1629,8 +1691,9 @@ def plot_group(rec: GratingRecord, figsize: Tuple[float, float] = (7.2, 7.6)):
                  color='#000000', alpha=0.06, lw=0, zorder=0)
     ax_t.set_xlabel('Time (ms)')
     ax_t.set_ylabel('Rate (Hz)' if 'Hz' in rec.units else rec.units)
+    light_path = rec.config.get('ndf_combination', f'FW{rec.ndf:g}')
     ax_t.set_title(f'{rec.exp_name}  {rec.cell_label} ({rec.cell_type})  {rec.online_analysis}\n'
-                   f'grating over {rec.grating_site}  |  FW={rec.ndf:g} '
+                   f'grating over {rec.grating_site}  |  {light_path} '
                    f'bg={rec.background_intensity:g} ({rec.light_level})', fontsize=9)
     ax_t.legend(frameon=False, fontsize=6.5, ncol=2, title='dark contrast', title_fontsize=7)
 
@@ -1874,7 +1937,7 @@ def plot_tuning_overlay(records: Sequence, labels: Optional[Sequence[str]] = Non
 def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
                 on_error: str = 'log', verbose: bool = False,
                 skip_existing: bool = False, status: bool = True,
-                prune: bool = False, **kwargs) -> List[GratingRecord]:
+                prune: bool = False, path=None, **kwargs) -> List[GratingRecord]:
     """Run :func:`analyze_group` over every row of :func:`group_blocks` output.
 
     ``status=True`` (the default) announces each recording before it is
@@ -1898,14 +1961,14 @@ def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
     this run keeps whatever it had — a failure should not delete data.
     """
     records, failures = [], []
-    stored = set(load_summary()['key']) if skip_existing else set()
+    stored = set(load_summary(path=path)['key']) if skip_existing else set()
     skipped = 0
     total = len(groups)
     for position, (_, row) in enumerate(groups.iterrows(), start=1):
         if skip_existing:
             key = record_key(row['exp_name'], row['cell_label'], row['onlineAnalysis'],
                              row['grating_site'], row['filter_wheel_ndf'],
-                             row['backgroundIntensity'])
+                             row['backgroundIntensity'], row.get('ndf_combination'))
             if key in stored:
                 skipped += 1
                 if status:
@@ -1922,7 +1985,7 @@ def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
             if save:
                 # Save as we go: a batch this long should survive an
                 # interruption, and with skip_existing it can then resume.
-                save_records([rec], verbose=False)
+                save_records([rec], path=path, verbose=False)
             if plot:
                 plot_group(rec)
             if status:
@@ -1942,7 +2005,7 @@ def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
     # still part of the analysis set, and deleting its stored record because the
     # rerun crashed would turn a transient failure into data loss.
     if prune and save and len(groups):
-        prune_records(groups, verbose=status)
+        prune_records(groups, path=path, verbose=status)
 
     print(f'analyzed {len(records)}/{len(groups)} groups'
           + (f' ({skipped} already stored, skipped)' if skipped else ''))

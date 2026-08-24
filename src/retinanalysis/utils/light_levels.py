@@ -301,7 +301,7 @@ def read_block_light_settings(blocks, block_id=None, *, amp="Amp1", verbose=True
         raise ValueError(f"block_id must identify one experiment; duplicated: {duplicates}")
 
     output_columns = [
-        "exp_name", "block_id", "rig", "fixed_ndfs", "filter_wheel_ndf",
+        "exp_name", "block_id", "rig", "stage_ndfs", "fixed_ndfs", "filter_wheel_ndf",
         "ndf_combination", "filter_wheel_status", "n_epochs",
         "n_filter_wheel_readings", "ignored_stage_fw_tokens",
     ]

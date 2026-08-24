@@ -156,6 +156,22 @@ def test_refresh_rstar_fills_a_blank_rig_column_from_the_experiment_name():
     assert out['rstar'].notna().all()
 
 
+def test_refresh_rstar_uses_fixed_filters_and_visual_stimulus_lookup():
+    import pandas as pd
+    stored = pd.DataFrame({
+        'exp_name': ['2026-06-04_G'],
+        'fixed_ndfs': ['EL06, EL2'],
+        'ndf': [1.0],
+        'background_intensity': [0.3],
+        'rstar': [np.nan],
+        'light_level': [''],
+    })
+    out = sag.refresh_rstar(stored)
+    assert out.loc[0, 'max_light_level'] == 7600.0
+    assert out.loc[0, 'rstar'] == 2280.0
+    assert out.loc[0, 'light_level'] == '2000R*'
+
+
 def test_refresh_rstar_is_a_no_op_without_the_setting_columns():
     import pandas as pd
     empty = pd.DataFrame()
@@ -447,6 +463,11 @@ def test_record_key_handles_nan_ndf():
     assert 'FWNaN' in key and '.' not in key
 
 
+def test_record_key_distinguishes_fixed_filter_combinations():
+    base = ('2026-05-08_E', 'Cell1', 'exc', 'center', 1.0, 0.15)
+    assert sag.record_key(*base, 'EL3 + FW1') != sag.record_key(*base, 'EL2 + FW1')
+
+
 # --- canonical condition selection ----------------------------------------
 
 def _groups_frame():
@@ -708,6 +729,16 @@ def test_group_blocks_bar_width_lists_every_width_it_pooled():
 def test_group_blocks_bright_is_a_bare_value_when_there_is_only_one():
     g = sag.group_blocks(_groupable_blocks([0.9, 0.9]), show=False)
     assert g.loc[0, 'bright'] == '0.9'
+
+
+def test_group_blocks_keeps_light_paths_as_separate_conditions():
+    blocks = _groupable_blocks([0.9, 0.9])
+    blocks['ndf_combination'] = ['EL3 + FW1', 'EL2 + FW1']
+    blocks['fixed_ndfs'] = [('EL3',), ('EL2',)]
+    blocks['max_light_level'] = [3000.0, 10000.0]
+    grouped = sag.group_blocks(blocks, show=False, min_epochs=None)
+    assert grouped['ndf_combination'].tolist() == ['EL3 + FW1', 'EL2 + FW1']
+    assert grouped['max_light_level'].tolist() == [3000.0, 10000.0]
 
 
 def _tiny_record(exp='2026-04-23_E', cell='Cell1', mode='extracellular',
