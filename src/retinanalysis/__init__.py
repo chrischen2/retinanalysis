@@ -342,6 +342,7 @@ _ATTR_TO_MODULE = {
     'plot_sorting_qc': 'retinanalysis.classes.raw',
     'plot_sorting_qc_grid': 'retinanalysis.classes.raw',
     'plot_spike_count_distribution': 'retinanalysis.utils.chunk_summary',
+    'plot_spike_detection_qc': 'retinanalysis.utils.spike_detection_qc',
     'plot_stim_with_mosaic': 'retinanalysis.utils.mosaic_overlay',
     'raster_sort_order': 'retinanalysis.utils.mosaic_overlay',
     'cell_mean_psth': 'retinanalysis.utils.cycle_average',
