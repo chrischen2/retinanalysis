@@ -368,13 +368,17 @@ def plot_split_field_ratio_response(
         bright_contrast: float = 0.9,
         i0: float = DEFAULTS['cone_i0'],
         ratio_grid=None,
+        off_cell: bool = True,
+        normalize_each: bool = True,
         figsize: Tuple[float, float] = (7.4, 4.8)):
     """Plot :func:`split_field_ratio_response` across background levels.
 
     The default ratio grid spans the full physical range from a zero-intensity
     dark half (:math:`C_-=-1`) to no dark modulation (:math:`C_-=0`). Each
     circle marks the analytic cancellation prediction from
-    :func:`cone_predict_dark_contrast`.
+    :func:`cone_predict_dark_contrast`. ``off_cell=True`` reverses the model
+    sign so dark-driven responses are positive. ``normalize_each=True`` then
+    divides every background's displayed response by its own positive maximum.
     """
     import matplotlib.pyplot as plt
     from retinanalysis.utils import style
@@ -399,8 +403,16 @@ def plot_split_field_ratio_response(
     for background in levels:
         response = split_field_ratio_response(
             ratio, background, bright_contrast=bright_contrast, i0=i0)
+        displayed_response = -response if off_cell else response
+        if normalize_each:
+            peak_response = np.max(displayed_response)
+            if not np.isfinite(peak_response) or peak_response <= 0:
+                raise ValueError(
+                    'each displayed curve must have a finite positive maximum '
+                    'for normalization')
+            displayed_response = displayed_response / peak_response
         color = colors[background]
-        ax.plot(ratio, response, color=color, lw=1.8,
+        ax.plot(ratio, displayed_response, color=color, lw=1.8,
                 label=f'{background:g} R*/s')
         cancellation_ratio = (
             cone_predict_dark_contrast(background, bright_contrast, i0)
@@ -412,10 +424,16 @@ def plot_split_field_ratio_response(
     ax.axvline(-1.0, color='#999999', ls=':', lw=1.0,
                label='equal contrast magnitude')
     ax.set_xlabel(r'signed contrast ratio $\rho=C_-/C_+$')
-    ax.set_ylabel(r'net split-field response $R_{net}$')
+    response_kind = 'OFF-cell response' if off_cell else 'net response'
+    if normalize_each:
+        response_kind = f'normalized {response_kind}'
+    ax.set_ylabel(response_kind)
     ax.set_title(
         f'Linear pooling after intensity-dependent gain discount\n'
-        f'$C_+={bright_contrast:g}$, $W={float(i0):g}$ R*/s', fontsize=10)
+        f'$C_+={bright_contrast:g}$, $W={float(i0):g}$ R*/s; '
+        f'{"OFF-cell sign" if off_cell else "model sign"}'
+        f'{", normalized per background" if normalize_each else ""}',
+        fontsize=10)
     ax.legend(frameon=False, fontsize=7, title='background $I_b$')
     ax.margins(x=0)
     return fig

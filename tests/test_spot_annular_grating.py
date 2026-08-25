@@ -295,6 +295,11 @@ def test_plot_split_field_ratio_response_draws_each_background_and_cancellation(
 
     assert len(response_curves) == len(levels)
     assert len(cancellation_markers) == len(levels)
+    assert all(np.max(line.get_ydata()) == pytest.approx(1.0)
+               for line in response_curves)
+    assert all(line.get_ydata()[0] > 0 > line.get_ydata()[-1]
+               for line in response_curves)
+    assert ax.get_ylabel() == 'normalized OFF-cell response'
     assert all(np.allclose(marker.get_ydata(), [0.0]) for marker in cancellation_markers)
     plt.close(fig)
 
