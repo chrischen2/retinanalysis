@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Optional, Sequence, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -125,3 +126,170 @@ def plot_spike_detection_qc(
             plt.close(fig)
 
     return figures, selected
+
+
+@dataclass
+class SpikeDetectionQCBrowser:
+    """Handles returned by :func:`spike_detection_qc_browser`."""
+
+    widget: Any
+    selector: Any
+    image: Any
+    figures: List[Any]
+    selected_epochs: List[np.ndarray]
+    option_labels: List[str]
+    png_cache: Dict[int, bytes] = field(default_factory=dict, repr=False)
+
+
+def spike_detection_qc_browser(
+        datasets: Sequence[Mapping],
+        fraction: float = 0.30,
+        random_state: Optional[int] = None,
+        epochs_per_view: int = 1,
+        image_dpi: int = 130,
+        display_widget: bool = True,
+        verbose: bool = True) -> Optional[SpikeDetectionQCBrowser]:
+    """Build a compact pull-down browser for spike-detection QC.
+
+    This is protocol-independent. Each dataset mapping must contain ``traces``,
+    ``spike_times``, and ``sample_rate``. Optional keys are:
+
+    - ``label``: short pull-down label;
+    - ``title``: figure heading;
+    - ``spike_time_unit``: ``'samples'``, ``'ms'``, or ``'s'``;
+    - ``stimulus_window_ms``: onset/offset shading;
+    - ``source_group``, ``block_ids``, and ``epoch_indices``: stable source
+      identity and readable epoch labels;
+    - ``epoch_keys`` and ``epoch_labels``: protocol-specific identity/labels
+      that override the block-based defaults.
+
+    The random subset is selected independently in each dataset. Duplicate
+    source epochs are removed across datasets. Figures are rendered into one
+    :class:`ipywidgets.Image`; changing the pull-down replaces its PNG bytes,
+    so notebook frontends cannot accumulate repeated trace outputs.
+    """
+    import io
+    import ipywidgets as widgets
+
+    datasets = list(datasets)
+    if not datasets:
+        if verbose:
+            print('No datasets are available for spike-detection QC.')
+        return None
+    if int(epochs_per_view) != epochs_per_view or epochs_per_view < 1:
+        raise ValueError('epochs_per_view must be a positive integer')
+    if int(image_dpi) != image_dpi or image_dpi < 1:
+        raise ValueError('image_dpi must be a positive integer')
+
+    figures_out: List[Any] = []
+    selected_out: List[np.ndarray] = []
+    option_labels: List[str] = []
+    seen_views = set()
+    page_size = int(epochs_per_view)
+
+    for dataset_index, dataset in enumerate(datasets):
+        missing = [key for key in ('traces', 'spike_times', 'sample_rate')
+                   if key not in dataset]
+        if missing:
+            raise ValueError(f'dataset {dataset_index} is missing {missing}')
+        name = str(dataset.get('label', f'Dataset {dataset_index + 1}'))
+        seed = (None if random_state is None
+                else int(random_state) + dataset_index)
+        figures, selected = plot_spike_detection_qc(
+            dataset['traces'], dataset['spike_times'],
+            sample_rate=dataset['sample_rate'], fraction=fraction,
+            random_state=seed,
+            spike_time_unit=dataset.get('spike_time_unit', 'samples'),
+            stimulus_window_ms=dataset.get('stimulus_window_ms'),
+            max_epochs_per_figure=page_size, close_figures=True,
+            title=dataset.get('title', name))
+        selected_out.append(selected)
+        if verbose:
+            print(f'{name}: checking epochs {selected.tolist()}')
+
+        n_epochs = len(dataset['traces'])
+        def optional_list(key):
+            value = dataset.get(key)
+            return [] if value is None else list(value)
+
+        block_ids = optional_list('block_ids')
+        epoch_indices = optional_list('epoch_indices')
+        epoch_keys = optional_list('epoch_keys')
+        epoch_labels = optional_list('epoch_labels')
+        for values, field_name in ((block_ids, 'block_ids'),
+                                   (epoch_indices, 'epoch_indices'),
+                                   (epoch_keys, 'epoch_keys'),
+                                   (epoch_labels, 'epoch_labels')):
+            if values and len(values) != n_epochs:
+                raise ValueError(
+                    f'dataset {dataset_index} {field_name} must match traces')
+
+        for view_index, figure in enumerate(figures):
+            page = selected[view_index * page_size:(view_index + 1) * page_size]
+            page_keys, page_labels = [], []
+            for axis, local_epoch_value in zip(figure.axes, page):
+                local_epoch = int(local_epoch_value)
+                if epoch_labels:
+                    epoch_label = str(epoch_labels[local_epoch])
+                elif block_ids:
+                    block_id = int(block_ids[local_epoch])
+                    epoch_in_block = (int(epoch_indices[local_epoch])
+                                      if epoch_indices else
+                                      sum(int(value) == block_id
+                                          for value in block_ids[:local_epoch]))
+                    epoch_label = f'block {block_id} | epoch {epoch_in_block}'
+                else:
+                    epoch_label = f'epoch {local_epoch}'
+
+                if epoch_keys:
+                    epoch_key = ('explicit', epoch_keys[local_epoch])
+                elif block_ids:
+                    epoch_key = (dataset.get('source_group', name),
+                                 int(block_ids[local_epoch]), epoch_in_block)
+                else:
+                    epoch_key = (dataset_index, local_epoch)
+                try:
+                    hash(epoch_key)
+                except TypeError as exc:
+                    raise ValueError('epoch_keys entries must be hashable') from exc
+                page_keys.append(epoch_key)
+                page_labels.append(epoch_label)
+                axis.set_ylabel(epoch_label.replace(' | ', '\n'))
+
+            view_key = tuple(page_keys)
+            if view_key in seen_views:
+                continue
+            seen_views.add(view_key)
+            figures_out.append(figure)
+            option_labels.append(f'{name} | {", ".join(page_labels)}')
+
+    if not figures_out:
+        if verbose:
+            print('No unique epochs are available for spike-detection QC.')
+        return None
+
+    selector = widgets.Dropdown(
+        options=[(label, index) for index, label in enumerate(option_labels)],
+        description='QC view:', layout=widgets.Layout(width='520px'),
+        style={'description_width': '70px'})
+    image = widgets.Image(format='png', layout=widgets.Layout(max_width='100%'))
+    browser = SpikeDetectionQCBrowser(
+        widget=widgets.VBox([selector, image]), selector=selector, image=image,
+        figures=figures_out, selected_epochs=selected_out,
+        option_labels=option_labels)
+
+    def _show_selection(change=None):
+        index = int(selector.value)
+        if index not in browser.png_cache:
+            buffer = io.BytesIO()
+            browser.figures[index].savefig(
+                buffer, format='png', dpi=int(image_dpi), bbox_inches='tight')
+            browser.png_cache[index] = buffer.getvalue()
+        image.value = browser.png_cache[index]
+
+    selector.observe(_show_selection, names='value')
+    _show_selection()
+    if display_widget:
+        from IPython.display import display
+        display(browser.widget)
+    return browser

@@ -53,6 +53,53 @@ def test_plot_spike_detection_qc_can_close_figures_for_widget_display():
     assert all(len(figure.axes) == 1 for figure in figures)
 
 
+def test_spike_detection_qc_browser_replaces_one_image_and_deduplicates_sources():
+    t = np.linspace(0.0, 4.0 * np.pi, 100)
+
+    def dataset(label, block_id, epoch_index, frequency):
+        return {
+            'label': label,
+            'traces': np.asarray([np.sin(frequency * t)]),
+            'spike_times': [np.array([20.0])],
+            'sample_rate': 1000.0,
+            'spike_time_unit': 'ms',
+            'source_group': '2026-08-25_E',
+            'block_ids': np.array([block_id]),
+            'epoch_indices': np.array([epoch_index]),
+        }
+
+    browser = ra.spike_detection_qc_browser(
+        [dataset('Condition 1', 100, 7, 1.0),
+         dataset('Condition 2 duplicate', 100, 7, 2.0),
+         dataset('Condition 3', 101, 7, 3.0)],
+        fraction=1.0, random_state=0, display_widget=False, verbose=False)
+
+    assert browser.option_labels == [
+        'Condition 1 | block 100 | epoch 7',
+        'Condition 3 | block 101 | epoch 7',
+    ]
+    assert [child.__class__.__name__ for child in browser.widget.children] == [
+        'Dropdown', 'Image']
+    first_png = browser.image.value
+    browser.selector.value = 1
+    assert browser.image.value and browser.image.value != first_png
+    assert set(browser.png_cache) == {0, 1}
+
+
+def test_spike_detection_qc_browser_accepts_protocol_specific_epoch_identity():
+    browser = ra.spike_detection_qc_browser([{
+        'label': 'Protocol A',
+        'traces': np.zeros((2, 50)),
+        'spike_times': [[], []],
+        'sample_rate': 1000.0,
+        'epoch_keys': [('file-a', 4), ('file-a', 9)],
+        'epoch_labels': ['sweep 4', 'sweep 9'],
+    }], fraction=1.0, display_widget=False, verbose=False)
+
+    assert browser.option_labels == [
+        'Protocol A | sweep 4', 'Protocol A | sweep 9']
+
+
 @pytest.mark.parametrize('fraction', [0, -0.1, 1.1])
 def test_plot_spike_detection_qc_rejects_invalid_fraction(fraction):
     with pytest.raises(ValueError, match='fraction'):
