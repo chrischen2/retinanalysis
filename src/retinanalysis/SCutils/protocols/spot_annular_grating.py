@@ -1897,6 +1897,79 @@ def refresh_rstar(summary: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def assume_missing_filter_wheel(summary: pd.DataFrame,
+                                assumed_ndf: float = 0.0) -> pd.DataFrame:
+    """Patch missing stored wheel readings with an explicit assumed setting.
+
+    This is intentionally opt-in: raw records keep their missing value, while
+    population analyses that know the wheel was at FW0 can call this function
+    before grouping. The returned copy records the affected rows in
+    ``filter_wheel_assumed`` and recomputes their calibrated R* values.
+    """
+    if summary.empty or 'ndf' not in summary.columns:
+        return summary.copy()
+    assumed_ndf = float(assumed_ndf)
+    if not np.isfinite(assumed_ndf) or assumed_ndf < 0:
+        raise ValueError('assumed_ndf must be finite and nonnegative')
+
+    out = summary.copy()
+    wheel = pd.to_numeric(out['ndf'], errors='coerce')
+    missing = wheel.isna()
+    out['ndf'] = wheel.mask(missing, assumed_ndf)
+    out['filter_wheel_assumed'] = missing
+
+    if 'light_setting' in out.columns:
+        for index in out.index[missing]:
+            out.at[index, 'light_setting'] = light_setting(
+                assumed_ndf, out.at[index, 'background_intensity'])
+    if 'ndf_combination' in out.columns:
+        for index in out.index[missing]:
+            fixed = str(out.at[index, 'fixed_ndfs']).strip() \
+                if 'fixed_ndfs' in out.columns else ''
+            fixed = ' + '.join(part.strip() for part in fixed.split(',') if part.strip())
+            wheel_label = f'FW{assumed_ndf:g}'
+            out.at[index, 'ndf_combination'] = (
+                f'{fixed} + {wheel_label}' if fixed else wheel_label)
+    return refresh_rstar(out)
+
+
+def select_population_light_bands(
+        summary: pd.DataFrame,
+        bands: Sequence[Tuple[float, float, float]]
+        = ((1000.0, 1500.0, 1200.0), (10000.0, 15000.0, 12000.0))
+        ) -> pd.DataFrame:
+    """Keep records inside explicit R* bands and assign their group labels.
+
+    Each band is ``(inclusive_low, inclusive_high, plotted_label)``. The exact
+    calibrated value remains in ``rstar``; only ``rstar_level`` and
+    ``light_level`` are replaced by the requested population group label.
+    """
+    if summary.empty:
+        return summary.copy()
+    if 'rstar' not in summary.columns:
+        raise ValueError("summary must contain an 'rstar' column")
+
+    parsed = [tuple(float(value) for value in band) for band in bands]
+    if any(len(band) != 3 for band in parsed):
+        raise ValueError('each light band must be (low, high, label)')
+    for index, (low, high, label) in enumerate(parsed):
+        if (not np.isfinite([low, high, label]).all() or low <= 0
+                or high < low or label <= 0):
+            raise ValueError('light-band bounds and labels must be finite and positive')
+        for other_low, other_high, _ in parsed[:index]:
+            if low <= other_high and other_low <= high:
+                raise ValueError('population light bands must not overlap')
+
+    out = summary.copy()
+    labels = pd.Series(np.nan, index=out.index, dtype=float)
+    for low, high, label in parsed:
+        labels.loc[out['rstar'].between(low, high, inclusive='both')] = label
+    out = out.loc[labels.notna()].copy()
+    out['rstar_level'] = labels.loc[out.index].astype(float)
+    out['light_level'] = out['rstar_level'].map(lambda value: f'{value:g}R*')
+    return out
+
+
 def load_summary(path=None, rstar: bool = True) -> pd.DataFrame:
     """Scalar fields for every stored record — the population-analysis index.
 
@@ -2907,6 +2980,7 @@ def add_condition(summary: pd.DataFrame) -> pd.DataFrame:
 
 def population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Dict]] = None,
                       normalize: bool = True, min_contrasts: int = 3,
+                      negative_only: bool = False,
                       allowed_bright_contrast: Optional[Sequence[float]]
                       = ALLOWED_BRIGHT_CONTRAST) -> pd.DataFrame:
     """Mean response-vs-dark-contrast curve per light level, pooled over cells.
@@ -2915,8 +2989,9 @@ def population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Dict]] 
     extracellular records this subtracts the firing rate measured during
     preTime from the firing rate measured strictly during the stimulus window.
 
-    ``normalize`` (default) then divides each cell's curve by the largest
-    absolute plotted response. Two reasons it is the default:
+    ``negative_only=True`` excludes positive values from the contrast axis.
+    ``normalize`` (default) then divides each cell's retained curve by the
+    largest absolute plotted response. Two reasons it is the default:
 
     - Cells differ enormously in absolute response — in this dataset the
       excitatory-current records span 1.2 to 538 pA, so a raw mean is just the
@@ -2951,9 +3026,13 @@ def population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Dict]] 
         if rec is None:
             continue
         contrasts = np.asarray(rec['dark_contrasts'], dtype=float)
+        rel = np.asarray(rec['resp_mean'], dtype=float) - float(rec['baseline_mean'])
+        if negative_only:
+            keep = contrasts <= 0
+            contrasts = contrasts[keep]
+            rel = rel[keep]
         if contrasts.size < min_contrasts:
             continue
-        rel = np.asarray(rec['resp_mean'], dtype=float) - float(rec['baseline_mean'])
         if normalize:
             peak = np.nanmax(np.abs(rel))
             if not np.isfinite(peak) or peak == 0:
@@ -3047,9 +3126,10 @@ def plot_population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Di
                 ax.legend(frameon=False, fontsize=7, title='light level',
                           title_fontsize=7, loc='best')
             if i == len(conditions) - 1:
-                ax.set_xlabel('dark bar contrast')
+                ax.set_xlabel(r'negative contrast $C_-$')
             if j == 0:
-                ax.set_ylabel(f'response − baseline\n({units})')
+                ax.set_ylabel('normalized response' if normalize
+                              else f'response − baseline\n({units})')
     fig.suptitle('Population tuning curves by light level'
                  + ('' if normalize else '  (recorded units — never pooled across modes)'),
                  fontsize=11)

@@ -180,6 +180,40 @@ def test_refresh_rstar_is_a_no_op_without_the_setting_columns():
     assert 'rstar' not in sag.refresh_rstar(no_ndf).columns
 
 
+def test_assume_missing_filter_wheel_patches_fw0_and_calibrated_rstar():
+    import pandas as pd
+
+    stored = pd.DataFrame({
+        'exp_name': ['2026-05-08_E', '2026-05-08_E'],
+        'fixed_ndfs': ['EL3', 'EL3'],
+        'ndf_combination': ['EL3', 'EL3 + FW1'],
+        'light_setting': ['FW?/bg0.5', 'FW1/bg0.5'],
+        'ndf': [np.nan, 1.0],
+        'background_intensity': [0.5, 0.5],
+    })
+    out = sag.assume_missing_filter_wheel(stored, assumed_ndf=0.0)
+
+    assert out['filter_wheel_assumed'].tolist() == [True, False]
+    assert out['ndf'].tolist() == [0.0, 1.0]
+    assert out.loc[0, 'ndf_combination'] == 'EL3 + FW0'
+    assert out.loc[0, 'rstar'] == pytest.approx(15000.0)
+    assert out.loc[1, 'rstar'] == pytest.approx(1500.0)
+    assert np.isnan(stored.loc[0, 'ndf'])
+
+
+def test_select_population_light_bands_uses_requested_inclusive_groups():
+    import pandas as pd
+
+    summary = pd.DataFrame({'rstar': [999, 1000, 1140, 1500, 1501,
+                                                  10000, 11550, 15000, 15001]})
+    out = sag.select_population_light_bands(summary)
+
+    assert out['rstar'].tolist() == [1000, 1140, 1500, 10000, 11550, 15000]
+    assert out['rstar_level'].tolist() == [1200, 1200, 1200, 12000, 12000, 12000]
+    assert out['light_level'].tolist() == [
+        '1200R*', '1200R*', '1200R*', '12000R*', '12000R*', '12000R*']
+
+
 def test_is_calibrated_follows_the_rig():
     # A known rig with a wheel reading is calibrated whatever the background.
     assert sag.is_calibrated(0.0, 0.50, rig='E')
@@ -1208,6 +1242,20 @@ def test_population_tuning_excludes_disallowed_bright_contrasts():
     summary.loc[1, 'bright_bar_contrast'] = 0.25
     t = sag.population_tuning(summary, records=recs, normalize=False)
     assert t['n_cells'].max() == 1
+
+
+def test_population_tuning_can_restrict_and_normalize_negative_contrasts():
+    summary, recs = _pop_summary_and_records({
+        'Cell1': (1000.0, 0.0, [10.0, 5.0, 1.0]),
+    })
+    recs['k0']['dark_contrasts'] = np.array([-1.0, -0.5, 0.0, 0.2])
+    recs['k0']['resp_mean'] = np.array([10.0, 5.0, 1.0, 50.0])
+
+    tuning = sag.population_tuning(
+        summary, records=recs, normalize=True, negative_only=True)
+
+    assert tuning['dark_contrast'].tolist() == [-1.0, -0.5, 0.0]
+    assert tuning['mean'].tolist() == [1.0, 0.5, 0.1]
 
 
 def _blocks_with_rs(labels, resistances, exp='X_E', high_rs=None):
