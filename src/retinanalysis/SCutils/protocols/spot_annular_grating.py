@@ -1893,10 +1893,8 @@ def plot_group(rec: GratingRecord, figsize: Tuple[float, float] = (7.2, 7.6),
     return fig
 
 
-# Marker per grating site and dash per recording mode, so two recordings that
-# share a light level (hence a color) are still told apart.
+# Marker per grating site; tuning overlays assign color and dash per condition.
 _SITE_MARKERS = {'center': 'o', 'surround': 's'}
-_MODE_STYLES = {'extracellular': '-', 'exc': '--', 'inh': ':'}
 
 
 def _curve_fields(rec, value: str = 'resp_mean', sem: Optional[str] = 'auto') -> Dict:
@@ -2010,16 +2008,11 @@ def plot_tuning_overlay(records: Sequence, labels: Optional[Sequence[str]] = Non
     most negative dark contrast (see :func:`tuning_overlay`), which is what
     makes modes comparable — it is one axes however many units are on the left.
 
-    Color is the light level on the house sequential ramp (dim to bright), dash
-    is the recording mode, marker is the grating site, so two recordings that
-    coincide on one of those are still distinguishable. A triangle on the zero
-    line marks each recording's interpolated crossing.
-
-    The ramp is stretched across the levels *in this figure*, not across
-    :data:`RSTAR_LEVELS`, so a cell recorded at two neighboring rungs still gets
-    two clearly different colors — at the cost of a given R* not being the same
-    color in another figure. The legend names each recording's setting, so read
-    color within a figure only.
+    Color and dash identify the individual recording condition using a reordered
+    Okabe-Ito categorical palette and distinct line patterns; marker identifies
+    grating site. Thus conditions at the same light level, bright contrast, or
+    bar width remain visually distinct even when normalized curves overlap. A
+    triangle on the zero line marks each recording's interpolated crossing.
 
     ``labels`` overrides the legend text, one per record — pass the section-2
     row indices to tie a curve back to the table it came from. Where a record
@@ -2047,15 +2040,29 @@ def plot_tuning_overlay(records: Sequence, labels: Optional[Sequence[str]] = Non
         print('no tuning curves to overlay')
         return None
 
-    # Color follows the light level, which is ordered, so it gets the sequential
-    # ramp rather than categorical hues -- same convention as the population
-    # figures. Recordings with no R* fall back to gray rather than dropping out.
-    # Wider than the default 0.15-0.85 slice of the ramp: an overlay is a
-    # handful of curves that often share mode and site, leaving color as the
-    # only thing separating them, so the extra spread is worth the darker and
-    # paler ends.
-    levels = sorted(long.loc[long['rstar'].notna(), 'rstar'].map(round_rstar).unique())
-    ramp = style.colors_for_conditions(levels, lo=0.05, hi=0.95)
+    # Overlays compare individual conditions, and several often share the same
+    # light level. Give each position its own high-contrast categorical color
+    # instead of mapping color only to R*, which made coincident conditions
+    # nearly impossible to distinguish.
+    condition_palette = [
+        '#0072B2',  # blue
+        '#D55E00',  # vermillion
+        '#009E73',  # bluish green
+        '#CC79A7',  # reddish purple
+        '#E69F00',  # orange
+        '#56B4E9',  # sky blue
+        '#000000',  # black
+        '#F0E442',  # yellow
+    ]
+    positions = sorted(int(value) for value in long['position'].unique())
+    condition_colors = {
+        position: condition_palette[index % len(condition_palette)]
+        for index, position in enumerate(positions)
+    }
+    condition_line_styles = {
+        position: ('-', '--', '-.', ':')[index % 4]
+        for index, position in enumerate(positions)
+    }
 
     # Constrained rather than tight layout: the normalized axes spans every row
     # of the grid, which tight_layout cannot size.
@@ -2068,9 +2075,8 @@ def plot_tuning_overlay(records: Sequence, labels: Optional[Sequence[str]] = Non
     for position, sub in long.groupby('position', sort=True):
         sub = sub.sort_values('dark_contrast')
         r = sub.iloc[0]
-        color = (ramp.get(round_rstar(r['rstar']), '#888888')
-                 if np.isfinite(r['rstar']) else '#888888')
-        ls = _MODE_STYLES.get(r['online_analysis'], '-')
+        color = condition_colors[int(position)]
+        ls = condition_line_styles[int(position)]
         marker = _SITE_MARKERS.get(r['grating_site'], 'D')
         bits = [r['online_analysis'], r['grating_site']]
         if np.isfinite(r['temporal_frequency']):

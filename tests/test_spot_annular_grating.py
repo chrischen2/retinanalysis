@@ -1361,6 +1361,22 @@ def test_overlay_of_nothing_is_empty():
     assert sag.tuning_overlay([]).empty
 
 
+def test_plot_tuning_overlay_gives_same_light_conditions_distinct_colors():
+    import matplotlib.pyplot as plt
+
+    records = [_overlay_record(rstar=2000.0, amp=amplitude)
+               for amplitude in (20.0, 40.0, 80.0)]
+    fig = sag.plot_tuning_overlay(records, labels=['A', 'B', 'C'])
+    raw_axis = fig.axes[0]
+    colors = [container.lines[0].get_color() for container in raw_axis.containers]
+    line_styles = [container.lines[0].get_linestyle() for container in raw_axis.containers]
+
+    assert colors == ['#0072B2', '#D55E00', '#009E73']
+    assert len(set(colors)) == len(records)
+    assert line_styles == ['-', '--', '-.']
+    plt.close(fig)
+
+
 # --- raw-view helpers -------------------------------------------------------
 
 def test_reversal_times_fall_on_every_half_period():
