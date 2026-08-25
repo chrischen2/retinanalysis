@@ -834,6 +834,7 @@ def test_analyze_cell_conditions_wraps_section3_workflow(monkeypatch):
     result = sag.analyze_cell_conditions(
         date_index=1, cell_label='Cell1', online_analysis='extracellular',
         spike_offset=125.0, wc_offset=75.0,
+        detector_kwargs={'min_peak_amplitude': 10.0, 'max_trial_length_s': 5.0},
         show=False, plot=True, verbose=False)
 
     assert result.exp_name == '2026-04-04_E'
@@ -844,6 +845,9 @@ def test_analyze_cell_conditions_wraps_section3_workflow(monkeypatch):
     assert all(call[1]['keep_raw'] is True for call in analyzed)
     assert all(call[1]['spike_offset'] == 125.0 for call in analyzed)
     assert all(call[1]['wc_offset'] == 75.0 for call in analyzed)
+    assert all(call[1]['detector_kwargs'] == {
+        'min_peak_amplitude': 10.0, 'max_trial_length_s': 5.0}
+        for call in analyzed)
 
 
 def _tiny_record(exp='2026-04-23_E', cell='Cell1', mode='extracellular',

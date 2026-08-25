@@ -2107,7 +2107,8 @@ def analyze_cell_conditions(date_index: int, cell_label: str, online_analysis: s
                             spike_offset: float = DEFAULTS['spike_offset'],
                             wc_offset: float = DEFAULTS['wc_offset'],
                             keep_raw: bool = True, plot: bool = True,
-                            show: bool = True, verbose: bool = True) -> CellConditionAnalysis:
+                            show: bool = True, verbose: bool = True,
+                            detector_kwargs: Optional[dict] = None) -> CellConditionAnalysis:
     """Discover, analyze, and plot every condition for one selected cell.
 
     This is the reusable implementation behind Section 3 of
@@ -2116,7 +2117,9 @@ def analyze_cell_conditions(date_index: int, cell_label: str, online_analysis: s
     FilterWheel, background intensity, bright-bar contrast, and (unless
     ``collapse_bar_widths`` is true) bar width.
 
-    ``spike_offset`` and ``wc_offset`` are milliseconds after stimulus onset;
+    ``detector_kwargs`` overrides spike-detector defaults for this protocol
+    analysis without changing the shared detector. ``spike_offset`` and
+    ``wc_offset`` are milliseconds after stimulus onset;
     both response windows still end at ``preTime + stimTime``. Extracellular
     tuning overlays subtract the firing rate measured during preTime; whole-cell
     overlays retain the same baseline-subtracted convention.
@@ -2215,6 +2218,7 @@ def analyze_cell_conditions(date_index: int, cell_label: str, online_analysis: s
             exp_name, block_ids, online_analysis=online_analysis,
             max_series_resistance=max_series_resistance,
             spike_offset=spike_offset, wc_offset=wc_offset,
+            detector_kwargs=detector_kwargs,
             keep_raw=keep_raw, verbose=verbose)
         records.append(record)
         if plot:
