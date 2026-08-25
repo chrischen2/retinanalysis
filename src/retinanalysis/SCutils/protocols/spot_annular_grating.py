@@ -2981,6 +2981,8 @@ def add_condition(summary: pd.DataFrame) -> pd.DataFrame:
 def population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Dict]] = None,
                       normalize: bool = True, min_contrasts: int = 3,
                       negative_only: bool = False,
+                      normalization_contrast: Optional[float] = None,
+                      require_positive_reference: bool = False,
                       allowed_bright_contrast: Optional[Sequence[float]]
                       = ALLOWED_BRIGHT_CONTRAST) -> pd.DataFrame:
     """Mean response-vs-dark-contrast curve per light level, pooled over cells.
@@ -2990,15 +2992,20 @@ def population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Dict]] 
     preTime from the firing rate measured strictly during the stimulus window.
 
     ``negative_only=True`` excludes positive values from the contrast axis.
-    ``normalize`` (default) then divides each cell's retained curve by the
-    largest absolute plotted response. Two reasons it is the default:
+    ``normalize`` (default) then normalizes each cell after repeated records
+    have been averaged. With ``normalization_contrast=None`` the divisor is the
+    largest absolute plotted response. Set ``normalization_contrast=-1`` to
+    divide by the response at :math:`C_-=-1` instead. For an OFF-cell analysis,
+    ``require_positive_reference=True`` excludes cells not driven positively
+    at that reference rather than amplifying a zero or sign-reversed response.
 
     - Cells differ enormously in absolute response — in this dataset the
       excitatory-current records span 1.2 to 538 pA, so a raw mean is just the
       loudest cell with a little noise added. Firing rates are milder (16 to 92
       Hz) but still 6-fold.
-    - It is a *positive* scalar, so it preserves curve shape and any zero
-      crossing. The separately stored cancellation-point calculation is unchanged.
+    - The default absolute-peak divisor, and the requested positive OFF-cell
+      reference, are positive scalars, so they preserve curve shape and any
+      zero crossing. The stored cancellation calculation is unchanged.
 
     Set ``normalize=False`` to keep the recorded units, which is only meaningful
     within one recording mode.
@@ -3011,45 +3018,43 @@ def population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Dict]] 
     Returns one row per (condition, mode, light level, dark contrast) with the
     mean, its SEM across cells, and the cell count.
     """
-    df = add_condition(summary) if 'condition' not in summary.columns else summary.copy()
-    if allowed_bright_contrast is not None and 'bright_bar_contrast' in df.columns:
-        df = df[df['bright_bar_contrast'].isin(list(allowed_bright_contrast))]
-    if df.empty:
+    per_cell = population_cell_tuning(
+        summary, records=records, min_contrasts=min_contrasts,
+        negative_only=negative_only,
+        allowed_bright_contrast=allowed_bright_contrast)
+    if per_cell.empty:
         return pd.DataFrame(columns=['condition', 'online_analysis', 'units', 'rstar_level',
                                      'dark_contrast', 'mean', 'sem', 'n_cells'])
-    if records is None:
-        records = load_records(list(df['key']))
 
-    rows = []
-    for _, r in df.iterrows():
-        rec = records.get(r['key'])
-        if rec is None:
-            continue
-        contrasts = np.asarray(rec['dark_contrasts'], dtype=float)
-        rel = np.asarray(rec['resp_mean'], dtype=float) - float(rec['baseline_mean'])
-        if negative_only:
-            keep = contrasts <= 0
-            contrasts = contrasts[keep]
-            rel = rel[keep]
-        if contrasts.size < min_contrasts:
-            continue
-        if normalize:
-            peak = np.nanmax(np.abs(rel))
-            if not np.isfinite(peak) or peak == 0:
+    if normalize:
+        normalized = []
+        skipped = []
+        cell_keys = ['condition', 'online_analysis', 'units', 'rstar_level', 'cell']
+        for cell_key, curve in per_cell.groupby(cell_keys, dropna=False, sort=False):
+            if normalization_contrast is None:
+                divisor = float(np.nanmax(np.abs(curve['value'])))
+            else:
+                reference = curve[np.isclose(
+                    curve['dark_contrast'], float(normalization_contrast), atol=1e-6)]
+                divisor = float(reference['value'].mean()) if len(reference) else np.nan
+            if (not np.isfinite(divisor) or divisor == 0
+                    or (require_positive_reference and divisor <= 0)):
+                skipped.append(str(cell_key[-1]))
                 continue
-            rel = rel / peak
-        for c, v in zip(contrasts, rel):
-            rows.append({'condition': r['condition'], 'online_analysis': r['online_analysis'],
-                         'units': 'normalized' if normalize else r.get('units', ''),
-                         'rstar_level': r['rstar_level'],
-                         'cell': f"{r['exp_name']}/{r['cell_label']}",
-                         'dark_contrast': round(float(c), 4), 'value': float(v)})
-    long = pd.DataFrame(rows)
-    if long.empty:
-        return long
+            curve = curve.copy()
+            curve['value'] = curve['value'] / divisor
+            curve['units'] = 'normalized'
+            normalized.append(curve)
+        if skipped:
+            reference_text = ('maximum response' if normalization_contrast is None
+                              else f'contrast {float(normalization_contrast):g}')
+            print(f'Excluded {len(skipped)} cell(s) without a usable positive '
+                  f'normalization response at {reference_text}: {", ".join(skipped)}')
+        if not normalized:
+            return pd.DataFrame()
+        per_cell = pd.concat(normalized, ignore_index=True)
 
     keys = ['condition', 'online_analysis', 'units', 'rstar_level', 'dark_contrast']
-    per_cell = long.groupby(keys + ['cell'], dropna=False)['value'].mean().reset_index()
     out = (per_cell.groupby(keys, dropna=False)['value']
            .agg(mean='mean',
                 sem=lambda s: float(s.std(ddof=1) / np.sqrt(len(s))) if len(s) > 1 else np.nan,
@@ -3164,6 +3169,8 @@ def plot_population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Di
                                                         'OFF-parasol / center'),
                            modes: Sequence[str] = ('extracellular', 'exc'),
                            figsize: Tuple[float, float] = (10.0, 7.0),
+                           cone_prediction_bright_contrast: Optional[float] = None,
+                           cone_prediction_i0: float = DEFAULTS['cone_i0'],
                            **kwargs):
     """Population tuning curves, one line per light level, overlaid.
 
@@ -3218,6 +3225,14 @@ def plot_population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Di
                                 color=colors[lvl], alpha=0.16, lw=0, zorder=2)
                 ax.plot(sub['dark_contrast'], sub['mean'], 'o-', ms=4, lw=1.8,
                         color=colors[lvl], zorder=3, label=f'{lvl:g} R* (n={n})')
+                if cone_prediction_bright_contrast is not None:
+                    predicted = cone_predict_dark_contrast(
+                        lvl, cone_prediction_bright_contrast, cone_prediction_i0)
+                    ax.axvline(predicted, color=colors[lvl], ls=':', lw=1.2,
+                               alpha=0.85, zorder=2)
+                    ax.plot(predicted, 0.0, marker='*', ms=9, color=colors[lvl],
+                            mec='#222222', mew=0.5, zorder=5,
+                            label=f'cone prediction: {predicted:.3f}')
                 drawn += 1
             units = panel['units'].iloc[0]
             ax.set_title(f'{cond} — {mode}', fontsize=9)
@@ -3227,8 +3242,14 @@ def plot_population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Di
             if i == len(conditions) - 1:
                 ax.set_xlabel(r'negative contrast $C_-$')
             if j == 0:
-                ax.set_ylabel('normalized response' if normalize
-                              else f'response − baseline\n({units})')
+                if normalize:
+                    reference = kwargs.get('normalization_contrast')
+                    label = 'normalized response'
+                    if reference is not None:
+                        label += f'\n(at $C_-={float(reference):g}$)'
+                    ax.set_ylabel(label)
+                else:
+                    ax.set_ylabel(f'response − baseline\n({units})')
     fig.suptitle('Population tuning curves by light level'
                  + ('' if normalize else '  (recorded units — never pooled across modes)'),
                  fontsize=11)

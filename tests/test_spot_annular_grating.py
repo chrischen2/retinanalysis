@@ -1258,6 +1258,32 @@ def test_population_tuning_can_restrict_and_normalize_negative_contrasts():
     assert tuning['mean'].tolist() == [1.0, 0.5, 0.1]
 
 
+def test_population_tuning_can_normalize_each_cell_at_minus_one():
+    summary, recs = _pop_summary_and_records({
+        'Cell1': (13000.0, 0.0, [5.0, 10.0, 20.0]),
+        'Cell2': (13000.0, 0.0, [2.0, 4.0, 8.0]),
+    })
+    tuning = sag.population_tuning(
+        summary, records=recs, normalize=True, negative_only=True,
+        normalization_contrast=-1.0, require_positive_reference=True)
+
+    assert tuning['mean'].tolist() == [1.0, 2.0, 4.0]
+    assert tuning['n_cells'].tolist() == [2, 2, 2]
+
+
+def test_population_tuning_excludes_nonpositive_minus_one_reference(capsys):
+    summary, recs = _pop_summary_and_records({
+        'Cell1': (13000.0, 0.0, [5.0, 2.5, 0.0]),
+        'Cell2': (13000.0, 0.0, [-0.1, 1.0, 2.0]),
+    })
+    tuning = sag.population_tuning(
+        summary, records=recs, normalize=True,
+        normalization_contrast=-1.0, require_positive_reference=True)
+
+    assert tuning['n_cells'].eq(1).all()
+    assert 'X_E/Cell2' in capsys.readouterr().out
+
+
 def test_population_cell_tuning_keeps_raw_units_and_averages_repeated_cell():
     summary, recs = _pop_summary_and_records({
         'Cell1': (1200.0, 10.0, [30.0, 20.0, 10.0]),
@@ -1293,6 +1319,28 @@ def test_plot_population_individual_tuning_draws_one_curve_per_cell_and_level():
     assert sum(line.get_label().startswith('X_E / Cell')
                for ax in fig.axes for line in ax.lines) == 2
     assert fig.axes[0].get_ylabel() == 'response − baseline (rate (Hz))'
+    plt.close(fig)
+
+
+def test_plot_population_tuning_marks_cone_prediction():
+    import matplotlib.pyplot as plt
+
+    summary, recs = _pop_summary_and_records({
+        'Cell1': (13000.0, 0.0, [10.0, 5.0, 0.0]),
+        'Cell2': (13000.0, 0.0, [20.0, 10.0, 0.0]),
+    })
+    fig = sag.plot_population_tuning(
+        summary, records=recs, normalize=True,
+        normalization_contrast=-1.0, require_positive_reference=True,
+        conditions=('ON-parasol / surround',), modes=('extracellular',),
+        cone_prediction_bright_contrast=0.9, cone_prediction_i0=2000.0)
+    fig.canvas.draw()
+    predicted = sag.cone_predict_dark_contrast(13000.0, 0.9, 2000.0)
+    stars = [line for line in fig.axes[0].lines if line.get_marker() == '*']
+
+    assert len(stars) == 1
+    assert stars[0].get_xdata()[0] == pytest.approx(predicted)
+    assert stars[0].get_ydata()[0] == 0.0
     plt.close(fig)
 
 
