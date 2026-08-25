@@ -239,6 +239,18 @@ def test_cone_prediction_matches_matlab_formula():
         assert sag.cone_predict_dark_contrast(rstar, bright, i0) == pytest.approx(expected)
 
 
+@pytest.mark.parametrize(
+    'background, bright, weber_constant',
+    [(1.0, 0.5, 1.0), (12000.0, 0.9, 2000.0), (8000.0, 0.5, 500.0)])
+def test_cone_prediction_matches_closed_form_derivation(
+        background, bright, weber_constant):
+    """Match C- = -C+ (W + Ib) / (W + Ib + 2 Ib C+)."""
+    expected = (-bright * (weber_constant + background)
+                / (weber_constant + background + 2.0 * background * bright))
+    assert sag.cone_predict_dark_contrast(
+        background, bright, weber_constant) == pytest.approx(expected)
+
+
 def test_cone_prediction_is_negative_contrast():
     """Cancelling a bright bar requires a dark bar, i.e. negative contrast."""
     assert -1 < sag.cone_predict_dark_contrast(12000, 0.9) < 0

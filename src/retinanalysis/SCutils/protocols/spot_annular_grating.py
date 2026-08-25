@@ -269,17 +269,48 @@ def cone_predict_dark_contrast(rstar: float, bright_contrast: float,
                                i0: float = DEFAULTS['cone_i0']) -> float:
     """Dark-bar contrast that cancels the bright bar under a Weber cone model.
 
-    Port of ``conePredictDarkContrast``. With R(I) = I / (I + I0), balance is
-    ``(Ib - Im)/(Ib + I0) = (Im - Id)/(Id + I0)`` where Im = rstar and
-    Ib = Im*(1 + bright_contrast). NaN in, NaN out.
+    This is the equal-area (50/50 bright/dark) solution for the adapted signal
+
+    .. math::
+
+        S(I) = \\frac{I-I_b}{1+I/W},
+
+    where ``rstar`` is background intensity :math:`I_b`, ``i0`` is the Weber
+    constant :math:`W`, and ``bright_contrast`` is signed contrast
+    :math:`C_+ > 0`. Setting the two half-field signals to cancel,
+    :math:`S(I_+) + S(I_-) = 0`, gives
+
+    .. math::
+
+        C_- = -C_+\\frac{1+I_b/W}
+        {1+I_b/W+2(I_b/W)C_+}.
+
+    Thus the returned value is the signed cancelling dark contrast
+    :math:`C_- < 0`; its positive magnitude is :math:`|C_-|`. The expression
+    is also the cancellation point obtained from the static Naka-Rushton law
+    :math:`R(I)=I/(I+W)`, because subtracting :math:`R(I_b)` introduces one
+    common factor that cancels between the equal-area halves.
+
+    The implementation below retains the algebraic form of the original
+    MATLAB ``conePredictDarkContrast`` routine. NaN in, NaN out.
     """
-    if rstar is None or np.isnan(rstar) or bright_contrast is None or np.isnan(bright_contrast):
+    if (rstar is None or np.isnan(rstar)
+            or bright_contrast is None or np.isnan(bright_contrast)):
         return np.nan
-    im = float(rstar)
-    ib = im * (1.0 + bright_contrast)
-    lam = (ib - im) / (ib + i0)
-    idk = (im - lam * i0) / (1.0 + lam)
-    return idk / im - 1.0
+    background = float(rstar)                 # I_b in the derivation
+    weber_constant = float(i0)                # W
+    c_bright = float(bright_contrast)         # C_+
+    bright_intensity = background * (1.0 + c_bright)  # I_+
+
+    # Dimensionless bright-half signal after dropping the common factor W.
+    bright_signal = ((bright_intensity - background)
+                     / (bright_intensity + weber_constant))
+
+    # Solve (I_+ - I_b)/(I_+ + W) + (I_- - I_b)/(I_- + W) = 0 for I_-.
+    dark_intensity = ((background - bright_signal * weber_constant)
+                      / (1.0 + bright_signal))
+    c_dark = dark_intensity / background - 1.0  # C_- = I_-/I_b - 1
+    return c_dark
 
 
 def interp_zero_crossing(x, y) -> float:
