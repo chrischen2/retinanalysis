@@ -251,6 +251,54 @@ def test_cone_prediction_matches_closed_form_derivation(
         background, bright, weber_constant) == pytest.approx(expected)
 
 
+def test_split_field_ratio_response_matches_derived_linear_pooling():
+    background, bright, weber_constant = 2000.0, 0.9, 2000.0
+    ratios = np.array([-1.0, -0.5, 0.0])
+    beta = background / weber_constant
+    expected = 0.5 * background * bright * (
+        1.0 / (1.0 + beta * (1.0 + bright))
+        + ratios / (1.0 + beta * (1.0 + ratios * bright)))
+
+    assert np.allclose(sag.split_field_ratio_response(
+        ratios, background, bright, weber_constant), expected)
+
+
+def test_split_field_ratio_response_cancels_at_cone_prediction():
+    for background in (1000, 2000, 4000, 8000, 12000):
+        ratio = sag.cone_predict_dark_contrast(background, 0.9, 2000.0) / 0.9
+        assert sag.split_field_ratio_response(
+            ratio, background, 0.9, 2000.0) == pytest.approx(0.0, abs=1e-10)
+
+
+def test_split_field_ratio_response_reproduces_two_thirds_example():
+    assert sag.split_field_ratio_response(
+        -2.0 / 3.0, background=1.0, bright_contrast=0.5, i0=1.0
+    ) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_split_field_ratio_response_rejects_negative_dark_intensity():
+    with pytest.raises(ValueError, match='negative dark-half intensity'):
+        sag.split_field_ratio_response(-1.2, background=2000.0,
+                                       bright_contrast=0.9, i0=2000.0)
+
+
+def test_plot_split_field_ratio_response_draws_each_background_and_cancellation():
+    import matplotlib.pyplot as plt
+
+    levels = (1000, 2000, 4000, 8000, 12000)
+    fig = sag.plot_split_field_ratio_response(
+        backgrounds=levels, bright_contrast=0.9, i0=2000.0)
+    fig.canvas.draw()
+    ax = fig.axes[0]
+    response_curves = [line for line in ax.lines if line.get_label().endswith('R*/s')]
+    cancellation_markers = [line for line in ax.lines if line.get_marker() == 'o']
+
+    assert len(response_curves) == len(levels)
+    assert len(cancellation_markers) == len(levels)
+    assert all(np.allclose(marker.get_ydata(), [0.0]) for marker in cancellation_markers)
+    plt.close(fig)
+
+
 def test_cone_prediction_is_negative_contrast():
     """Cancelling a bright bar requires a dark bar, i.e. negative contrast."""
     assert -1 < sag.cone_predict_dark_contrast(12000, 0.9) < 0

@@ -313,6 +313,114 @@ def cone_predict_dark_contrast(rstar: float, bright_contrast: float,
     return c_dark
 
 
+def split_field_ratio_response(dark_to_bright_ratio, background: float,
+                               bright_contrast: float = 0.9,
+                               i0: float = DEFAULTS['cone_i0']):
+    """Net adapted response of an equal-area split field versus ``C-/C+``.
+
+    Let :math:`\\rho=C_-/C_+` be the signed dark-to-bright contrast ratio,
+    :math:`C_+>0`, :math:`\\beta=I_b/W`, and
+
+    .. math::
+
+        S(I)=\\frac{I-I_b}{1+I/W}.
+
+    Linear pooling of the two already-discounted half-field signals gives
+
+    .. math::
+
+        R_{net}(\\rho)=\\frac{I_b C_+}{2}
+        \\left[\\frac{1}{1+\\beta(1+C_+)}+
+        \\frac{\\rho}{1+\\beta(1+\\rho C_+)}\\right].
+
+    The pooling is linear in :math:`S(I_+)` and :math:`S(I_-)`, but not in the
+    physical contrasts because each half's denominator depends on its own
+    intensity. Ratios below :math:`-1/C_+` are rejected because they imply a
+    negative dark-half intensity.
+    """
+    ratio = np.asarray(dark_to_bright_ratio, dtype=float)
+    background = float(background)
+    bright_contrast = float(bright_contrast)
+    i0 = float(i0)
+    if not np.isfinite(background) or background <= 0:
+        raise ValueError('background must be finite and positive')
+    if not np.isfinite(bright_contrast) or bright_contrast <= 0:
+        raise ValueError('bright_contrast must be finite and positive')
+    if not np.isfinite(i0) or i0 <= 0:
+        raise ValueError('i0 must be finite and positive')
+    if not np.isfinite(ratio).all():
+        raise ValueError('dark_to_bright_ratio must be finite')
+    physical_minimum = -1.0 / bright_contrast
+    if np.any(ratio < physical_minimum - 1e-12):
+        raise ValueError(
+            'dark_to_bright_ratio implies a negative dark-half intensity')
+
+    beta = background / i0
+    bright_discounted = 1.0 / (1.0 + beta * (1.0 + bright_contrast))
+    dark_discounted = ratio / (1.0 + beta * (1.0 + ratio * bright_contrast))
+    response = 0.5 * background * bright_contrast * (
+        bright_discounted + dark_discounted)
+    return float(response) if ratio.ndim == 0 else response
+
+
+def plot_split_field_ratio_response(
+        backgrounds: Sequence[float] = (1000, 2000, 4000, 8000, 12000),
+        bright_contrast: float = 0.9,
+        i0: float = DEFAULTS['cone_i0'],
+        ratio_grid=None,
+        figsize: Tuple[float, float] = (7.4, 4.8)):
+    """Plot :func:`split_field_ratio_response` across background levels.
+
+    The default ratio grid spans the full physical range from a zero-intensity
+    dark half (:math:`C_-=-1`) to no dark modulation (:math:`C_-=0`). Each
+    circle marks the analytic cancellation prediction from
+    :func:`cone_predict_dark_contrast`.
+    """
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    levels = [float(value) for value in backgrounds]
+    if (not levels or not np.isfinite(levels).all()
+            or any(value <= 0 for value in levels)):
+        raise ValueError('backgrounds must contain finite positive values')
+    bright_contrast = float(bright_contrast)
+    if not np.isfinite(bright_contrast) or bright_contrast <= 0:
+        raise ValueError('bright_contrast must be finite and positive')
+    if ratio_grid is None:
+        ratio = np.linspace(-1.0 / bright_contrast, 0.0, 501)
+    else:
+        ratio = np.asarray(ratio_grid, dtype=float)
+        if ratio.ndim != 1 or ratio.size < 2:
+            raise ValueError('ratio_grid must be a one-dimensional array with at least 2 points')
+
+    style.apply_publication_style()
+    colors = style.colors_for_conditions(levels, lo=0.08, hi=0.92)
+    fig, ax = plt.subplots(figsize=figsize, layout='constrained')
+    for background in levels:
+        response = split_field_ratio_response(
+            ratio, background, bright_contrast=bright_contrast, i0=i0)
+        color = colors[background]
+        ax.plot(ratio, response, color=color, lw=1.8,
+                label=f'{background:g} R*/s')
+        cancellation_ratio = (
+            cone_predict_dark_contrast(background, bright_contrast, i0)
+            / bright_contrast)
+        ax.plot(cancellation_ratio, 0.0, 'o', color=color, ms=5,
+                mec='#222222', mew=0.45, zorder=4)
+
+    ax.axhline(0.0, color='#555555', ls='--', lw=1.0, zorder=1)
+    ax.axvline(-1.0, color='#999999', ls=':', lw=1.0,
+               label='equal contrast magnitude')
+    ax.set_xlabel(r'signed contrast ratio $\rho=C_-/C_+$')
+    ax.set_ylabel(r'net split-field response $R_{net}$')
+    ax.set_title(
+        f'Linear pooling after intensity-dependent gain discount\n'
+        f'$C_+={bright_contrast:g}$, $W={float(i0):g}$ R*/s', fontsize=10)
+    ax.legend(frameon=False, fontsize=7, title='background $I_b$')
+    ax.margins(x=0)
+    return fig
+
+
 def interp_zero_crossing(x, y) -> float:
     """First linearly interpolated x where y crosses zero; NaN if it never does."""
     x = np.asarray(x, dtype=float)
