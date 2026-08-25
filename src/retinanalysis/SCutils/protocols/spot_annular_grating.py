@@ -3059,6 +3059,105 @@ def population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Dict]] 
     return out.reset_index(drop=True)
 
 
+def population_cell_tuning(
+        summary: pd.DataFrame, records: Optional[Dict[str, Dict]] = None,
+        min_contrasts: int = 3, negative_only: bool = False,
+        allowed_bright_contrast: Optional[Sequence[float]]
+        = ALLOWED_BRIGHT_CONTRAST) -> pd.DataFrame:
+    """Baseline-subtracted tuning curves before cell normalization.
+
+    Returns one row per cell and contrast in recorded units. Multiple records
+    from the same experiment/cell, mode, condition, and grouped light level are
+    averaged first, matching the equal-cell weighting used by
+    :func:`population_tuning`.
+    """
+    df = add_condition(summary) if 'condition' not in summary.columns else summary.copy()
+    if allowed_bright_contrast is not None and 'bright_bar_contrast' in df.columns:
+        df = df[df['bright_bar_contrast'].isin(list(allowed_bright_contrast))]
+    if df.empty:
+        return pd.DataFrame()
+    if records is None:
+        records = load_records(list(df['key']))
+
+    rows = []
+    for _, row in df.iterrows():
+        rec = records.get(row['key'])
+        if rec is None:
+            continue
+        contrasts = np.asarray(rec['dark_contrasts'], dtype=float)
+        response = (np.asarray(rec['resp_mean'], dtype=float)
+                    - float(rec['baseline_mean']))
+        if negative_only:
+            keep = contrasts <= 0
+            contrasts = contrasts[keep]
+            response = response[keep]
+        if contrasts.size < min_contrasts:
+            continue
+        for contrast, value in zip(contrasts, response):
+            rows.append({
+                'condition': row['condition'],
+                'online_analysis': row['online_analysis'],
+                'units': row.get('units', rec.get('units', '')),
+                'rstar_level': row['rstar_level'],
+                'cell': f"{row['exp_name']}/{row['cell_label']}",
+                'dark_contrast': round(float(contrast), 4),
+                'value': float(value),
+            })
+    long = pd.DataFrame(rows)
+    if long.empty:
+        return long
+    keys = ['condition', 'online_analysis', 'units', 'rstar_level',
+            'cell', 'dark_contrast']
+    return (long.groupby(keys, dropna=False)['value'].mean().reset_index()
+            .sort_values(keys).reset_index(drop=True))
+
+
+def plot_population_individual_tuning(
+        summary: pd.DataFrame, records: Optional[Dict[str, Dict]] = None,
+        figsize: Tuple[float, float] = (12.0, 4.8), **kwargs):
+    """Plot every cell's tuning curve in recorded units before normalization.
+
+    Light groups are separate panels with a shared y-axis. A date/cell identity
+    has the same categorical color in every panel, and repeated records have
+    already been averaged by :func:`population_cell_tuning`.
+    """
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    tuning = population_cell_tuning(summary, records=records, **kwargs)
+    if tuning.empty:
+        print('no individual tuning curves to plot')
+        return None
+    modes = tuning['online_analysis'].dropna().unique()
+    units = tuning['units'].dropna().unique()
+    if len(modes) != 1 or len(units) != 1:
+        raise ValueError('individual raw curves require one recording mode and one unit')
+
+    levels = sorted(tuning['rstar_level'].dropna().unique())
+    cells = sorted(tuning['cell'].dropna().unique())
+    cmap = plt.get_cmap('tab20')
+    colors = {cell: cmap(index % cmap.N) for index, cell in enumerate(cells)}
+    fig, axes = plt.subplots(1, len(levels), figsize=figsize, squeeze=False,
+                             sharex=True, sharey=True)
+    for ax, level in zip(axes[0], levels):
+        panel = tuning[tuning['rstar_level'].eq(level)]
+        ax.axhline(0.0, color='#666666', ls='--', lw=1.0, zorder=1)
+        for cell, cell_curve in panel.groupby('cell', sort=True):
+            cell_curve = cell_curve.sort_values('dark_contrast')
+            ax.plot(cell_curve['dark_contrast'], cell_curve['value'], 'o-',
+                    color=colors[cell], ms=3.2, lw=1.2, alpha=0.9,
+                    label=cell.replace('/', ' / '), zorder=3)
+        ax.set_title(f'{level:g} R*/s  (n={panel.cell.nunique()})', fontsize=9)
+        ax.set_xlabel(r'negative contrast $C_-$')
+        ax.legend(frameon=False, fontsize=6, loc='best')
+    axes[0][0].set_ylabel(f'response − baseline ({units[0]})')
+    fig.suptitle(
+        f'Individual {modes[0]} tuning curves before normalization', fontsize=11)
+    fig.tight_layout()
+    return fig
+
+
 def plot_population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Dict]] = None,
                            normalize: bool = True, min_cells: int = 2,
                            conditions: Sequence[str] = ('ON-parasol / surround',

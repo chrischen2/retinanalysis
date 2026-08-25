@@ -1258,6 +1258,44 @@ def test_population_tuning_can_restrict_and_normalize_negative_contrasts():
     assert tuning['mean'].tolist() == [1.0, 0.5, 0.1]
 
 
+def test_population_cell_tuning_keeps_raw_units_and_averages_repeated_cell():
+    summary, recs = _pop_summary_and_records({
+        'Cell1': (1200.0, 10.0, [30.0, 20.0, 10.0]),
+        'Cell1_dup': (1200.0, 0.0, [40.0, 20.0, 0.0]),
+        'Cell2': (1200.0, 5.0, [15.0, 10.0, 5.0]),
+    })
+    summary.loc[1, 'cell_label'] = 'Cell1'
+
+    tuning = sag.population_cell_tuning(
+        summary, records=recs, negative_only=True,
+        allowed_bright_contrast=(0.9,))
+    cell1 = tuning[tuning['cell'].eq('X_E/Cell1')]
+
+    assert cell1['value'].tolist() == [30.0, 15.0, 0.0]
+    assert cell1['units'].unique().tolist() == ['rate (Hz)']
+    assert tuning['cell'].nunique() == 2
+
+
+def test_plot_population_individual_tuning_draws_one_curve_per_cell_and_level():
+    import matplotlib.pyplot as plt
+
+    summary, recs = _pop_summary_and_records({
+        'Cell1': (1200.0, 0.0, [10.0, 5.0, 0.0]),
+        'Cell2': (12000.0, 0.0, [20.0, 10.0, 0.0]),
+    })
+    fig = sag.plot_population_individual_tuning(
+        summary, records=recs, negative_only=True,
+        allowed_bright_contrast=(0.9,))
+    fig.canvas.draw()
+
+    assert len(fig.axes) == 2
+    assert all('(n=1)' in ax.get_title() for ax in fig.axes)
+    assert sum(line.get_label().startswith('X_E / Cell')
+               for ax in fig.axes for line in ax.lines) == 2
+    assert fig.axes[0].get_ylabel() == 'response − baseline (rate (Hz))'
+    plt.close(fig)
+
+
 def _blocks_with_rs(labels, resistances, exp='X_E', high_rs=None):
     """A block table plus the matching stubbed amplifier reading."""
     import pandas as pd
