@@ -1182,8 +1182,8 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
     traces_all, first_params, used_blocks = [], None, []
     n_samples = None
     rs_kept, n_high_rs, mode_mismatch = [], 0, False
-    raw = {'traces': [], 'spike_times_ms': [], 'block_id': [], 'sample_rate': None,
-           'series_resistance': []} if keep_raw else None
+    raw = {'traces': [], 'spike_times_ms': [], 'block_id': [], 'epoch_index': [],
+           'sample_rate': None, 'series_resistance': []} if keep_raw else None
 
     for bid in block_ids:
         sb = ra.StimBlock(exp_name, int(bid), verbose=False)
@@ -1260,6 +1260,7 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
                 raw['spike_times_ms'].append(
                     np.asarray(rb.spike_times[i], dtype=float) / sr * 1e3 if spiking else None)
                 raw['block_id'].append(int(bid))
+                raw['epoch_index'].append(int(i))
                 raw['series_resistance'].append(float(rs[i]))
 
         if spiking:
@@ -3049,8 +3050,9 @@ def load_raw(exp_name, block_ids: Optional[Sequence[int]] = None,
 
     Returns a dict with ``traces`` (list of 1-D arrays, one per epoch),
     ``spike_times_ms`` (per epoch, ``None`` for whole-cell), ``dark`` (the
-    epoch's ``currentDarkContrast``), ``block_id``, ``series_resistance``,
-    ``sample_rate``, ``pre_time_ms``, ``stim_time_ms`` and ``units``.
+    epoch's ``currentDarkContrast``), ``block_id``, block-local ``epoch_index``,
+    ``series_resistance``, ``sample_rate``, ``pre_time_ms``, ``stim_time_ms``
+    and ``units``.
     """
     import retinanalysis as ra
 
@@ -3066,8 +3068,8 @@ def load_raw(exp_name, block_ids: Optional[Sequence[int]] = None,
         raise ValueError('block_ids is required unless a GratingRecord is passed')
 
     out = {'traces': [], 'spike_times_ms': [], 'dark': [], 'block_id': [],
-           'series_resistance': [], 'sample_rate': None, 'exp_name': exp_name,
-           'units': ''}
+           'epoch_index': [], 'series_resistance': [], 'sample_rate': None,
+           'exp_name': exp_name, 'units': ''}
     for bid in block_ids:
         sb = ra.StimBlock(exp_name, int(bid), verbose=False)
         ep = sb.df_epochs
@@ -3093,6 +3095,7 @@ def load_raw(exp_name, block_ids: Optional[Sequence[int]] = None,
             out['spike_times_ms'].append(
                 np.asarray(rb.spike_times[i], float) / sr * 1e3 if spiking else None)
             out['block_id'].append(int(bid))
+            out['epoch_index'].append(int(i))
             out['series_resistance'].append(float(rs[i]) if i < rs.size else np.nan)
         out['dark'].extend(_epoch_param(ep, 'currentDarkContrast'))
         out['sample_rate'] = sr

@@ -16,6 +16,7 @@ def plot_spike_detection_qc(
         spike_time_unit: str = 'samples',
         stimulus_window_ms: Optional[Tuple[float, float]] = None,
         max_epochs_per_figure: int = 10,
+        close_figures: bool = False,
         title: Optional[str] = None):
     """Plot raw traces and detected spikes for a random subset of epochs.
 
@@ -35,6 +36,10 @@ def plot_spike_detection_qc(
         Optional ``(onset, offset)`` pair drawn as a shaded region.
     max_epochs_per_figure
         Paginate larger samples so individual spike waveforms remain visible.
+    close_figures
+        Close each figure after creating it while retaining the returned figure
+        object. This is useful for pull-down widgets that explicitly display
+        one figure at a time and prevents Matplotlib's open-figure warning.
 
     Returns
     -------
@@ -116,5 +121,7 @@ def plot_spike_detection_qc(
             f'{heading}\nrandom {n_select}/{n_epochs} epochs ({100 * n_select / n_epochs:.1f}%)',
             fontsize=11)
         figures.append(fig)
+        if close_figures:
+            plt.close(fig)
 
     return figures, selected

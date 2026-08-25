@@ -40,6 +40,19 @@ def test_plot_spike_detection_qc_accepts_ms_and_none_entries():
     assert len(figures[0].axes) == 2
 
 
+def test_plot_spike_detection_qc_can_close_figures_for_widget_display():
+    import matplotlib.pyplot as plt
+
+    plt.close('all')
+    figures, _ = ra.plot_spike_detection_qc(
+        np.zeros((3, 50)), [[], [], []], sample_rate=1000.0,
+        fraction=1.0, max_epochs_per_figure=1, close_figures=True)
+
+    assert len(figures) == 3
+    assert not plt.get_fignums()
+    assert all(len(figure.axes) == 1 for figure in figures)
+
+
 @pytest.mark.parametrize('fraction', [0, -0.1, 1.1])
 def test_plot_spike_detection_qc_rejects_invalid_fraction(fraction):
     with pytest.raises(ValueError, match='fraction'):
