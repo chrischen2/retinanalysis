@@ -772,8 +772,8 @@ def test_spike_window_rates_use_exact_pre_and_stimulus_boundaries():
     assert baseline == 20.0
 
 
-def test_visible_offsets_default_to_100_ms():
-    assert sag.DEFAULTS['spike_offset'] == 100.0
+def test_visible_offsets_have_mode_specific_defaults():
+    assert sag.DEFAULTS['spike_offset'] == 0.0
     assert sag.DEFAULTS['wc_offset'] == 100.0
 
 
