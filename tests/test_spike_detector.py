@@ -1,5 +1,6 @@
 import numpy as np
 
+import retinanalysis.utils.spike_detector as spike_detector
 from retinanalysis.utils.spike_detector import get_peaks, get_rebounds
 
 
@@ -41,3 +42,41 @@ def test_get_rebounds_handles_empty_candidates():
     result = get_rebounds(np.array([], dtype=int), np.arange(10.0), 12)
     assert result['Left'].shape == (0,)
     assert result['Right'].shape == (0,)
+
+
+def test_pooled_clustering_rejects_small_events_promoted_by_empty_epochs(monkeypatch):
+    """A shared boundary rejects contamination that wins a local two-cluster fit."""
+    traces = np.zeros((3, 40), dtype=float)
+    # Epochs 0/1 contain real spikes (30), contamination (12), and noise (2).
+    # Epoch 2 lacks real spikes; a local fit promotes its contamination to the
+    # high-amplitude cluster, whereas the pooled fit retains the 30-unit scale.
+    traces[0, [5, 13, 21, 29]] = [-30.0, -12.0, -4.0, -2.0]
+    traces[1, [7, 15, 23, 31]] = [-30.0, -12.0, -4.0, -2.0]
+    traces[2, [9, 19, 29]] = [-12.0, -4.0, -2.0]
+
+    monkeypatch.setattr(
+        spike_detector, 'high_pass_filter',
+        lambda values, cutoff, interval: np.asarray(values, dtype=float))
+    fit_sizes = []
+
+    def relative_amplitude_fit(features, n_clusters, verbose=False):
+        fit_sizes.append(len(features))
+        is_spike = features[:, 0] > 0.75 * np.max(features[:, 0])
+        labels = np.where(is_spike, 0, 1)
+        return labels, is_spike
+
+    monkeypatch.setattr(spike_detector, 'fit_kmeans', relative_amplitude_fit)
+
+    local_times, _, _ = spike_detector.detector(
+        traces, sample_rate=1000.0, min_peak_amplitude=10.0,
+        max_trial_length_s=5.0, cluster_across_trials=False)
+    local_fit_sizes = fit_sizes.copy()
+    fit_sizes.clear()
+    pooled_times, _, _ = spike_detector.detector(
+        traces, sample_rate=1000.0, min_peak_amplitude=10.0,
+        max_trial_length_s=5.0, cluster_across_trials=True)
+
+    assert len(local_fit_sizes) == 3
+    assert len(local_times[2]) == 1       # contamination promoted locally
+    assert fit_sizes == [11]              # one fit using every candidate
+    assert [len(times) for times in pooled_times] == [1, 1, 0]

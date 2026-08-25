@@ -90,7 +90,7 @@ def detector(data_matrix, check_detection=False, sample_rate=1e4, refractory_per
              search_window=1.2e-3, cutoff_frequency=300, global_polarity=False,
              min_peak_amplitude=0, n_clusters=2, threshold_spike_factor=3,
              remove_refractory_violations=True, max_trial_length_s=1, str_save_dir=None,
-             verbose=False):
+             verbose=False, cluster_across_trials=False):
     """Detect spikes in extracellular / cell-attached traces; port of SpikeDetectorNew.m.
 
     Each row of ``data_matrix`` is one trial. The trace is high-pass filtered,
@@ -117,10 +117,20 @@ def detector(data_matrix, check_detection=False, sample_rate=1e4, refractory_per
     work with, 1.5 admits hundreds of "spikes" per trial while 3 admits almost
     none. Pass ``threshold_spike_factor=1.5`` for the bare function default.
 
+    With ``cluster_across_trials=True``, candidate features from every trial are
+    fit by one shared k-means model and pass one shared spike-factor gate. This
+    prevents a trial containing only small contamination events from promoting
+    those events into its local "spike" cluster. Spike times and refractory
+    filtering remain trial-specific. ``global_polarity=True`` is recommended
+    with pooled clustering so trials without real spikes cannot flip polarity
+    independently.
+
     Two documented departures remain: ``n_clusters`` may exceed the MATLAB's
-    fixed 2, and traces longer than ``max_trial_length_s`` are clustered in
-    sections (the MATLAB always clusters the whole trace) so that a slow drift
-    in noise amplitude does not swamp the spike cluster.
+    fixed 2, and in per-trial mode traces longer than ``max_trial_length_s`` are
+    clustered in sections (the MATLAB always clusters the whole trace) so that
+    a slow drift in noise amplitude does not swamp the spike cluster. Pooled
+    mode intentionally uses one fit across all trials and therefore does not
+    section that shared fit.
 
     Returns ``(spike_times, spike_amplitudes, refractory_violations)``, each a
     list with one entry per trial. Spike times are in samples. ``verbose=True``
@@ -148,6 +158,107 @@ def detector(data_matrix, check_detection=False, sample_rate=1e4, refractory_per
         spike_times[tt] = np.array([], dtype=int)
         spike_amplitudes[tt] = np.array([])
         refractory_violations[tt] = np.array([], dtype=int)
+
+    if cluster_across_trials:
+        # Extract candidates separately so epoch boundaries remain intact, but
+        # fit one cluster boundary using all epochs. A single global quality
+        # gate replaces the old all-or-none gate fitted independently within
+        # each epoch.
+        oriented_traces = []
+        candidate_times = []
+        candidate_amplitudes = []
+        candidate_rebounds = []
+        candidate_features = []
+        polarity_source_global = data_matrix.ravel() if global_polarity else None
+
+        for tt in range(n_traces):
+            current_trace = np.asarray(data_matrix[tt, :]).copy()
+            polarity_source = (polarity_source_global if global_polarity
+                               else current_trace)
+            tail = min(500, max(polarity_source.size // 2, 1))
+            sorted_trace = np.sort(polarity_source)
+            if abs(np.mean(sorted_trace[-tail:])) > abs(np.mean(sorted_trace[:tail])):
+                current_trace = -current_trace
+            oriented_traces.append(current_trace)
+
+            amplitudes, times = get_peaks(current_trace, -1)
+            negative = amplitudes < 0
+            times = np.asarray(times[negative], dtype=int)
+            amplitudes = np.abs(np.asarray(amplitudes[negative], dtype=float))
+            rebounds = get_rebounds(times, current_trace, search_window_dp)
+            features = np.column_stack(
+                (amplitudes, rebounds['Left'], rebounds['Right']))
+
+            candidate_times.append(times)
+            candidate_amplitudes.append(amplitudes)
+            candidate_rebounds.append(rebounds)
+            candidate_features.append(features)
+
+        total_candidates = sum(len(values) for values in candidate_times)
+        if total_candidates < n_clusters:
+            if verbose:
+                print(f'Pooled detector: only {total_candidates} candidate peak(s); '
+                      'returning zero spikes')
+            for tt in range(n_traces):
+                _empty(tt)
+            return spike_times, spike_amplitudes, refractory_violations
+
+        pooled_features = np.vstack(candidate_features)
+        pooled_amplitudes = np.concatenate(candidate_amplitudes)
+        pooled_cluster_index, pooled_spike_mask = fit_kmeans(
+            pooled_features, n_clusters, verbose=verbose)
+        if min_peak_amplitude > 0:
+            pooled_spike_mask &= pooled_amplitudes > float(min_peak_amplitude)
+            pooled_cluster_index[~pooled_spike_mask] = non_spike_cluster_index
+
+        spike_pool = pooled_amplitudes[pooled_spike_mask]
+        noise_pool = pooled_amplitudes[~pooled_spike_mask]
+        if not len(spike_pool) or not len(noise_pool):
+            sigF = -np.inf
+        else:
+            noise_sd = float(np.std(noise_pool))
+            separation = float(np.mean(spike_pool) - np.mean(noise_pool))
+            sigF = separation / noise_sd if noise_sd > 0 else (
+                np.inf if separation > 0 else -np.inf)
+        if sigF < abs(threshold_spike_factor):
+            pooled_spike_mask[:] = False
+            if verbose:
+                print(f'Pooled detector: 0 spikes (spike factor {sigF:.2f} < '
+                      f'{abs(threshold_spike_factor):g})')
+        elif verbose:
+            print(f'Pooled detector: {int(pooled_spike_mask.sum())} spikes from '
+                  f'{n_traces} trials (spike factor {sigF:.2f})')
+
+        start = 0
+        for tt, times in enumerate(candidate_times):
+            stop = start + len(times)
+            local_mask = pooled_spike_mask[start:stop]
+            local_clusters = pooled_cluster_index[start:stop]
+            spike_times[tt] = np.asarray(times[local_mask], dtype=int)
+            spike_amplitudes[tt] = np.asarray(
+                candidate_amplitudes[tt][local_mask], dtype=float)
+            refractory_violations[tt] = (
+                np.where(np.diff(spike_times[tt]) < refractory_period_dp)[0] + 1)
+
+            if check_detection:
+                save_path = (os.path.join(str_save_dir, f'trial_{tt + 1}_clustering.png')
+                             if str_save_dir else None)
+                plot_clustering_data(
+                    candidate_amplitudes[tt], candidate_rebounds[tt],
+                    local_clusters, spike_cluster_indices, non_spike_cluster_index,
+                    oriented_traces[tt], spike_times[tt], refractory_violations[tt],
+                    sigF, str_save_plot=save_path)
+            start = stop
+
+        if remove_refractory_violations:
+            for tt in range(n_traces):
+                if len(refractory_violations[tt]) == 0:
+                    continue
+                keep = np.ones(len(spike_times[tt]), dtype=bool)
+                keep[np.asarray(refractory_violations[tt], dtype=int)] = False
+                spike_times[tt] = np.asarray(spike_times[tt])[keep]
+                spike_amplitudes[tt] = np.asarray(spike_amplitudes[tt])[keep]
+        return spike_times, spike_amplitudes, refractory_violations
 
     for tt in range(n_traces):
         current_trace = data_matrix[tt, :]
