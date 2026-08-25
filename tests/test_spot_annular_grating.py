@@ -816,6 +816,7 @@ def test_analyze_cell_conditions_wraps_section3_workflow(monkeypatch):
     monkeypatch.setattr(sag, 'check_series_resistance', lambda frame, **kwargs: frame)
 
     analyzed = []
+    plotted = []
 
     def fake_analyze(exp_name, block_ids, **kwargs):
         record = {'exp_name': exp_name, 'block_ids': list(block_ids)}
@@ -824,7 +825,11 @@ def test_analyze_cell_conditions_wraps_section3_workflow(monkeypatch):
 
     overlay = {}
     monkeypatch.setattr(sag, 'analyze_group', fake_analyze)
-    monkeypatch.setattr(sag, 'plot_group', lambda record: f"plot-{record['block_ids'][0]}")
+    def fake_plot(record, **kwargs):
+        plotted.append(kwargs)
+        return f"plot-{record['block_ids'][0]}"
+
+    monkeypatch.setattr(sag, 'plot_group', fake_plot)
 
     def fake_overlay(records, **kwargs):
         overlay.update(kwargs)
@@ -842,12 +847,23 @@ def test_analyze_cell_conditions_wraps_section3_workflow(monkeypatch):
     assert result.condition_figures == ['plot-1', 'plot-2']
     assert result.light_tuning_figure == 'overlay-figure'
     assert overlay['subtract_baseline'] is True
+    assert all(call['subtract_baseline'] is True for call in plotted)
     assert all(call[1]['keep_raw'] is True for call in analyzed)
+    assert all(call[1]['subtract_baseline'] is True for call in analyzed)
     assert all(call[1]['spike_offset'] == 125.0 for call in analyzed)
     assert all(call[1]['wc_offset'] == 75.0 for call in analyzed)
     assert all(call[1]['detector_kwargs'] == {
         'min_peak_amplitude': 10.0, 'max_trial_length_s': 5.0}
         for call in analyzed)
+
+    analyzed.clear()
+    plotted.clear()
+    sag.analyze_cell_conditions(
+        date_index=1, cell_label='Cell1', online_analysis='extracellular',
+        subtract_baseline=False, show=False, plot=True, verbose=False)
+    assert overlay['subtract_baseline'] is False
+    assert all(call['subtract_baseline'] is False for call in plotted)
+    assert all(call[1]['subtract_baseline'] is False for call in analyzed)
 
 
 def _tiny_record(exp='2026-04-23_E', cell='Cell1', mode='extracellular',
@@ -897,6 +913,23 @@ def test_plot_group_without_raw_spikes_keeps_two_panels():
 
     fig = sag.plot_group(_tiny_record(mode='exc'))
     assert len(fig.axes) == 2
+    plt.close(fig)
+
+
+def test_plot_group_can_show_absolute_response_without_subtracting_baseline():
+    import matplotlib.pyplot as plt
+
+    rec = _tiny_record()
+    rec.baseline_mean = 3.0
+    fig = sag.plot_group(rec, subtract_baseline=False)
+    tuning = fig.axes[-1]
+    response = tuning.containers[0].lines[0]
+    baseline = next(line for line in tuning.lines if line.get_label() == 'baseline')
+
+    assert np.allclose(response.get_ydata(), rec.resp_mean)
+    assert np.allclose(baseline.get_ydata(), [rec.baseline_mean, rec.baseline_mean])
+    assert 'response:' in rec.describe(subtract_baseline=False)
+    assert 'response − baseline:' not in rec.describe(subtract_baseline=False)
     plt.close(fig)
 
 

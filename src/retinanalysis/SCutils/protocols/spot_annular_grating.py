@@ -1036,7 +1036,7 @@ class GratingRecord:
             'wc_offset_ms': self.config.get('wc_offset_ms', np.nan),
         }
 
-    def describe(self) -> str:
+    def describe(self, subtract_baseline: bool = True) -> str:
         if not np.isfinite(self.series_resistance):
             rs = ''
         elif self.series_resistance > 0:
@@ -1059,14 +1059,16 @@ class GratingRecord:
         offset_key = 'spike_offset_ms' if self.online_analysis == 'extracellular' else 'wc_offset_ms'
         offset = self.config.get(offset_key, np.nan)
         offset_text = f'  offset={float(offset):g} ms' if np.isfinite(float(offset)) else ''
-        response_relative = self.resp_mean - self.baseline_mean
+        response_values = (self.resp_mean - self.baseline_mean
+                           if subtract_baseline else self.resp_mean)
+        response_label = 'response − baseline' if subtract_baseline else 'response'
         return (f'{self.exp_name} | {self.cell_type} | {self.cell_label} | '
                 f'{mode} | grating {self.grating_site} | '
                 f'{light_path}{maximum_text} bg={self.background_intensity:.2f} '
                 f'({self.light_level}) | '
                 f'{self.n_epochs} epochs{rs}{offset_text}\n'
                 f'  dark contrasts : {np.round(self.dark_contrasts, 3)}\n'
-                f'  response − baseline: {np.round(response_relative, 3)}\n'
+                f'  {response_label}: {np.round(response_values, 3)}\n'
                 f'  baseline={self.baseline_mean:.3f} | crossing nearest='
                 f'{self.crossing_nearest:.3f} interp={self.crossing_interp:.3f} | '
                 f'cone pred={self.cone_pred_dark:.3f}')
@@ -1143,6 +1145,7 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
                   drop_epochs: Sequence[int] = (),
                   max_series_resistance: Optional[float] = MAX_SERIES_RESISTANCE,
                   keep_raw: bool = False,
+                  subtract_baseline: bool = True,
                   verbose: bool = True) -> GratingRecord:
     """Port of the per-node body of analyzeSpotAnnularGrating.m.
 
@@ -1168,6 +1171,11 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
     An epoch recorded through more than ``max_series_resistance`` ohms is
     dropped, per epoch, since the current is too filtered to trust; set it to
     ``None`` to keep them.
+
+    ``subtract_baseline`` controls the printed response summary. The returned
+    record always retains both the absolute stimulus response in ``resp_mean``
+    and the across-epoch preTime mean in ``baseline_mean``, so downstream plots
+    can switch between them without repeating spike detection.
 
     ``keep_raw=True`` attaches the unprocessed amplifier traces to the record as
     ``rec.raw``, so :func:`plot_raw_blocks` and :func:`plot_raw_epochs` can draw
@@ -1390,10 +1398,11 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
                 'ndf_combination': ndf_combination,
                 'max_light_level': max_light_level,
                 'spike_offset_ms': float(spike_offset),
-                'wc_offset_ms': float(wc_offset)},
+                'wc_offset_ms': float(wc_offset),
+                'subtract_baseline': bool(subtract_baseline)},
         units=units, raw=raw)
     if verbose:
-        print(rec.describe())
+        print(rec.describe(subtract_baseline=subtract_baseline))
     return rec
 
 
@@ -1786,7 +1795,8 @@ def load_records(keys: Optional[Sequence[str]] = None, path=None) -> Dict[str, D
 # plotting
 # --------------------------------------------------------------------------
 
-def plot_group(rec: GratingRecord, figsize: Tuple[float, float] = (7.2, 7.6)):
+def plot_group(rec: GratingRecord, figsize: Tuple[float, float] = (7.2, 7.6),
+               subtract_baseline: bool = True):
     """Raster, mean PSTHs, and contrast tuning for one recording group.
 
     Extracellular records built with ``keep_raw=True`` gain a spike raster above
@@ -1864,11 +1874,14 @@ def plot_group(rec: GratingRecord, figsize: Tuple[float, float] = (7.2, 7.6)):
                    f'bg={rec.background_intensity:g} ({rec.light_level})', fontsize=9)
     ax_t.legend(frameon=False, fontsize=6.5, ncol=2, title='dark contrast', title_fontsize=7)
 
-    response_relative = rec.resp_mean - rec.baseline_mean
-    ax_c.errorbar(rec.dark_contrasts, response_relative, yerr=rec.resp_sem, fmt='o-',
+    response_values = (rec.resp_mean - rec.baseline_mean
+                       if subtract_baseline else rec.resp_mean)
+    response_label = 'response − baseline' if subtract_baseline else 'response'
+    baseline_level = 0.0 if subtract_baseline else rec.baseline_mean
+    ax_c.errorbar(rec.dark_contrasts, response_values, yerr=rec.resp_sem, fmt='o-',
                   ms=4, lw=1.4, color='#0072B2', ecolor='#0072B2', capsize=3,
-                  label='response − baseline', zorder=3)
-    ax_c.axhline(0.0, color='#666666', ls='--', lw=1.1, label='baseline')
+                  label=response_label, zorder=3)
+    ax_c.axhline(baseline_level, color='#666666', ls='--', lw=1.1, label='baseline')
     ax_c.axvline(rec.crossing_nearest, color='#D55E00', ls=':', lw=1.3, label='crossing')
     if np.isfinite(rec.cone_pred_dark):
         ax_c.axvline(rec.cone_pred_dark, color='#009E73', ls='-.', lw=1.3, label='conepred')
@@ -2107,6 +2120,7 @@ def analyze_cell_conditions(date_index: int, cell_label: str, online_analysis: s
                             max_series_resistance: Optional[float] = MAX_SERIES_RESISTANCE,
                             spike_offset: float = DEFAULTS['spike_offset'],
                             wc_offset: float = DEFAULTS['wc_offset'],
+                            subtract_baseline: bool = True,
                             keep_raw: bool = True, plot: bool = True,
                             show: bool = True, verbose: bool = True,
                             detector_kwargs: Optional[dict] = None) -> CellConditionAnalysis:
@@ -2121,9 +2135,10 @@ def analyze_cell_conditions(date_index: int, cell_label: str, online_analysis: s
     ``detector_kwargs`` overrides spike-detector defaults for this protocol
     analysis without changing the shared detector. ``spike_offset`` and
     ``wc_offset`` are milliseconds after stimulus onset;
-    both response windows still end at ``preTime + stimTime``. Extracellular
-    tuning overlays subtract the firing rate measured during preTime; whole-cell
-    overlays retain the same baseline-subtracted convention.
+    both response windows still end at ``preTime + stimTime``.
+    ``subtract_baseline`` controls the printed values and Section 3 tuning plots
+    and defaults to ``True``. The record still retains both absolute response
+    and baseline values regardless of this display choice.
     """
     from retinanalysis.SCutils import explore as sc
     if show:
@@ -2205,6 +2220,7 @@ def analyze_cell_conditions(date_index: int, cell_label: str, online_analysis: s
                 'onlineAnalysis': row.onlineAnalysis,
                 'spikeOffset_ms': float(spike_offset),
                 'wholeCellOffset_ms': float(wc_offset),
+                'subtractBaseline': bool(subtract_baseline),
                 'spotIntensity': row.spot_intensity,
                 'brightBarContrast': row.bright,
                 'barWidth_um': row.bar_width,
@@ -2219,11 +2235,13 @@ def analyze_cell_conditions(date_index: int, cell_label: str, online_analysis: s
             exp_name, block_ids, online_analysis=online_analysis,
             max_series_resistance=max_series_resistance,
             spike_offset=spike_offset, wc_offset=wc_offset,
+            subtract_baseline=subtract_baseline,
             detector_kwargs=detector_kwargs,
             keep_raw=keep_raw, verbose=verbose)
         records.append(record)
         if plot:
-            condition_figures.append(plot_group(record))
+            condition_figures.append(
+                plot_group(record, subtract_baseline=subtract_baseline))
 
     light_tuning_figure = None
     if plot and len(light_conditions) > 1:
@@ -2234,10 +2252,11 @@ def analyze_cell_conditions(date_index: int, cell_label: str, online_analysis: s
             for _, row in condition_rows.iterrows()
         ]
         if show:
-            print('Overlaying baseline-subtracted tuning curves across the '
+            response_text = ('baseline-subtracted' if subtract_baseline else 'absolute')
+            print(f'Overlaying {response_text} tuning curves across the '
                   'recorded light conditions.')
         light_tuning_figure = plot_tuning_overlay(
-            records, labels=labels, subtract_baseline=True,
+            records, labels=labels, subtract_baseline=subtract_baseline,
             title=f'{exp_name} {cell_label}: tuning curves by light condition')
 
     if show:
