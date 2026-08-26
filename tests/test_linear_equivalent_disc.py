@@ -670,6 +670,34 @@ def test_natural_image_patch_library_row_accepts_identical_duplicate_locations(
     assert row['patchVariance'] == .75
 
 
+def test_equivalent_intensity_reconstruction_recovers_distinct_cone_value(
+        monkeypatch):
+    contrast = np.arange(64, dtype=float).reshape(8, 8) / 63 - .5
+    monkeypatch.setattr(
+        led, 'load_vh_contrast_image',
+        lambda image_name, image_set: (contrast, .2))
+    params = {
+        'imageName': '00152', 'currentImageSet': 'images',
+        'currentPatchLocation': [4, 4], 'canvasSize': [4, 4],
+        'micronsPerPixel': 6.6, 'apertureDiameter': 100,
+        'rfSigmaCenter': 20, 'linearIntegrationFunction': 'uniform',
+        'backgroundIntensity': .2, 'maxIntensity': 1000,
+        'WeberConstant': 200,
+    }
+
+    equivalent, cone_equivalent = led.equivalent_intensities_from_epoch(params)
+
+    patch = contrast[2:6, 2:6]
+    expected_equivalent = .2 * (1 + patch.mean())
+    patch_isoms = (patch + 1) * .2 * 1000
+    rf_factor = np.mean((patch_isoms - 200) / (1 + patch_isoms / 200))
+    cone_contrast = rf_factor * (1 + 200 / 200) / (1 - rf_factor / 200) / 200
+    expected_cone = .2 * (1 + cone_contrast)
+    assert equivalent == pytest.approx(expected_equivalent)
+    assert cone_equivalent == pytest.approx(expected_cone)
+    assert cone_equivalent != pytest.approx(equivalent)
+
+
 def test_build_and_save_fw0_patch_variance_population(tmp_path, monkeypatch):
     from dataclasses import replace
 
@@ -700,8 +728,11 @@ def test_build_and_save_fw0_patch_variance_population(tmp_path, monkeypatch):
         'patchVariance': [.4, .5, .6],
         'equivalentIntensity': [.2, .3, .4],
         'equivalentIntensity_values': ['0.2', '0.3', '0.4'],
+        'equivalentIntensity_recorded_values': ['0.2', '0.3', '0.4'],
         'equivalentIntensityConeLin': [.25, .35, .45],
         'equivalentIntensityConeLin_values': ['0.25', '0.35', '0.45'],
+        'equivalentIntensityConeLin_recorded_values': ['0.2', '0.3', '0.4'],
+        'cone_equivalent_metadata_corrected': [True] * 3,
         'library_path': ['test.mat'] * 3,
     })
     monkeypatch.setattr(

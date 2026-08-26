@@ -116,7 +116,7 @@ CONDITION_SUMMARY_COLUMNS = (
     'backgroundIntensity', 'meanIntensity',
 )
 CONDITION_OUTPUT_VERSION = 1
-PATCH_VARIANCE_POPULATION_VERSION = 1
+PATCH_VARIANCE_POPULATION_VERSION = 2
 
 
 def stimulus_site(protocol: str) -> str:
@@ -1783,8 +1783,10 @@ PATCH_VARIANCE_POPULATION_COLUMNS = [
     'seed_values', 'patchSampling_values', 'patchContrast_values',
     'maxIntensity', 'backgroundIntensity', 'meanIntensity',
     'patchMean', 'patchVariance', 'equivalentIntensity',
-    'equivalentIntensity_values', 'equivalentIntensityConeLin',
-    'equivalentIntensityConeLin_values', 'equivalentIntensity_Rstar_per_s',
+    'equivalentIntensity_values', 'equivalentIntensity_recorded_values',
+    'equivalentIntensityConeLin', 'equivalentIntensityConeLin_values',
+    'equivalentIntensityConeLin_recorded_values',
+    'cone_equivalent_metadata_corrected', 'equivalentIntensity_Rstar_per_s',
     'equivalentIntensityConeLin_Rstar_per_s', 'response_units',
     'image_response', 'image_response_sem', 'image_trials',
     'disc_response', 'disc_response_sem', 'disc_trials',
@@ -1882,6 +1884,104 @@ def _single_numeric(values, label: str, patch_key: str) -> float:
     return float(candidates[0])
 
 
+@lru_cache(maxsize=None)
+def _natural_image_weighting(canvas_width: float, canvas_height: float,
+                             microns_per_pixel: float, outer_diameter: float,
+                             inner_diameter: float, rf_sigma: float,
+                             integration_function: str):
+    """Protocol-exact RF/aperture weights in van Hateren pixel space."""
+    rad_x, rad_y = np.floor(
+        np.asarray([canvas_width, canvas_height], dtype=float)
+        * float(microns_per_pixel) / VH_MICRONS_PER_PIXEL / 2).astype(int)
+    if rad_x <= 0 or rad_y <= 0:
+        raise ValueError('recorded canvas geometry produces an empty image patch')
+
+    # MATLAB fspecial('gaussian', 2.*[radX radY], sigma) uses half-pixel
+    # centers for these even-sized arrays.
+    x = np.arange(2 * rad_x, dtype=float) - (2 * rad_x - 1) / 2
+    y = np.arange(2 * rad_y, dtype=float) - (2 * rad_y - 1) / 2
+    yy, xx = np.meshgrid(y, x)
+    sigma_vh = float(rf_sigma) / VH_MICRONS_PER_PIXEL
+    gaussian = np.exp(-(xx ** 2 + yy ** 2) / (2 * sigma_vh ** 2))
+    gaussian[gaussian < np.finfo(float).eps * gaussian.max()] = 0
+    gaussian /= gaussian.sum()
+
+    rr, cc = np.meshgrid(
+        np.arange(1, 2 * rad_x + 1, dtype=float),
+        np.arange(1, 2 * rad_y + 1, dtype=float))
+    radius = np.sqrt((rr - rad_x) ** 2 + (cc - rad_y) ** 2).T
+    aperture = radius < float(outer_diameter) / 2 / VH_MICRONS_PER_PIXEL
+    if float(inner_diameter) > 0:
+        aperture &= radius > float(inner_diameter) / 2 / VH_MICRONS_PER_PIXEL
+
+    mode = str(integration_function).strip().lower()
+    if mode == 'gaussian':
+        weighting = aperture * gaussian
+    elif mode == 'uniform':
+        weighting = aperture.astype(float)
+    else:
+        raise ValueError(f'unknown linearIntegrationFunction {integration_function!r}')
+    total = float(weighting.sum())
+    if total <= 0:
+        raise ValueError('recorded aperture produces zero integration weight')
+    return weighting / total, int(rad_x), int(rad_y)
+
+
+def equivalent_intensities_from_epoch(params: Dict) -> Tuple[float, float]:
+    """Reconstruct both displayed disc intensities from recorded parameters.
+
+    This mirrors ``NaturalImageFlashProtocol.getEquivalentIntensityValues`` and
+    ``getEquivalentIntensityValuesConeLin``. It is necessary for the older
+    Turner ``LinearEquivalentDisc`` protocol, whose ``prepareEpoch`` displayed
+    ``equivalentIntensityConeLin`` correctly but accidentally saved
+    ``equivalentIntensity`` under that epoch-parameter name.
+    """
+    image_name = str(params['imageName']).strip()
+    image_set = str(params.get(
+        'currentImageSet', 'VHsubsample_20160105')).strip().lstrip('/')
+    contrast, _ = load_vh_contrast_image(image_name, image_set)
+    if contrast is None:
+        raise FileNotFoundError(
+            f'cannot reconstruct equivalent intensities: imk{image_name}.iml '
+            f'was not found in {image_set}')
+    canvas = np.asarray(params['canvasSize'], dtype=float).reshape(-1)
+    if canvas.size < 2:
+        raise ValueError('recorded canvasSize must contain width and height')
+    inner = float(params.get('annulusInnerDiameter') or 0.0)
+    outer = float(params.get('apertureDiameter')
+                  or params.get('annulusOuterDiameter') or 0.0)
+    sigma_key = 'rfSigmaSurround' if inner > 0 else 'rfSigmaCenter'
+    weighting, rad_x, rad_y = _natural_image_weighting(
+        float(canvas[0]), float(canvas[1]), float(params['micronsPerPixel']),
+        outer, inner, float(params[sigma_key]),
+        str(params.get('linearIntegrationFunction', 'gaussian')))
+
+    x, y = (int(round(value)) for value in
+            np.asarray(params['currentPatchLocation'], dtype=float)[:2])
+    patch = contrast[x - rad_x:x + rad_x, y - rad_y:y + rad_y]
+    if patch.shape != weighting.shape:
+        raise ValueError(
+            f'imk{image_name} location {[x, y]} produced patch shape '
+            f'{patch.shape}; expected {weighting.shape}')
+
+    background = float(params['backgroundIntensity'])
+    equivalent_contrast = float(np.sum(weighting * patch))
+    equivalent = background * (1 + equivalent_contrast)
+
+    maximum = float(params['maxIntensity'])
+    weber = float(params['WeberConstant'])
+    patch_isoms = (patch + 1) * background * maximum
+    rf_factor = float(np.sum(
+        weighting * (patch_isoms - background * maximum)
+        / (1 + patch_isoms / weber)))
+    cone_contrast = (
+        rf_factor * (1 + background * maximum / weber)
+        / (1 - rf_factor / weber)
+        / (background * maximum))
+    cone_equivalent = background * (1 + cone_contrast)
+    return float(equivalent), float(cone_equivalent)
+
+
 def _condition_patch_stimulus_metadata(analysis: ConditionAnalysis) -> pd.DataFrame:
     """Recover physical patch identity and stimulus values from raw epochs.
 
@@ -1920,6 +2020,7 @@ def _condition_patch_stimulus_metadata(analysis: ConditionAnalysis) -> pd.DataFr
             x, y = float(location[0]), float(location[1])
             library = _natural_image_patch_library_row(
                 protocol_name, stimulus_set, image_name, (x, y))
+            equivalent, cone_equivalent = equivalent_intensities_from_epoch(params)
             patch_uid = f'{stimulus_set}:imk{image_name}:x{x:g}:y{y:g}'
             rows.append({
                 'imageName': image_name,
@@ -1936,8 +2037,11 @@ def _condition_patch_stimulus_metadata(analysis: ConditionAnalysis) -> pd.DataFr
                 'seed': params.get('seed', np.nan),
                 'patchSampling': params.get('patchSampling', ''),
                 'patchContrast': params.get('patchContrast', ''),
-                'equivalentIntensity': params.get('equivalentIntensity', np.nan),
-                'equivalentIntensityConeLin': params.get(
+                'equivalentIntensity': equivalent,
+                'equivalentIntensity_recorded': params.get(
+                    'equivalentIntensity', np.nan),
+                'equivalentIntensityConeLin': cone_equivalent,
+                'equivalentIntensityConeLin_recorded': params.get(
                     'equivalentIntensityConeLin', np.nan),
                 **library,
             })
@@ -1986,10 +2090,19 @@ def _condition_patch_stimulus_metadata(analysis: ConditionAnalysis) -> pd.DataFr
                 group['equivalentIntensity'], errors='coerce').mean()),
             'equivalentIntensity_values': _joined_metadata_values(
                 group['equivalentIntensity']),
+            'equivalentIntensity_recorded_values': _joined_metadata_values(
+                group['equivalentIntensity_recorded']),
             'equivalentIntensityConeLin': float(pd.to_numeric(
                 group['equivalentIntensityConeLin'], errors='coerce').mean()),
             'equivalentIntensityConeLin_values': _joined_metadata_values(
                 group['equivalentIntensityConeLin']),
+            'equivalentIntensityConeLin_recorded_values': _joined_metadata_values(
+                group['equivalentIntensityConeLin_recorded']),
+            'cone_equivalent_metadata_corrected': bool(np.any(~np.isclose(
+                pd.to_numeric(group['equivalentIntensityConeLin'], errors='coerce'),
+                pd.to_numeric(
+                    group['equivalentIntensityConeLin_recorded'], errors='coerce'),
+                rtol=1e-7, atol=1e-10, equal_nan=True))),
             'source_block_ids': _joined_metadata_values(
                 sorted(group['source_block_id'].unique())),
             'noPatches_values': _joined_metadata_values(group['noPatches']),
@@ -3795,6 +3908,7 @@ def vh_image_path(image_name: str, image_set: str = 'VHsubsample_20160105'):
     return hits[0] if hits else None
 
 
+@lru_cache(maxsize=None)
 def load_vh_contrast_image(image_name: str, image_set: str = 'VHsubsample_20160105'):
     """Load a van Hateren image the way the protocol does.
 
