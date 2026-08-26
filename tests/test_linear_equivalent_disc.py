@@ -14,7 +14,8 @@ from retinanalysis.SCutils.protocols import linear_equivalent_disc as led
     'analyzeConeCenterDisc.ipynb',
 ])
 def test_analysis_notebooks_select_retinanalysis_kernel(name):
-    notebook_path = Path(__file__).parents[1] / 'SingCell_Notebooks' / name
+    notebook_path = (Path(__file__).parents[1] / 'SingCell_Notebooks'
+                     / 'linCone' / name)
     notebook = json.loads(notebook_path.read_text())
 
     assert notebook['metadata']['kernelspec']['name'] == 'retinanalysis'
@@ -1062,7 +1063,7 @@ def test_center_disc_mat_export_matches_reference_cell_struct(tmp_path, capsys):
 def test_center_disc_mat_export_preserves_reference_field_prefix():
     from scipy.io import loadmat
 
-    reference = (Path(__file__).parents[1] / 'SingCell_Notebooks'
+    reference = (Path(__file__).parents[1] / 'SingCell_Notebooks' / 'linCone'
                  / 'OffParasolLinEquiv.mat')
     collected = loadmat(
         reference, squeeze_me=False,
