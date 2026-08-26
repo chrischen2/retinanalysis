@@ -1271,6 +1271,19 @@ def test_population_tuning_can_normalize_each_cell_at_minus_one():
     assert tuning['n_cells'].tolist() == [2, 2, 2]
 
 
+def test_population_tuning_can_normalize_to_maximum_signed_response():
+    summary, recs = _pop_summary_and_records({
+        'Cell1': (13000.0, 0.0, [-20.0, 5.0, 10.0]),
+        'Cell2': (13000.0, 0.0, [-4.0, 1.0, 2.0]),
+    })
+    tuning = sag.population_tuning(
+        summary, records=recs, normalize=True,
+        normalization_mode='max_response', require_positive_reference=True)
+
+    assert tuning['mean'].tolist() == [-2.0, 0.5, 1.0]
+    assert tuning['n_cells'].tolist() == [2, 2, 2]
+
+
 def test_population_tuning_excludes_nonpositive_minus_one_reference(capsys):
     summary, recs = _pop_summary_and_records({
         'Cell1': (13000.0, 0.0, [5.0, 2.5, 0.0]),

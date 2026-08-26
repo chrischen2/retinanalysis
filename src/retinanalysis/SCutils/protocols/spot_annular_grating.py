@@ -2982,7 +2982,9 @@ def population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Dict]] 
                       normalize: bool = True, min_contrasts: int = 3,
                       negative_only: bool = False,
                       normalization_contrast: Optional[float] = None,
+                      normalization_mode: str = 'max_abs',
                       require_positive_reference: bool = False,
+                      report_excluded: bool = True,
                       allowed_bright_contrast: Optional[Sequence[float]]
                       = ALLOWED_BRIGHT_CONTRAST) -> pd.DataFrame:
     """Mean response-vs-dark-contrast curve per light level, pooled over cells.
@@ -2993,9 +2995,11 @@ def population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Dict]] 
 
     ``negative_only=True`` excludes positive values from the contrast axis.
     ``normalize`` (default) then normalizes each cell after repeated records
-    have been averaged. With ``normalization_contrast=None`` the divisor is the
-    largest absolute plotted response. Set ``normalization_contrast=-1`` to
-    divide by the response at :math:`C_-=-1` instead. For an OFF-cell analysis,
+    have been averaged. With ``normalization_contrast=None``,
+    ``normalization_mode='max_abs'`` uses the largest absolute response, while
+    ``'max_response'`` uses the largest signed response. Set
+    ``normalization_contrast=-1`` to divide by the response at
+    :math:`C_-=-1` instead. For an OFF-cell analysis,
     ``require_positive_reference=True`` excludes cells not driven positively
     at that reference rather than amplifying a zero or sign-reversed response.
 
@@ -3032,7 +3036,13 @@ def population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Dict]] 
         cell_keys = ['condition', 'online_analysis', 'units', 'rstar_level', 'cell']
         for cell_key, curve in per_cell.groupby(cell_keys, dropna=False, sort=False):
             if normalization_contrast is None:
-                divisor = float(np.nanmax(np.abs(curve['value'])))
+                if normalization_mode == 'max_abs':
+                    divisor = float(np.nanmax(np.abs(curve['value'])))
+                elif normalization_mode == 'max_response':
+                    divisor = float(np.nanmax(curve['value']))
+                else:
+                    raise ValueError(
+                        "normalization_mode must be 'max_abs' or 'max_response'")
             else:
                 reference = curve[np.isclose(
                     curve['dark_contrast'], float(normalization_contrast), atol=1e-6)]
@@ -3045,8 +3055,9 @@ def population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Dict]] 
             curve['value'] = curve['value'] / divisor
             curve['units'] = 'normalized'
             normalized.append(curve)
-        if skipped:
-            reference_text = ('maximum response' if normalization_contrast is None
+        if skipped and report_excluded:
+            reference_text = (normalization_mode.replace('_', ' ')
+                              if normalization_contrast is None
                               else f'contrast {float(normalization_contrast):g}')
             print(f'Excluded {len(skipped)} cell(s) without a usable positive '
                   f'normalization response at {reference_text}: {", ".join(skipped)}')
@@ -3169,6 +3180,7 @@ def plot_population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Di
                                                         'OFF-parasol / center'),
                            modes: Sequence[str] = ('extracellular', 'exc'),
                            figsize: Tuple[float, float] = (10.0, 7.0),
+                           title: Optional[str] = None,
                            cone_prediction_bright_contrast: Optional[float] = None,
                            cone_prediction_i0: float = DEFAULTS['cone_i0'],
                            **kwargs):
@@ -3247,12 +3259,15 @@ def plot_population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Di
                     label = 'normalized response'
                     if reference is not None:
                         label += f'\n(at $C_-={float(reference):g}$)'
+                    elif kwargs.get('normalization_mode') == 'max_response':
+                        label += '\n(at each cell’s maximum)'
                     ax.set_ylabel(label)
                 else:
                     ax.set_ylabel(f'response − baseline\n({units})')
-    fig.suptitle('Population tuning curves by light level'
-                 + ('' if normalize else '  (recorded units — never pooled across modes)'),
-                 fontsize=11)
+    default_title = ('Population tuning curves by light level'
+                     + ('' if normalize
+                        else '  (recorded units — never pooled across modes)'))
+    fig.suptitle(title if title is not None else default_title, fontsize=11)
     fig.tight_layout()
     return fig
 
