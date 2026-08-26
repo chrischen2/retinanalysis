@@ -648,6 +648,81 @@ def test_condition_output_save_is_idempotent_and_loads_population_rows(tmp_path)
     assert loaded['imageName'].tolist() == ['00152', '00152', '01769']
 
 
+def test_natural_image_patch_library_row_accepts_identical_duplicate_locations(
+        tmp_path, monkeypatch):
+    library_path = tmp_path / 'NaturalImageFlashLibrary_test.mat'
+    library_path.touch()
+    monkeypatch.setattr(
+        led, '_natural_image_library_path',
+        lambda protocol_name, stimulus_set: library_path)
+    monkeypatch.setattr(led, '_load_natural_image_library', lambda path: {
+        'imk00152': {
+            'location': np.array([[10, 20], [30, 40], [10, 20]]),
+            'PatchMean': np.array([.25, .5, .25]),
+            'PatchVariance': np.array([.75, 1.0, .75]),
+        },
+    })
+
+    row = led._natural_image_patch_library_row(
+        'example.protocol', 'NaturalImageFlashLibrary_test', '00152', [10, 20])
+
+    assert row['patchMean'] == .25
+    assert row['patchVariance'] == .75
+
+
+def test_build_and_save_fw0_patch_variance_population(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    analysis = replace(
+        _condition_analysis_for_output(),
+        protocols=['LinearEquivalentDiscConeLin'], site='center')
+    led.save_condition_output(analysis, output_dir=tmp_path, verbose=False)
+    led.save_condition_output(
+        replace(analysis, cell_label='Cell2', filter_wheel_ndf=1.0),
+        output_dir=tmp_path, verbose=False)
+    metadata = pd.DataFrame({
+        'imageName': ['00152', '00152', '01769'],
+        'patchIndex': [1.0, 2.0, 1.0],
+        'patch_uid': ['library:imk00152:x10:y20',
+                      'library:imk00152:x30:y40',
+                      'library:imk01769:x50:y60'],
+        'patch_x_vh': [10.0, 30.0, 50.0],
+        'patch_y_vh': [20.0, 40.0, 60.0],
+        'currentStimSet': ['library'] * 3,
+        'currentImageSet': ['images'] * 3,
+        'source_protocol_name': ['example.protocol'] * 3,
+        'source_block_ids': ['11', '11', '12'],
+        'noPatches_values': ['10', '10', '30'],
+        'seed_values': ['1'] * 3,
+        'patchSampling_values': ['ranked'] * 3,
+        'patchContrast_values': ['all'] * 3,
+        'patchMean': [.1, .2, .3],
+        'patchVariance': [.4, .5, .6],
+        'equivalentIntensity': [.2, .3, .4],
+        'equivalentIntensity_values': ['0.2', '0.3', '0.4'],
+        'equivalentIntensityConeLin': [.25, .35, .45],
+        'equivalentIntensityConeLin_values': ['0.25', '0.35', '0.45'],
+        'library_path': ['test.mat'] * 3,
+    })
+    monkeypatch.setattr(
+        led, '_condition_patch_stimulus_metadata', lambda _analysis: metadata)
+
+    table = led.build_center_disc_patch_variance_population(
+        output_dir=tmp_path, filter_wheel_ndf=0, verbose=False)
+    output = led.save_patch_variance_population(
+        table, path=tmp_path / 'population.h5', verbose=False)
+    restored = led.load_patch_variance_population(output)
+
+    assert len(table) == 3
+    assert table['filter_wheel_ndf'].unique().tolist() == [0.0]
+    assert table['patch_uid'].nunique() == 3
+    assert table['equivalentIntensity_Rstar_per_s'].tolist() == [200, 300, 400]
+    assert table['delta_nli_cone_minus_disc'].tolist() == pytest.approx([
+        1 / 7 - 1 / 3, 1 / 15 - 1 / 3, 1 / 11 - 1 / 3])
+    assert restored.columns.tolist() == led.PATCH_VARIANCE_POPULATION_COLUMNS
+    assert restored['patchVariance'].tolist() == [.4, .5, .6]
+
+
 def test_condition_save_alerts_and_removes_matching_h5_and_legacy_csv(
         tmp_path, capsys):
     import shutil

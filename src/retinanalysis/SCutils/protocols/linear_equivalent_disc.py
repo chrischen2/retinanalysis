@@ -46,6 +46,7 @@ blocks; :func:`find_blocks` applies it and reports what it dropped.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 import re
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
@@ -115,6 +116,7 @@ CONDITION_SUMMARY_COLUMNS = (
     'backgroundIntensity', 'meanIntensity',
 )
 CONDITION_OUTPUT_VERSION = 1
+PATCH_VARIANCE_POPULATION_VERSION = 1
 
 
 def stimulus_site(protocol: str) -> str:
@@ -1770,6 +1772,362 @@ def load_condition_outputs(
                     str(table.iloc[0]['protocol']).split(', '), protocol))):
             tables.append(table)
     return pd.concat(tables, ignore_index=True) if tables else pd.DataFrame()
+
+
+PATCH_VARIANCE_POPULATION_COLUMNS = [
+    'date', 'cell_label', 'cell_type', 'onlineAnalysis', 'protocol', 'site',
+    'filter_wheel_ndf', 'imageName', 'patch_uid', 'patchIndex',
+    'patch_x_vh', 'patch_y_vh', 'currentStimSet', 'currentImageSet',
+    'source_protocol_name', 'library_path', 'source_condition_h5',
+    'source_block_ids', 'noPatches_values',
+    'seed_values', 'patchSampling_values', 'patchContrast_values',
+    'maxIntensity', 'backgroundIntensity', 'meanIntensity',
+    'patchMean', 'patchVariance', 'equivalentIntensity',
+    'equivalentIntensity_values', 'equivalentIntensityConeLin',
+    'equivalentIntensityConeLin_values', 'equivalentIntensity_Rstar_per_s',
+    'equivalentIntensityConeLin_Rstar_per_s', 'response_units',
+    'image_response', 'image_response_sem', 'image_trials',
+    'disc_response', 'disc_response_sem', 'disc_trials',
+    'cone_disc_response', 'cone_disc_response_sem', 'cone_disc_trials',
+    'nli_image_vs_disc', 'nli_image_vs_cone_disc', 'delta_nli_cone_minus_disc',
+]
+
+
+def _natural_image_library_path(protocol_name: str, stimulus_set: str):
+    """Resolve the exact package resource used by a recorded protocol."""
+    from pathlib import Path
+    from retinanalysis.utils.protocol_source import protocol_source_path
+
+    source = protocol_source_path(str(protocol_name))
+    if source is None:
+        raise FileNotFoundError(
+            f'no local MATLAB source was found for {protocol_name!r}')
+    path = Path(source).parent.parent / '+resources' / f'{stimulus_set}.mat'
+    if not path.is_file():
+        raise FileNotFoundError(
+            f'{protocol_name!r} points to {path.parent}, but '
+            f'{stimulus_set}.mat is missing')
+    return path
+
+
+@lru_cache(maxsize=None)
+def _load_natural_image_library(path_string: str):
+    """Load and cache one NaturalImageFlash MATLAB metadata library."""
+    from scipy.io import loadmat
+
+    contents = loadmat(path_string, simplify_cells=True)
+    if 'imageData' not in contents:
+        raise KeyError(f'{path_string} has no imageData variable')
+    return contents['imageData']
+
+
+def _natural_image_patch_library_row(protocol_name: str, stimulus_set: str,
+                                     image_name: str, patch_location) -> Dict:
+    """Patch mean/variance for one exact recorded natural-image location."""
+    path = _natural_image_library_path(protocol_name, stimulus_set)
+    image_data = _load_natural_image_library(str(path))
+    field = f'imk{str(image_name).strip()}'
+    if field not in image_data:
+        raise KeyError(f'{path.name} has no {field} entry')
+    record = image_data[field]
+    locations = np.asarray(record['location'], dtype=float)
+    target = np.asarray(patch_location, dtype=float).reshape(-1)[:2]
+    matched = np.flatnonzero(np.all(np.isclose(locations, target), axis=1))
+    if matched.size == 0:
+        raise ValueError(
+            f'{field} location {target.tolist()} is absent from {path.name}')
+    # Some historical libraries contain the same physical location twice. It
+    # is still one patch when all stored patch statistics agree.
+    means = np.asarray(record['PatchMean']).reshape(-1)[matched].astype(float)
+    variances = np.asarray(
+        record['PatchVariance']).reshape(-1)[matched].astype(float)
+    if (not np.allclose(means, means[0], equal_nan=True)
+            or not np.allclose(variances, variances[0], equal_nan=True)):
+        raise ValueError(
+            f'{field} location {target.tolist()} has {matched.size} conflicting '
+            f'rows in {path.name}')
+    index = int(matched[0])
+    return {
+        'patchMean': float(np.asarray(record['PatchMean']).reshape(-1)[index]),
+        'patchVariance': float(
+            np.asarray(record['PatchVariance']).reshape(-1)[index]),
+        'library_path': str(path),
+    }
+
+
+def _joined_metadata_values(values) -> str:
+    """Stable comma-separated provenance for metadata that can vary by block."""
+    unique = []
+    for value in values:
+        if isinstance(value, (list, tuple, np.ndarray)):
+            value = tuple(np.asarray(value).reshape(-1).tolist())
+        if not isinstance(value, tuple) and pd.isna(value):
+            continue
+        text = str(value)
+        if text not in unique:
+            unique.append(text)
+    return ','.join(unique)
+
+
+def _single_numeric(values, label: str, patch_key: str) -> float:
+    """Return one repeated numeric value, rejecting inconsistent metadata."""
+    numeric = pd.to_numeric(pd.Series(list(values)), errors='coerce').dropna()
+    if numeric.empty:
+        return np.nan
+    candidates = numeric.to_numpy(dtype=float)
+    if not np.allclose(candidates, candidates[0], rtol=1e-7, atol=1e-10):
+        raise ValueError(
+            f'{patch_key}: recorded {label} has multiple values '
+            f'{np.unique(candidates).tolist()}')
+    return float(candidates[0])
+
+
+def _condition_patch_stimulus_metadata(analysis: ConditionAnalysis) -> pd.DataFrame:
+    """Recover physical patch identity and stimulus values from raw epochs.
+
+    Saved responses are indexed by the protocol's run-local ``patchIndex``.
+    This function reopens the blocks named in the saved HDF5 and translates
+    that ordinal into the stable identity ``(stimulus library, image, x, y)``.
+    """
+    import contextlib
+    import io
+    import retinanalysis as ra
+
+    rows = []
+    for block_id in analysis.block_ids:
+        # StimBlock can emit frame-monitor diagnostics even though this bridge
+        # only reads epoch parameters. Keep the long population build quiet;
+        # missing or inconsistent metadata below still raises explicitly.
+        with (contextlib.redirect_stdout(io.StringIO()),
+              contextlib.redirect_stderr(io.StringIO())):
+            stimulus_block = ra.StimBlock(
+                analysis.exp_name, int(block_id), verbose=False)
+        protocol_name = str(stimulus_block.protocol_name)
+        for params in stimulus_block.df_epochs['epoch_parameters']:
+            if category_of(params.get('stimulusTag')) != 'image':
+                continue
+            patch_index = pd.to_numeric(
+                params.get('imagePatchIndex', params.get('patchIndex')),
+                errors='coerce')
+            location = np.asarray(
+                params.get('currentPatchLocation', []), dtype=float).reshape(-1)
+            if not np.isfinite(patch_index) or location.size < 2:
+                continue
+            image_name = str(params.get('imageName', '')).strip()
+            stimulus_set = str(params.get('currentStimSet', '')).strip()
+            if not image_name or not stimulus_set:
+                continue
+            x, y = float(location[0]), float(location[1])
+            library = _natural_image_patch_library_row(
+                protocol_name, stimulus_set, image_name, (x, y))
+            patch_uid = f'{stimulus_set}:imk{image_name}:x{x:g}:y{y:g}'
+            rows.append({
+                'imageName': image_name,
+                'patchIndex': float(patch_index),
+                'patch_uid': patch_uid,
+                'patch_x_vh': x,
+                'patch_y_vh': y,
+                'currentStimSet': stimulus_set,
+                'currentImageSet': str(
+                    params.get('currentImageSet', '')).strip().lstrip('/'),
+                'source_protocol_name': protocol_name,
+                'source_block_id': int(block_id),
+                'noPatches': params.get('noPatches', np.nan),
+                'seed': params.get('seed', np.nan),
+                'patchSampling': params.get('patchSampling', ''),
+                'patchContrast': params.get('patchContrast', ''),
+                'equivalentIntensity': params.get('equivalentIntensity', np.nan),
+                'equivalentIntensityConeLin': params.get(
+                    'equivalentIntensityConeLin', np.nan),
+                **library,
+            })
+    if not rows:
+        raise ValueError(
+            f'{analysis.exp_name}/{analysis.cell_label}: no image epochs carried '
+            'the patch location and stimulus-library metadata')
+
+    epochs = pd.DataFrame(rows).drop_duplicates()
+    key_columns = ['imageName', 'patchIndex']
+    identity_counts = epochs.groupby(key_columns)['patch_uid'].nunique()
+    collisions = identity_counts.loc[identity_counts.gt(1)]
+    if not collisions.empty:
+        examples = ', '.join(
+            f'{image}:{patch:g}' for image, patch in collisions.index[:8])
+        raise ValueError(
+            f'{analysis.exp_name}/{analysis.cell_label}: saved response keys '
+            f'map to multiple physical locations ({examples}). The saved means '
+            'are already mixed and must be recomputed from per-epoch responses.')
+
+    collapsed = []
+    for (image_name, patch_index), group in epochs.groupby(key_columns, sort=False):
+        patch_key = f'{image_name}:{patch_index:g}'
+        fixed_text = {}
+        for column in ('patch_uid', 'currentStimSet', 'currentImageSet',
+                       'source_protocol_name', 'library_path'):
+            values = [str(value) for value in group[column] if str(value)]
+            if len(set(values)) > 1:
+                raise ValueError(
+                    f'{patch_key}: {column} has multiple values {sorted(set(values))}')
+            fixed_text[column] = values[0] if values else ''
+        collapsed.append({
+            'imageName': image_name,
+            'patchIndex': float(patch_index),
+            **fixed_text,
+            'patch_x_vh': _single_numeric(group['patch_x_vh'], 'patch_x_vh', patch_key),
+            'patch_y_vh': _single_numeric(group['patch_y_vh'], 'patch_y_vh', patch_key),
+            'patchMean': _single_numeric(group['patchMean'], 'patchMean', patch_key),
+            'patchVariance': _single_numeric(
+                group['patchVariance'], 'patchVariance', patch_key),
+            # A physical patch can be repeated in blocks whose recorded
+            # calibration differs slightly. Responses in the saved file are
+            # already pooled across those blocks, so retain every exact value
+            # as provenance and use their mean as the representative value.
+            'equivalentIntensity': float(pd.to_numeric(
+                group['equivalentIntensity'], errors='coerce').mean()),
+            'equivalentIntensity_values': _joined_metadata_values(
+                group['equivalentIntensity']),
+            'equivalentIntensityConeLin': float(pd.to_numeric(
+                group['equivalentIntensityConeLin'], errors='coerce').mean()),
+            'equivalentIntensityConeLin_values': _joined_metadata_values(
+                group['equivalentIntensityConeLin']),
+            'source_block_ids': _joined_metadata_values(
+                sorted(group['source_block_id'].unique())),
+            'noPatches_values': _joined_metadata_values(group['noPatches']),
+            'seed_values': _joined_metadata_values(group['seed']),
+            'patchSampling_values': _joined_metadata_values(group['patchSampling']),
+            'patchContrast_values': _joined_metadata_values(group['patchContrast']),
+        })
+    return pd.DataFrame(collapsed)
+
+
+def build_center_disc_patch_variance_population(
+        output_dir=None, filter_wheel_ndf: float = 0.0,
+        online_analysis: Optional[str] = None,
+        verbose: bool = True) -> pd.DataFrame:
+    """Enrich saved center-disc responses with physical patch metadata.
+
+    This is a temporary bridge for the spatial-contrast analysis. Response
+    values come from the compact saved condition HDF5 files; patch locations,
+    equivalent intensities, and protocol settings are recovered from the raw
+    epoch metadata. ``PatchMean`` and ``PatchVariance`` are then looked up in
+    the exact NaturalImageFlash library belonging to the recorded protocol.
+
+    One output row is one cell/condition/physical patch. Only the requested
+    FilterWheel setting is included (FW0 by default).
+    """
+    import h5py
+
+    protocols = ('LinearEquivalentDiscConeLin', 'LinearEquivalentDisc')
+    rows = []
+    matched_conditions = 0
+    for path in _condition_paths(output_dir, protocols, '.h5'):
+        # Filter from scalar attributes before expanding arrays. Besides being
+        # faster, this prevents irrelevant FW1 intensity warnings in an FW0 run.
+        with h5py.File(path, 'r') as saved:
+            saved_fw = float(saved.attrs.get('filter_wheel_ndf', np.nan))
+            saved_protocols = str(saved.attrs.get('protocols', '')).split('\n')
+            saved_site = str(saved.attrs.get('site', '')).strip().lower()
+        if (not np.isclose(saved_fw, float(filter_wheel_ndf))
+                or saved_site != 'center'
+                or not _saved_condition_matches_protocol(
+                    saved_protocols, protocols)):
+            continue
+        analysis = _read_condition_h5(path)
+        if (online_analysis is not None
+                and analysis.online_analysis.strip().lower()
+                != str(online_analysis).strip().lower()):
+            continue
+        matched_conditions += 1
+        stimulus = _condition_patch_stimulus_metadata(analysis)
+        population = condition_population_table(analysis)
+        enriched = population.merge(
+            stimulus, on=['imageName', 'patchIndex'], how='left',
+            validate='one_to_one')
+        missing = enriched['patch_uid'].isna()
+        if missing.any():
+            keys = enriched.loc[missing, 'patch_key'].astype(str).tolist()
+            raise ValueError(
+                f'{path.name}: {len(keys)} saved response rows have no matching '
+                f'raw patch metadata: {keys[:8]}')
+        enriched['equivalentIntensity_Rstar_per_s'] = (
+            enriched['maxIntensity'] * enriched['equivalentIntensity'])
+        enriched['equivalentIntensityConeLin_Rstar_per_s'] = (
+            enriched['maxIntensity'] * enriched['equivalentIntensityConeLin'])
+        enriched['delta_nli_cone_minus_disc'] = (
+            enriched['nli_image_vs_cone_disc']
+            - enriched['nli_image_vs_disc'])
+        enriched['source_condition_h5'] = str(path)
+        rows.append(enriched)
+        if verbose:
+            print(f'{analysis.exp_name}/{analysis.cell_label} | '
+                  f'{analysis.online_analysis} | FW{analysis.filter_wheel_ndf:g} | '
+                  f'{len(enriched)} patches')
+    if not rows:
+        return pd.DataFrame(columns=PATCH_VARIANCE_POPULATION_COLUMNS)
+    table = pd.concat(rows, ignore_index=True)
+    table = table[PATCH_VARIANCE_POPULATION_COLUMNS].sort_values(
+        ['date', 'cell_label', 'onlineAnalysis', 'imageName',
+         'patch_x_vh', 'patch_y_vh']).reset_index(drop=True)
+    if verbose:
+        print(f'Built {len(table)} cell-patch rows from {matched_conditions} '
+              f'saved FW{float(filter_wheel_ndf):g} condition(s), '
+              f'{table.patch_uid.nunique()} unique physical patches.')
+    return table
+
+
+def patch_variance_population_path(filter_wheel_ndf: float = 0.0):
+    """Default consolidated HDF5 path for the temporary patch analysis."""
+    return (store_dir() / 'population' /
+            f'center_disc_patch_variance_FW{float(filter_wheel_ndf):g}.h5')
+
+
+def save_patch_variance_population(table: pd.DataFrame, path=None,
+                                   filter_wheel_ndf: float = 0.0,
+                                   verbose: bool = True):
+    """Save the enriched all-cell patch table as one compressed HDF5 file."""
+    import h5py
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    missing = sorted(set(PATCH_VARIANCE_POPULATION_COLUMNS) - set(table.columns))
+    if missing:
+        raise ValueError(f'patch population is missing columns: {missing}')
+    destination = (Path(path) if path is not None
+                   else patch_variance_population_path(filter_wheel_ndf))
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + '.tmp')
+    with h5py.File(temporary, 'w') as h5:
+        h5.attrs['output_version'] = PATCH_VARIANCE_POPULATION_VERSION
+        h5.attrs['filter_wheel_ndf'] = float(filter_wheel_ndf)
+        h5.attrs['generated_utc'] = datetime.now(timezone.utc).isoformat()
+        h5.attrs['row_identity'] = (
+            'date, cell_label, onlineAnalysis, protocol, patch_uid')
+        h5.attrs['patch_identity'] = (
+            'currentStimSet, imageName, patch_x_vh, patch_y_vh')
+        _write_condition_frame(
+            h5.create_group('patch_population'),
+            table[PATCH_VARIANCE_POPULATION_COLUMNS])
+    temporary.replace(destination)
+    if verbose:
+        print(f'Saved {len(table)} cell-patch rows to {destination}')
+    return destination
+
+
+def load_patch_variance_population(path=None,
+                                   filter_wheel_ndf: float = 0.0) -> pd.DataFrame:
+    """Load the consolidated temporary spatial-contrast population table."""
+    import h5py
+    from pathlib import Path
+
+    source = (Path(path) if path is not None
+              else patch_variance_population_path(filter_wheel_ndf))
+    with h5py.File(source, 'r') as h5:
+        version = int(h5.attrs.get('output_version', -1))
+        if version != PATCH_VARIANCE_POPULATION_VERSION:
+            raise ValueError(
+                f'{source}: output version {version} does not match '
+                f'{PATCH_VARIANCE_POPULATION_VERSION}')
+        return _read_condition_frame(h5['patch_population'])
 
 
 IMAGE_NLI_SUMMARY_COLUMNS = [
