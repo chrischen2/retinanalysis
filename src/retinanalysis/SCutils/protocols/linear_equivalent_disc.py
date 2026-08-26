@@ -116,7 +116,7 @@ CONDITION_SUMMARY_COLUMNS = (
     'backgroundIntensity', 'meanIntensity',
 )
 CONDITION_OUTPUT_VERSION = 1
-PATCH_VARIANCE_POPULATION_VERSION = 2
+PATCH_VARIANCE_POPULATION_VERSION = 3
 
 
 def stimulus_site(protocol: str) -> str:
@@ -1778,11 +1778,20 @@ PATCH_VARIANCE_POPULATION_COLUMNS = [
     'date', 'cell_label', 'cell_type', 'onlineAnalysis', 'protocol', 'site',
     'filter_wheel_ndf', 'imageName', 'patch_uid', 'patchIndex',
     'patch_x_vh', 'patch_y_vh', 'currentStimSet', 'currentImageSet',
-    'source_protocol_name', 'library_path', 'source_condition_h5',
+    'source_protocol_name', 'library_path', 'image_path', 'source_condition_h5',
     'source_block_ids', 'noPatches_values',
     'seed_values', 'patchSampling_values', 'patchContrast_values',
-    'maxIntensity', 'backgroundIntensity', 'meanIntensity',
-    'patchMean', 'patchVariance', 'equivalentIntensity',
+    'canvas_width_px', 'canvas_height_px', 'micronsPerPixel',
+    'apertureDiameter_um', 'annulusInnerDiameter_um',
+    'annulusOuterDiameter_um', 'rfSigmaCenter_um', 'rfSigmaSurround_um',
+    'apertureDiameter_um_values', 'annulusInnerDiameter_um_values',
+    'annulusOuterDiameter_um_values',
+    'rfSigmaCenter_um_values', 'rfSigmaSurround_um_values',
+    'linearIntegrationFunction', 'WeberConstant',
+    'maxIntensity', 'imageMeanIntensity', 'meanIntensity_Rstar_per_s',
+    'backgroundIntensity', 'meanIntensity',
+    'patchMean', 'patchMeanContrast', 'patchMeanIntensity', 'patchVariance',
+    'equivalentIntensity',
     'equivalentIntensity_values', 'equivalentIntensity_recorded_values',
     'equivalentIntensityConeLin', 'equivalentIntensityConeLin_values',
     'equivalentIntensityConeLin_recorded_values',
@@ -1792,6 +1801,8 @@ PATCH_VARIANCE_POPULATION_COLUMNS = [
     'disc_response', 'disc_response_sem', 'disc_trials',
     'cone_disc_response', 'cone_disc_response_sem', 'cone_disc_trials',
     'nli_image_vs_disc', 'nli_image_vs_cone_disc', 'delta_nli_cone_minus_disc',
+    'complete_response_triplet', 'stimulus_metadata_mixed_fields',
+    'analysis_ready', 'exclusion_reason',
 ]
 
 
@@ -1927,7 +1938,8 @@ def _natural_image_weighting(canvas_width: float, canvas_height: float,
     return weighting / total, int(rad_x), int(rad_y)
 
 
-def equivalent_intensities_from_epoch(params: Dict) -> Tuple[float, float]:
+def equivalent_intensities_from_epoch(
+        params: Dict, image_path=None) -> Tuple[float, float]:
     """Reconstruct both displayed disc intensities from recorded parameters.
 
     This mirrors ``NaturalImageFlashProtocol.getEquivalentIntensityValues`` and
@@ -1939,7 +1951,9 @@ def equivalent_intensities_from_epoch(params: Dict) -> Tuple[float, float]:
     image_name = str(params['imageName']).strip()
     image_set = str(params.get(
         'currentImageSet', 'VHsubsample_20160105')).strip().lstrip('/')
-    contrast, _ = load_vh_contrast_image(image_name, image_set)
+    contrast, _ = (_load_vh_contrast_image_path(str(image_path))
+                   if image_path is not None
+                   else load_vh_contrast_image(image_name, image_set))
     if contrast is None:
         raise FileNotFoundError(
             f'cannot reconstruct equivalent intensities: imk{image_name}.iml '
@@ -1991,6 +2005,7 @@ def _condition_patch_stimulus_metadata(analysis: ConditionAnalysis) -> pd.DataFr
     """
     import contextlib
     import io
+    from pathlib import Path
     import retinanalysis as ra
 
     rows = []
@@ -2003,6 +2018,7 @@ def _condition_patch_stimulus_metadata(analysis: ConditionAnalysis) -> pd.DataFr
             stimulus_block = ra.StimBlock(
                 analysis.exp_name, int(block_id), verbose=False)
         protocol_name = str(stimulus_block.protocol_name)
+        seen_patches = set()
         for params in stimulus_block.df_epochs['epoch_parameters']:
             if category_of(params.get('stimulusTag')) != 'image':
                 continue
@@ -2018,9 +2034,23 @@ def _condition_patch_stimulus_metadata(analysis: ConditionAnalysis) -> pd.DataFr
             if not image_name or not stimulus_set:
                 continue
             x, y = float(location[0]), float(location[1])
+            epoch_patch_key = (image_name, float(patch_index), x, y)
+            if epoch_patch_key in seen_patches:
+                continue
+            seen_patches.add(epoch_patch_key)
             library = _natural_image_patch_library_row(
                 protocol_name, stimulus_set, image_name, (x, y))
-            equivalent, cone_equivalent = equivalent_intensities_from_epoch(params)
+            image_set = str(
+                params.get('currentImageSet', '')).strip().lstrip('/')
+            image_file = (Path(library['library_path']).parent / image_set
+                          / f'imk{image_name}.iml')
+            if not image_file.is_file():
+                image_file = vh_image_path(image_name, image_set)
+            equivalent, cone_equivalent = equivalent_intensities_from_epoch(
+                params, image_path=image_file)
+            canvas = np.asarray(
+                params.get('canvasSize', [np.nan, np.nan]),
+                dtype=float).reshape(-1)
             patch_uid = f'{stimulus_set}:imk{image_name}:x{x:g}:y{y:g}'
             rows.append({
                 'imageName': image_name,
@@ -2032,11 +2062,25 @@ def _condition_patch_stimulus_metadata(analysis: ConditionAnalysis) -> pd.DataFr
                 'currentImageSet': str(
                     params.get('currentImageSet', '')).strip().lstrip('/'),
                 'source_protocol_name': protocol_name,
+                'image_path': str(image_file) if image_file is not None else '',
                 'source_block_id': int(block_id),
                 'noPatches': params.get('noPatches', np.nan),
                 'seed': params.get('seed', np.nan),
                 'patchSampling': params.get('patchSampling', ''),
                 'patchContrast': params.get('patchContrast', ''),
+                'canvas_width_px': canvas[0] if canvas.size > 0 else np.nan,
+                'canvas_height_px': canvas[1] if canvas.size > 1 else np.nan,
+                'micronsPerPixel': params.get('micronsPerPixel', np.nan),
+                'apertureDiameter_um': params.get('apertureDiameter', np.nan),
+                'annulusInnerDiameter_um': params.get(
+                    'annulusInnerDiameter', np.nan),
+                'annulusOuterDiameter_um': params.get(
+                    'annulusOuterDiameter', np.nan),
+                'rfSigmaCenter_um': params.get('rfSigmaCenter', np.nan),
+                'rfSigmaSurround_um': params.get('rfSigmaSurround', np.nan),
+                'linearIntegrationFunction': params.get(
+                    'linearIntegrationFunction', ''),
+                'WeberConstant': params.get('WeberConstant', np.nan),
                 'equivalentIntensity': equivalent,
                 'equivalentIntensity_recorded': params.get(
                     'equivalentIntensity', np.nan),
@@ -2065,9 +2109,20 @@ def _condition_patch_stimulus_metadata(analysis: ConditionAnalysis) -> pd.DataFr
     collapsed = []
     for (image_name, patch_index), group in epochs.groupby(key_columns, sort=False):
         patch_key = f'{image_name}:{patch_index:g}'
+        mixed_fields = []
+        for column in ('canvas_width_px', 'canvas_height_px', 'micronsPerPixel',
+                       'apertureDiameter_um', 'annulusInnerDiameter_um',
+                       'annulusOuterDiameter_um', 'rfSigmaCenter_um',
+                       'rfSigmaSurround_um', 'WeberConstant'):
+            values = pd.to_numeric(group[column], errors='coerce').dropna()
+            if values.size and not np.allclose(
+                    values.to_numpy(float), float(values.iloc[0]),
+                    rtol=1e-7, atol=1e-10):
+                mixed_fields.append(column)
         fixed_text = {}
         for column in ('patch_uid', 'currentStimSet', 'currentImageSet',
-                       'source_protocol_name', 'library_path'):
+                       'source_protocol_name', 'library_path',
+                       'image_path', 'linearIntegrationFunction'):
             values = [str(value) for value in group[column] if str(value)]
             if len(set(values)) > 1:
                 raise ValueError(
@@ -2082,6 +2137,34 @@ def _condition_patch_stimulus_metadata(analysis: ConditionAnalysis) -> pd.DataFr
             'patchMean': _single_numeric(group['patchMean'], 'patchMean', patch_key),
             'patchVariance': _single_numeric(
                 group['patchVariance'], 'patchVariance', patch_key),
+            'canvas_width_px': _single_numeric(
+                group['canvas_width_px'], 'canvas_width_px', patch_key),
+            'canvas_height_px': _single_numeric(
+                group['canvas_height_px'], 'canvas_height_px', patch_key),
+            'micronsPerPixel': _single_numeric(
+                group['micronsPerPixel'], 'micronsPerPixel', patch_key),
+            'apertureDiameter_um': float(pd.to_numeric(
+                group['apertureDiameter_um'], errors='coerce').mean()),
+            'annulusInnerDiameter_um': float(pd.to_numeric(
+                group['annulusInnerDiameter_um'], errors='coerce').mean()),
+            'annulusOuterDiameter_um': float(pd.to_numeric(
+                group['annulusOuterDiameter_um'], errors='coerce').mean()),
+            'apertureDiameter_um_values': _joined_metadata_values(
+                group['apertureDiameter_um']),
+            'annulusInnerDiameter_um_values': _joined_metadata_values(
+                group['annulusInnerDiameter_um']),
+            'annulusOuterDiameter_um_values': _joined_metadata_values(
+                group['annulusOuterDiameter_um']),
+            'rfSigmaCenter_um': float(pd.to_numeric(
+                group['rfSigmaCenter_um'], errors='coerce').mean()),
+            'rfSigmaSurround_um': float(pd.to_numeric(
+                group['rfSigmaSurround_um'], errors='coerce').mean()),
+            'rfSigmaCenter_um_values': _joined_metadata_values(
+                group['rfSigmaCenter_um']),
+            'rfSigmaSurround_um_values': _joined_metadata_values(
+                group['rfSigmaSurround_um']),
+            'WeberConstant': _single_numeric(
+                group['WeberConstant'], 'WeberConstant', patch_key),
             # A physical patch can be repeated in blocks whose recorded
             # calibration differs slightly. Responses in the saved file are
             # already pooled across those blocks, so retain every exact value
@@ -2109,14 +2192,17 @@ def _condition_patch_stimulus_metadata(analysis: ConditionAnalysis) -> pd.DataFr
             'seed_values': _joined_metadata_values(group['seed']),
             'patchSampling_values': _joined_metadata_values(group['patchSampling']),
             'patchContrast_values': _joined_metadata_values(group['patchContrast']),
+            'stimulus_metadata_mixed_fields': ','.join(mixed_fields),
         })
     return pd.DataFrame(collapsed)
 
 
 def build_center_disc_patch_variance_population(
-        output_dir=None, filter_wheel_ndf: float = 0.0,
+        output_dir=None, filter_wheel_ndf: Optional[float] = None,
         online_analysis: Optional[str] = None,
-        verbose: bool = True) -> pd.DataFrame:
+        require_analysis_ready: bool = True,
+        return_qc: bool = False,
+        verbose: bool = True):
     """Enrich saved center-disc responses with physical patch metadata.
 
     This is a temporary bridge for the spatial-contrast analysis. Response
@@ -2125,13 +2211,18 @@ def build_center_disc_patch_variance_population(
     epoch metadata. ``PatchMean`` and ``PatchVariance`` are then looked up in
     the exact NaturalImageFlash library belonging to the recorded protocol.
 
-    One output row is one cell/condition/physical patch. Only the requested
-    FilterWheel setting is included (FW0 by default).
+    One output row is one cell/condition/physical patch. By default all
+    FilterWheel settings are retained. Incomplete image/disc/cone-disc
+    triplets and rows whose saved response pooled conflicting stimulus geometry
+    are excluded. Pass a numeric ``filter_wheel_ndf`` only for an explicitly
+    restricted rebuild. With ``return_qc=True``, return ``(population,
+    excluded_rows)`` so rejected rows remain auditable.
     """
     import h5py
 
     protocols = ('LinearEquivalentDiscConeLin', 'LinearEquivalentDisc')
     rows = []
+    excluded_rows = []
     matched_conditions = 0
     for path in _condition_paths(output_dir, protocols, '.h5'):
         # Filter from scalar attributes before expanding arrays. Besides being
@@ -2140,8 +2231,9 @@ def build_center_disc_patch_variance_population(
             saved_fw = float(saved.attrs.get('filter_wheel_ndf', np.nan))
             saved_protocols = str(saved.attrs.get('protocols', '')).split('\n')
             saved_site = str(saved.attrs.get('site', '')).strip().lower()
-        if (not np.isclose(saved_fw, float(filter_wheel_ndf))
-                or saved_site != 'center'
+        wrong_filter = (filter_wheel_ndf is not None
+                        and not np.isclose(saved_fw, float(filter_wheel_ndf)))
+        if (wrong_filter or saved_site != 'center'
                 or not _saved_condition_matches_protocol(
                     saved_protocols, protocols)):
             continue
@@ -2166,36 +2258,78 @@ def build_center_disc_patch_variance_population(
             enriched['maxIntensity'] * enriched['equivalentIntensity'])
         enriched['equivalentIntensityConeLin_Rstar_per_s'] = (
             enriched['maxIntensity'] * enriched['equivalentIntensityConeLin'])
+        # Explicit names prevent the protocol's normalized [0, 1] image mean
+        # from being confused with its calibrated mean light level in R*/s.
+        enriched['imageMeanIntensity'] = enriched['backgroundIntensity']
+        enriched['meanIntensity_Rstar_per_s'] = enriched['meanIntensity']
+        enriched['patchMeanContrast'] = enriched['patchMean']
+        enriched['patchMeanIntensity'] = (
+            enriched['imageMeanIntensity'] * (1 + enriched['patchMeanContrast']))
         enriched['delta_nli_cone_minus_disc'] = (
             enriched['nli_image_vs_cone_disc']
             - enriched['nli_image_vs_disc'])
+        response_columns = [
+            'image_response', 'disc_response', 'cone_disc_response']
+        enriched['complete_response_triplet'] = (
+            enriched[response_columns].notna().all(axis=1))
+        mixed = enriched['stimulus_metadata_mixed_fields'].astype(str).ne('')
+        enriched['analysis_ready'] = (
+            enriched['complete_response_triplet'] & ~mixed)
+        enriched['exclusion_reason'] = ''
+        enriched.loc[
+            ~enriched['complete_response_triplet'], 'exclusion_reason'
+        ] = 'incomplete response triplet'
+        enriched.loc[mixed, 'exclusion_reason'] = (
+            'mixed stimulus metadata: '
+            + enriched.loc[mixed, 'stimulus_metadata_mixed_fields'].astype(str))
         enriched['source_condition_h5'] = str(path)
+        excluded_condition = enriched.loc[~enriched['analysis_ready']].copy()
+        if not excluded_condition.empty:
+            excluded_rows.append(excluded_condition)
+            if verbose:
+                print(f'ALERT: {analysis.exp_name}/{analysis.cell_label} | '
+                      f'{analysis.online_analysis} | FW{analysis.filter_wheel_ndf:g}: '
+                      f'excluding {len(excluded_condition)} patch row(s) that are '
+                      'not analysis-ready')
+        if require_analysis_ready:
+            enriched = enriched.loc[enriched['analysis_ready']].copy()
         rows.append(enriched)
         if verbose:
             print(f'{analysis.exp_name}/{analysis.cell_label} | '
                   f'{analysis.online_analysis} | FW{analysis.filter_wheel_ndf:g} | '
                   f'{len(enriched)} patches')
+    excluded = (pd.concat(excluded_rows, ignore_index=True)
+                if excluded_rows else
+                pd.DataFrame(columns=PATCH_VARIANCE_POPULATION_COLUMNS))
     if not rows:
-        return pd.DataFrame(columns=PATCH_VARIANCE_POPULATION_COLUMNS)
+        table = pd.DataFrame(columns=PATCH_VARIANCE_POPULATION_COLUMNS)
+        return (table, excluded) if return_qc else table
     table = pd.concat(rows, ignore_index=True)
     table = table[PATCH_VARIANCE_POPULATION_COLUMNS].sort_values(
         ['date', 'cell_label', 'onlineAnalysis', 'imageName',
          'patch_x_vh', 'patch_y_vh']).reset_index(drop=True)
     if verbose:
-        print(f'Built {len(table)} cell-patch rows from {matched_conditions} '
-              f'saved FW{float(filter_wheel_ndf):g} condition(s), '
+        wheel_label = ('all FilterWheel values' if filter_wheel_ndf is None
+                       else f'FW{float(filter_wheel_ndf):g}')
+        print(f'Built {len(table)} analysis-ready cell-patch rows from '
+              f'{matched_conditions} saved {wheel_label} condition(s), '
               f'{table.patch_uid.nunique()} unique physical patches.')
-    return table
+        if len(excluded):
+            print(f'Excluded {len(excluded)} non-analysis-ready patch row(s); '
+                  'request return_qc=True to inspect them.')
+    return (table, excluded) if return_qc else table
 
 
-def patch_variance_population_path(filter_wheel_ndf: float = 0.0):
+def patch_variance_population_path(filter_wheel_ndf: Optional[float] = None):
     """Default consolidated HDF5 path for the temporary patch analysis."""
-    return (store_dir() / 'population' /
-            f'center_disc_patch_variance_FW{float(filter_wheel_ndf):g}.h5')
+    label = ('allFW' if filter_wheel_ndf is None
+             else f'FW{float(filter_wheel_ndf):g}')
+    return store_dir() / 'population' / f'center_disc_patch_variance_{label}.h5'
 
 
 def save_patch_variance_population(table: pd.DataFrame, path=None,
-                                   filter_wheel_ndf: float = 0.0,
+                                   filter_wheel_ndf: Optional[float] = None,
+                                   excluded_qc: Optional[pd.DataFrame] = None,
                                    verbose: bool = True):
     """Save the enriched all-cell patch table as one compressed HDF5 file."""
     import h5py
@@ -2211,7 +2345,8 @@ def save_patch_variance_population(table: pd.DataFrame, path=None,
     temporary = destination.with_suffix(destination.suffix + '.tmp')
     with h5py.File(temporary, 'w') as h5:
         h5.attrs['output_version'] = PATCH_VARIANCE_POPULATION_VERSION
-        h5.attrs['filter_wheel_ndf'] = float(filter_wheel_ndf)
+        h5.attrs['filter_wheel_selection'] = (
+            'all' if filter_wheel_ndf is None else float(filter_wheel_ndf))
         h5.attrs['generated_utc'] = datetime.now(timezone.utc).isoformat()
         h5.attrs['row_identity'] = (
             'date, cell_label, onlineAnalysis, protocol, patch_uid')
@@ -2220,6 +2355,10 @@ def save_patch_variance_population(table: pd.DataFrame, path=None,
         _write_condition_frame(
             h5.create_group('patch_population'),
             table[PATCH_VARIANCE_POPULATION_COLUMNS])
+        if excluded_qc is not None and len(excluded_qc):
+            _write_condition_frame(
+                h5.create_group('excluded_qc'),
+                excluded_qc[PATCH_VARIANCE_POPULATION_COLUMNS])
     temporary.replace(destination)
     if verbose:
         print(f'Saved {len(table)} cell-patch rows to {destination}')
@@ -2227,7 +2366,8 @@ def save_patch_variance_population(table: pd.DataFrame, path=None,
 
 
 def load_patch_variance_population(path=None,
-                                   filter_wheel_ndf: float = 0.0) -> pd.DataFrame:
+                                   filter_wheel_ndf: Optional[float] = None,
+                                   excluded_qc: bool = False) -> pd.DataFrame:
     """Load the consolidated temporary spatial-contrast population table."""
     import h5py
     from pathlib import Path
@@ -2240,7 +2380,11 @@ def load_patch_variance_population(path=None,
             raise ValueError(
                 f'{source}: output version {version} does not match '
                 f'{PATCH_VARIANCE_POPULATION_VERSION}')
-        return _read_condition_frame(h5['patch_population'])
+        group = ('excluded_qc' if excluded_qc
+                 else 'patch_population')
+        if group not in h5:
+            return pd.DataFrame(columns=PATCH_VARIANCE_POPULATION_COLUMNS)
+        return _read_condition_frame(h5[group])
 
 
 IMAGE_NLI_SUMMARY_COLUMNS = [
@@ -3893,6 +4037,7 @@ VH_MICRONS_PER_PIXEL = 6.6
 VH_SHAPE = (1536, 1024)          # as MATLAB reads it: fread(fid, [1536 1024])
 
 
+@lru_cache(maxsize=None)
 def vh_image_path(image_name: str, image_set: str = 'VHsubsample_20160105'):
     """Locate ``imk<name>.iml`` in the turner package resources, or None."""
     from pathlib import Path
@@ -3921,7 +4066,13 @@ def load_vh_contrast_image(image_name: str, image_set: str = 'VHsubsample_201601
     path = vh_image_path(image_name, image_set)
     if path is None:
         return None, np.nan
-    raw = np.fromfile(str(path), dtype='>u2')
+    return _load_vh_contrast_image_path(str(path))
+
+
+@lru_cache(maxsize=None)
+def _load_vh_contrast_image_path(path_string: str):
+    """Load one exact van Hateren image path with protocol normalization."""
+    raw = np.fromfile(path_string, dtype='>u2')
     if raw.size < VH_SHAPE[0] * VH_SHAPE[1]:
         return None, np.nan
     # MATLAB fills [1536,1024] column-wise; the row-major read is its transpose.

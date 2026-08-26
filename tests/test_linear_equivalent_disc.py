@@ -698,7 +698,8 @@ def test_equivalent_intensity_reconstruction_recovers_distinct_cone_value(
     assert cone_equivalent != pytest.approx(equivalent)
 
 
-def test_build_and_save_fw0_patch_variance_population(tmp_path, monkeypatch):
+def test_build_and_save_all_filter_wheel_patch_variance_population(
+        tmp_path, monkeypatch):
     from dataclasses import replace
 
     analysis = replace(
@@ -719,11 +720,27 @@ def test_build_and_save_fw0_patch_variance_population(tmp_path, monkeypatch):
         'currentStimSet': ['library'] * 3,
         'currentImageSet': ['images'] * 3,
         'source_protocol_name': ['example.protocol'] * 3,
+        'image_path': ['image.iml'] * 3,
         'source_block_ids': ['11', '11', '12'],
         'noPatches_values': ['10', '10', '30'],
         'seed_values': ['1'] * 3,
         'patchSampling_values': ['ranked'] * 3,
         'patchContrast_values': ['all'] * 3,
+        'canvas_width_px': [100] * 3,
+        'canvas_height_px': [80] * 3,
+        'micronsPerPixel': [1.0] * 3,
+        'apertureDiameter_um': [200] * 3,
+        'annulusInnerDiameter_um': [np.nan] * 3,
+        'annulusOuterDiameter_um': [np.nan] * 3,
+        'apertureDiameter_um_values': ['200'] * 3,
+        'annulusInnerDiameter_um_values': [''] * 3,
+        'annulusOuterDiameter_um_values': [''] * 3,
+        'rfSigmaCenter_um': [50] * 3,
+        'rfSigmaSurround_um': [np.nan] * 3,
+        'rfSigmaCenter_um_values': ['50'] * 3,
+        'rfSigmaSurround_um_values': [''] * 3,
+        'linearIntegrationFunction': ['gaussian'] * 3,
+        'WeberConstant': [2000] * 3,
         'patchMean': [.1, .2, .3],
         'patchVariance': [.4, .5, .6],
         'equivalentIntensity': [.2, .3, .4],
@@ -733,25 +750,90 @@ def test_build_and_save_fw0_patch_variance_population(tmp_path, monkeypatch):
         'equivalentIntensityConeLin_values': ['0.25', '0.35', '0.45'],
         'equivalentIntensityConeLin_recorded_values': ['0.2', '0.3', '0.4'],
         'cone_equivalent_metadata_corrected': [True] * 3,
+        'stimulus_metadata_mixed_fields': [''] * 3,
         'library_path': ['test.mat'] * 3,
     })
     monkeypatch.setattr(
         led, '_condition_patch_stimulus_metadata', lambda _analysis: metadata)
 
     table = led.build_center_disc_patch_variance_population(
-        output_dir=tmp_path, filter_wheel_ndf=0, verbose=False)
+        output_dir=tmp_path, verbose=False)
     output = led.save_patch_variance_population(
         table, path=tmp_path / 'population.h5', verbose=False)
     restored = led.load_patch_variance_population(output)
 
-    assert len(table) == 3
-    assert table['filter_wheel_ndf'].unique().tolist() == [0.0]
+    assert len(table) == 6
+    assert table['filter_wheel_ndf'].unique().tolist() == [0.0, 1.0]
     assert table['patch_uid'].nunique() == 3
-    assert table['equivalentIntensity_Rstar_per_s'].tolist() == [200, 300, 400]
-    assert table['delta_nli_cone_minus_disc'].tolist() == pytest.approx([
-        1 / 7 - 1 / 3, 1 / 15 - 1 / 3, 1 / 11 - 1 / 3])
+    assert table['equivalentIntensity_Rstar_per_s'].tolist() == [
+        200, 300, 400, 200, 300, 400]
+    assert table['complete_response_triplet'].all()
+    assert table['imageMeanIntensity'].tolist() == [.2, .2, .1] * 2
+    assert table['patchMeanIntensity'].tolist() == pytest.approx([
+        .22, .24, .13] * 2)
     assert restored.columns.tolist() == led.PATCH_VARIANCE_POPULATION_COLUMNS
-    assert restored['patchVariance'].tolist() == [.4, .5, .6]
+    assert restored['patchVariance'].tolist() == [.4, .5, .6] * 2
+
+
+def test_patch_variance_population_separates_incomplete_triplets(
+        tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    analysis = replace(
+        _condition_analysis_for_output(),
+        protocols=['LinearEquivalentDiscConeLin'], site='center')
+    patches = analysis.patch_responses.copy()
+    patches.loc[0, ['cone_disc_mean', 'cone_disc_sem', 'cone_disc_n',
+                    'nli_cone_disc']] = np.nan
+    analysis = replace(analysis, patch_responses=patches)
+    led.save_condition_output(analysis, output_dir=tmp_path, verbose=False)
+    metadata = pd.DataFrame({
+        'imageName': ['00152', '00152', '01769'],
+        'patchIndex': [1.0, 2.0, 1.0],
+        'patch_uid': ['library:A', 'library:B', 'library:C'],
+        'patch_x_vh': [10., 20., 30.], 'patch_y_vh': [40., 50., 60.],
+        'currentStimSet': ['library'] * 3, 'currentImageSet': ['images'] * 3,
+        'source_protocol_name': ['example.protocol'] * 3,
+        'library_path': ['library.mat'] * 3, 'image_path': ['image.iml'] * 3,
+        'source_block_ids': ['11', '11', '12'], 'noPatches_values': ['3'] * 3,
+        'seed_values': ['1'] * 3, 'patchSampling_values': ['ranked'] * 3,
+        'patchContrast_values': ['all'] * 3,
+        'canvas_width_px': [100] * 3, 'canvas_height_px': [80] * 3,
+        'micronsPerPixel': [1.] * 3, 'apertureDiameter_um': [200.] * 3,
+        'annulusInnerDiameter_um': [np.nan] * 3,
+        'annulusOuterDiameter_um': [np.nan] * 3,
+        'apertureDiameter_um_values': ['200'] * 3,
+        'annulusInnerDiameter_um_values': [''] * 3,
+        'annulusOuterDiameter_um_values': [''] * 3,
+        'rfSigmaCenter_um': [50.] * 3, 'rfSigmaSurround_um': [np.nan] * 3,
+        'rfSigmaCenter_um_values': ['50'] * 3,
+        'rfSigmaSurround_um_values': [''] * 3,
+        'linearIntegrationFunction': ['gaussian'] * 3, 'WeberConstant': [2000.] * 3,
+        'patchMean': [.1, .2, .3], 'patchVariance': [.4, .5, .6],
+        'equivalentIntensity': [.2, .3, .4],
+        'equivalentIntensity_values': ['.2', '.3', '.4'],
+        'equivalentIntensity_recorded_values': ['.2', '.3', '.4'],
+        'equivalentIntensityConeLin': [.25, .35, .45],
+        'equivalentIntensityConeLin_values': ['.25', '.35', '.45'],
+        'equivalentIntensityConeLin_recorded_values': ['.25', '.35', '.45'],
+        'cone_equivalent_metadata_corrected': [False] * 3,
+        'stimulus_metadata_mixed_fields': [''] * 3,
+    })
+    monkeypatch.setattr(
+        led, '_condition_patch_stimulus_metadata', lambda _analysis: metadata)
+
+    table, excluded = led.build_center_disc_patch_variance_population(
+        output_dir=tmp_path, return_qc=True, verbose=False)
+    path = led.save_patch_variance_population(
+        table, path=tmp_path / 'population.h5',
+        excluded_qc=excluded, verbose=False)
+
+    assert len(table) == 2 and table['complete_response_triplet'].all()
+    assert len(excluded) == 1
+    assert excluded.iloc[0]['patch_uid'] == 'library:A'
+    restored_qc = led.load_patch_variance_population(
+        path, excluded_qc=True)
+    assert restored_qc['patch_uid'].tolist() == ['library:A']
 
 
 def test_condition_save_alerts_and_removes_matching_h5_and_legacy_csv(
