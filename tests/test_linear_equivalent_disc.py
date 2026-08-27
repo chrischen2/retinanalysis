@@ -26,6 +26,22 @@ def test_analysis_notebooks_select_retinanalysis_kernel(name):
     assert 'sys.executable' in import_source
 
 
+def test_center_disc_section_3e_filters_patch_sampling_and_contrast():
+    notebook_path = (Path(__file__).parents[1] / 'SingCell_Notebooks'
+                     / 'linCone' / 'analyzeConeCenterDisc.ipynb')
+    notebook = json.loads(notebook_path.read_text())
+    cell_sources = {
+        cell.get('id'): ''.join(cell.get('source', []))
+        for cell in notebook['cells']}
+
+    load_source = cell_sources['load-patch-variance-population-code']
+    analysis_source = cell_sources['high-light-patch-variance-analysis-code']
+    assert "'patchSampling_values', 'patchContrast_values'" in load_source
+    assert "ANALYSIS_PATCH_SAMPLING = 'ranked'" in analysis_source
+    assert "ANALYSIS_PATCH_CONTRAST = 'negative'" in analysis_source
+    assert 'sampling_mask & patch_contrast_mask' in analysis_source
+
+
 # --- stimulus tag mapping --------------------------------------------------
 
 @pytest.mark.parametrize('tag, expected', [
