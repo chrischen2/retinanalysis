@@ -1156,15 +1156,84 @@ def load_records(keys: Optional[Sequence[str]] = None, path=None) -> Dict[str, D
 # plotting
 # --------------------------------------------------------------------------
 
-def plot_group(rec: CRGRecord, figsize: Tuple[float, float] = (7.2, 9.0)):
-    """Mean reversal cycle per dark contrast, the half-cycle difference, and F1/F2."""
+def plot_group(rec: CRGRecord, figsize: Tuple[float, float] = (7.2, 9.0),
+               cycle_cmap: str = 'plasma'):
+    """Raster, reversal-cycle averages, harmonic amplitudes, and symmetry check.
+
+    Cycle averages use a perceptually ordered ``plasma`` palette by default;
+    pass another Matplotlib colormap name through ``cycle_cmap`` to change it.
+    Extracellular records built with ``keep_raw=True`` gain a spike raster with
+    rows grouped and colored by dark-bar contrast. Whole-cell and stored records
+    without raw spikes retain the original three-panel layout.
+    """
     import matplotlib.pyplot as plt
     from retinanalysis.utils import style
 
     style.apply_publication_style()
-    fig, (ax_c, ax_d, ax_h) = plt.subplots(
-        3, 1, figsize=figsize, gridspec_kw={'height_ratios': [1.2, 1.0, 0.9], 'hspace': 0.38})
-    colors = style.colors_for_conditions(list(rec.dark_contrasts))
+    raw = rec.raw or {}
+    raw_spikes = raw.get('spike_times_ms', [])
+    has_raster = (rec.online_analysis == 'extracellular'
+                  and len(raw_spikes) > 0
+                  and all(spikes is not None for spikes in raw_spikes)
+                  and len(raw.get('dark', [])) == len(raw_spikes))
+    if has_raster:
+        fig = plt.figure(figsize=(figsize[0], figsize[1] + 2.0))
+        grid = fig.add_gridspec(
+            4, 1, height_ratios=[0.9, 1.2, 1.0, 0.9], hspace=0.42)
+        ax_r = fig.add_subplot(grid[0])
+        ax_c = fig.add_subplot(grid[1])
+        ax_d = fig.add_subplot(grid[2])
+        ax_h = fig.add_subplot(grid[3])
+    else:
+        fig, (ax_c, ax_d, ax_h) = plt.subplots(
+            3, 1, figsize=figsize,
+            gridspec_kw={
+                'height_ratios': [1.2, 1.0, 0.9], 'hspace': 0.38})
+        ax_r = None
+    colors = style.colors_for_conditions(
+        list(rec.dark_contrasts), cmap_name=cycle_cmap, lo=0.12, hi=0.88)
+
+    if ax_r is not None:
+        raw_dark = np.asarray(raw['dark'], dtype=float)
+        row_position = 0
+        tick_positions, tick_labels = [], []
+        for contrast in rec.dark_contrasts:
+            epoch_indices = np.flatnonzero(np.isclose(raw_dark, contrast))
+            if not len(epoch_indices):
+                continue
+            start = row_position
+            for epoch_index in epoch_indices:
+                ax_r.eventplot(
+                    np.asarray(raw_spikes[epoch_index], dtype=float),
+                    lineoffsets=row_position, linelengths=0.75,
+                    linewidths=0.7, colors=colors[contrast])
+                row_position += 1
+            tick_positions.append((start + row_position - 1) / 2.0)
+            tick_labels.append(f'{contrast:g}')
+            ax_r.axhline(
+                row_position - 0.5, color='#DDDDDD', lw=0.6, zorder=0)
+        stimulus_start = float(rec.pre_time_ms)
+        stimulus_stop = stimulus_start + float(rec.stim_time_ms)
+        ax_r.axvspan(
+            stimulus_start, stimulus_stop,
+            color='#000000', alpha=0.05, lw=0, zorder=0)
+        half_cycle_ms = 1000.0 / (2.0 * float(rec.temporal_frequency))
+        for boundary in np.arange(
+                stimulus_start, stimulus_stop + half_cycle_ms * 0.5,
+                half_cycle_ms):
+            ax_r.axvline(
+                boundary, color='#888888', lw=0.55, alpha=0.7, zorder=1)
+        ax_r.set_ylim(max(row_position - 0.5, 0.5), -0.5)
+        ax_r.set_yticks(tick_positions, tick_labels, fontsize=7)
+        ax_r.set_ylabel('dark contrast', fontsize=8)
+        ax_r.set_title(
+            'Spike raster — epochs grouped by dark-bar contrast; '
+            'vertical lines mark reversals', fontsize=8.5)
+        ax_r.tick_params(axis='x', labelbottom=False)
+        trace_duration_ms = (
+            np.asarray(raw['traces'][0]).size
+            / float(raw['sample_rate']) * 1000.0)
+        ax_r.set_xlim(0.0, trace_duration_ms)
 
     half_ms = rec.cycle_time_ms[len(rec.cycle_time_ms) // 2] if len(rec.cycle_time_ms) else 0
     for c, cyc in zip(rec.dark_contrasts, rec.cycles):

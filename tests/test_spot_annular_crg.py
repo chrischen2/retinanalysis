@@ -6,6 +6,7 @@ specific to the reversing protocol.
 """
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -73,6 +74,67 @@ def test_fold_cycles_handles_a_partial_trailing_cycle():
     trace = np.concatenate([np.ones(250), np.ones(250), np.ones(120)])
     folded = crg.fold_cycles(trace, sr, f)
     assert folded.size == 250 and np.allclose(folded, 1.0)
+
+
+# --- recording-group plot --------------------------------------------------
+
+def _plot_record(with_raster=True):
+    contrasts = np.array([-1.0, -0.5, 0.0])
+    raw = None
+    if with_raster:
+        raw = {
+            'spike_times_ms': [
+                np.array([900.0, 1050.0, 1300.0]),
+                np.array([950.0, 1125.0]),
+                np.array([800.0, 1500.0])],
+            'dark': contrasts.copy(),
+            'traces': [np.zeros(4000)] * 3,
+            'sample_rate': 1000.0,
+        }
+    return SimpleNamespace(
+        exp_name='2026-04-23_E', cell_label='Cell1',
+        cell_type='OFF-parasol', online_analysis='extracellular',
+        grating_site='center', temporal_frequency=4.0, ndf=0.0,
+        background_intensity=0.5, light_level='15000R*',
+        dark_contrasts=contrasts,
+        cycles=np.vstack([
+            np.sin(np.linspace(0, 2 * np.pi, 250) + phase)
+            for phase in (0.0, 0.4, 0.8)]),
+        cycle_time_ms=np.arange(250.0),
+        f1_mean=np.array([1.0, 2.0, 3.0]),
+        f2_mean=np.array([2.0, 4.0, 6.0]),
+        resp_mean=np.array([0.1, 0.0, -0.1]),
+        resp_sem=np.array([0.01, 0.01, 0.01]),
+        units='rate difference (Hz)', pre_time_ms=1000.0,
+        stim_time_ms=2000.0, raw=raw)
+
+
+def test_crg_plot_group_adds_extracellular_raster_and_plasma_cycles():
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import to_hex
+    from retinanalysis.utils import style
+
+    record = _plot_record(with_raster=True)
+    figure = crg.plot_group(record)
+
+    assert len(figure.axes) == 4
+    assert 'Spike raster' in figure.axes[0].get_title()
+    assert figure.axes[0].get_ylabel() == 'dark contrast'
+    expected = style.colors_for_conditions(
+        list(record.dark_contrasts), cmap_name='plasma', lo=0.12, hi=0.88)
+    cycle_colors = [to_hex(line.get_color()) for line in figure.axes[1].lines]
+    assert cycle_colors == [expected[value] for value in record.dark_contrasts]
+    plt.close(figure)
+
+
+def test_crg_plot_group_keeps_three_panels_without_raw_spikes():
+    import matplotlib.pyplot as plt
+
+    figure = crg.plot_group(_plot_record(with_raster=False))
+
+    assert len(figure.axes) == 3
+    assert 'reversal cycle' in figure.axes[0].get_xlabel()
+    plt.close(figure)
 
 
 # --- stimulus frames -------------------------------------------------------
@@ -270,7 +332,8 @@ def test_single_cell_crg_notebooks_follow_the_split_condition_contract(site):
     source = '\n'.join(
         ''.join(cell.get('source', [])) for cell in notebook['cells'])
 
-    assert notebook['metadata']['kernelspec']['name'] == 'retinanalysis'
+    assert notebook['metadata']['kernelspec']['language'] == 'python'
+    assert 'requires the retinanalysis Python 3.11 kernel' in source
     assert f"SITE = '{site.lower()}'" in source
     assert 'allowed_temporal_frequency=None' in source
     assert 'separate_bright_contrast=True' in source
