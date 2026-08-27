@@ -1831,6 +1831,391 @@ def patch_rms_contrast(patch_mean_contrast, patch_variance,
     return float(rms) if rms.ndim == 0 else rms
 
 
+@dataclass
+class PatchRmsAnalysis:
+    """Reusable Section 3e physical-patch RMS-contrast analysis."""
+    selected_rows: pd.DataFrame
+    physical_patches: pd.DataFrame
+    occupancy_summary: pd.DataFrame
+    occupancy_counts: Dict[str, np.ndarray]
+    contrast_bin_summary: pd.DataFrame
+    group_summary: pd.DataFrame
+    filter_audit: Dict[str, int]
+    rms_cutoffs: Tuple[float, ...]
+    rms_group_labels: Tuple[str, ...]
+    weber_range: Tuple[float, float]
+    grid_bins: int
+    contrast_bins: int
+    spearman_r: float
+
+
+def normalize_rms_cutoffs(cutoffs) -> Tuple[float, ...]:
+    """Return validated RMS cutoffs from a scalar or ordered sequence."""
+    if np.isscalar(cutoffs):
+        values = np.asarray([cutoffs], dtype=float)
+    else:
+        values = np.asarray(tuple(cutoffs), dtype=float).reshape(-1)
+    if values.size == 0:
+        raise ValueError('at least one RMS contrast cutoff is required')
+    if not np.isfinite(values).all() or np.any(values < 0):
+        raise ValueError('RMS contrast cutoffs must be finite and non-negative')
+    if np.any(np.diff(values) <= 0):
+        raise ValueError('RMS contrast cutoffs must be strictly increasing')
+    return tuple(float(value) for value in values)
+
+
+def rms_contrast_groups(values, cutoffs):
+    """Assign half-open RMS groups for one or more cutoffs.
+
+    A scalar cutoff produces two groups. For example, ``0.3`` yields
+    ``RMS < 0.3`` and ``RMS >= 0.3``. Multiple cutoffs produce the analogous
+    half-open intervals, with the final group including its lower boundary.
+    """
+    normalized = normalize_rms_cutoffs(cutoffs)
+    array = np.asarray(values, dtype=float)
+    groups = np.searchsorted(np.asarray(normalized), array, side='right')
+    groups = np.where(np.isfinite(array), groups, -1).astype(int)
+    labels = [f'RMS < {normalized[0]:g}']
+    labels.extend(
+        f'{left:g} ≤ RMS < {right:g}'
+        for left, right in zip(normalized[:-1], normalized[1:]))
+    labels.append(f'RMS ≥ {normalized[-1]:g}')
+    return groups, tuple(labels), normalized
+
+
+def _quartile_group_summary(table: pd.DataFrame, split_column: str):
+    lower, upper = table[split_column].quantile([0.25, 0.75])
+    labels = ('Lower 25%', 'Middle 50%', 'Upper 25%')
+    groups = np.select(
+        [table[split_column] <= lower, table[split_column] >= upper],
+        [labels[0], labels[2]], default=labels[1])
+    grouped = table.assign(group=groups)
+    rows = []
+    for label in labels:
+        values = grouped.loc[
+            grouped['group'] == label, 'delta_nli_cone_minus_disc']
+        rows.append({
+            'split_variable': split_column,
+            'lower_25_cutoff': float(lower),
+            'upper_75_cutoff': float(upper),
+            'group': label,
+            'n_patches': int(len(values)),
+            'mean_delta_nli': float(values.mean()),
+            'sem_delta_nli': float(values.sem()) if len(values) > 1 else np.nan,
+        })
+    return grouped, pd.DataFrame(rows)
+
+
+def analyze_patch_rms_population(
+        population: pd.DataFrame, *, cell_type: str = 'OFF-parasol',
+        recording_modes: Union[str, Sequence[str]] = 'extracellular',
+        min_intensity: float = 4000.0,
+        weber_range: Tuple[float, float] = (-1.0, 1.0),
+        grid_bins: int = 6, contrast_bins: int = 8,
+        rms_cutoffs=(0.3, 1.0), verbose: bool = True) -> PatchRmsAnalysis:
+    """Filter, collapse, bin, and summarize the Section 3e patch population."""
+    numeric_columns = [
+        'meanIntensity_Rstar_per_s', 'patchMeanContrast', 'patchVariance',
+        'patchRmsContrast', 'delta_nli_cone_minus_disc']
+    required = set(numeric_columns) | {
+        'date', 'cell_label', 'cell_type', 'onlineAnalysis', 'patch_uid',
+        'imageName', 'patch_x_vh', 'patch_y_vh'}
+    missing = sorted(required - set(population.columns))
+    if missing:
+        raise ValueError(f'patch population is missing columns: {missing}')
+    if grid_bins < 2 or contrast_bins < 2:
+        raise ValueError('grid_bins and contrast_bins must be at least two')
+    if len(weber_range) != 2 or weber_range[0] >= weber_range[1]:
+        raise ValueError('weber_range must contain increasing lower/upper values')
+
+    selected = population.copy()
+    for column in numeric_columns:
+        selected[column] = pd.to_numeric(selected[column], errors='coerce')
+    modes = ((recording_modes,) if isinstance(recording_modes, str)
+             else tuple(recording_modes))
+    cell_mask = (selected['cell_type'].astype(str).str.casefold()
+                 == str(cell_type).casefold())
+    mode_mask = selected['onlineAnalysis'].astype(str).str.casefold().isin(
+        [str(mode).casefold() for mode in modes])
+    finite_mask = np.isfinite(selected[numeric_columns]).all(axis=1)
+    light_mask = selected['meanIntensity_Rstar_per_s'] >= float(min_intensity)
+    weber_mask = selected['patchMeanContrast'].between(
+        weber_range[0], weber_range[1], inclusive='both')
+    audit = {
+        'all': int(len(selected)),
+        'cell_type': int(cell_mask.sum()),
+        'recording_mode': int((cell_mask & mode_mask).sum()),
+        'light': int((cell_mask & mode_mask & light_mask).sum()),
+        'selected': int((cell_mask & mode_mask & light_mask
+                         & weber_mask & finite_mask).sum()),
+    }
+    selected = selected.loc[
+        cell_mask & mode_mask & light_mask & weber_mask & finite_mask].copy()
+    if selected.empty:
+        raise ValueError(
+            f'No rows remain for cell_type={cell_type!r}, modes={modes}, '
+            f'light>={min_intensity:g}, Weber={weber_range}')
+    selected['cell_id'] = (
+        selected['date'].astype(str) + '/' + selected['cell_label'].astype(str))
+
+    cell_patches = (selected.groupby(['cell_id', 'patch_uid'], as_index=False)
+                    .agg(imageName=('imageName', 'first'),
+                         patch_x_vh=('patch_x_vh', 'first'),
+                         patch_y_vh=('patch_y_vh', 'first'),
+                         patchMeanContrast=('patchMeanContrast', 'mean'),
+                         patchVariance=('patchVariance', 'mean'),
+                         patchRmsContrast=('patchRmsContrast', 'mean'),
+                         delta_nli_cone_minus_disc=(
+                             'delta_nli_cone_minus_disc', 'mean'),
+                         n_source_rows=('patch_uid', 'size')))
+    patches = (cell_patches.groupby('patch_uid', as_index=False)
+               .agg(imageName=('imageName', 'first'),
+                    patch_x_vh=('patch_x_vh', 'first'),
+                    patch_y_vh=('patch_y_vh', 'first'),
+                    patchMeanContrast=('patchMeanContrast', 'mean'),
+                    patchVariance=('patchVariance', 'mean'),
+                    patchRmsContrast=('patchRmsContrast', 'mean'),
+                    delta_nli_cone_minus_disc=(
+                        'delta_nli_cone_minus_disc', 'mean'),
+                    n_cells=('cell_id', 'size'),
+                    n_observations=('n_source_rows', 'sum')))
+
+    contrast = patches['patchMeanContrast']
+    rms = patches['patchRmsContrast']
+    even_x = np.linspace(weber_range[0], weber_range[1], grid_bins + 1)
+    even_y = np.linspace(rms.min(), rms.max(), grid_bins + 1)
+    even_counts = np.histogram2d(
+        rms, contrast, bins=[even_y, even_x])[0].astype(int)
+
+    def quantile_edges(values):
+        edges = np.unique(np.quantile(values, np.linspace(0, 1, grid_bins + 1)))
+        if len(edges) != grid_bins + 1:
+            raise ValueError(
+                f'Only {len(edges) - 1} distinct quantile bins are available')
+        return edges
+
+    quantile_x = quantile_edges(contrast)
+    quantile_y = quantile_edges(rms)
+    marginal_counts = np.histogram2d(
+        rms, contrast, bins=[quantile_y, quantile_x])[0].astype(int)
+    nested_counts = np.zeros((grid_bins, grid_bins), dtype=int)
+    nested_x = np.minimum(
+        ((contrast.rank(method='first') - 1) * grid_bins
+         // len(contrast)).astype(int), grid_bins - 1)
+    for xi in range(grid_bins):
+        column_rms = rms.loc[nested_x == xi]
+        nested_y = np.minimum(
+            ((column_rms.rank(method='first') - 1) * grid_bins
+             // len(column_rms)).astype(int), grid_bins - 1)
+        for yi in range(grid_bins):
+            nested_counts[yi, xi] = int((nested_y == yi).sum())
+
+    def occupancy_row(label, counts):
+        return {
+            'binning': label, 'min_patches': int(counts.min()),
+            'max_patches': int(counts.max()),
+            'empty_cells': int((counts == 0).sum()),
+            'count_cv': float(counts.std() / counts.mean())}
+
+    occupancy_counts = {
+        'equal_intervals': even_counts,
+        'marginal_quantiles': marginal_counts,
+        'nested_quantiles': nested_counts,
+    }
+    occupancy_summary = pd.DataFrame([
+        occupancy_row('Equal numeric intervals', even_counts),
+        occupancy_row('Shared marginal quantiles', marginal_counts),
+        occupancy_row('Nested adaptive quantiles', nested_counts),
+    ])
+
+    contrast_edges = np.linspace(
+        weber_range[0], weber_range[1], contrast_bins + 1)
+    contrast_bin = pd.cut(
+        contrast, contrast_edges, include_lowest=True, labels=False)
+    grouped = patches.assign(contrast_bin=contrast_bin).copy()
+    codes, rms_labels, normalized_cutoffs = rms_contrast_groups(
+        grouped['patchRmsContrast'], rms_cutoffs)
+    grouped['rms_contrast_group'] = codes
+    grouped['rms_group_label'] = grouped['rms_contrast_group'].map(
+        dict(enumerate(rms_labels)))
+    contrast_summary = (grouped.groupby(
+        ['contrast_bin', 'rms_contrast_group'], as_index=False, observed=True)
+        .agg(mean_contrast=('patchMeanContrast', 'mean'),
+             rms_contrast_min=('patchRmsContrast', 'min'),
+             rms_contrast_max=('patchRmsContrast', 'max'),
+             mean_delta_nli=('delta_nli_cone_minus_disc', 'mean'),
+             sem_delta_nli=('delta_nli_cone_minus_disc', 'sem'),
+             n_patches=('patch_uid', 'size')))
+    all_bins = pd.MultiIndex.from_product(
+        [range(contrast_bins), range(len(rms_labels))],
+        names=['contrast_bin', 'rms_contrast_group']).to_frame(index=False)
+    contrast_summary = all_bins.merge(
+        contrast_summary,
+        on=['contrast_bin', 'rms_contrast_group'], how='left')
+    contrast_summary['rms_group_label'] = contrast_summary[
+        'rms_contrast_group'].map(dict(enumerate(rms_labels)))
+    contrast_summary['bin_left'] = contrast_summary['contrast_bin'].map(
+        dict(enumerate(contrast_edges[:-1])))
+    contrast_summary['bin_right'] = contrast_summary['contrast_bin'].map(
+        dict(enumerate(contrast_edges[1:])))
+    contrast_summary['bin_center'] = (
+        contrast_summary['bin_left'] + contrast_summary['bin_right']) / 2
+
+    _, contrast_quartiles = _quartile_group_summary(
+        patches, 'patchMeanContrast')
+    _, rms_quartiles = _quartile_group_summary(patches, 'patchRmsContrast')
+    group_summary = pd.concat(
+        [contrast_quartiles, rms_quartiles], ignore_index=True)
+    spearman_r = float(patches[[
+        'patchMeanContrast', 'patchRmsContrast']].corr(
+        method='spearman').iloc[0, 1])
+
+    if verbose:
+        print('Filter audit: '
+              f'all={audit["all"]}, cell type={audit["cell_type"]}, '
+              f'mode {modes}={audit["recording_mode"]}, '
+              f'+ light={audit["light"]}, + Weber/finite={audit["selected"]}')
+        print(f'High-light selection: {len(selected)} rows, '
+              f'{selected.cell_id.nunique()} cells, {len(patches)} physical patches; '
+              f'{cell_type}, {modes}, mean light >= {min_intensity:g} R*/s, '
+              f'Weber contrast {weber_range}; RMS groups={rms_labels}')
+
+    return PatchRmsAnalysis(
+        selected_rows=selected, physical_patches=patches,
+        occupancy_summary=occupancy_summary,
+        occupancy_counts=occupancy_counts,
+        contrast_bin_summary=contrast_summary,
+        group_summary=group_summary, filter_audit=audit,
+        rms_cutoffs=normalized_cutoffs, rms_group_labels=rms_labels,
+        weber_range=tuple(float(value) for value in weber_range),
+        grid_bins=int(grid_bins), contrast_bins=int(contrast_bins),
+        spearman_r=spearman_r)
+
+
+def plot_patch_rms_analysis(analysis: PatchRmsAnalysis, show: bool = True):
+    """Render the reusable Section 3e RMS-contrast figure set."""
+    import matplotlib.pyplot as plt
+
+    patches = analysis.physical_patches
+    figures = []
+    fig, axes = plt.subplots(1, 2, figsize=(10, 3.7))
+    axes[0].hist(patches['patchRmsContrast'], bins='auto',
+                 color='0.35', edgecolor='white')
+    axes[0].set(xlabel='Patch RMS contrast', ylabel='Physical patch count',
+                title='Patch RMS-contrast distribution')
+    axes[1].hist(patches['patchMeanContrast'], bins='auto',
+                 color='#4C78A8', edgecolor='white')
+    axes[1].set(xlabel='Patch mean Weber contrast',
+                ylabel='Physical patch count',
+                title='Patch-mean-contrast distribution')
+    fig.tight_layout()
+    figures.append(fig)
+    if show:
+        plt.show()
+
+    fig, ax = plt.subplots(figsize=(5.4, 4.4))
+    ax.scatter(patches['patchMeanContrast'], patches['patchRmsContrast'],
+               s=18, alpha=0.55, color='#4C78A8', edgecolors='none')
+    ax.set(xlabel='Patch mean Weber contrast', ylabel='Patch RMS contrast',
+           title=f'Physical patches (Spearman r = {analysis.spearman_r:.2f})')
+    fig.tight_layout()
+    figures.append(fig)
+    if show:
+        plt.show()
+
+    def plot_count_grid(ax, counts, title, xlabel, ylabel):
+        ax.imshow(counts, origin='lower', cmap='Blues', aspect='equal',
+                  vmin=0, vmax=max(1, counts.max()))
+        threshold = counts.max() * 0.55
+        for yi in range(counts.shape[0]):
+            for xi in range(counts.shape[1]):
+                ax.text(xi, yi, str(counts[yi, xi]), ha='center', va='center',
+                        fontsize=8, color=(
+                            'white' if counts[yi, xi] > threshold else 'black'))
+        ax.set(title=f'{title}\nmin-max = {counts.min()}-{counts.max()}',
+               xlabel=xlabel, ylabel=ylabel,
+               xticks=range(analysis.grid_bins),
+               yticks=range(analysis.grid_bins))
+
+    fig, axes = plt.subplots(
+        1, 3, figsize=(13, 4.1), constrained_layout=True)
+    plot_count_grid(
+        axes[0], analysis.occupancy_counts['equal_intervals'],
+        'Equal numeric intervals', 'Weber-contrast interval',
+        'RMS-contrast interval')
+    plot_count_grid(
+        axes[1], analysis.occupancy_counts['marginal_quantiles'],
+        'Shared marginal quantiles', 'Weber-contrast quantile',
+        'RMS-contrast quantile')
+    plot_count_grid(
+        axes[2], analysis.occupancy_counts['nested_quantiles'],
+        'Nested adaptive quantiles', 'Weber-contrast quantile',
+        'Within-column RMS-contrast quantile')
+    figures.append(fig)
+    if show:
+        plt.show()
+
+    summary = analysis.contrast_bin_summary
+    n_groups = len(analysis.rms_group_labels)
+    if n_groups == 2:
+        colors = ('#4C78A8', '#E45756')
+    elif n_groups == 3:
+        colors = ('#4C78A8', '#F2CF5B', '#E45756')
+    else:
+        colors = tuple(plt.get_cmap('viridis')(
+            np.linspace(0.12, 0.88, n_groups)))
+    fig, ax = plt.subplots(figsize=(6.5, 4.5))
+    for group_index, (label, color) in enumerate(
+            zip(analysis.rms_group_labels, colors)):
+        rows = summary.loc[summary['rms_contrast_group'] == group_index]
+        ax.errorbar(rows['bin_center'], rows['mean_delta_nli'],
+                    yerr=rows['sem_delta_nli'], fmt='o-', color=color,
+                    capsize=3, linewidth=1.5, label=label)
+    ax.axhline(0, color='0.65', linewidth=1, linestyle='--')
+    ax.set(xlim=analysis.weber_range,
+           xlabel='Patch mean Weber contrast (equal-width bin center)',
+           ylabel='Mean patch ΔNLI ± SEM',
+           title='ΔNLI versus patch mean contrast by RMS contrast')
+    ax.legend(title='Fixed patch RMS contrast', frameon=False)
+    fig.tight_layout()
+    figures.append(fig)
+    if show:
+        plt.show()
+
+    def plot_quartiles(ax, split_column, title):
+        grouped, summary_table = _quartile_group_summary(patches, split_column)
+        labels = ('Lower 25%', 'Middle 50%', 'Upper 25%')
+        for xpos, label in enumerate(labels):
+            values = grouped.loc[
+                grouped['group'] == label, 'delta_nli_cone_minus_disc']
+            offsets = (np.linspace(-0.12, 0.12, len(values))
+                       if len(values) > 1 else [0])
+            ax.scatter(xpos + np.asarray(offsets), values, s=28, alpha=0.7,
+                       color='#4C78A8', edgecolors='white', linewidths=0.4)
+            row = summary_table.loc[summary_table['group'] == label].iloc[0]
+            ax.errorbar(xpos, row['mean_delta_nli'],
+                        yerr=row['sem_delta_nli'], fmt='o', color='black',
+                        capsize=4, markersize=6, linewidth=1.5, zorder=5)
+        lower = summary_table['lower_25_cutoff'].iloc[0]
+        upper = summary_table['upper_75_cutoff'].iloc[0]
+        ax.axhline(0, color='0.65', linewidth=1, linestyle='--')
+        ax.set(xticks=range(len(labels)), xticklabels=labels,
+               ylabel='Patch ΔNLI (averaged across cells)',
+               title=f'{title}\n25% = {lower:.3g}; 75% = {upper:.3g}')
+        ax.tick_params(axis='x', rotation=15)
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.2), sharey=True)
+    plot_quartiles(
+        axes[0], 'patchMeanContrast', 'Signed Weber-contrast quartiles')
+    plot_quartiles(
+        axes[1], 'patchRmsContrast', 'Patch RMS-contrast quartiles')
+    fig.tight_layout()
+    figures.append(fig)
+    if show:
+        plt.show()
+    return tuple(figures)
+
+
 def _natural_image_library_path(protocol_name: str, stimulus_set: str):
     """Resolve the exact package resource used by a recorded protocol."""
     from pathlib import Path

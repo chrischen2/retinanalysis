@@ -39,11 +39,11 @@ def test_center_disc_notebook_displays_and_analyzes_patch_rms_contrast():
         assert "'patchSampling_values', 'patchContrast_values'" in cell_sources[cell_id]
         assert "'patchRmsContrast'" in cell_sources[cell_id]
     analysis_source = cell_sources['high-light-patch-variance-analysis-code']
-    assert "physical_patches['patchRmsContrast']" in analysis_source
     assert 'RMS_CONTRAST_CUTOFFS = (0.3, 1.0)' in analysis_source
-    assert "['patchRmsContrast'] < low_rms_cutoff" in analysis_source
-    assert "['patchRmsContrast'] > high_rms_cutoff" in analysis_source
-    assert "'patchRmsContrast',\n    'Patch RMS-contrast quartiles'" in analysis_source
+    assert 'use 0.3 for two groups' in analysis_source
+    assert 'led.analyze_patch_rms_population(' in analysis_source
+    assert 'led.plot_patch_rms_analysis(' in analysis_source
+    assert len(analysis_source.splitlines()) < 50
 
 
 # --- stimulus tag mapping --------------------------------------------------
@@ -88,6 +88,59 @@ def test_patch_rms_contrast_converts_matlab_sample_variance():
     assert np.isnan(result[2])
     with pytest.raises(ValueError, match='greater than one'):
         led.patch_rms_contrast(0.0, 1.0, n_pixels=1)
+
+
+def test_rms_contrast_groups_accepts_one_cutoff_for_two_groups():
+    groups, labels, cutoffs = led.rms_contrast_groups(
+        [0.1, 0.3, 0.7, 1.0, 1.2], 0.3)
+
+    assert groups.tolist() == [0, 1, 1, 1, 1]
+    assert labels == ('RMS < 0.3', 'RMS ≥ 0.3')
+    assert cutoffs == (0.3,)
+
+
+def test_rms_contrast_groups_accepts_multiple_cutoffs():
+    groups, labels, cutoffs = led.rms_contrast_groups(
+        [0.1, 0.3, 0.7, 1.0, 1.2], (0.3, 1.0))
+
+    assert groups.tolist() == [0, 1, 1, 2, 2]
+    assert labels == ('RMS < 0.3', '0.3 ≤ RMS < 1', 'RMS ≥ 1')
+    assert cutoffs == (0.3, 1.0)
+
+
+@pytest.mark.parametrize('cutoffs', [(), (0.3, 0.3), (-0.1,), (np.nan,)])
+def test_rms_contrast_groups_rejects_invalid_cutoffs(cutoffs):
+    with pytest.raises(ValueError, match='cutoff'):
+        led.rms_contrast_groups([0.1, 0.2], cutoffs)
+
+
+def test_patch_rms_population_analysis_uses_scalar_cutoff():
+    patch_count = 8
+    population = pd.DataFrame({
+        'date': ['2026-01-01'] * patch_count,
+        'cell_label': ['cell1'] * patch_count,
+        'cell_type': ['OFF-parasol'] * patch_count,
+        'onlineAnalysis': ['extracellular'] * patch_count,
+        'patch_uid': [f'patch-{index}' for index in range(patch_count)],
+        'imageName': [f'image-{index}' for index in range(patch_count)],
+        'patch_x_vh': np.arange(patch_count),
+        'patch_y_vh': np.arange(patch_count) + 10,
+        'meanIntensity_Rstar_per_s': [5000.0] * patch_count,
+        'patchMeanContrast': np.linspace(-0.8, 0.8, patch_count),
+        'patchVariance': np.linspace(0.01, 0.64, patch_count),
+        'patchRmsContrast': [0.1, 0.2, 0.25, 0.29, 0.3, 0.5, 0.8, 1.2],
+        'delta_nli_cone_minus_disc': np.linspace(-0.4, 0.3, patch_count),
+    })
+
+    result = led.analyze_patch_rms_population(
+        population, rms_cutoffs=0.3, grid_bins=2, contrast_bins=2,
+        verbose=False)
+
+    assert result.rms_cutoffs == (0.3,)
+    assert result.rms_group_labels == ('RMS < 0.3', 'RMS ≥ 0.3')
+    assert len(result.physical_patches) == patch_count
+    assert len(result.contrast_bin_summary) == 4
+    assert result.contrast_bin_summary['n_patches'].sum() == patch_count
 
 
 def test_compute_nli_keeps_patches_where_one_response_clears_threshold():
