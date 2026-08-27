@@ -367,7 +367,11 @@ def test_single_cell_crg_notebooks_follow_the_split_condition_contract(site):
     source = '\n'.join(
         ''.join(cell.get('source', [])) for cell in notebook['cells'])
 
-    assert notebook['metadata']['kernelspec']['language'] == 'python'
+    assert notebook['metadata']['kernelspec'] == {
+        'name': 'retinanalysis',
+        'display_name': 'retinanalysis (Python 3.11)',
+        'language': 'python',
+    }
     assert 'requires the retinanalysis Python 3.11 kernel' in source
     assert f"SITE = '{site.lower()}'" in source
     assert 'allowed_temporal_frequency=None' in source
@@ -377,6 +381,23 @@ def test_single_cell_crg_notebooks_follow_the_split_condition_contract(site):
     assert 'crg.analyze_cell_conditions(' in source
     assert 'crg.save_records(records, path=STORE_PATH)' in source
     assert "'temporal_frequency'" in source
+
+
+@pytest.mark.parametrize('name', [
+    'analyzeCenterGrating.ipynb',
+    'analyzeSurroundGrating.ipynb',
+    'analyzeCenterContrastReversingGrating.ipynb',
+    'analyzeSurroundContrastReversingGrating.ipynb',
+])
+def test_all_grating_notebooks_pin_the_named_python311_kernel(name):
+    path = (Path(__file__).parents[1] / 'SingCell_Notebooks' / 'linCone' / name)
+    kernelspec = json.loads(path.read_text())['metadata']['kernelspec']
+
+    assert kernelspec == {
+        'name': 'retinanalysis',
+        'display_name': 'retinanalysis (Python 3.11)',
+        'language': 'python',
+    }
 
 
 def test_crg_prune_records_refuses_an_empty_keep_set():

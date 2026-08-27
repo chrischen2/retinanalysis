@@ -46,7 +46,9 @@ dependencies = [
   "torch",
   "torchaudio",
   "torchvision",
-  "ipykernel",
+  # VS Code Jupyter 2025.9.1 can hang indefinitely during the ipykernel 7
+  # IOPub startup handshake (microsoft/vscode-jupyter#17481).
+  "ipykernel>=6.29,<7",
   "xarray",
   "dask",
   "netCDF4",
