@@ -218,9 +218,34 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
             continue
         ids = [int(i) for i in (ep['id'] if 'id' in ep else ep.index)]
         p = (schema.Epoch() & f'id={ids[0]}').fetch1('parameters')
-        row = {'block_id': int(bid), 'n_epochs': len(ids)}
-        row.update({k: p.get(k, np.nan) for k in CONFIG_KEYS})
-        rows.append(row)
+        epoch_conditions = pd.DataFrame({
+            'temporalFrequency': pd.to_numeric([
+                params.get('currentTemporalFrequency', np.nan)
+                for params in ep['parameters']], errors='coerce'),
+            'brightBarContrast': pd.to_numeric([
+                params.get('currentBrightContrast', np.nan)
+                for params in ep['parameters']], errors='coerce'),
+            'barWidth': pd.to_numeric([
+                params.get('currentBarWidth', np.nan)
+                for params in ep['parameters']], errors='coerce'),
+        })
+        for column in epoch_conditions:
+            if epoch_conditions[column].notna().any():
+                continue
+            configured = np.atleast_1d(p.get(column, np.nan))
+            if len(configured) == 1:
+                epoch_conditions[column] = float(configured[0])
+        recorded_conditions = (epoch_conditions.dropna(
+            subset=['temporalFrequency', 'brightBarContrast', 'barWidth'])
+            .value_counts(sort=False).rename('n_epochs').reset_index())
+        for _, condition in recorded_conditions.iterrows():
+            row = {'block_id': int(bid),
+                   'n_epochs': int(condition.n_epochs)}
+            row.update({k: p.get(k, np.nan) for k in CONFIG_KEYS})
+            row['temporalFrequency'] = float(condition.temporalFrequency)
+            row['brightBarContrast'] = float(condition.brightBarContrast)
+            row['barWidth'] = float(condition.barWidth)
+            rows.append(row)
 
     df = pd.DataFrame(rows).merge(blocks[['exp_name', 'block_id']], on='block_id')
     df = df.merge(meta, on=['exp_name', 'block_id'], how='left')
@@ -229,42 +254,93 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
     df['center_spot'] = df['apertureDiameter'].apply(center_spot)
     df['cell_type_short'] = df['cell_type'].astype(str).str.split('\\').str[-1]
     df['rig'] = df['exp_name'].apply(rig_of)
-    df = df.rename(columns={'NDF': 'filter_wheel_ndf', 'barWidth': 'bar_width'})
-    df['has_filter_wheel'] = df['filter_wheel_ndf'].notna()
+    df = df.rename(columns={
+        'NDF': 'filter_wheel_ndf_recorded', 'barWidth': 'bar_width'})
     if verify_fw:
-        bad = [(r['exp_name'], int(r['block_id']))
-               for _, r in df.iterrows()
-               if not np.isclose(read_filter_wheel_ndf(r['exp_name'], r['block_id']),
-                                 r['filter_wheel_ndf'], equal_nan=True)]
+        bad = []
+        for _, row in df.iterrows():
+            h5_value = read_filter_wheel_ndf(
+                row['exp_name'], int(row['block_id']))
+            recorded = row['filter_wheel_ndf_recorded']
+            if not (np.isclose(h5_value, recorded)
+                    or (np.isnan(h5_value) and pd.isna(recorded))):
+                bad.append((row['exp_name'], int(row['block_id'])))
         print(f'filter-wheel verification: {len(df) - len(bad)}/{len(df)} agree with the h5')
         for exp, bid in bad:
             print(f'  MISMATCH {exp} block {bid}')
 
-    # The fixed filters in the light path, which the wheel setting does not cover.
-    df = df.merge(stage_ndf_table(df[['exp_name', 'block_id']], verbose=show),
-                  on='block_id', how='left')
-    df['stage_ndfs'] = df['stage_ndfs'].fillna('')
+    # Keep fixed filters and the protected numeric FilterWheel reading separate.
+    # Embedded Stage FW labels are descriptive text, not wheel measurements.
+    requested_settings = df[['exp_name', 'block_id']]
+    try:
+        settings = ra.read_block_light_settings(
+            requested_settings, verbose=show)
+    except ValueError:
+        # Keep discovery usable when one historical block contains genuinely
+        # conflicting protected wheel readings. That block stays visible with
+        # a missing numeric wheel and an explicit error; no arbitrary reading
+        # is selected and all other blocks retain their trusted settings.
+        from retinanalysis.utils.isomerization import split_stage_ndfs
+        setting_rows = []
+        for _, requested in requested_settings.iterrows():
+            one = pd.DataFrame([requested])
+            try:
+                setting_rows.append(
+                    ra.read_block_light_settings(one, verbose=False).iloc[0].to_dict())
+            except ValueError as error:
+                stage = stage_ndf_table(one, verbose=False).iloc[0]
+                fixed, embedded = split_stage_ndfs(stage.get('stage_ndfs', ''))
+                setting_rows.append({
+                    'exp_name': requested.exp_name,
+                    'block_id': int(requested.block_id),
+                    'rig': rig_of(requested.exp_name),
+                    'stage_ndfs': stage.get('stage_ndfs', ''),
+                    'fixed_ndfs': tuple(sorted(fixed)),
+                    'filter_wheel_ndf': np.nan,
+                    'ndf_combination': (
+                        ' + '.join([*sorted(fixed), 'FW conflict'])),
+                    'filter_wheel_status': 'conflicting',
+                    'n_epochs': np.nan,
+                    'n_filter_wheel_readings': np.nan,
+                    'ignored_stage_fw_tokens': tuple(embedded),
+                    'light_settings_error': str(error),
+                })
+                if show:
+                    print(f'  WARNING: {error}; retaining block '
+                          f'{int(requested.block_id)} with FilterWheel=NaN.')
+        settings = pd.DataFrame(setting_rows)
+    drop = [column for column in ('exp_name', 'rig', 'n_epochs')
+            if column in settings]
+    df = (df.drop(columns=['filter_wheel_ndf_recorded'])
+          .merge(settings.drop(columns=drop), on='block_id', how='left',
+                 validate='many_to_one'))
+    df['has_filter_wheel'] = df['filter_wheel_ndf'].notna()
 
-    # R* comes from the rig's measured ceiling, so the rig has to come with the
-    # wheel setting -- E and G differ by 2.6x at the same setting. Passing no rig
-    # fell back to RSTAR_TABLE and left most blocks with no light level at all.
-    rs = [light_level_rstar(n, b, rig=r)
-          for n, b, r in zip(df['filter_wheel_ndf'], df['backgroundIntensity'], df['rig'])]
-    df['rstar'] = [r for r, _ in rs]
-    df['light_level'] = [lab for _, lab in rs]
-    df['rstar_level'] = [round_rstar(r) for r, _ in rs]
+    maxima = []
+    for rig, fixed, wheel in zip(
+            df['rig'], df['fixed_ndfs'], df['filter_wheel_ndf']):
+        try:
+            maxima.append(ra.visual_stimulus_max(rig, fixed, wheel))
+        except (KeyError, TypeError, ValueError):
+            maxima.append(np.nan)
+    df['max_light_level'] = maxima
+    df['rstar'] = df['max_light_level'] * df['backgroundIntensity']
+    df['light_level'] = [
+        f'{round_rstar(value):g}R*' if np.isfinite(value)
+        else f'{combo} (?R*)'
+        for value, combo in zip(df['rstar'], df['ndf_combination'])]
+    df['rstar_level'] = [round_rstar(value) for value in df['rstar']]
     df['light_setting'] = [light_setting(n, b)
                            for n, b in zip(df['filter_wheel_ndf'], df['backgroundIntensity'])]
-    df['rstar_measured'] = [is_calibrated(n, b, rig=r)
-                            for n, b, r in zip(df['filter_wheel_ndf'],
-                                               df['backgroundIntensity'], df['rig'])]
-    df['max_rstar'] = [max_rstar(r, n) for r, n in zip(df['rig'], df['filter_wheel_ndf'])]
+    df['rstar_measured'] = df['max_light_level'].notna()
+    df['max_rstar'] = df['max_light_level']
     df = df.sort_values(['exp_name', 'cell_label', 'start_time']).reset_index(drop=True)
 
     if show:
         cols = ['exp_name', 'rig', 'cell_label', 'cell_type_short', 'onlineAnalysis',
                 'grating_site', 'center_spot', 'temporalFrequency', 'bar_width',
-                'brightBarContrast', 'filter_wheel_ndf', 'stage_ndfs',
+                'brightBarContrast', 'ndf_combination', 'max_light_level',
+                'filter_wheel_ndf', 'stage_ndfs',
                 'backgroundIntensity', 'light_level', 'annulusInnerDiameter',
                 'annulusOuterDiameter', 'stimTime', 'n_epochs', 'block_id']
         print(f"{len(df)} blocks | {df['exp_name'].nunique()} experiments | "
@@ -284,8 +360,9 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
                                       zip(off['rstar'], off['rstar_level'])})))
         sc.scroll_table(df[cols], height=height,
                         num_cols=('temporalFrequency', 'bar_width', 'brightBarContrast',
-                                  'filter_wheel_ndf', 'backgroundIntensity', 'stimTime',
-                                  'n_epochs', 'block_id'))
+                                  'filter_wheel_ndf', 'max_light_level',
+                                  'backgroundIntensity', 'stimTime', 'n_epochs',
+                                  'block_id'))
     return df
 
 
@@ -297,23 +374,30 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
                  allowed_temporal_frequency: Optional[Sequence[float]]
                  = ALLOWED_TEMPORAL_FREQUENCY,
                  min_bar_width: Optional[float] = MIN_BAR_WIDTH,
-                 min_epochs: Optional[int] = MIN_EPOCHS) -> pd.DataFrame:
+                 min_epochs: Optional[int] = MIN_EPOCHS,
+                 separate_bright_contrast: bool = False,
+                 collapse_bar_widths: bool = True) -> pd.DataFrame:
     """One row per recording group; like the flashed version plus temporal frequency.
 
     A group is (experiment, rig, cell, recording mode, grating site, **temporal
-    frequency**, filter wheel, background). Temporal frequency is a grouping key
-    rather than something pooled: it changes the response, and F1/F2 are measured
-    at it.
+    frequency**, fixed-NDF path, filter wheel, background). Temporal frequency is
+    the only grouping dimension beyond the flashed-grating contract.
 
     The filters are the flashed protocol's, applied the same way and reported the
     same way — ``allowed_filter_wheel`` and ``allowed_bright_contrast`` and
     ``min_bar_width`` on blocks, ``min_epochs`` on the pooled group — plus
     ``allowed_temporal_frequency`` for this protocol's extra axis. Any of them
-    takes ``None`` to keep everything.
+    takes ``None`` to keep everything. ``separate_bright_contrast`` and
+    ``collapse_bar_widths`` have the same meaning as in the flashed protocol;
+    the analysis notebooks use ``True`` and ``False`` respectively so distinct
+    stimuli are never silently pooled.
     """
     from retinanalysis.SCutils import explore as sc
 
-    needed = ['rig', 'bar_width', 'rstar_level', 'center_spot']
+    needed = ['rig', 'bar_width', 'rstar_level', 'center_spot',
+              'light_setting', 'filter_wheel_ndf', 'grating_site',
+              'temporalFrequency', 'apertureDiameter',
+              'annulusInnerDiameter', 'annulusOuterDiameter']
     absent = [c for c in needed if c not in df.columns]
     if absent:
         raise KeyError(
@@ -364,30 +448,51 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
         df = df[keep]
 
     keys = ['exp_name', 'rig', 'cell_label', 'cell_type_short', 'onlineAnalysis',
-            'grating_site', 'temporalFrequency', 'filter_wheel_ndf', 'backgroundIntensity']
+            'grating_site', 'temporalFrequency', 'filter_wheel_ndf',
+            'backgroundIntensity']
+    if 'ndf_combination' in df.columns:
+        keys.append('ndf_combination')
+    df = df.copy()
+    if separate_bright_contrast and 'brightBarContrast' in df.columns:
+        df['_condition_bright'] = df['brightBarContrast']
+        keys.append('_condition_bright')
+    if not collapse_bar_widths and 'bar_width' in df.columns:
+        df['_condition_bar_width'] = df['bar_width']
+        keys.append('_condition_bar_width')
     agg = dict(blocks=('block_id', 'size'), epochs=('n_epochs', 'sum'),
+               light_setting=('light_setting', 'first'),
                light_level=('light_level', 'first'), rstar=('rstar', 'first'),
                rstar_level=('rstar_level', 'first'),
-               light_setting=('light_setting', 'first'),
                rstar_measured=('rstar_measured', 'first'),
                center_spot=('center_spot',
                             lambda s: ', '.join(sorted(set(str(v) for v in s)))),
-               bright=('brightBarContrast',
-                       lambda s: ', '.join(f'{v:g}' for v in sorted(set(s), reverse=True))),
-               # Bar width is pooled by analyze_group, unlike temporal frequency,
-               # so a group can legitimately span several and has to show them.
-               bar_width=('bar_width',
-                          lambda s: ', '.join(f'{b:g}' for b in sorted(set(s)))),
                aperture=('apertureDiameter', 'first'),
                annulus_inner=('annulusInnerDiameter', 'first'),
                annulus_outer=('annulusOuterDiameter', 'first'),
                block_ids=('block_id', lambda s: ', '.join(str(int(b)) for b in sorted(s))))
+    if 'spotIntensity' in df.columns:
+        agg['spot_intensity'] = ('spotIntensity', 'first')
+    if collapse_bar_widths:
+        agg['bar_width'] = ('bar_width',
+                            lambda s: ', '.join(f'{value:g}' for value in sorted(set(s))))
+    if not separate_bright_contrast:
+        agg['bright'] = ('brightBarContrast',
+                         lambda s: ', '.join(
+                             f'{value:g}' for value in sorted(set(s), reverse=True)))
     if 'stage_ndfs' in df.columns:
         agg['stage_ndfs'] = ('stage_ndfs', lambda s: ' | '.join(sorted({str(v) for v in s})))
+    if 'fixed_ndfs' in df.columns:
+        agg['fixed_ndfs'] = ('fixed_ndfs', 'first')
+    if 'max_light_level' in df.columns:
+        agg['max_light_level'] = ('max_light_level', 'first')
     if 'series_resistance' in df.columns:
         agg['rs_mohm'] = ('series_resistance', lambda s: np.round(np.nanmedian(s) / 1e6, 2))
         agg['epochs_high_rs'] = ('n_epochs_high_rs', 'sum')
     g = df.groupby(keys, dropna=False, sort=False).agg(**agg).reset_index()
+    if separate_bright_contrast and '_condition_bright' in g.columns:
+        g['bright'] = g.pop('_condition_bright')
+    if not collapse_bar_widths and '_condition_bar_width' in g.columns:
+        g['bar_width'] = g.pop('_condition_bar_width')
 
     # On the pooled group, for the same reason as the flashed protocol: a cell run
     # twice at one condition reaches a usable count between the two blocks.
@@ -405,10 +510,12 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
 
     if show:
         print(f'{len(g)} recording groups (experiment x cell x mode x grating site x '
-              f'temporal frequency x filter wheel x background)')
+              f'temporal frequency x NDF combination x background)')
         cols = ['cell_type_short', 'rig', 'exp_name', 'cell_label', 'onlineAnalysis',
                 'grating_site', 'center_spot', 'temporalFrequency', 'bar_width', 'bright',
-                'filter_wheel_ndf', 'backgroundIntensity', 'rstar_level', 'blocks', 'epochs']
+                'ndf_combination', 'filter_wheel_ndf', 'backgroundIntensity',
+                'rstar_level', 'blocks', 'epochs']
+        cols = [column for column in cols if column in g.columns]
         cols += [c for c in ('rs_mohm', 'epochs_high_rs') if c in g.columns]
         sc.tree_table(g.sort_values(['cell_type_short', 'exp_name', 'cell_label'])[cols],
                       levels=['cell_type_short', 'rig', 'exp_name', 'cell_label'],
@@ -471,7 +578,9 @@ class CRGRecord:
     def key(self) -> str:
         return record_key(self.exp_name, self.cell_label, self.online_analysis,
                           self.grating_site, self.temporal_frequency, self.ndf,
-                          self.background_intensity)
+                          self.background_intensity,
+                          self.config.get('ndf_combination'),
+                          self.bright_bar_contrast, self.bar_widths)
 
     def summary_row(self) -> Dict:
         return {
@@ -480,7 +589,9 @@ class CRGRecord:
             'grating_site': self.grating_site,
             'temporal_frequency': self.temporal_frequency, 'ndf': self.ndf,
             'background_intensity': self.background_intensity, 'rstar': self.rstar,
-            'rstar_measured': is_calibrated(self.ndf, self.background_intensity),
+            'rstar_level': round_rstar(self.rstar), 'rig': rig_of(self.exp_name),
+            'rstar_measured': np.isfinite(
+                float(self.config.get('max_light_level', np.nan))),
             'light_setting': light_setting(self.ndf, self.background_intensity),
             'light_level': self.light_level, 'baseline_mean': self.baseline_mean,
             'baseline_sem': self.baseline_sem, 'crossing_nearest': self.crossing_nearest,
@@ -496,6 +607,9 @@ class CRGRecord:
             'annulus_inner': self.config.get('annulusInnerDiameter', np.nan),
             'annulus_outer': self.config.get('annulusOuterDiameter', np.nan),
             'spot_intensity': self.config.get('spotIntensity', np.nan),
+            'fixed_ndfs': self.config.get('fixed_ndfs', ''),
+            'ndf_combination': self.config.get('ndf_combination', ''),
+            'max_light_level': self.config.get('max_light_level', np.nan),
         }
 
     def describe(self) -> str:
@@ -509,6 +623,18 @@ class CRGRecord:
                 f'  F1 / F2          : {np.round(self.f1_mean, 2)} / {np.round(self.f2_mean, 2)}\n'
                 f'  null nearest={self.crossing_nearest:.3f} interp='
                 f'{self.crossing_interp:.3f} | cone pred={self.cone_pred_dark:.3f}')
+
+
+@dataclass
+class CellConditionAnalysis:
+    """Outputs from :func:`analyze_cell_conditions` for notebook reuse."""
+
+    exp_name: str
+    condition_rows: pd.DataFrame
+    light_conditions: pd.DataFrame
+    records: List[CRGRecord]
+    condition_figures: List[object] = field(default_factory=list)
+    light_tuning_figure: Optional[object] = None
 
 
 def harmonic_amplitudes(trace: np.ndarray, sample_rate: float,
@@ -550,6 +676,9 @@ def fold_cycles(trace: np.ndarray, sample_rate: float, frequency: float,
 
 def analyze_group(exp_name: str, block_ids: Sequence[int],
                   online_analysis: Optional[str] = None,
+                  temporal_frequency: Optional[float] = None,
+                  bright_bar_contrast: Optional[float] = None,
+                  bar_width: Optional[float] = None,
                   spike_offset: int = DEFAULTS['spike_offset'],
                   wc_offset: int = DEFAULTS['wc_offset'],
                   smooth_ms: float = DEFAULTS['smooth_ms'],
@@ -569,6 +698,11 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
     two contrasts balance, so its zero crossing over ``darkBarContrast`` is the
     null, directly comparable to the Weber prediction. F1 and F2 amplitudes are
     computed on the same window.
+
+    ``temporal_frequency``, ``bright_bar_contrast``, and ``bar_width`` select
+    epochs when a block interleaves conditions. Frequency must be supplied when
+    more than one is present; mixing it would make the cycle fold and F1/F2
+    amplitudes invalid. The condition notebooks pass all three selectors.
 
     ``cycles_to_drop`` skips the first reversal cycle, which carries the onset
     transient rather than a steady-state reversal response.
@@ -598,9 +732,25 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
             first_params = p0
         mode = (online_analysis or p0.get('onlineAnalysis', 'extracellular')).lower()
         spiking = mode == 'extracellular'
-        f = float(sag._epoch_param(ep, 'currentTemporalFrequency')[0])
-        if not np.isfinite(f):
-            f = float(np.atleast_1d(p0['temporalFrequency'])[0])
+        epoch_frequencies = sag._epoch_param(ep, 'currentTemporalFrequency')
+        epoch_bright = sag._epoch_param(ep, 'currentBrightContrast')
+        epoch_bar_width = sag._epoch_param(ep, 'currentBarWidth')
+        available_frequencies = np.unique(
+            epoch_frequencies[np.isfinite(epoch_frequencies)])
+        if temporal_frequency is None:
+            if len(available_frequencies) > 1:
+                raise ValueError(
+                    f'{exp_name} block {bid} interleaves temporal frequencies '
+                    f'{available_frequencies.tolist()}; pass temporal_frequency')
+            f = (float(available_frequencies[0])
+                 if len(available_frequencies) else
+                 float(np.atleast_1d(p0['temporalFrequency'])[0]))
+        else:
+            f = float(temporal_frequency)
+        if freq is not None and not np.isclose(freq, f):
+            raise ValueError(
+                f'{exp_name} blocks {list(block_ids)} span temporal '
+                f'frequencies {freq:g} and {f:g} Hz')
         freq = f
 
         rb = ra.SCResponseBlock(exp_name, int(bid), b_spiking=spiking, verbose=False,
@@ -608,7 +758,18 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
         sr = float(rb.amp_sample_rate)
         pre_pts = int(round(float(p0['preTime']) / 1e3 * sr))
         stim_pts = int(round(float(p0['stimTime']) / 1e3 * sr))
-        keep = [i for i in range(len(ep)) if i not in set(drop_epochs)]
+        keep = [i for i in range(len(ep))
+                if i not in set(drop_epochs)
+                and (not np.isfinite(epoch_frequencies[i])
+                     or np.isclose(epoch_frequencies[i], f))]
+        if bright_bar_contrast is not None:
+            keep = [i for i in keep if np.isclose(
+                epoch_bright[i], float(bright_bar_contrast))]
+        if bar_width is not None:
+            keep = [i for i in keep if np.isclose(
+                epoch_bar_width[i], float(bar_width))]
+        if not keep:
+            continue
         used_blocks.append(int(bid))
 
         # The traces exactly as the amplifier wrote them, before the PSTH or the
@@ -665,6 +826,13 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
         bright.extend(sag._epoch_param(ep, 'currentBrightContrast')[keep])
         bar.extend(sag._epoch_param(ep, 'currentBarWidth')[keep])
 
+    if not used_blocks or not cycles_all:
+        frequency_text = ('requested frequency' if temporal_frequency is None
+                          else f'{float(temporal_frequency):g} Hz')
+        raise ValueError(
+            f'{exp_name} blocks {list(block_ids)} contain no epochs at '
+            f'{frequency_text}')
+
     dark = np.asarray(dark); diff = np.asarray(diff)
     if keep_raw:
         # Same order as the traces: both are appended per block over `keep`.
@@ -692,9 +860,26 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
     crossing_interp = interp_zero_crossing(contrasts, resp_mean)
 
     bright_mode = float(pd.Series(bright[valid]).mode().iloc[0])
-    ndf = float(first_params.get('NDF', np.nan))
     bg = float(first_params['backgroundIntensity'])
-    rstar, light_label = light_level_rstar(ndf, bg)
+    light_settings = ra.read_block_light_settings(
+        pd.DataFrame({'exp_name': exp_name, 'block_id': used_blocks}),
+        verbose=False)
+    combinations = light_settings['ndf_combination'].drop_duplicates()
+    if len(combinations) != 1:
+        raise ValueError(
+            f'{exp_name} blocks {used_blocks} span multiple NDF combinations: '
+            f'{combinations.tolist()}')
+    fixed_ndfs = light_settings.loc[0, 'fixed_ndfs']
+    ndf = float(light_settings.loc[0, 'filter_wheel_ndf'])
+    ndf_combination = str(combinations.iloc[0])
+    try:
+        max_light_level = ra.visual_stimulus_max(
+            rig_of(exp_name), fixed_ndfs, ndf)
+    except (KeyError, TypeError, ValueError):
+        max_light_level = np.nan
+    rstar = max_light_level * bg
+    light_label = (f'{round_rstar(rstar):g}R*' if np.isfinite(rstar)
+                   else f'{ndf_combination} (?R*)')
 
     summary = ra.get_exp_summary(exp_name)
     row = summary[summary['block_id'].eq(int(used_blocks[0]))].iloc[0]
@@ -712,7 +897,12 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
         cycles=cycles, cycle_time_ms=np.arange(width) / trace_rate * 1e3,
         pre_time_ms=float(first_params['preTime']), stim_time_ms=float(first_params['stimTime']),
         n_epochs=int(valid.sum()), block_ids=used_blocks,
-        config={k: first_params.get(k) for k in CONFIG_KEYS}, units=units, raw=raw)
+        config={**{k: first_params.get(k) for k in CONFIG_KEYS},
+                'fixed_ndfs': ', '.join(fixed_ndfs),
+                'ndf_combination': ndf_combination,
+                'max_light_level': max_light_level,
+                'temporalFrequency': float(freq)},
+        units=units, raw=raw)
     if verbose:
         print(rec.describe())
     return rec
@@ -731,13 +921,43 @@ def store_dir():
 
 def record_key(exp_name: str, cell_label: str, online_analysis: str, site: str,
                temporal_frequency: float, ndf: float,
-               background_intensity: float) -> str:
-    """Recording-group identifier; carries temporal frequency as well."""
+               background_intensity: float,
+               ndf_combination: Optional[str] = None,
+               bright_bar_contrast: Optional[float] = None,
+               bar_widths=None) -> str:
+    """Recording-group identifier; flashed dimensions plus temporal frequency."""
     def num(v):
         return ('NaN' if v is None or (isinstance(v, float) and np.isnan(v))
                 else f'{v:g}'.replace('.', 'p'))
+    import re
+    light_path = ''
+    if ndf_combination:
+        safe = re.sub(r'[^A-Za-z0-9.-]+', '-', str(ndf_combination)).strip('-')
+        light_path = f'__{safe}'
+    bright_path = ''
+    if bright_bar_contrast is not None and not pd.isna(bright_bar_contrast):
+        bright_path = f'__bright{num(float(bright_bar_contrast))}'
+    bar_path = ''
+    if bar_widths is not None:
+        if isinstance(bar_widths, str):
+            values = [value.strip() for value in bar_widths.split(',') if value.strip()]
+        elif np.isscalar(bar_widths):
+            values = [bar_widths]
+        else:
+            values = list(np.asarray(bar_widths).ravel())
+        normalized = []
+        for value in values:
+            try:
+                normalized.append(num(float(value)))
+            except (TypeError, ValueError):
+                normalized.append(
+                    re.sub(r'[^A-Za-z0-9-]+', '-', str(value)).strip('-'))
+        if normalized:
+            bar_path = f'__bar{"-".join(normalized)}'
     return (f'{exp_name}__{cell_label}__{online_analysis}__{site}__'
-            f'{num(temporal_frequency)}Hz__FW{num(ndf)}__bg{num(background_intensity)}')
+            f'{num(temporal_frequency)}Hz__FW{num(ndf)}'
+            f'__bg{num(background_intensity)}{light_path}'
+            f'{bright_path}{bar_path}')
 
 
 _ARRAY_FIELDS = ('dark_contrasts', 'resp_mean', 'resp_sem', 'resp_n', 'f1_mean',
@@ -753,7 +973,9 @@ def group_keys(groups: pd.DataFrame) -> List[str]:
     """
     return [record_key(r['exp_name'], r['cell_label'], r['onlineAnalysis'],
                        r['grating_site'], r['temporalFrequency'],
-                       r['filter_wheel_ndf'], r['backgroundIntensity'])
+                       r['filter_wheel_ndf'], r['backgroundIntensity'],
+                       r.get('ndf_combination'), r.get('bright'),
+                       r.get('bar_width'))
             for _, r in groups.iterrows()]
 
 
@@ -816,29 +1038,8 @@ def prune_records(keep, path=None, dry_run: bool = False,
 
 
 def refresh_rstar(summary: pd.DataFrame) -> pd.DataFrame:
-    """Recompute ``rstar`` / ``rstar_level`` / ``light_level`` from setting and rig.
-
-    Same reasoning as :func:`spot_annular_grating.refresh_rstar`: the record
-    stores the *setting*, which is a fact about the experiment, while R* is a
-    fact about the rig and can be restated on read. The rig is derived from the
-    experiment name, with a stored value overriding only where it has one.
-    """
-    if summary.empty or 'ndf' not in summary.columns:
-        return summary
-    out = summary.copy()
-    rigs = out['exp_name'].apply(rig_of)
-    if 'rig' in out.columns:
-        stored = out['rig']
-        rigs = stored.where(stored.notna() & (stored.astype(str).str.strip() != ''), rigs)
-    values = [light_level_rstar(n, b, rig=r)
-              for n, b, r in zip(out['ndf'], out['background_intensity'], rigs)]
-    out['rig'] = list(rigs)
-    out['rstar'] = [v for v, _ in values]
-    out['light_level'] = [lab for _, lab in values]
-    out['rstar_level'] = [round_rstar(v) for v, _ in values]
-    out['rstar_measured'] = [is_calibrated(n, b, rig=r)
-                             for n, b, r in zip(out['ndf'], out['background_intensity'], rigs)]
-    return out
+    """Refresh light calibration with the flashed protocol's exact contract."""
+    return sag.refresh_rstar(summary)
 
 
 def save_records(records: Sequence[CRGRecord], path=None, verbose: bool = True,
@@ -857,6 +1058,19 @@ def save_records(records: Sequence[CRGRecord], path=None, verbose: bool = True,
     h5_path = base / 'records.h5'
     with h5py.File(h5_path, 'a') as f:
         for rec in records:
+            legacy_keys = {
+                record_key(rec.exp_name, rec.cell_label, rec.online_analysis,
+                           rec.grating_site, rec.temporal_frequency, rec.ndf,
+                           rec.background_intensity),
+                record_key(rec.exp_name, rec.cell_label, rec.online_analysis,
+                           rec.grating_site, rec.temporal_frequency, rec.ndf,
+                           rec.background_intensity,
+                           rec.config.get('ndf_combination')),
+            }
+            legacy_keys.discard(rec.key)
+            removed_legacy = [key for key in legacy_keys if key in f]
+            for key in removed_legacy:
+                del f[key]
             if rec.key in f:
                 del f[rec.key]
                 action = 'overwrote'
@@ -873,6 +1087,8 @@ def save_records(records: Sequence[CRGRecord], path=None, verbose: bool = True,
                 if v is not None and not isinstance(v, (list, tuple, dict)):
                     g.attrs[f'cfg_{k}'] = v
             if verbose:
+                for key in removed_legacy:
+                    print(f'  replaced legacy unsplit record {key}')
                 print(f'  {action} {rec.key}')
 
     if prune_to is not None:
@@ -1037,9 +1253,157 @@ def plot_tuning_overlay(records: Sequence, harmonic: str = 'f2_mean', **kwargs):
     return sag.plot_tuning_overlay(records, value=harmonic, **kwargs)
 
 
+def analyze_cell_conditions(
+        date_index: int, cell_label: str, online_analysis: str,
+        site: str = 'center', collapse_bar_widths: bool = False,
+        max_series_resistance: Optional[float] = MAX_SERIES_RESISTANCE,
+        spike_offset: int = DEFAULTS['spike_offset'],
+        wc_offset: int = DEFAULTS['wc_offset'],
+        keep_raw: bool = True, plot: bool = True, show: bool = True,
+        verbose: bool = True,
+        detector_kwargs: Optional[dict] = None) -> CellConditionAnalysis:
+    """Analyze every recorded condition for one cell without silent filtering.
+
+    This is the contrast-reversing counterpart of
+    :func:`spot_annular_grating.analyze_cell_conditions`. Fixed-NDF path,
+    FilterWheel, background, bright contrast, bar width, and temporal frequency
+    remain separate. Temporal frequency is the only additional condition field.
+    """
+    from retinanalysis.SCutils import explore as sc
+    if show:
+        from IPython.display import display
+
+    protocol_index = sc.find_blocks(PROTOCOL, show=False)
+    protocol_dates = sorted(protocol_index.exp_name.dropna().unique())
+    if not 1 <= int(date_index) <= len(protocol_dates):
+        raise ValueError(
+            f'date_index {date_index} is outside 1-{len(protocol_dates)}')
+    exp_name = protocol_dates[int(date_index) - 1]
+
+    date_blocks = find_blocks(exp_names=[exp_name], show=False)
+    date_blocks = check_series_resistance(
+        date_blocks, max_series_resistance=max_series_resistance, show=False)
+    date_blocks = date_blocks[date_blocks.grating_site.eq(site)].copy()
+    cell_blocks = date_blocks[
+        date_blocks.cell_label.eq(cell_label)
+        & date_blocks.onlineAnalysis.eq(online_analysis)
+    ].copy()
+    if cell_blocks.empty:
+        available_columns = [
+            'cell_label', 'cell_type_short', 'onlineAnalysis']
+        available = (date_blocks[available_columns].drop_duplicates()
+                     .sort_values(['cell_label', 'onlineAnalysis']))
+        if show:
+            display(available)
+        raise ValueError(
+            f'No {site} CRG blocks for {exp_name} {cell_label} '
+            f'{online_analysis}')
+
+    alerts = (
+        ('bright-bar contrasts', 'brightBarContrast', ''),
+        ('bar widths', 'bar_width', ' µm'),
+        ('temporal frequencies', 'temporalFrequency', ' Hz'),
+    )
+    for label, column, unit in alerts:
+        values = sorted(cell_blocks[column].dropna().astype(float).unique())
+        if show and len(values) > 1:
+            action = ''
+            if column == 'bar_width':
+                action = ('; COLLAPSING them by request' if collapse_bar_widths
+                          else '; keeping them separate')
+            print(f'ALERT: multiple {label} were recorded: {values}{unit}'
+                  f'{action}.')
+
+    condition_rows = group_blocks(
+        cell_blocks, show=False, require_filter_wheel=False,
+        allowed_bright_contrast=None, allowed_temporal_frequency=None,
+        min_bar_width=None, min_epochs=None,
+        separate_bright_contrast=True,
+        collapse_bar_widths=collapse_bar_widths)
+    if condition_rows.empty:
+        raise ValueError(f'No conditions found for {exp_name} {cell_label}')
+    condition_rows = condition_rows.sort_values(
+        ['ndf_combination', 'backgroundIntensity', 'bright', 'bar_width',
+         'temporalFrequency'], na_position='last').reset_index(drop=True)
+    condition_rows.insert(
+        0, 'condition_index', np.arange(1, len(condition_rows) + 1))
+
+    view_columns = [
+        'condition_index', 'ndf_combination', 'filter_wheel_ndf',
+        'backgroundIntensity', 'bright', 'bar_width', 'temporalFrequency',
+        'max_light_level', 'rstar', 'blocks', 'epochs', 'block_ids']
+    view_columns = [column for column in view_columns
+                    if column in condition_rows]
+    if show and len(condition_rows) > 1:
+        print(f'ALERT: {len(condition_rows)} unique conditions found; '
+              'each will be analyzed separately:')
+        display(condition_rows[view_columns])
+
+    light_columns = [
+        'ndf_combination', 'filter_wheel_ndf', 'backgroundIntensity']
+    light_conditions = condition_rows[light_columns].drop_duplicates()
+    records: List[CRGRecord] = []
+    condition_figures: List[object] = []
+    for _, row in condition_rows.iterrows():
+        block_ids = [int(value) for value in str(row.block_ids).split(',')]
+        if show:
+            metadata = pd.DataFrame([{
+                'condition_index': int(row.condition_index),
+                'cell_label': row.cell_label,
+                'cell_type': row.cell_type_short,
+                'onlineAnalysis': row.onlineAnalysis,
+                'spotIntensity': row.spot_intensity,
+                'brightBarContrast': row.bright,
+                'barWidth_um': row.bar_width,
+                'temporalFrequency_Hz': row.temporalFrequency,
+                'apertureDiameter_um': row.aperture,
+                'annulusInnerDiameter_um': row.annulus_inner,
+                'annulusOuterDiameter_um': row.annulus_outer,
+                'background_Rstar_per_s': row.rstar,
+                'block_ids': row.block_ids,
+                'epochs': row.epochs,
+            }])
+            print(f'Condition {int(row.condition_index)}/'
+                  f'{len(condition_rows)} metadata:')
+            display(metadata)
+        record = analyze_group(
+            exp_name, block_ids, online_analysis=online_analysis,
+            temporal_frequency=float(row.temporalFrequency),
+            bright_bar_contrast=float(row.bright),
+            bar_width=(None if collapse_bar_widths
+                       else float(row.bar_width)),
+            spike_offset=spike_offset, wc_offset=wc_offset,
+            detector_kwargs=detector_kwargs, keep_raw=keep_raw,
+            verbose=verbose)
+        records.append(record)
+        if plot:
+            condition_figures.append(plot_group(record))
+
+    light_tuning_figure = None
+    if plot and len(records) > 1:
+        labels = [
+            (f'C{int(row.condition_index)}: {row.temporalFrequency:g} Hz, '
+             f'NDF={row.ndf_combination}, FW={row.filter_wheel_ndf}, '
+             f'background={row.backgroundIntensity}, bright={row.bright}, '
+             f'width={row.bar_width} µm')
+            for _, row in condition_rows.iterrows()]
+        light_tuning_figure = plot_tuning_overlay(
+            records, labels=labels,
+            title=f'{exp_name} {cell_label}: F2 curves by condition')
+
+    if show:
+        print(f'Analyzed {len(records)} separate condition(s) for '
+              f'{exp_name} {cell_label}.')
+    return CellConditionAnalysis(
+        exp_name=exp_name, condition_rows=condition_rows,
+        light_conditions=light_conditions, records=records,
+        condition_figures=condition_figures,
+        light_tuning_figure=light_tuning_figure)
+
+
 def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
                 on_error: str = 'log', verbose: bool = False,
-                skip_existing: bool = False, prune: bool = False,
+                skip_existing: bool = False, prune: bool = False, path=None,
                 **kwargs) -> List[CRGRecord]:
     """Run :func:`analyze_group` over every row of :func:`group_blocks` output.
 
@@ -1048,25 +1412,39 @@ def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
     that failed this run keeps whatever it had.
     """
     records, failures = [], []
-    stored = set(load_summary()['key']) if skip_existing and len(load_summary()) else set()
+    stored_summary = load_summary(path=path)
+    stored = (set(stored_summary['key'])
+              if skip_existing and len(stored_summary) else set())
     skipped = 0
     for _, row in groups.iterrows():
         if skip_existing:
             key = record_key(row['exp_name'], row['cell_label'], row['onlineAnalysis'],
                              row['grating_site'], row['temporalFrequency'],
-                             row['filter_wheel_ndf'], row['backgroundIntensity'])
+                             row['filter_wheel_ndf'], row['backgroundIntensity'],
+                             row.get('ndf_combination'), row.get('bright'),
+                             row.get('bar_width'))
             if key in stored:
                 skipped += 1
                 continue
         try:
+            bright_selector = row.get('bright')
+            bar_selector = row.get('bar_width')
+            if isinstance(bright_selector, str) and ',' in bright_selector:
+                bright_selector = None
+            if isinstance(bar_selector, str) and ',' in bar_selector:
+                bar_selector = None
             rec = analyze_group(row['exp_name'],
                                 [int(b) for b in str(row['block_ids']).split(',')],
-                                online_analysis=row['onlineAnalysis'], verbose=verbose, **kwargs)
+                                online_analysis=row['onlineAnalysis'],
+                                temporal_frequency=row['temporalFrequency'],
+                                bright_bar_contrast=bright_selector,
+                                bar_width=bar_selector,
+                                verbose=verbose, **kwargs)
             records.append(rec)
             if save:
                 # Save as we go: a batch this long should survive an
                 # interruption, and with skip_existing it can then resume.
-                save_records([rec], verbose=False)
+                save_records([rec], path=path, verbose=False)
             if plot:
                 plot_group(rec)
         except Exception as e:
@@ -1075,7 +1453,7 @@ def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
             failures.append((row['exp_name'], row['cell_label'], f'{type(e).__name__}: {e}'))
 
     if prune and save and len(groups):
-        prune_records(groups)
+        prune_records(groups, path=path)
 
     print(f'analyzed {len(records)}/{len(groups)} groups'
           + (f' ({skipped} already stored, skipped)' if skipped else ''))

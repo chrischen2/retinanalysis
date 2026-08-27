@@ -4,7 +4,11 @@ Pure helpers only — no database or SSD. The shared light-level / cone-model
 helpers are tested in test_spot_annular_grating.py; this file covers what is
 specific to the reversing protocol.
 """
+import json
+from pathlib import Path
+
 import numpy as np
+import pandas as pd
 import pytest
 
 from retinanalysis.SCutils.protocols import spot_annular_crg as crg
@@ -162,11 +166,14 @@ def _crg_blocks(freqs, bar_widths=None, n_epochs=None, ndf=0.0):
         'center_spot': ['none'] * n, 'temporalFrequency': list(freqs),
         'bar_width': bar_widths, 'brightBarContrast': [0.9] * n,
         'filter_wheel_ndf': [ndf] * n, 'backgroundIntensity': [0.5] * n,
+        'ndf_combination': [f'EL3 + FW{ndf:g}'] * n,
+        'fixed_ndfs': [('EL3',)] * n,
+        'max_light_level': [30000.0] * n,
         'has_filter_wheel': [True] * n, 'light_setting': ['FW0/bg0.5'] * n,
         'light_level': ['15000R*'] * n, 'rstar': [15000.0] * n,
         'rstar_level': [15000.0] * n, 'rstar_measured': [True] * n,
         'apertureDiameter': [0.0] * n, 'annulusInnerDiameter': [0.0] * n,
-        'annulusOuterDiameter': [300.0] * n,
+        'annulusOuterDiameter': [300.0] * n, 'spotIntensity': [0.05] * n,
     })
 
 
@@ -204,6 +211,74 @@ def test_crg_group_keys_carry_the_temporal_frequency():
     keys = crg.group_keys(g)
     assert len(set(keys)) == 2
     assert any('2Hz' in k for k in keys) and any('4Hz' in k for k in keys)
+
+
+def test_crg_notebooks_keep_every_condition_dimension_separate():
+    blocks = _crg_blocks([4.0, 4.0], bar_widths=[100.0, 150.0])
+    blocks['brightBarContrast'] = [0.5, 0.9]
+
+    grouped = crg.group_blocks(
+        blocks, show=False, allowed_bright_contrast=None,
+        allowed_temporal_frequency=None, min_bar_width=None, min_epochs=None,
+        separate_bright_contrast=True, collapse_bar_widths=False)
+
+    assert len(grouped) == 2
+    assert set(grouped['bright']) == {0.5, 0.9}
+    assert set(grouped['bar_width']) == {100.0, 150.0}
+    keys = crg.group_keys(grouped)
+    assert all('4Hz' in key and 'EL3-FW0' in key for key in keys)
+    assert any('bright0p5' in key and 'bar100' in key for key in keys)
+    assert any('bright0p9' in key and 'bar150' in key for key in keys)
+
+
+def test_crg_save_persists_temporal_frequency_in_h5_and_summary(tmp_path):
+    record = crg.CRGRecord(
+        exp_name='2026-04-23_E', cell_label='Cell1',
+        cell_type='OFF-parasol', online_analysis='extracellular',
+        grating_site='center', temporal_frequency=4.0, ndf=0.0,
+        background_intensity=0.5, rstar=15000.0, light_level='15000R*',
+        dark_contrasts=np.array([-1.0, -0.5]),
+        resp_mean=np.array([0.1, 0.2]), resp_sem=np.array([0.01, 0.02]),
+        resp_n=np.array([3, 3]), f1_mean=np.array([1.0, 2.0]),
+        f2_mean=np.array([3.0, 4.0]), baseline_mean=0.0,
+        baseline_sem=0.0, crossing_nearest=-1.0, crossing_interp=-0.75,
+        bright_bar_contrast=0.9, cone_pred_dark=-0.8, cone_i0=2000.0,
+        bar_widths=np.array([100.0]), cycles=np.ones((2, 10)),
+        cycle_time_ms=np.arange(10.0), pre_time_ms=1000.0,
+        stim_time_ms=2000.0, n_epochs=6, block_ids=[123],
+        config={'temporalFrequency': 4.0, 'fixed_ndfs': 'EL3',
+                'ndf_combination': 'EL3 + FW0', 'max_light_level': 30000.0},
+        units='rate difference (Hz)')
+
+    path = crg.save_records([record], path=tmp_path, verbose=False)
+    summary = crg.load_summary(path=tmp_path, rstar=False)
+
+    assert summary.loc[0, 'temporal_frequency'] == pytest.approx(4.0)
+    assert summary.loc[0, 'ndf_combination'] == 'EL3 + FW0'
+    import h5py
+    with h5py.File(path, 'r') as store:
+        attrs = store[record.key].attrs
+        assert attrs['temporal_frequency'] == pytest.approx(4.0)
+        assert attrs['cfg_temporalFrequency'] == pytest.approx(4.0)
+
+
+@pytest.mark.parametrize('site', ['Center', 'Surround'])
+def test_single_cell_crg_notebooks_follow_the_split_condition_contract(site):
+    path = (Path(__file__).parents[1] / 'SingCell_Notebooks' / 'linCone'
+            / f'analyze{site}ContrastReversingGrating.ipynb')
+    notebook = json.loads(path.read_text())
+    source = '\n'.join(
+        ''.join(cell.get('source', [])) for cell in notebook['cells'])
+
+    assert notebook['metadata']['kernelspec']['name'] == 'retinanalysis'
+    assert f"SITE = '{site.lower()}'" in source
+    assert 'allowed_temporal_frequency=None' in source
+    assert 'separate_bright_contrast=True' in source
+    assert 'collapse_bar_widths=False' in source
+    assert 'temporalFrequency' in source
+    assert 'crg.analyze_cell_conditions(' in source
+    assert 'crg.save_records(records, path=STORE_PATH)' in source
+    assert "'temporal_frequency'" in source
 
 
 def test_crg_prune_records_refuses_an_empty_keep_set():

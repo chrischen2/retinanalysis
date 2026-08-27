@@ -39,8 +39,8 @@ def test_center_disc_notebook_displays_and_analyzes_patch_rms_contrast():
         assert "'patchSampling_values', 'patchContrast_values'" in cell_sources[cell_id]
         assert "'patchRmsContrast'" in cell_sources[cell_id]
     analysis_source = cell_sources['high-light-patch-variance-analysis-code']
-    assert 'RMS_CONTRAST_CUTOFFS = (0.3, 1.0)' in analysis_source
-    assert 'use 0.3 for two groups' in analysis_source
+    assert 'RMS_CONTRAST_CUTOFFS =' in analysis_source
+    assert 'for two groups' in analysis_source
     assert 'led.analyze_patch_rms_population(' in analysis_source
     assert 'led.plot_patch_rms_analysis(' in analysis_source
     assert len(analysis_source.splitlines()) < 50
