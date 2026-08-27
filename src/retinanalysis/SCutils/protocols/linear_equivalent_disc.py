@@ -116,7 +116,9 @@ CONDITION_SUMMARY_COLUMNS = (
     'backgroundIntensity', 'meanIntensity',
 )
 CONDITION_OUTPUT_VERSION = 1
-PATCH_VARIANCE_POPULATION_VERSION = 3
+PATCH_VARIANCE_POPULATION_VERSION = 4
+NATURAL_IMAGE_PATCH_SIZE_PIXELS = 38
+NATURAL_IMAGE_PATCH_PIXEL_COUNT = NATURAL_IMAGE_PATCH_SIZE_PIXELS ** 2
 
 
 def stimulus_site(protocol: str) -> str:
@@ -1791,6 +1793,7 @@ PATCH_VARIANCE_POPULATION_COLUMNS = [
     'maxIntensity', 'imageMeanIntensity', 'meanIntensity_Rstar_per_s',
     'backgroundIntensity', 'meanIntensity',
     'patchMean', 'patchMeanContrast', 'patchMeanIntensity', 'patchVariance',
+    'patchRmsContrast',
     'equivalentIntensity',
     'equivalentIntensity_values', 'equivalentIntensity_recorded_values',
     'equivalentIntensityConeLin', 'equivalentIntensityConeLin_values',
@@ -1804,6 +1807,28 @@ PATCH_VARIANCE_POPULATION_COLUMNS = [
     'complete_response_triplet', 'stimulus_metadata_mixed_fields',
     'analysis_ready', 'exclusion_reason',
 ]
+
+
+def patch_rms_contrast(patch_mean_contrast, patch_variance,
+                       n_pixels: int = NATURAL_IMAGE_PATCH_PIXEL_COUNT):
+    """Convert stored sample variance to patch-local RMS contrast.
+
+    The natural-image library stores MATLAB ``var(ImagePatch(:))`` after the
+    image has been normalized to whole-image Weber contrast. Its fixed patch is
+    38 x 38 pixels. Correct the sample variance to population variance and
+    renormalize by the patch mean intensity, ``1 + patch_mean_contrast``.
+    Invalid negative variances or non-positive patch means return NaN.
+    """
+    if int(n_pixels) != n_pixels or n_pixels <= 1:
+        raise ValueError('n_pixels must be an integer greater than one')
+    mean = np.asarray(patch_mean_contrast, dtype=float)
+    variance = np.asarray(patch_variance, dtype=float)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        rms = np.sqrt(variance * ((n_pixels - 1) / n_pixels)) / (1 + mean)
+    invalid = (~np.isfinite(mean) | ~np.isfinite(variance)
+               | (variance < 0) | (mean <= -1))
+    rms = np.where(invalid, np.nan, rms)
+    return float(rms) if rms.ndim == 0 else rms
 
 
 def _natural_image_library_path(protocol_name: str, stimulus_set: str):
@@ -2265,6 +2290,8 @@ def build_center_disc_patch_variance_population(
         enriched['patchMeanContrast'] = enriched['patchMean']
         enriched['patchMeanIntensity'] = (
             enriched['imageMeanIntensity'] * (1 + enriched['patchMeanContrast']))
+        enriched['patchRmsContrast'] = patch_rms_contrast(
+            enriched['patchMeanContrast'], enriched['patchVariance'])
         enriched['delta_nli_cone_minus_disc'] = (
             enriched['nli_image_vs_cone_disc']
             - enriched['nli_image_vs_disc'])
@@ -2376,15 +2403,19 @@ def load_patch_variance_population(path=None,
               else patch_variance_population_path(filter_wheel_ndf))
     with h5py.File(source, 'r') as h5:
         version = int(h5.attrs.get('output_version', -1))
-        if version != PATCH_VARIANCE_POPULATION_VERSION:
+        if version not in (3, PATCH_VARIANCE_POPULATION_VERSION):
             raise ValueError(
                 f'{source}: output version {version} does not match '
-                f'{PATCH_VARIANCE_POPULATION_VERSION}')
+                f'supported versions 3 or {PATCH_VARIANCE_POPULATION_VERSION}')
         group = ('excluded_qc' if excluded_qc
                  else 'patch_population')
         if group not in h5:
             return pd.DataFrame(columns=PATCH_VARIANCE_POPULATION_COLUMNS)
-        return _read_condition_frame(h5[group])
+        table = _read_condition_frame(h5[group])
+    if 'patchRmsContrast' not in table:
+        table['patchRmsContrast'] = patch_rms_contrast(
+            table['patchMeanContrast'], table['patchVariance'])
+    return table.reindex(columns=PATCH_VARIANCE_POPULATION_COLUMNS)
 
 
 IMAGE_NLI_SUMMARY_COLUMNS = [

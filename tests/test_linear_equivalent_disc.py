@@ -26,7 +26,7 @@ def test_analysis_notebooks_select_retinanalysis_kernel(name):
     assert 'sys.executable' in import_source
 
 
-def test_center_disc_section_3d_displays_patch_sampling_and_contrast():
+def test_center_disc_notebook_displays_and_analyzes_patch_rms_contrast():
     notebook_path = (Path(__file__).parents[1] / 'SingCell_Notebooks'
                      / 'linCone' / 'analyzeConeCenterDisc.ipynb')
     notebook = json.loads(notebook_path.read_text())
@@ -37,6 +37,12 @@ def test_center_disc_section_3d_displays_patch_sampling_and_contrast():
     for cell_id in ('fw0-patch-variance-population-code',
                     'load-patch-variance-population-code'):
         assert "'patchSampling_values', 'patchContrast_values'" in cell_sources[cell_id]
+        assert "'patchRmsContrast'" in cell_sources[cell_id]
+    analysis_source = cell_sources['high-light-patch-variance-analysis-code']
+    assert "physical_patches['patchRmsContrast']" in analysis_source
+    assert ("['patchRmsContrast']\n"
+            '    .transform(_relative_rms_contrast_group)' in analysis_source)
+    assert "'patchRmsContrast',\n    'Patch RMS-contrast quartiles'" in analysis_source
 
 
 # --- stimulus tag mapping --------------------------------------------------
@@ -64,6 +70,23 @@ def test_compute_nli_matches_the_matlab_formula():
 def test_compute_nli_is_zero_below_threshold():
     """Neither response clears the threshold, so the index is noise -> 0."""
     assert led.compute_nli([1.0], [0.5], threshold=3.0).tolist() == [0.0]
+
+
+def test_patch_rms_contrast_converts_matlab_sample_variance():
+    patch_mean = np.array([0.0, 0.25, -1.0])
+    patch_variance = np.array([0.25, 0.75, 0.5])
+    correction = (led.NATURAL_IMAGE_PATCH_PIXEL_COUNT - 1) / (
+        led.NATURAL_IMAGE_PATCH_PIXEL_COUNT)
+
+    result = led.patch_rms_contrast(patch_mean, patch_variance)
+
+    assert result[:2].tolist() == pytest.approx([
+        np.sqrt(0.25 * correction),
+        np.sqrt(0.75 * correction) / 1.25,
+    ])
+    assert np.isnan(result[2])
+    with pytest.raises(ValueError, match='greater than one'):
+        led.patch_rms_contrast(0.0, 1.0, n_pixels=1)
 
 
 def test_compute_nli_keeps_patches_where_one_response_clears_threshold():
@@ -789,6 +812,28 @@ def test_build_and_save_all_filter_wheel_patch_variance_population(
     assert restored['patchSampling_values'].tolist() == ['ranked'] * 6
     assert restored['patchContrast_values'].tolist() == ['all'] * 6
     assert restored['patchVariance'].tolist() == [.4, .5, .6] * 2
+    expected_rms = led.patch_rms_contrast(
+        [.1, .2, .3] * 2, [.4, .5, .6] * 2)
+    assert restored['patchRmsContrast'].tolist() == pytest.approx(expected_rms)
+
+
+def test_patch_variance_loader_derives_rms_for_version_3_file(tmp_path):
+    import h5py
+    path = tmp_path / 'legacy.h5'
+    with h5py.File(path, 'w') as h5:
+        h5.attrs['output_version'] = 3
+        led._write_condition_frame(
+            h5.create_group('patch_population'),
+            pd.DataFrame({
+                'patchMeanContrast': [0.1, 0.2],
+                'patchVariance': [0.4, 0.5],
+            }))
+
+    restored = led.load_patch_variance_population(path)
+
+    assert restored['patchRmsContrast'].tolist() == pytest.approx(
+        led.patch_rms_contrast(restored['patchMeanContrast'],
+                               restored['patchVariance']))
 
 
 def test_patch_variance_population_separates_incomplete_triplets(
