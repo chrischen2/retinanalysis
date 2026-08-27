@@ -26,7 +26,7 @@ def test_analysis_notebooks_select_retinanalysis_kernel(name):
     assert 'sys.executable' in import_source
 
 
-def test_center_disc_section_3e_filters_patch_sampling_and_contrast():
+def test_center_disc_section_3d_displays_patch_sampling_and_contrast():
     notebook_path = (Path(__file__).parents[1] / 'SingCell_Notebooks'
                      / 'linCone' / 'analyzeConeCenterDisc.ipynb')
     notebook = json.loads(notebook_path.read_text())
@@ -34,12 +34,9 @@ def test_center_disc_section_3e_filters_patch_sampling_and_contrast():
         cell.get('id'): ''.join(cell.get('source', []))
         for cell in notebook['cells']}
 
-    load_source = cell_sources['load-patch-variance-population-code']
-    analysis_source = cell_sources['high-light-patch-variance-analysis-code']
-    assert "'patchSampling_values', 'patchContrast_values'" in load_source
-    assert "ANALYSIS_PATCH_SAMPLING = 'ranked'" in analysis_source
-    assert "ANALYSIS_PATCH_CONTRAST = 'negative'" in analysis_source
-    assert 'sampling_mask & patch_contrast_mask' in analysis_source
+    for cell_id in ('fw0-patch-variance-population-code',
+                    'load-patch-variance-population-code'):
+        assert "'patchSampling_values', 'patchContrast_values'" in cell_sources[cell_id]
 
 
 # --- stimulus tag mapping --------------------------------------------------
@@ -789,6 +786,8 @@ def test_build_and_save_all_filter_wheel_patch_variance_population(
     assert table['patchMeanIntensity'].tolist() == pytest.approx([
         .22, .24, .13] * 2)
     assert restored.columns.tolist() == led.PATCH_VARIANCE_POPULATION_COLUMNS
+    assert restored['patchSampling_values'].tolist() == ['ranked'] * 6
+    assert restored['patchContrast_values'].tolist() == ['all'] * 6
     assert restored['patchVariance'].tolist() == [.4, .5, .6] * 2
 
 
