@@ -137,6 +137,41 @@ def test_crg_plot_group_keeps_three_panels_without_raw_spikes():
     plt.close(figure)
 
 
+def _light_overlay_record(light_level, rstar, response):
+    return {
+        'exp_name': '2026-04-23_E', 'cell_label': 'Cell1',
+        'online_analysis': 'extracellular', 'grating_site': 'center',
+        'light_level': light_level, 'rstar': rstar,
+        'temporal_frequency': 4.0, 'crossing_interp': np.nan,
+        'n_epochs': 6, 'dark_contrasts': np.array([-1.0, -0.5, 0.0]),
+        'f2_mean': np.asarray(response, dtype=float),
+        'units': 'rate difference (Hz)', 'baseline_mean': 0.0,
+    }
+
+
+def test_max_normalized_light_overlay_scales_each_curve_to_one():
+    import matplotlib.pyplot as plt
+
+    records = [
+        _light_overlay_record('1000R*', 1000.0, [2.0, 4.0, 1.0]),
+        _light_overlay_record('10000R*', 10000.0, [3.0, 6.0, 1.5]),
+    ]
+    figure = crg.plot_max_normalized_light_overlay(records)
+
+    assert figure is not None
+    curves = [line.get_ydata() for line in figure.axes[0].lines
+              if len(line.get_ydata()) == 3]
+    assert len(curves) == 2
+    assert all(np.nanmax(np.abs(curve)) == pytest.approx(1.0)
+               for curve in curves)
+    plt.close(figure)
+
+
+def test_max_normalized_light_overlay_requires_multiple_light_levels():
+    record = _light_overlay_record('1000R*', 1000.0, [2.0, 4.0, 1.0])
+    assert crg.plot_max_normalized_light_overlay([record]) is None
+
+
 # --- stimulus frames -------------------------------------------------------
 
 def test_two_phases_swap_which_bars_are_bright():

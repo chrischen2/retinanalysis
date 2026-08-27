@@ -635,6 +635,7 @@ class CellConditionAnalysis:
     records: List[CRGRecord]
     condition_figures: List[object] = field(default_factory=list)
     light_tuning_figure: Optional[object] = None
+    max_normalized_light_figure: Optional[object] = None
 
 
 def harmonic_amplitudes(trace: np.ndarray, sample_rate: float,
@@ -1322,6 +1323,75 @@ def plot_tuning_overlay(records: Sequence, harmonic: str = 'f2_mean', **kwargs):
     return sag.plot_tuning_overlay(records, value=harmonic, **kwargs)
 
 
+def plot_max_normalized_light_overlay(
+        records: Sequence, harmonic: str = 'f2_mean',
+        labels: Optional[Sequence[str]] = None,
+        figsize: Tuple[float, float] = (6.4, 4.8),
+        title: Optional[str] = None):
+    """Overlay CRG curves after normalizing each to its own maximum response.
+
+    This is the light-level comparison used by Section 3. Unlike
+    :func:`plot_tuning_overlay`, whose normalized panel uses the deepest shared
+    dark contrast as its reference, this figure divides each complete harmonic
+    curve by ``max(abs(curve))``. Colors encode light level; line style keeps
+    separate conditions visible when frequency, bar width, or another
+    parameter also differs. The function returns ``None`` unless at least two
+    light levels are present.
+    """
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    long = tuning_overlay(records, harmonic=harmonic)
+    if long.empty:
+        print('no CRG response curves to normalize')
+        return None
+
+    level_table = long[['rstar', 'light_level']].drop_duplicates()
+    if len(level_table) < 2:
+        return None
+
+    finite_levels = sorted(long.loc[np.isfinite(long['rstar']), 'rstar'].unique())
+    colors = style.colors_for_conditions(finite_levels)
+    missing_levels = sorted(
+        long.loc[~np.isfinite(long['rstar']), 'light_level'].unique())
+    missing_colors = style.colors_for_conditions(missing_levels)
+    line_styles = ('-', '--', '-.', ':')
+
+    fig, ax = plt.subplots(figsize=figsize)
+    plotted = 0
+    for position, sub in long.groupby('position', sort=True):
+        sub = sub.sort_values('dark_contrast').copy()
+        maximum = float(np.nanmax(np.abs(sub['rel'])))
+        if not np.isfinite(maximum) or maximum <= 0:
+            continue
+        sub['max_norm'] = sub['rel'] / maximum
+        row = sub.iloc[0]
+        color = (colors[float(row.rstar)] if np.isfinite(row.rstar)
+                 else missing_colors[str(row.light_level)])
+        label = (str(labels[int(position)]) if labels is not None
+                 and int(position) < len(labels)
+                 else (f'{row.light_level} · {row.temporal_frequency:g} Hz'))
+        ax.plot(sub['dark_contrast'], sub['max_norm'], marker='o', ms=4,
+                lw=1.7, ls=line_styles[int(position) % len(line_styles)],
+                color=color, label=label)
+        plotted += 1
+
+    if not plotted:
+        plt.close(fig)
+        print('no CRG response curve had a finite, non-zero maximum')
+        return None
+    ax.axhline(0.0, color='#666666', ls='--', lw=1.0, zorder=1)
+    ax.set_xlabel('dark bar contrast')
+    ax.set_ylabel(f'{harmonic.split("_")[0].upper()} response / maximum response')
+    ax.set_ylim(bottom=0.0)
+    ax.legend(frameon=False, fontsize=7, title='light level', title_fontsize=7)
+    fig.suptitle(title or 'Maximum-normalized CRG response by light level',
+                 fontsize=10)
+    fig.tight_layout()
+    return fig
+
+
 def analyze_cell_conditions(
         date_index: int, cell_label: str, online_analysis: str,
         site: str = 'center', collapse_bar_widths: bool = False,
@@ -1449,6 +1519,7 @@ def analyze_cell_conditions(
             condition_figures.append(plot_group(record))
 
     light_tuning_figure = None
+    max_normalized_light_figure = None
     if plot and len(records) > 1:
         labels = [
             (f'C{int(row.condition_index)}: {row.temporalFrequency:g} Hz, '
@@ -1459,6 +1530,11 @@ def analyze_cell_conditions(
         light_tuning_figure = plot_tuning_overlay(
             records, labels=labels,
             title=f'{exp_name} {cell_label}: F2 curves by condition')
+        if len(light_conditions) > 1:
+            max_normalized_light_figure = plot_max_normalized_light_overlay(
+                records, labels=labels,
+                title=(f'{exp_name} {cell_label}: maximum-normalized F2 '
+                       'curves by light level'))
 
     if show:
         print(f'Analyzed {len(records)} separate condition(s) for '
@@ -1467,7 +1543,8 @@ def analyze_cell_conditions(
         exp_name=exp_name, condition_rows=condition_rows,
         light_conditions=light_conditions, records=records,
         condition_figures=condition_figures,
-        light_tuning_figure=light_tuning_figure)
+        light_tuning_figure=light_tuning_figure,
+        max_normalized_light_figure=max_normalized_light_figure)
 
 
 def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
