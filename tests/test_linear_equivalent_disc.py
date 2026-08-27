@@ -40,8 +40,9 @@ def test_center_disc_notebook_displays_and_analyzes_patch_rms_contrast():
         assert "'patchRmsContrast'" in cell_sources[cell_id]
     analysis_source = cell_sources['high-light-patch-variance-analysis-code']
     assert "physical_patches['patchRmsContrast']" in analysis_source
-    assert ("['patchRmsContrast']\n"
-            '    .transform(_relative_rms_contrast_group)' in analysis_source)
+    assert 'RMS_CONTRAST_CUTOFFS = (0.3, 1.0)' in analysis_source
+    assert "['patchRmsContrast'] < low_rms_cutoff" in analysis_source
+    assert "['patchRmsContrast'] > high_rms_cutoff" in analysis_source
     assert "'patchRmsContrast',\n    'Patch RMS-contrast quartiles'" in analysis_source
 
 
