@@ -202,6 +202,57 @@ def test_assume_missing_filter_wheel_patches_fw0_and_calibrated_rstar():
     assert np.isnan(stored.loc[0, 'ndf'])
 
 
+def test_audit_saved_light_settings_repairs_wheel_key_and_derived_light(tmp_path,
+                                                                       monkeypatch):
+    import h5py
+    import pandas as pd
+    import retinanalysis as ra
+
+    old_key = sag.record_key('2026-04-14_E', 'Cell1', 'extracellular',
+                             'center', 1.0, 0.5, 'EL3 + FW1', 0.9, '75')
+    with h5py.File(tmp_path / 'records.h5', 'w') as f:
+        g = f.create_group(old_key)
+        g.attrs.update({
+            'key': old_key, 'exp_name': '2026-04-14_E', 'cell_label': 'Cell1',
+            'cell_type': r'RGC\OFF-parasol', 'online_analysis': 'extracellular',
+            'grating_site': 'center', 'block_ids': '34002', 'ndf': 1.0,
+            'cfg_NDF': 1.0, 'background_intensity': 0.5,
+            'fixed_ndfs': 'EL3', 'cfg_fixed_ndfs': 'EL3',
+            'ndf_combination': 'EL3 + FW1',
+            'cfg_ndf_combination': 'EL3 + FW1', 'max_light_level': 3000.0,
+            'cfg_max_light_level': 3000.0, 'rstar': 1500.0,
+            'rstar_level': 2000.0, 'rstar_measured': True,
+            'light_setting': 'FW1/bg0.5', 'light_level': '2000R*',
+            'bright_bar_contrast': 0.9, 'cone_i0': 2000.0,
+            'cone_pred_dark': -0.5, 'bar_widths': '75',
+        })
+
+    direct = pd.DataFrame({
+        'exp_name': ['2026-04-14_E'], 'block_id': [34002], 'rig': ['E'],
+        'stage_ndfs': ['EL3, FW1'], 'fixed_ndfs': [('EL3',)],
+        'filter_wheel_ndf': [0.5], 'ndf_combination': ['EL3 + FW0.5'],
+        'filter_wheel_status': ['recorded'], 'n_epochs': [44],
+        'n_filter_wheel_readings': [44], 'ignored_stage_fw_tokens': [('FW1',)],
+    })
+    monkeypatch.setattr(ra, 'read_block_light_settings',
+                        lambda *args, **kwargs: direct.copy())
+    monkeypatch.setattr(sag, 'read_filter_wheel_ndf', lambda *args: 0.5)
+
+    report = sag.audit_saved_light_settings(tmp_path, repair=True)
+
+    assert report['status'].tolist() == ['changed']
+    new_key = report.loc[0, 'new_key']
+    assert '__FW0p5__' in new_key
+    with h5py.File(tmp_path / 'records.h5', 'r') as f:
+        assert old_key not in f
+        attrs = f[new_key].attrs
+        assert attrs['ndf'] == pytest.approx(0.5)
+        assert attrs['ndf_combination'] == 'EL3 + FW0.5'
+        assert attrs['max_light_level'] == pytest.approx(10000.0)
+        assert attrs['rstar'] == pytest.approx(5000.0)
+        assert attrs['key'] == new_key
+
+
 def test_select_population_light_bands_uses_requested_inclusive_groups():
     import pandas as pd
 

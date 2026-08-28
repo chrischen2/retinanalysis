@@ -2060,6 +2060,227 @@ def load_records(keys: Optional[Sequence[str]] = None, path=None) -> Dict[str, D
     return out
 
 
+def audit_saved_light_settings(path=None, repair: bool = False,
+                               verify_raw_h5: bool = True,
+                               verbose: bool = True) -> pd.DataFrame:
+    """Check saved light metadata against the recording, optionally repairing it.
+
+    FilterWheel comes from the protected numeric epoch parameter (and, by
+    default, is independently checked against the raw Symphony HDF5). Fixed EL
+    filters come from the Stage device configuration. A metadata-only repair is
+    safe when every block in a saved condition has one common direct setting;
+    a mixed or inconsistent condition is reported as ``blocked`` because its
+    responses must be re-analyzed rather than relabelled.
+
+    Repairs update the HDF5 group name/key and every dependent scalar light
+    field, then refresh ``summary.csv``. The response arrays are untouched.
+    The returned table has one row per changed or blocked condition; an empty
+    table means every saved condition already agrees.
+    """
+    import h5py
+    from pathlib import Path
+    import retinanalysis as ra
+
+    base = Path(path) if path is not None else store_dir()
+    h5_path, csv_path = base / 'records.h5', base / 'summary.csv'
+    columns = [
+        'status', 'exp_name', 'cell_label', 'online_analysis', 'grating_site',
+        'old_key', 'new_key', 'block_ids', 'old_filter_wheel_ndf',
+        'direct_filter_wheel_ndf', 'old_ndf_combination',
+        'direct_ndf_combination', 'old_max_light_level',
+        'direct_max_light_level', 'reason',
+    ]
+    if not h5_path.exists():
+        if verbose:
+            print(f'No saved grating records at {h5_path}')
+        return pd.DataFrame(columns=columns)
+
+    records = []
+    with h5py.File(h5_path, 'r') as f:
+        for group_name, group in f.items():
+            attrs = {k: (v.decode() if isinstance(v, bytes) else v)
+                     for k, v in group.attrs.items()}
+            attrs['_group_name'] = group_name
+            attrs['_block_ids'] = [
+                int(value) for value in str(attrs.get('block_ids', '')).split(',')
+                if value.strip()
+            ]
+            records.append(attrs)
+    if not records:
+        if verbose:
+            print(f'No saved grating conditions in {h5_path}')
+        return pd.DataFrame(columns=columns)
+
+    requested = pd.DataFrame([
+        {'exp_name': record['exp_name'], 'block_id': block_id}
+        for record in records for block_id in record['_block_ids']
+    ]).drop_duplicates()
+    settings = ra.read_block_light_settings(requested, verbose=False)
+
+    raw_wheels = {}
+    if verify_raw_h5:
+        for row in requested.itertuples(index=False):
+            raw_wheels[(str(row.exp_name), int(row.block_id))] = \
+                read_filter_wheel_ndf(str(row.exp_name), int(row.block_id))
+
+    def same_number(left, right):
+        left_missing, right_missing = pd.isna(left), pd.isna(right)
+        return bool(left_missing and right_missing) or (
+            not left_missing and not right_missing
+            and bool(np.isclose(float(left), float(right))))
+
+    def scalar(values, numeric: bool = False):
+        unique = []
+        for value in values:
+            matches = (lambda prior: same_number(value, prior)) if numeric \
+                else (lambda prior: str(value) == str(prior))
+            if not any(matches(prior) for prior in unique):
+                unique.append(value)
+        return unique[0] if len(unique) == 1 else None
+
+    plans, report = [], []
+    for attrs in records:
+        rows = settings[
+            settings['exp_name'].astype(str).eq(str(attrs['exp_name']))
+            & settings['block_id'].isin(attrs['_block_ids'])
+        ]
+        reason = ''
+        if len(rows) != len(attrs['_block_ids']):
+            reason = 'not every saved block resolved to direct light metadata'
+        direct_wheel = scalar(rows['filter_wheel_ndf'].tolist(), numeric=True) \
+            if not reason else None
+        fixed_sets = rows['fixed_ndfs'].apply(tuple).drop_duplicates().tolist()
+        direct_combo = scalar(rows['ndf_combination'].tolist()) if not reason else None
+        if not reason and (direct_wheel is None or len(fixed_sets) != 1
+                           or direct_combo is None):
+            reason = 'saved blocks span more than one direct light setting'
+        if not reason and verify_raw_h5:
+            for row in rows.itertuples(index=False):
+                raw = raw_wheels[(str(row.exp_name), int(row.block_id))]
+                if not same_number(raw, row.filter_wheel_ndf):
+                    reason = (f'protected FilterWheel {row.filter_wheel_ndf!r} '
+                              f'disagrees with raw HDF5 {raw!r} in block '
+                              f'{int(row.block_id)}')
+                    break
+
+        old_wheel = attrs.get('ndf', np.nan)
+        old_combo = attrs.get('ndf_combination', '')
+        old_maximum = attrs.get('max_light_level', np.nan)
+        direct_maximum = np.nan
+        if not reason and not pd.isna(direct_wheel):
+            try:
+                direct_maximum = ra.visual_stimulus_max(
+                    attrs['exp_name'], fixed_sets[0], direct_wheel)
+            except (KeyError, TypeError, ValueError) as error:
+                reason = f'no calibrated maximum for direct setting: {error}'
+
+        common = dict(
+            exp_name=attrs.get('exp_name', ''),
+            cell_label=attrs.get('cell_label', ''),
+            online_analysis=attrs.get('online_analysis', ''),
+            grating_site=attrs.get('grating_site', ''),
+            old_key=attrs['_group_name'], new_key=attrs['_group_name'],
+            block_ids=attrs.get('block_ids', ''),
+            old_filter_wheel_ndf=old_wheel,
+            direct_filter_wheel_ndf=(np.nan if direct_wheel is None else direct_wheel),
+            old_ndf_combination=old_combo,
+            direct_ndf_combination=('' if direct_combo is None else direct_combo),
+            old_max_light_level=old_maximum,
+            direct_max_light_level=direct_maximum,
+        )
+        if reason:
+            report.append(dict(status='blocked', reason=reason, **common))
+            continue
+
+        fixed_text = ', '.join(fixed_sets[0])
+        background = float(attrs['background_intensity'])
+        rstar = (direct_maximum * background
+                 if np.isfinite(direct_maximum) else np.nan)
+        expected = {
+            'ndf': direct_wheel, 'cfg_NDF': direct_wheel,
+            'fixed_ndfs': fixed_text, 'cfg_fixed_ndfs': fixed_text,
+            'ndf_combination': direct_combo,
+            'cfg_ndf_combination': direct_combo,
+            'max_light_level': direct_maximum,
+            'cfg_max_light_level': direct_maximum,
+            'rstar': rstar, 'rstar_level': round_rstar(rstar),
+            'rstar_measured': bool(np.isfinite(direct_maximum)),
+            'light_setting': light_setting(direct_wheel, background),
+            'light_level': (f'{round_rstar(rstar):g}R*' if np.isfinite(rstar)
+                            else f'{direct_combo} (?R*)'),
+        }
+        if 'cone_pred_dark' in attrs:
+            expected['cone_pred_dark'] = cone_predict_dark_contrast(
+                rstar, float(attrs.get('bright_bar_contrast', np.nan)),
+                float(attrs.get('cone_i0', DEFAULTS['cone_i0'])))
+        differs = any(
+            not same_number(attrs.get(name, np.nan), value)
+            if isinstance(value, (int, float, np.integer, np.floating, bool))
+            else str(attrs.get(name, '')) != str(value)
+            for name, value in expected.items()
+        )
+        if not differs:
+            continue
+
+        new_key = record_key(
+            attrs['exp_name'], attrs['cell_label'], attrs['online_analysis'],
+            attrs['grating_site'], direct_wheel, background, direct_combo,
+            attrs.get('bright_bar_contrast'), attrs.get('bar_widths'))
+        common['new_key'] = new_key
+        report.append(dict(status='changed' if repair else 'conflict', reason='', **common))
+        plans.append((attrs['_group_name'], new_key, expected))
+
+    if repair and plans:
+        with h5py.File(h5_path, 'a') as f:
+            destinations = [new for _, new, _ in plans]
+            if len(destinations) != len(set(destinations)):
+                raise ValueError('Light-setting repair would create duplicate HDF5 keys')
+            for old, new, _ in plans:
+                if new != old and new in f:
+                    raise ValueError(f'Light-setting repair would overwrite {new}')
+            for old, new, expected in plans:
+                group = f[old]
+                for name, value in expected.items():
+                    group.attrs[name] = value
+                group.attrs['key'] = new
+                if new != old:
+                    f.move(old, new)
+        load_summary(path=base).to_csv(csv_path, index=False)
+
+    result = pd.DataFrame(report, columns=columns)
+    if verbose:
+        changed = result[result['status'].isin(['changed', 'conflict'])]
+        blocked = result[result['status'].eq('blocked')]
+        action = 'Repaired' if repair else 'Found'
+        if changed.empty:
+            print(f'FilterWheel/NDF audit: all {len(records)} saved condition(s) agree')
+        else:
+            print(f'{action} {len(changed)} saved light-setting conflict(s):')
+            for row in changed.itertuples(index=False):
+                print(f'  {row.exp_name} {row.cell_label} | {row.old_key}')
+                print(f'    {row.old_ndf_combination or "not stored"} / '
+                      f'{row.old_max_light_level!r} -> '
+                      f'{row.direct_ndf_combination} / '
+                      f'{row.direct_max_light_level!r}')
+        if not blocked.empty:
+            print(f'Blocked {len(blocked)} condition(s); re-analysis is required:')
+            for row in blocked.itertuples(index=False):
+                print(f'  {row.exp_name} {row.cell_label} | {row.old_key}: {row.reason}')
+        missing = settings[settings['filter_wheel_ndf'].isna()]
+        if not missing.empty:
+            affected = sorted({
+                (record['exp_name'], record['cell_label'], record['_group_name'])
+                for record in records
+                if any(block_id in set(missing['block_id'])
+                       for block_id in record['_block_ids'])
+            })
+            print(f'Direct FilterWheel value was not recorded for {len(affected)} '
+                  'saved condition(s); none was assumed:')
+            for exp_name, cell_label, key in affected:
+                print(f'  {exp_name} {cell_label} | {key}')
+    return result
+
+
 # --------------------------------------------------------------------------
 # plotting
 # --------------------------------------------------------------------------
