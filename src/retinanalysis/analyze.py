@@ -440,11 +440,15 @@ def _normalize_cell_types(response_block) -> None:
 
 
 def _extract_ndf(stim_block) -> Optional[float]:
-    """Pull NDF from the first epoch's parameters if present."""
+    """Consolidate protected FilterWheel NDF across every epoch."""
+    from .utils.light_levels import filter_wheel_ndf_from_epoch_parameters
+
     try:
-        v = stim_block.df_epochs['epoch_parameters'].iloc[0].get('NDF')
-        return float(v) if v is not None else None
-    except (KeyError, IndexError, ValueError, TypeError):
+        parameters = stim_block.df_epochs['epoch_parameters'].tolist()
+        value = filter_wheel_ndf_from_epoch_parameters(
+            parameters, context='stimulus block epochs')
+        return float(value) if np.isfinite(value) else None
+    except (KeyError, IndexError, TypeError):
         return None
 
 

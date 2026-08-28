@@ -56,12 +56,11 @@ import pandas as pd
 from retinanalysis.SCutils.protocols import spot_annular_grating as sag
 from retinanalysis.SCutils.protocols.spot_annular_grating import (  # noqa: F401
     apply_rstar_mapping, is_calibrated, light_level_rstar, light_setting,
-    read_filter_wheel_ndf,
 )
 from retinanalysis.SCutils.recording_mode import (  # noqa: F401
     MAX_SERIES_RESISTANCE, check_series_resistance, mode_family,
     read_series_resistance, read_stage_ndfs, resolve_recording_mode,
-    series_resistance_table, stage_ndf_table, trace_is_spiking,
+    series_resistance_table, trace_is_spiking,
 )
 
 # Protocol leaf names that feed this analysis. LinearEquivalentDisc is only
@@ -350,6 +349,7 @@ def protocol_cells_from_blocks(blocks: pd.DataFrame, show: bool = True,
 def describe_experiment_protocol(exp_name: str, protocol: str, show: bool = True,
                                  height: int = 500) -> pd.DataFrame:
     """Block-level protocol metadata for one experiment, grouped for display."""
+    import retinanalysis as ra
     from retinanalysis.SCutils import explore as sc
 
     columns = ['exp_name', 'cell_label', 'epoch_group', 'recording_technique',
@@ -380,11 +380,17 @@ def describe_experiment_protocol(exp_name: str, protocol: str, show: bool = True
         'onlineAnalysis': blocks.apply(lambda row: parameter(row, 'onlineAnalysis', '?'), axis=1),
         'block_id': blocks['block_id'].astype(int),
         'protocol': blocks['protocol'],
-        'filter_wheel_ndf': blocks.apply(lambda row: parameter(row, 'NDF'), axis=1),
         'imageName': blocks.apply(lambda row: parameter(row, 'imageName', '?'), axis=1),
         '_start_time': blocks['start_time'],
-    }).sort_values(['cell_label', '_start_time', 'block_id']).drop(columns='_start_time')
-    result = result.reset_index(drop=True)
+    })
+    light = ra.read_block_light_settings(
+        result[['exp_name', 'block_id']], verbose=False)
+    result = (result.merge(
+        light[['exp_name', 'block_id', 'filter_wheel_ndf']],
+        on=['exp_name', 'block_id'], how='left', validate='one_to_one')
+        .sort_values(['cell_label', '_start_time', 'block_id'])
+        .drop(columns='_start_time'))
+    result = result[columns].reset_index(drop=True)
     if show:
         print(f'{exp_name} | {protocol} | {result.cell_label.nunique()} cells | '
               f'{len(result)} blocks')
@@ -404,9 +410,11 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
 
     ``LinearEquivalentDisc`` blocks without a ``linearizeCones`` parameter are the
     older, unrelated experiment and are dropped (reported in the output). Database
-    metadata and epoch counts are fetched in batches. Slow per-block stage-NDF reads
-    are opt-in via ``include_stage_ndfs=True``.
+    metadata and epoch counts are fetched in batches. Fixed NDFs and protected
+    FilterWheel readings always come from :func:`read_block_light_settings`;
+    ``include_stage_ndfs`` remains as a compatibility argument.
     """
+    import retinanalysis as ra
     from retinanalysis.SCutils import explore as sc
 
     if protocols is None:
@@ -431,18 +439,28 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
                 if isinstance(row['parameters'], dict) else np.nan), axis=1)
     df['site'] = df['protocol'].apply(stimulus_site)
     df['cell_type_short'] = df['cell_type'].astype(str).str.split('\\').str[-1]
-    df = df.rename(columns={'NDF': 'filter_wheel_ndf'})
+    df = df.drop(columns=['NDF'], errors='ignore')
+    light = ra.read_block_light_settings(
+        df[['exp_name', 'block_id']], verbose=show)
+    df = df.merge(light, on=['exp_name', 'block_id'], how='left',
+                  validate='one_to_one')
     df['has_filter_wheel'] = df['filter_wheel_ndf'].notna()
     df['light_setting'] = [light_setting(n, b) for n, b in
                            zip(df['filter_wheel_ndf'], df['backgroundIntensity'])]
-    rs = [light_level_rstar(n, b) for n, b in
-          zip(df['filter_wheel_ndf'], df['backgroundIntensity'])]
-    df['rstar'] = [r for r, _ in rs]
-    df['light_level'] = [lab for _, lab in rs]
-    if include_stage_ndfs:
-        df = df.merge(stage_ndf_table(df[['exp_name', 'block_id']], verbose=show),
-                      on='block_id', how='left')
-        df['stage_ndfs'] = df['stage_ndfs'].fillna('')
+    maxima = []
+    for rig, fixed, wheel in zip(
+            df['rig'], df['fixed_ndfs'], df['filter_wheel_ndf']):
+        try:
+            maxima.append(ra.visual_stimulus_max(rig, fixed, wheel))
+        except (KeyError, TypeError, ValueError):
+            maxima.append(np.nan)
+    df['max_light_level'] = maxima
+    df['rstar'] = df['max_light_level'] * df['backgroundIntensity']
+    df['light_level'] = [
+        f'{sag.round_rstar(value):g}R*' if np.isfinite(value)
+        else f'{combo} (?R*)'
+        for value, combo in zip(df['rstar'], df['ndf_combination'])
+    ]
     df = df.sort_values(['exp_name', 'cell_label', 'start_time']).reset_index(drop=True)
 
     if show:
@@ -523,6 +541,7 @@ def estimate_rig_max_intensity(
     load traces or run response analysis. The first returned table is the rig
     map and the second preserves the per-NDF-combination evidence.
     """
+    import retinanalysis as ra
     from retinanalysis.SCutils import explore as sc
 
     if blocks is None:
@@ -531,9 +550,11 @@ def estimate_rig_max_intensity(
     else:
         frame = blocks.copy()
         if 'stage_ndfs' not in frame:
+            light = ra.read_block_light_settings(
+                frame[['exp_name', 'block_id']], verbose=show)
             frame = frame.merge(
-                stage_ndf_table(frame[['exp_name', 'block_id']], verbose=show),
-                on='block_id', how='left')
+                light[['exp_name', 'block_id', 'stage_ndfs']],
+                on=['exp_name', 'block_id'], how='left', validate='one_to_one')
     columns = [
         'rig', 'data_source', 'manual_ndfs', 'manual_ndf_od',
         'filter_wheel_ndf', 'recorded_maxIntensity',
@@ -1102,11 +1123,26 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
 
     thresh_on, thresh_off = working_thresholds(mode, stim_s, offset_s,
                                                spiking=(mode == 'extracellular'))
-    ndf = float(first_params.get('NDF', np.nan))
     bg = float(first_params['backgroundIntensity'])
-    rstar, _ = light_level_rstar(ndf, bg)
 
     import retinanalysis as _ra
+    light = _ra.read_block_light_settings(pd.DataFrame({
+        'exp_name': exp_name, 'block_id': used_blocks,
+    }), verbose=False)
+    combinations = light['ndf_combination'].drop_duplicates()
+    if len(combinations) != 1:
+        raise ValueError(
+            f'{exp_name} blocks {used_blocks} span direct NDF settings '
+            f'{combinations.tolist()}')
+    ndf = float(light.loc[0, 'filter_wheel_ndf'])
+    fixed_ndfs = tuple(light.loc[0, 'fixed_ndfs'])
+    ndf_combination = str(combinations.iloc[0])
+    try:
+        max_light_level = _ra.visual_stimulus_max(exp_name, fixed_ndfs, ndf)
+    except (KeyError, TypeError, ValueError):
+        max_light_level = np.nan
+    rstar = max_light_level * bg if np.isfinite(max_light_level) else np.nan
+
     summary = _ra.get_exp_summary(exp_name)
     row = summary[summary['block_id'].eq(int(used_blocks[0]))].iloc[0]
 
@@ -1132,7 +1168,12 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
         series_resistance=(float(np.nanmedian(rs_kept))
                            if rs_kept and np.isfinite(rs_kept).any() else np.nan),
         n_epochs_high_rs=n_high_rs,
-        config={k: first_params.get(k) for k in CONFIG_KEYS}, units=units)
+        config={**{k: first_params.get(k) for k in CONFIG_KEYS},
+                'NDF': ndf,
+                'fixed_ndfs': ', '.join(fixed_ndfs),
+                'ndf_combination': ndf_combination,
+                'max_light_level': max_light_level},
+        units=units)
     if verbose:
         print(rec.describe())
     return rec

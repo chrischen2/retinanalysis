@@ -378,98 +378,20 @@ def _format_ndf_fw(ndfs, filter_wheel_ndf, ndfs_recorded: bool = True) -> str:
     return 'none' if ndfs_recorded else 'not recorded'
 
 
-def _block_filter_settings(block_ids: Sequence[int]) -> pd.DataFrame:
-    """First-epoch ``ndfs`` and actual FilterWheel NDF for each block."""
-    from retinanalysis.config import schema
-
-    ids = [int(value) for value in block_ids]
-    rows = pd.DataFrame({'block_id': ids})
-    if not ids:
-        return rows.assign(ndfs='', filter_wheel_ndf=pd.Series(dtype=float),
-                           ndfs_recorded=pd.Series(dtype=bool),
-                           ndf_fw=pd.Series(dtype=str))
-    epochs = schema.Epoch() & [{'parent_id': value} for value in ids]
-    frame = epochs.fetch(format='frame').reset_index() if len(epochs) else pd.DataFrame()
-    settings = {}
-    if not frame.empty:
-        for block_id, group in frame.sort_values('id').groupby('parent_id', sort=False):
-            params = _as_dict(group.iloc[0].get('parameters'))
-            has_ndfs = 'ndfs' in params
-            raw_ndfs = params.get('ndfs', '')
-            wheel = pd.to_numeric(params.get('NDF'), errors='coerce')
-            settings[int(block_id)] = {
-                'ndfs': raw_ndfs,
-                'ndfs_recorded': has_ndfs,
-                'filter_wheel_ndf': wheel,
-                'ndf_fw': _format_ndf_fw(raw_ndfs, wheel, has_ndfs),
-            }
-    rows['ndfs'] = [settings.get(value, {}).get('ndfs', '') for value in ids]
-    rows['ndfs_recorded'] = [settings.get(value, {}).get('ndfs_recorded', False)
-                              for value in ids]
-    rows['filter_wheel_ndf'] = [settings.get(value, {}).get('filter_wheel_ndf', float('nan'))
-                                for value in ids]
-    rows['ndf_fw'] = [settings.get(value, {}).get('ndf_fw', 'not recorded') for value in ids]
-    return rows
-
-
 def _block_light_filters(df: pd.DataFrame) -> pd.DataFrame:
-    """Combine raw Stage fixed filters with database FilterWheel readings.
+    """Load fixed NDFs and FilterWheel through the shared trusted reader."""
+    import retinanalysis as ra
 
-    Stage configuration is authoritative when present because flattened epoch
-    parameters can be overwritten by another device's empty ``ndfs`` setting.
-    LED-only rigs have no Stage, so they retain the active stimulus ``ndfs``
-    from the first epoch parameters.
-    """
-    settings = _block_filter_settings(df['block_id'])
-    stage = _raw_stage_ndfs(df[['exp_name', 'block_id']])
-    settings = settings.merge(stage, on='block_id', how='left')
-    has_stage = settings['stage_ndfs'].fillna('').astype(str).str.strip().ne('')
-    settings.loc[has_stage, 'ndfs'] = settings.loc[has_stage, 'stage_ndfs']
-    settings.loc[has_stage, 'ndfs_recorded'] = True
-    settings['ndf_fw'] = [
-        _format_ndf_fw(ndfs, wheel, bool(recorded))
-        for ndfs, wheel, recorded in zip(
-            settings['ndfs'], settings['filter_wheel_ndf'], settings['ndfs_recorded'])
-    ]
-    return settings.drop(columns=['stage_ndfs', 'ndfs_recorded'])
-
-
-def _raw_stage_ndfs(df: pd.DataFrame) -> pd.DataFrame:
-    """Batch-read Stage ``ndfs``: one DB query and one H5 open per date."""
-    import h5py
-    from retinanalysis.config import schema
-    from retinanalysis.SCutils.recording_mode import _stage_ndfs_from_group
-    from retinanalysis.utils.datajoint_utils import get_h5_file
-
-    wanted = df[['exp_name', 'block_id']].drop_duplicates().copy()
-    wanted['block_id'] = wanted['block_id'].astype(int)
-    result = wanted.assign(stage_ndfs='')
-    ids = wanted['block_id'].tolist()
-    if not ids:
-        return result[['block_id', 'stage_ndfs']]
-    epochs = (schema.Epoch() & [{'parent_id': value} for value in ids]).proj(
-        block_id='parent_id', epoch_id='id')
-    responses = epochs * schema.Response.proj(
-        ..., epoch_id='parent_id', response_id='id')
-    paths = responses.fetch(format='frame').reset_index() if len(responses) else pd.DataFrame()
-    if paths.empty or 'h5path' not in paths:
-        return result[['block_id', 'stage_ndfs']]
-    paths = (paths.sort_values(['block_id', 'epoch_id', 'response_id'])
-             .drop_duplicates('block_id', keep='first'))
-    paths['epoch_path'] = paths['h5path'].astype(str).str.split('/responses/').str[0]
-    result = result.merge(paths[['block_id', 'epoch_path']], on='block_id', how='left')
-    values = {}
-    for exp_name, group in result.groupby('exp_name', sort=False):
-        try:
-            with h5py.File(get_h5_file(str(exp_name)), 'r') as h5:
-                for row in group.itertuples():
-                    node = h5.get(row.epoch_path) if pd.notna(row.epoch_path) else None
-                    values[int(row.block_id)] = (
-                        _stage_ndfs_from_group(node) if node is not None else '')
-        except Exception:
-            continue
-    result['stage_ndfs'] = result['block_id'].map(values).fillna('')
-    return result[['block_id', 'stage_ndfs']]
+    settings = ra.read_block_light_settings(
+        df[['exp_name', 'block_id']], verbose=False,
+        on_filter_wheel_conflict='report')
+    settings['ndfs'] = settings['fixed_ndfs'].apply(
+        lambda values: ', '.join(values))
+    settings['ndf_fw'] = settings['ndf_combination']
+    return settings[[
+        'block_id', 'ndfs', 'filter_wheel_ndf', 'ndf_fw',
+        'filter_wheel_status', 'fixed_ndf_source',
+    ]]
 
 
 def find_blocks(protocol_search: str, show: bool = True,

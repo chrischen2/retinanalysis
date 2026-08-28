@@ -367,6 +367,8 @@ def test_protocol_cells_from_blocks_reuses_detailed_discovery():
 
 
 def test_describe_experiment_protocol_builds_group_and_block_columns(monkeypatch):
+    import retinanalysis as ra
+
     blocks = pd.DataFrame({
         'exp_name': ['2026-01-01_E'],
         'cell_label': ['Cell1'],
@@ -383,7 +385,13 @@ def test_describe_experiment_protocol_builds_group_and_block_columns(monkeypatch
                         lambda block_ids: ({123: {'onlineAnalysis': 'extracellular',
                                                   'NDF': 0.5,
                                                   'imageName': 'epoch-image'}},
-                                           pd.Series({123: 10})))
+                                               pd.Series({123: 10})))
+    monkeypatch.setattr(
+        ra, 'read_block_light_settings',
+        lambda *_args, **_kwargs: pd.DataFrame({
+            'exp_name': ['2026-01-01_E'], 'block_id': [123],
+            'filter_wheel_ndf': [0.5],
+        }))
     found = led.describe_experiment_protocol(
         '2026-01-01_E', 'LinearEquivalentAnnulus', show=False)
     assert list(found.columns) == [

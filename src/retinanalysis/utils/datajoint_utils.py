@@ -173,9 +173,12 @@ def djconnect(host_address: str = '127.0.0.1', user: str = 'root', password: str
 
 def populate_ndf_column(df_exp_summary):
     """
-    Helper function for pulling the NDF value (filter wheel ND being used) from
-    the first epoch of each epoch block run on a given day, and adding it to the
-    NDF column of the experiment summary dataframe.
+    Add protected FilterWheel NDF metadata consolidated across every epoch.
+
+    Broad experiment summaries report a within-block conflict as missing NDF
+    plus ``NDF_status='conflict: ...'`` rather than silently choosing the first
+    epoch. Condition analyses use ``read_block_light_settings`` and either
+    split such blocks or raise.
     
     Parameters:
     df_exp_summary (pandas DataFrame): experiment summary dataframe from 
@@ -188,18 +191,15 @@ def populate_ndf_column(df_exp_summary):
     NDF column added.
     """
 
-    df_exp_summary['NDF'] = np.nan
-    for bid in df_exp_summary['block_id'].values:
-        ep_q = schema.Epoch() & f'parent_id={bid}'
-        if len(ep_q) == 0:
-            print(f'No epochs found for block {bid}')
-            continue
-        ep_id = ep_q.fetch('id')[0]
-        params = (schema.Epoch() & f'id={ep_id}').fetch('parameters')[0]
-        if 'NDF' in params.keys():
-            df_exp_summary.loc[df_exp_summary['block_id']==bid, 'NDF'] = params['NDF']
-        # else:
-            # print(f'NDF parameter not found for block_id {bid}')
+    from retinanalysis.utils.light_levels import _block_filter_wheel_table
+
+    block_ids = pd.to_numeric(
+        df_exp_summary['block_id'], errors='coerce').dropna().astype(int).unique()
+    settings = _block_filter_wheel_table(
+        block_ids, on_conflict='report').set_index('block_id')
+    numeric = pd.to_numeric(df_exp_summary['block_id'], errors='coerce')
+    df_exp_summary['NDF'] = numeric.map(settings['filter_wheel_ndf'])
+    df_exp_summary['NDF_status'] = numeric.map(settings['filter_wheel_status'])
     return df_exp_summary
 
 
@@ -285,7 +285,8 @@ def get_exp_summary(exp_name: str) -> Optional[pd.DataFrame]:
         df_exp_summary['datafile_name'] = df_exp_summary['data_dir'].apply(lambda x: os.path.split(x)[-1])
 
         # Order columns.
-        ls_order = ['exp_name', 'prep_label', 'datafile_name', 'group_label', 'NDF','chunk_name', 'protocol_name',
+        ls_order = ['exp_name', 'prep_label', 'datafile_name', 'group_label',
+        'NDF', 'NDF_status', 'chunk_name', 'protocol_name',
         'duration_minutes', 'minutes_since_start', 'start_time', 'end_time', 'data_dir', 
         'experiment_id', 'prep_id', 'group_id', 'block_id', 'chunk_id', 'protocol_id']
     else:
@@ -293,7 +294,7 @@ def get_exp_summary(exp_name: str) -> Optional[pd.DataFrame]:
         df_exp_summary['cell_type'] = df_exp_summary['cell_properties'].apply(lambda x: x.get('type', 'Unknown'))
         ls_order = ['exp_name', 'prep_label', 'recording_technique', 'pipette_solution', 
         'cell_id', 'cell_label', 'cell_type', 
-        'NDF', 'protocol_name', 'duration_minutes', 'minutes_since_start', 
+        'NDF', 'NDF_status', 'protocol_name', 'duration_minutes', 'minutes_since_start',
         'start_time', 'end_time', 'cell_properties','group_label',
         'experiment_id', 'prep_id', 'group_id', 'block_id', 'protocol_id']
     df_exp_summary = df_exp_summary[ls_order]
@@ -411,7 +412,7 @@ def get_datasets_from_protocol_names(ls_protocol_names: str | List[str], b_exact
 
     # order columns
     ls_order = ['exp_name', 'datafile_name',
-                'NDF', 'chunk_name',
+                'NDF', 'NDF_status', 'chunk_name',
                 'protocol_name',  'is_mea', 'data_dir', 'group_label',
                 'experiment_id', 'protocol_id', 'group_id', 'block_id', 'chunk_id']
     df_exp_search = df_exp_search[ls_order]

@@ -87,6 +87,20 @@ def test_block_filter_wheel_table_rejects_conflict_within_block():
         _block_filter_wheel_table([10], epoch_rows=epochs)
 
 
+def test_block_filter_wheel_table_can_report_conflict_for_discovery():
+    from retinanalysis.utils.light_levels import _block_filter_wheel_table
+
+    epochs = [
+        {"id": 1, "parent_id": 10, "parameters": {"NDF": 0.5}},
+        {"id": 2, "parent_id": 10, "parameters": {"NDF": 1.0}},
+    ]
+    result = _block_filter_wheel_table(
+        [10], epoch_rows=epochs, on_conflict="report")
+
+    assert pd.isna(result.loc[0, "filter_wheel_ndf"])
+    assert result.loc[0, "filter_wheel_status"] == "conflict: 0.5, 1"
+
+
 def test_selected_block_filter_wheel_table_splits_a_mixed_block():
     from retinanalysis.utils.light_levels import _selected_block_filter_wheel_table
 
@@ -166,3 +180,70 @@ def test_read_block_light_settings_empty_input():
         pd.DataFrame(columns=["exp_name", "block_id"]), verbose=False)
     assert result.empty
     assert "ndf_combination" in result
+
+
+def test_filter_wheel_ndf_from_epoch_parameters_uses_every_epoch():
+    assert ra.filter_wheel_ndf_from_epoch_parameters([
+        {"NDF": 0.5}, {"NDF": "0.5"}, {},
+    ]) == pytest.approx(0.5)
+    with pytest.raises(ValueError, match="conflicting.*0.5, 1"):
+        ra.filter_wheel_ndf_from_epoch_parameters([
+            {"NDF": 0.5}, {"NDF": 1.0},
+        ])
+
+
+def test_read_block_light_settings_uses_epoch_fixed_ndfs_only_without_stage(
+        monkeypatch):
+    import retinanalysis.SCutils.recording_mode as recording_mode
+    import retinanalysis.utils.light_levels as light_levels
+
+    blocks = pd.DataFrame({"exp_name": ["2026-08-01_E"], "block_id": [10]})
+    monkeypatch.setattr(
+        recording_mode, "stage_ndf_table",
+        lambda *_args, **_kwargs: pd.DataFrame({
+            "block_id": [10], "stage_ndfs": [""],
+        }))
+    monkeypatch.setattr(
+        light_levels, "_block_filter_wheel_table",
+        lambda *_args, **_kwargs: pd.DataFrame({
+            "block_id": [10], "filter_wheel_ndf": [0.5],
+            "filter_wheel_status": ["recorded"], "n_epochs": [3],
+            "n_filter_wheel_readings": [3],
+        }))
+    monkeypatch.setattr(
+        light_levels, "_epoch_fixed_ndf_table",
+        lambda *_args, **_kwargs: pd.DataFrame({
+            "block_id": [10], "epoch_fixed_ndfs": [("EL3",)],
+            "ignored_epoch_fw_tokens": [("FW4",)],
+        }))
+
+    result = ra.read_block_light_settings(blocks, verbose=False)
+
+    assert result.loc[0, "fixed_ndfs"] == ("EL3",)
+    assert result.loc[0, "fixed_ndf_source"] == "epoch fallback"
+    assert result.loc[0, "filter_wheel_ndf"] == pytest.approx(0.5)
+    assert result.loc[0, "ndf_combination"] == "EL3 + FW0.5"
+    assert result.loc[0, "ignored_epoch_fw_tokens"] == ("FW4",)
+
+
+def test_experiment_summary_ndf_uses_shared_all_epoch_consolidation(monkeypatch):
+    import retinanalysis.utils.datajoint_utils as datajoint_utils
+    import retinanalysis.utils.light_levels as light_levels
+
+    calls = []
+
+    def consolidated(block_ids, on_conflict="raise"):
+        calls.append((list(block_ids), on_conflict))
+        return pd.DataFrame({
+            "block_id": [10, 20], "filter_wheel_ndf": [0.5, float("nan")],
+            "filter_wheel_status": ["recorded", "conflict: 0.5, 1"],
+        })
+
+    monkeypatch.setattr(light_levels, "_block_filter_wheel_table", consolidated)
+    summary = pd.DataFrame({"block_id": [10, 20]})
+    result = datajoint_utils.populate_ndf_column(summary)
+
+    assert calls == [([10, 20], "report")]
+    assert result["NDF"].tolist()[0] == pytest.approx(0.5)
+    assert pd.isna(result.loc[1, "NDF"])
+    assert result["NDF_status"].tolist() == ["recorded", "conflict: 0.5, 1"]

@@ -157,24 +157,6 @@ def _ensure_cols(df: pd.DataFrame, cols: Sequence[str]) -> pd.DataFrame:
     return df
 
 
-def _filter_wheel_by_block(exp_id: int) -> pd.Series:
-    """``{block_id: NDF}`` for one experiment, from each block's first epoch.
-
-    ``NDF`` is the filter-wheel setting (see ``populate_ndf_column``, and the
-    single-cell code that renames this same field to ``filter_wheel_ndf``).
-    The value is extracted from the parameters JSON inside SQL, so this is one
-    small query per date rather than one parameter-dict fetch per block.
-    """
-    epochs = (schema.Epoch & f'experiment_id={int(exp_id)}').proj(
-        block_id='parent_id', ndf="parameters->>'$.NDF'")
-    df = epochs.to_pandas().reset_index()
-    if df.empty:
-        return pd.Series(dtype=float)
-    # First epoch of each block, matching populate_ndf_column's convention.
-    df = df.sort_values('id').groupby('block_id', as_index=True)['ndf'].first()
-    return pd.to_numeric(df, errors='coerce')
-
-
 def experiment_tree(exp_names: Sequence[str] | str) -> pd.DataFrame:
     """Date -> protocol -> datafile tree of every block on the given dates.
 
@@ -239,8 +221,13 @@ def experiment_tree(exp_names: Sequence[str] | str) -> pd.DataFrame:
         df['protocol'] = df['protocol_name'].map(short_protocol)
         df['datafile_name'] = df['data_dir'].astype(str).str.rsplit(
             '/', n=1).str[-1]
-        df['filter_wheel_ndf'] = df['block_id'].map(
-            _filter_wheel_by_block(exp_id))
+        from retinanalysis.utils.light_levels import read_block_light_settings
+        light = read_block_light_settings(
+            df.assign(exp_name=name)[['exp_name', 'block_id']], verbose=False,
+            on_filter_wheel_conflict='report')
+        df = df.merge(
+            light[['block_id', 'filter_wheel_ndf']], on='block_id', how='left',
+            validate='one_to_one')
 
         start = pd.to_datetime(df['start_time'], errors='coerce')
         end = pd.to_datetime(df['end_time'], errors='coerce')

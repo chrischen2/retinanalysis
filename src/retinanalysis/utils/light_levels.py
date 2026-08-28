@@ -197,9 +197,42 @@ def _read_epoch_filter_wheel_parameters(block_ids):
     return epochs.fetch("id", "parent_id", "parameters", as_dict=True)
 
 
-def _block_filter_wheel_table(block_ids, epoch_rows=None):
+def filter_wheel_ndf_from_epoch_parameters(parameters, *, context="epochs"):
+    """Return one protected numeric FilterWheel value across all epochs.
+
+    Missing values return NaN. Invalid or conflicting recorded values raise so
+    callers never silently select the first epoch. Embedded ``FW`` labels in
+    other parameters are deliberately ignored.
+    """
+    import numpy as np
+    import pandas as pd
+
+    values = []
+    invalid = 0
+    for item in parameters:
+        item = item if isinstance(item, Mapping) else {}
+        if "NDF" not in item or item["NDF"] is None:
+            continue
+        value = pd.to_numeric(item["NDF"], errors="coerce")
+        if pd.isna(value):
+            invalid += 1
+        else:
+            values.append(float(value))
+    if invalid:
+        raise ValueError(f"{context} contain {invalid} invalid FilterWheel reading(s)")
+    unique = sorted(set(values))
+    if len(unique) > 1:
+        joined = ", ".join(f"{value:g}" for value in unique)
+        raise ValueError(f"{context} have conflicting FilterWheel metadata: {joined}")
+    return unique[0] if unique else np.nan
+
+
+def _block_filter_wheel_table(block_ids, epoch_rows=None, *, on_conflict="raise"):
     """Consolidate protected per-epoch FilterWheel metadata by parent block."""
     import pandas as pd
+
+    if on_conflict not in {"raise", "report"}:
+        raise ValueError("on_conflict must be 'raise' or 'report'")
 
     ids = [int(block_id) for block_id in block_ids]
     rows = (_read_epoch_filter_wheel_parameters(ids)
@@ -234,10 +267,12 @@ def _block_filter_wheel_table(block_ids, epoch_rows=None):
         unique = sorted(set(values))
         if len(unique) > 1:
             joined = ", ".join(f"{value:g}" for value in unique)
-            raise ValueError(
-                f"Epoch block {block_id} has conflicting FilterWheel metadata: {joined}"
-            )
-        if n_invalid:
+            if on_conflict == "raise":
+                raise ValueError(
+                    f"Epoch block {block_id} has conflicting FilterWheel metadata: {joined}"
+                )
+            status = f"conflict: {joined}"
+        elif n_invalid:
             status = "invalid"
         elif not block_epochs:
             status = "no epochs"
@@ -249,7 +284,7 @@ def _block_filter_wheel_table(block_ids, epoch_rows=None):
             status = "recorded"
         result.append({
             "block_id": block_id,
-            "filter_wheel_ndf": unique[0] if unique else float("nan"),
+            "filter_wheel_ndf": unique[0] if len(unique) == 1 else float("nan"),
             "filter_wheel_status": status,
             "n_epochs": len(block_epochs),
             "n_filter_wheel_readings": len(values),
@@ -320,7 +355,57 @@ def _selected_block_filter_wheel_table(wanted, epoch_rows=None):
     return pd.DataFrame(result)
 
 
-def read_block_light_settings(blocks, block_id=None, *, amp="Amp1", verbose=True):
+def _epoch_fixed_ndf_table(block_ids, epoch_rows=None):
+    """Fallback fixed filters from protected epoch parameters.
+
+    Raw Stage device configuration remains authoritative. This table is used
+    only when a block has no Stage setting (for example an LED-only rig). Empty
+    flattened ``ndfs`` values are ignored because another device can overwrite
+    the active stimulus value with an empty list. Embedded ``FW`` tokens are
+    retained only as ignored provenance; they never become wheel measurements.
+    """
+    import pandas as pd
+    from retinanalysis.utils.isomerization import split_stage_ndfs
+
+    ids = [int(block_id) for block_id in block_ids]
+    rows = (_read_epoch_filter_wheel_parameters(ids)
+            if epoch_rows is None else list(epoch_rows))
+    grouped = {block_id: [] for block_id in ids}
+    for row in rows:
+        block_id = int(row["parent_id"])
+        if block_id in grouped:
+            grouped[block_id].append(row)
+
+    result = []
+    for block_id in ids:
+        fixed_values = []
+        embedded_values = []
+        for epoch in grouped[block_id]:
+            parameters = epoch.get("parameters")
+            parameters = parameters if isinstance(parameters, Mapping) else {}
+            raw = parameters.get("ndfs")
+            if raw is None or not str(raw).strip() or str(raw).strip() in {"[]", "()"}:
+                continue
+            fixed, embedded = split_stage_ndfs(raw)
+            fixed = tuple(sorted(fixed))
+            if fixed and fixed not in fixed_values:
+                fixed_values.append(fixed)
+            embedded_values.extend(embedded)
+        if len(fixed_values) > 1:
+            joined = " | ".join(" + ".join(value) for value in fixed_values)
+            raise ValueError(
+                f"Epoch block {block_id} has conflicting fixed-NDF metadata: {joined}"
+            )
+        result.append({
+            "block_id": block_id,
+            "epoch_fixed_ndfs": fixed_values[0] if fixed_values else (),
+            "ignored_epoch_fw_tokens": tuple(sorted(set(embedded_values))),
+        })
+    return pd.DataFrame(result)
+
+
+def read_block_light_settings(blocks, block_id=None, *, amp="Amp1", verbose=True,
+                              on_filter_wheel_conflict="raise"):
     """Read one trusted fixed-NDF + FilterWheel setting per epoch block.
 
     ``blocks`` may be a frame containing ``exp_name`` and ``block_id``, or one
@@ -333,7 +418,13 @@ def read_block_light_settings(blocks, block_id=None, *, amp="Amp1", verbose=True
     protected ``FilterWheel:NDF`` metadata and is checked across every epoch in
     the block before being consolidated.
 
-    The returned frame has one row per requested block.  ``fixed_ndfs`` and
+    The returned frame has one row per requested block. By default conflicting
+    protected readings raise. ``on_filter_wheel_conflict='report'`` keeps the
+    block with a missing numeric wheel and an explicit conflict status, which
+    is useful for broad discovery tables; condition analysis should split the
+    epochs or retain the default error.
+
+    ``fixed_ndfs`` and
     ``filter_wheel_ndf`` can be passed directly to :func:`visual_stimulus_max`;
     ``ndf_combination`` is the readable combined setting.
 
@@ -346,6 +437,10 @@ def read_block_light_settings(blocks, block_id=None, *, amp="Amp1", verbose=True
     import pandas as pd
     from retinanalysis.SCutils.recording_mode import stage_ndf_table
     from retinanalysis.utils.isomerization import split_stage_ndfs
+
+    if on_filter_wheel_conflict not in {"raise", "report"}:
+        raise ValueError(
+            "on_filter_wheel_conflict must be 'raise' or 'report'")
 
     if isinstance(blocks, str):
         if block_id is None:
@@ -375,7 +470,8 @@ def read_block_light_settings(blocks, block_id=None, *, amp="Amp1", verbose=True
     output_columns = [
         "exp_name", "block_id", "rig", "stage_ndfs", "fixed_ndfs", "filter_wheel_ndf",
         "ndf_combination", "filter_wheel_status", "n_epochs",
-        "n_filter_wheel_readings", "ignored_stage_fw_tokens",
+        "n_filter_wheel_readings", "fixed_ndf_source", "ignored_stage_fw_tokens",
+        "ignored_epoch_fw_tokens",
     ]
     if wanted.empty:
         return pd.DataFrame(columns=output_columns)
@@ -383,7 +479,9 @@ def read_block_light_settings(blocks, block_id=None, *, amp="Amp1", verbose=True
     fixed_table = stage_ndf_table(wanted, amp=amp, verbose=verbose)
     wheel_table = (_selected_block_filter_wheel_table(wanted)
                    if has_selected_wheel else
-                   _block_filter_wheel_table(wanted["block_id"].tolist()))
+                   _block_filter_wheel_table(
+                       wanted["block_id"].tolist(),
+                       on_conflict=on_filter_wheel_conflict))
     if has_selected_wheel:
         result = (wanted.merge(fixed_table, on="block_id", how="left",
                                validate="many_to_one")
@@ -403,16 +501,44 @@ def read_block_light_settings(blocks, block_id=None, *, amp="Amp1", verbose=True
         embedded_values.append(tuple(embedded))
     result["fixed_ndfs"] = fixed_values
     result["ignored_stage_fw_tokens"] = embedded_values
+    result["fixed_ndf_source"] = [
+        "stage" if str(raw).strip() else "not recorded"
+        for raw in result["stage_ndfs"].fillna("")
+    ]
+    result["ignored_epoch_fw_tokens"] = [()] * len(result)
+
+    # LED-only recordings have no Stage device setting. Preserve their active
+    # stimulus fixed filters from epoch parameters, but never use an embedded
+    # FW label as the wheel value.
+    missing_stage = result["fixed_ndf_source"].eq("not recorded")
+    if missing_stage.any():
+        fallback = _epoch_fixed_ndf_table(
+            result.loc[missing_stage, "block_id"].drop_duplicates().tolist())
+        fallback = fallback.set_index("block_id")
+        for index in result.index[missing_stage]:
+            block = int(result.at[index, "block_id"])
+            fixed = fallback.at[block, "epoch_fixed_ndfs"]
+            ignored = fallback.at[block, "ignored_epoch_fw_tokens"]
+            result.at[index, "fixed_ndfs"] = fixed
+            result.at[index, "ignored_epoch_fw_tokens"] = ignored
+            if fixed:
+                result.at[index, "fixed_ndf_source"] = "epoch fallback"
     result["rig"] = result["exp_name"].astype(str).str.extract(
         r"_([A-Za-z])(?:_\d+)?$", expand=False).str.upper()
     result["ndf_combination"] = [
         " + ".join([*fixed, f"FW{wheel:g}"])
-        if pd.notna(wheel) else (" + ".join(fixed) or "not recorded")
-        for fixed, wheel in zip(result["fixed_ndfs"], result["filter_wheel_ndf"])
+        if pd.notna(wheel) else
+        " + ".join([*fixed, "FW conflict"])
+        if str(status).startswith("conflict:") else
+        (" + ".join(fixed) or "not recorded")
+        for fixed, wheel, status in zip(
+            result["fixed_ndfs"], result["filter_wheel_ndf"],
+            result["filter_wheel_status"])
     ]
     return result[output_columns]
 
 
 __all__ = [
-    "VISUAL_STIMULUS_MAX", "read_block_light_settings", "visual_stimulus_max",
+    "VISUAL_STIMULUS_MAX", "filter_wheel_ndf_from_epoch_parameters",
+    "read_block_light_settings", "visual_stimulus_max",
 ]

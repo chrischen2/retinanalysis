@@ -479,12 +479,11 @@ def save_offline_data(
         meta.attrs['chunk_name'] = ac.chunk_name
         meta.attrs['typing_file'] = getattr(ac, 'typing_file', '') or ''
         meta.attrs['n_cells'] = len(good_ids)
-        ndf = None
-        try:
-            ndf = sb.df_epochs['epoch_parameters'].iloc[0].get('NDF')
-        except Exception:
-            pass
-        meta.attrs['ndf'] = float(ndf) if ndf is not None else float('nan')
+        from .light_levels import filter_wheel_ndf_from_epoch_parameters
+        parameters = sb.df_epochs['epoch_parameters'].tolist()
+        ndf = filter_wheel_ndf_from_epoch_parameters(
+            parameters, context=f'{rb.exp_name} {short} epochs')
+        meta.attrs['ndf'] = float(ndf)
         meta.attrs['created'] = _dt.datetime.now().isoformat(timespec='seconds')
         meta.attrs['source_version'] = SOURCE_VERSION
         meta.attrs['condition_keys'] = np.array(

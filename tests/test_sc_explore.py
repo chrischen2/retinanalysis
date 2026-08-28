@@ -113,6 +113,30 @@ def test_format_ndf_fw_uses_numeric_wheel_not_embedded_token(
     assert sc._format_ndf_fw(ndfs, wheel, recorded) == expected
 
 
+def test_block_light_filters_delegates_to_shared_loader(monkeypatch):
+    import retinanalysis as ra
+
+    calls = []
+
+    def trusted(blocks, verbose=False, **kwargs):
+        calls.append(blocks.copy())
+        return pd.DataFrame({
+            'block_id': [10], 'fixed_ndfs': [('EL3',)],
+            'filter_wheel_ndf': [0.5], 'ndf_combination': ['EL3 + FW0.5'],
+            'filter_wheel_status': ['recorded'], 'fixed_ndf_source': ['stage'],
+        })
+
+    monkeypatch.setattr(ra, 'read_block_light_settings', trusted)
+    result = sc._block_light_filters(pd.DataFrame({
+        'exp_name': ['2026-08-01_E'], 'block_id': [10],
+    }))
+
+    assert len(calls) == 1
+    assert result.loc[0, 'ndfs'] == 'EL3'
+    assert result.loc[0, 'filter_wheel_ndf'] == pytest.approx(0.5)
+    assert result.loc[0, 'ndf_fw'] == 'EL3 + FW0.5'
+
+
 def test_num_cols_right_aligned(tree_df):
     html = sc.tree_table(tree_df, levels=['cell'], show=False, num_cols=('blocks',))
     assert html.count('class="num"') == len(tree_df)
