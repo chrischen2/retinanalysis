@@ -3249,6 +3249,55 @@ def add_condition(summary: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+_CONTRAST_AXIS_LABEL = {
+    'dark': r'negative contrast $C_-$',
+    'ratio': r'negative / bright contrast  $C_-/C_+$',
+}
+
+
+def _interpolate_cells_to_panel_grid(
+        per_cell: pd.DataFrame,
+        panel_keys: Sequence[str] = ('condition', 'online_analysis', 'units',
+                                     'rstar_level'),
+        contrast_col: str = 'dark_contrast',
+        value_col: str = 'value') -> pd.DataFrame:
+    """Resample every cell's curve onto the union of contrasts in its panel.
+
+    Needed as soon as a panel pools recordings that did not share a contrast
+    grid, which on the ratio axis is any panel mixing bright-bar contrasts.
+    Averaged as measured, the number of contributing cells changes from one x to
+    the next and the mean picks up a sawtooth that belongs to the sampling
+    rather than to the retina.
+
+    Linear, and it never extrapolates: a cell contributes only between its own
+    smallest and largest measured contrast.
+    """
+    cell_keys = [column for column in per_cell.columns
+                 if column not in (contrast_col, value_col)]
+    frames = []
+    for _, panel in per_cell.groupby(list(panel_keys), dropna=False):
+        grid = np.unique(np.round(panel[contrast_col].to_numpy(dtype=float), 4))
+        for _, curve in panel.groupby(cell_keys, dropna=False):
+            curve = curve.sort_values(contrast_col)
+            x = curve[contrast_col].to_numpy(dtype=float)
+            y = curve[value_col].to_numpy(dtype=float)
+            keep = np.isfinite(x) & np.isfinite(y)
+            x, y = x[keep], y[keep]
+            if x.size < 2:
+                continue
+            inside = grid[(grid >= x.min() - 1e-9) & (grid <= x.max() + 1e-9)]
+            if inside.size == 0:
+                continue
+            head = curve.iloc[[0]].drop(columns=[contrast_col, value_col])
+            block = head.loc[head.index.repeat(inside.size)].reset_index(drop=True)
+            block[contrast_col] = inside
+            block[value_col] = np.interp(inside, x, y)
+            frames.append(block)
+    if not frames:
+        return per_cell.iloc[0:0]
+    return pd.concat(frames, ignore_index=True)
+
+
 def population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Dict]] = None,
                       normalize: bool = True, min_contrasts: int = 3,
                       negative_only: bool = False,
@@ -3256,6 +3305,8 @@ def population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Dict]] 
                       normalization_mode: str = 'max_abs',
                       require_positive_reference: bool = False,
                       report_excluded: bool = True,
+                      contrast_axis: str = 'dark',
+                      interpolate: bool = False,
                       allowed_bright_contrast: Optional[Sequence[float]]
                       = ALLOWED_BRIGHT_CONTRAST) -> pd.DataFrame:
     """Mean response-vs-dark-contrast curve per light level, pooled over cells.
@@ -3290,12 +3341,21 @@ def population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Dict]] 
     several blocks does not count several times. Recordings sampling fewer than
     ``min_contrasts`` dark contrasts are not tuning curves and are dropped.
 
+    ``contrast_axis='ratio'`` plots against the dark bar divided by that
+    record's own bright bar (see :func:`population_cell_tuning`). Blocks run at
+    different bright bars then land on different contrast grids -- 1.0 steps by
+    0.1 while 0.9 steps by 0.111 -- and the two share only -1 and 0, so
+    averaging them as measured makes the contributing cell count change from one
+    x to the next. ``interpolate=True`` resamples every cell onto the union of
+    the grids in its panel first, linearly and never past a cell's own measured
+    range, which holds that count fixed across the axis.
+
     Returns one row per (condition, mode, light level, dark contrast) with the
     mean, its SEM across cells, and the cell count.
     """
     per_cell = population_cell_tuning(
         summary, records=records, min_contrasts=min_contrasts,
-        negative_only=negative_only,
+        negative_only=negative_only, contrast_axis=contrast_axis,
         allowed_bright_contrast=allowed_bright_contrast)
     if per_cell.empty:
         return pd.DataFrame(columns=['condition', 'online_analysis', 'units', 'rstar_level',
@@ -3336,6 +3396,11 @@ def population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Dict]] 
             return pd.DataFrame()
         per_cell = pd.concat(normalized, ignore_index=True)
 
+    if interpolate:
+        per_cell = _interpolate_cells_to_panel_grid(per_cell)
+        if per_cell.empty:
+            return pd.DataFrame()
+
     keys = ['condition', 'online_analysis', 'units', 'rstar_level', 'dark_contrast']
     out = (per_cell.groupby(keys, dropna=False)['value']
            .agg(mean='mean',
@@ -3349,6 +3414,7 @@ def population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Dict]] 
 def population_cell_tuning(
         summary: pd.DataFrame, records: Optional[Dict[str, Dict]] = None,
         min_contrasts: int = 3, negative_only: bool = False,
+        contrast_axis: str = 'dark',
         allowed_bright_contrast: Optional[Sequence[float]]
         = ALLOWED_BRIGHT_CONTRAST) -> pd.DataFrame:
     """Baseline-subtracted tuning curves before cell normalization.
@@ -3357,7 +3423,17 @@ def population_cell_tuning(
     from the same experiment/cell, mode, condition, and grouped light level are
     averaged first, matching the equal-cell weighting used by
     :func:`population_tuning`.
+
+    ``contrast_axis='ratio'`` divides each record's dark contrast by its own
+    bright-bar contrast, which is what makes blocks run at different bright bars
+    comparable: the two bars are equal in magnitude only where the ratio is -1,
+    so a -0.9 dark bar is the balanced stimulus against a 0.9 bright bar and a
+    deeper-than-balanced one against a 1.0 bright bar. The ratio keeps its sign,
+    so the axis still runs from the darkest bar on the left to no dark bar at
+    zero, and -1 remains the natural normalization reference.
     """
+    if contrast_axis not in ('dark', 'ratio'):
+        raise ValueError(f"contrast_axis must be 'dark' or 'ratio', got {contrast_axis!r}")
     df = add_condition(summary) if 'condition' not in summary.columns else summary.copy()
     if allowed_bright_contrast is not None and 'bright_bar_contrast' in df.columns:
         df = df[df['bright_bar_contrast'].isin(list(allowed_bright_contrast))]
@@ -3374,6 +3450,11 @@ def population_cell_tuning(
         contrasts = np.asarray(rec['dark_contrasts'], dtype=float)
         response = (np.asarray(rec['resp_mean'], dtype=float)
                     - float(rec['baseline_mean']))
+        if contrast_axis == 'ratio':
+            bright = float(row.get('bright_bar_contrast', np.nan))
+            if not np.isfinite(bright) or bright == 0:
+                continue
+            contrasts = contrasts / bright
         if negative_only:
             keep = contrasts <= 0
             contrasts = contrasts[keep]
@@ -3436,7 +3517,7 @@ def plot_population_individual_tuning(
                     color=colors[cell], ms=3.2, lw=1.2, alpha=0.9,
                     label=cell.replace('/', ' / '), zorder=3)
         ax.set_title(f'{level:g} R*/s  (n={panel.cell.nunique()})', fontsize=9)
-        ax.set_xlabel(r'negative contrast $C_-$')
+        ax.set_xlabel(_CONTRAST_AXIS_LABEL[kwargs.get('contrast_axis', 'dark')])
         ax.legend(frameon=False, fontsize=6, loc='best')
     axes[0][0].set_ylabel(f'response − baseline ({units[0]})')
     fig.suptitle(
@@ -3470,15 +3551,26 @@ def plot_population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Di
 
     ``min_cells`` hides a level whose mean rests on fewer than that many cells
     at every contrast; those points are still in :func:`population_tuning`.
+
+    ``cone_prediction_bright_contrast`` accepts a sequence as well as a single
+    value. Pass every bright bar the panel pools: the Weber prediction depends
+    on the bright bar, so a mixed panel has a range rather than a point, and the
+    figure draws that range instead of implying a precision it does not have.
     """
     import matplotlib.pyplot as plt
     from retinanalysis.utils import style
 
     style.apply_publication_style()
+    contrast_axis = kwargs.get('contrast_axis', 'dark')
     tuning = population_tuning(summary, records=records, normalize=normalize, **kwargs)
     if tuning.empty:
         print('no records with a tuning curve to plot')
         return None
+    cone_prediction_brights = (
+        [] if cone_prediction_bright_contrast is None
+        else [float(cone_prediction_bright_contrast)]
+        if np.isscalar(cone_prediction_bright_contrast)
+        else [float(value) for value in cone_prediction_bright_contrast])
 
     # Color follows the light level, not its rank within a panel, so build the
     # mapping once over every level present.
@@ -3509,13 +3601,28 @@ def plot_population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Di
                 ax.plot(sub['dark_contrast'], sub['mean'], 'o-', ms=4, lw=1.8,
                         color=colors[lvl], zorder=3, label=f'{lvl:g} R* (n={n})')
                 if cone_prediction_bright_contrast is not None:
-                    predicted = cone_predict_dark_contrast(
-                        lvl, cone_prediction_bright_contrast, cone_prediction_i0)
-                    ax.axvline(predicted, color=colors[lvl], ls=':', lw=1.2,
-                               alpha=0.85, zorder=2)
-                    ax.plot(predicted, 0.0, marker='*', ms=9, color=colors[lvl],
-                            mec='#222222', mew=0.5, zorder=5,
-                            label=f'cone prediction: {predicted:.3f}')
+                    # The prediction is a function of the (light level, bright
+                    # bar) pair, and on the ratio axis dividing by C+ does not
+                    # cancel that dependence -- at 12000 R* the ratio is -0.393
+                    # for C+=0.9 and -0.368 for C+=1.0. So a panel pooling both
+                    # gets the span between them, not one authoritative star.
+                    predicted = sorted(
+                        (cone_predict_dark_contrast(lvl, bright, cone_prediction_i0)
+                         / (bright if contrast_axis == 'ratio' else 1.0))
+                        for bright in cone_prediction_brights)
+                    for value in predicted:
+                        ax.axvline(value, color=colors[lvl], ls=':', lw=1.2,
+                                   alpha=0.85, zorder=2)
+                    if not np.isclose(predicted[0], predicted[-1]):
+                        ax.axvspan(predicted[0], predicted[-1], color=colors[lvl],
+                                   alpha=0.10, lw=0, zorder=1)
+                        text = (f'cone prediction: {predicted[0]:.3f} to '
+                                f'{predicted[-1]:.3f}')
+                    else:
+                        text = f'cone prediction: {predicted[0]:.3f}'
+                    ax.plot(float(np.mean(predicted)), 0.0, marker='*', ms=9,
+                            color=colors[lvl], mec='#222222', mew=0.5, zorder=5,
+                            label=text)
                 drawn += 1
             units = panel['units'].iloc[0]
             ax.set_title(f'{cond} — {mode}', fontsize=9)
@@ -3523,13 +3630,14 @@ def plot_population_tuning(summary: pd.DataFrame, records: Optional[Dict[str, Di
                 ax.legend(frameon=False, fontsize=7, title='light level',
                           title_fontsize=7, loc='best')
             if i == len(conditions) - 1:
-                ax.set_xlabel(r'negative contrast $C_-$')
+                ax.set_xlabel(_CONTRAST_AXIS_LABEL[contrast_axis])
             if j == 0:
                 if normalize:
                     reference = kwargs.get('normalization_contrast')
                     label = 'normalized response'
                     if reference is not None:
-                        label += f'\n(at $C_-={float(reference):g}$)'
+                        symbol = ('C_-/C_+' if contrast_axis == 'ratio' else 'C_-')
+                        label += f'\n(at ${symbol}={float(reference):g}$)'
                     elif kwargs.get('normalization_mode') == 'max_response':
                         label += '\n(at each cell’s maximum)'
                     ax.set_ylabel(label)

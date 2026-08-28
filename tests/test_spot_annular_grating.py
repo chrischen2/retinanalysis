@@ -1715,3 +1715,78 @@ def test_overlay_keeps_units_so_modes_are_not_pooled_on_one_axis():
                                _overlay_record(units='excitation (pA)',
                                                online_analysis='exc')])
     assert set(long['units']) == {'rate (Hz)', 'excitation (pA)'}
+
+
+def _mixed_bright_summary_and_records():
+    """Two cells on one grid, recorded behind different bright bars.
+
+    Same dark contrasts and same responses, so anything that separates them on
+    the ratio axis is the bright-bar division and nothing else.
+    """
+    import pandas as pd
+    contrasts = np.array([-1.0, -0.5, 0.0])
+    rows, recs = [], {}
+    for i, (cell, bright) in enumerate((('Cell1', 0.9), ('Cell2', 1.0))):
+        key = f'm{i}'
+        rows.append({'key': key, 'exp_name': 'X_E', 'cell_label': cell,
+                     'cell_type': 'ON-parasol', 'grating_site': 'surround',
+                     'online_analysis': 'extracellular', 'units': 'rate (Hz)',
+                     'rstar_level': 12000.0, 'bright_bar_contrast': bright})
+        recs[key] = {'dark_contrasts': contrasts,
+                     'resp_mean': np.array([30.0, 10.0, 0.0]),
+                     'baseline_mean': 0.0}
+    return pd.DataFrame(rows), recs
+
+
+def test_population_cell_tuning_ratio_axis_divides_by_the_bright_bar():
+    summary, recs = _mixed_bright_summary_and_records()
+    per_cell = sag.population_cell_tuning(
+        summary, records=recs, contrast_axis='ratio',
+        allowed_bright_contrast=None)
+
+    by_cell = per_cell.groupby('cell')['dark_contrast'].apply(
+        lambda s: sorted(round(float(v), 4) for v in s))
+    assert by_cell['X_E/Cell1'] == [-1.1111, -0.5556, 0.0]
+    assert by_cell['X_E/Cell2'] == [-1.0, -0.5, 0.0]
+
+
+def test_population_cell_tuning_default_axis_is_the_recorded_contrast():
+    summary, recs = _mixed_bright_summary_and_records()
+    per_cell = sag.population_cell_tuning(
+        summary, records=recs, allowed_bright_contrast=None)
+
+    assert sorted(per_cell['dark_contrast'].unique()) == [-1.0, -0.5, 0.0]
+
+
+def test_population_tuning_interpolation_holds_the_cell_count_flat():
+    """Without it the two bright bars share only the endpoints of the axis."""
+    summary, recs = _mixed_bright_summary_and_records()
+    common = dict(records=recs, normalize=False, contrast_axis='ratio',
+                  allowed_bright_contrast=None)
+
+    ragged = sag.population_tuning(summary, **common)
+    # -1.1111 and -0.5556 come from the 0.9 cell, -1.0 and -0.5 from the 1.0
+    # cell; only 0.0 is shared, so the count alternates across the axis.
+    assert sorted(ragged['n_cells'].unique()) == [1, 2]
+
+    filled = sag.population_tuning(summary, interpolate=True, **common)
+    interior = filled[filled['dark_contrast'].ge(-1.0)]
+    assert interior['n_cells'].eq(2).all()
+    # Never extrapolated: only the 0.9 cell was driven past a ratio of -1.
+    assert filled.loc[filled['dark_contrast'].lt(-1.0), 'n_cells'].eq(1).all()
+
+
+def test_population_tuning_interpolation_is_linear_between_measured_points():
+    summary, recs = _mixed_bright_summary_and_records()
+    filled = sag.population_tuning(
+        summary, records=recs, normalize=False, contrast_axis='ratio',
+        interpolate=True, allowed_bright_contrast=None)
+
+    # Ratio -0.5556 is the 0.9 cell's own -0.5 measurement, worth 10. The 1.0
+    # cell has no point there and is interpolated between its -1.0 (30) and
+    # -0.5 (10), landing at 10 + (0.5556 - 0.5) / 0.5 * 20.
+    point = filled[np.isclose(filled['dark_contrast'], -0.5556)]
+    assert len(point) == 1
+    interpolated = 10.0 + (0.5556 - 0.5) / 0.5 * 20.0
+    assert float(point['mean'].iloc[0]) == pytest.approx(
+        (10.0 + interpolated) / 2, rel=1e-4)
