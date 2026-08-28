@@ -429,7 +429,7 @@ def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
     groups_by_block = _amp_epoch_groups_by_block(
         out['block_id'], amp=amp, response_table=response_table)
     table = series_resistance_table(
-        out[['exp_name', 'block_id']], amp=amp,
+        out[['exp_name', 'block_id']].drop_duplicates(), amp=amp,
         max_series_resistance=max_series_resistance, verbose=show,
         sample_one_per_block=sample_series_resistance,
         groups_by_block=groups_by_block)

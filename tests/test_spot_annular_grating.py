@@ -4,6 +4,7 @@ Pure helpers only — no database or SSD. The DataJoint-backed discovery and
 analysis paths are exercised by demos/analyze_flash_grate.ipynb.
 """
 import numpy as np
+import pandas as pd
 import pytest
 
 from retinanalysis.SCutils.protocols import spot_annular_grating as sag
@@ -1398,6 +1399,26 @@ def test_audit_relabels_a_mislabelled_cell_attached_block():
     assert out.loc[0, 'onlineAnalysis_recorded'] == 'exc'
     assert out.loc[1, 'onlineAnalysis'] == 'exc'          # no spikes, label stands
     assert len(out) == 2                                  # neither is thrown away
+
+
+def test_audit_does_not_duplicate_condition_rows_for_one_block():
+    from unittest import mock
+    from retinanalysis.SCutils import recording_mode as rm
+
+    blocks, rs = _blocks_with_rs(['extracellular'], [0.0])
+    blocks = pd.concat([blocks.assign(filter_wheel_ndf=0.5),
+                        blocks.assign(filter_wheel_ndf=1.0)], ignore_index=True)
+
+    def fake_table(requested, **_kwargs):
+        assert requested['block_id'].tolist() == [1]
+        return rs
+
+    with mock.patch.object(rm, 'series_resistance_table', side_effect=fake_table), \
+            mock.patch.object(rm, '_amp_trace_samples', return_value={}):
+        out = sag.check_series_resistance(blocks, show=False)
+
+    assert len(out) == 2
+    assert out['filter_wheel_ndf'].tolist() == [0.5, 1.0]
 
 
 def test_audit_uses_recording_technique_to_skip_an_unneeded_trace_read():

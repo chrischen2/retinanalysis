@@ -219,6 +219,9 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
         ids = [int(i) for i in (ep['id'] if 'id' in ep else ep.index)]
         p = (schema.Epoch() & f'id={ids[0]}').fetch1('parameters')
         epoch_conditions = pd.DataFrame({
+            'filterWheelNDF': pd.to_numeric([
+                params.get('NDF', np.nan)
+                for params in ep['parameters']], errors='coerce'),
             'temporalFrequency': pd.to_numeric([
                 params.get('currentTemporalFrequency', np.nan)
                 for params in ep['parameters']], errors='coerce'),
@@ -236,12 +239,14 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
             if len(configured) == 1:
                 epoch_conditions[column] = float(configured[0])
         recorded_conditions = (epoch_conditions.dropna(
-            subset=['temporalFrequency', 'brightBarContrast', 'barWidth'])
+            subset=['filterWheelNDF', 'temporalFrequency',
+                    'brightBarContrast', 'barWidth'])
             .value_counts(sort=False).rename('n_epochs').reset_index())
         for _, condition in recorded_conditions.iterrows():
             row = {'block_id': int(bid),
                    'n_epochs': int(condition.n_epochs)}
             row.update({k: p.get(k, np.nan) for k in CONFIG_KEYS})
+            row['NDF'] = float(condition.filterWheelNDF)
             row['temporalFrequency'] = float(condition.temporalFrequency)
             row['brightBarContrast'] = float(condition.brightBarContrast)
             row['barWidth'] = float(condition.barWidth)
@@ -271,48 +276,15 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
 
     # Keep fixed filters and the protected numeric FilterWheel reading separate.
     # Embedded Stage FW labels are descriptive text, not wheel measurements.
-    requested_settings = df[['exp_name', 'block_id']]
-    try:
-        settings = ra.read_block_light_settings(
-            requested_settings, verbose=show)
-    except ValueError:
-        # Keep discovery usable when one historical block contains genuinely
-        # conflicting protected wheel readings. That block stays visible with
-        # a missing numeric wheel and an explicit error; no arbitrary reading
-        # is selected and all other blocks retain their trusted settings.
-        from retinanalysis.utils.isomerization import split_stage_ndfs
-        setting_rows = []
-        for _, requested in requested_settings.iterrows():
-            one = pd.DataFrame([requested])
-            try:
-                setting_rows.append(
-                    ra.read_block_light_settings(one, verbose=False).iloc[0].to_dict())
-            except ValueError as error:
-                stage = stage_ndf_table(one, verbose=False).iloc[0]
-                fixed, embedded = split_stage_ndfs(stage.get('stage_ndfs', ''))
-                setting_rows.append({
-                    'exp_name': requested.exp_name,
-                    'block_id': int(requested.block_id),
-                    'rig': rig_of(requested.exp_name),
-                    'stage_ndfs': stage.get('stage_ndfs', ''),
-                    'fixed_ndfs': tuple(sorted(fixed)),
-                    'filter_wheel_ndf': np.nan,
-                    'ndf_combination': (
-                        ' + '.join([*sorted(fixed), 'FW conflict'])),
-                    'filter_wheel_status': 'conflicting',
-                    'n_epochs': np.nan,
-                    'n_filter_wheel_readings': np.nan,
-                    'ignored_stage_fw_tokens': tuple(embedded),
-                    'light_settings_error': str(error),
-                })
-                if show:
-                    print(f'  WARNING: {error}; retaining block '
-                          f'{int(requested.block_id)} with FilterWheel=NaN.')
-        settings = pd.DataFrame(setting_rows)
+    requested_settings = df[[
+        'exp_name', 'block_id', 'filter_wheel_ndf_recorded']].rename(
+            columns={'filter_wheel_ndf_recorded': 'filter_wheel_ndf'})
+    settings = ra.read_block_light_settings(requested_settings, verbose=show)
     drop = [column for column in ('exp_name', 'rig', 'n_epochs')
             if column in settings]
-    df = (df.drop(columns=['filter_wheel_ndf_recorded'])
-          .merge(settings.drop(columns=drop), on='block_id', how='left',
+    df = (df.rename(columns={'filter_wheel_ndf_recorded': 'filter_wheel_ndf'})
+          .merge(settings.drop(columns=drop),
+                 on=['block_id', 'filter_wheel_ndf'], how='left',
                  validate='many_to_one'))
     df['has_filter_wheel'] = df['filter_wheel_ndf'].notna()
 
@@ -459,7 +431,7 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
     if not collapse_bar_widths and 'bar_width' in df.columns:
         df['_condition_bar_width'] = df['bar_width']
         keys.append('_condition_bar_width')
-    agg = dict(blocks=('block_id', 'size'), epochs=('n_epochs', 'sum'),
+    agg = dict(blocks=('block_id', 'nunique'), epochs=('n_epochs', 'sum'),
                light_setting=('light_setting', 'first'),
                light_level=('light_level', 'first'), rstar=('rstar', 'first'),
                rstar_level=('rstar_level', 'first'),
@@ -469,7 +441,8 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
                aperture=('apertureDiameter', 'first'),
                annulus_inner=('annulusInnerDiameter', 'first'),
                annulus_outer=('annulusOuterDiameter', 'first'),
-               block_ids=('block_id', lambda s: ', '.join(str(int(b)) for b in sorted(s))))
+               block_ids=('block_id', lambda s: ', '.join(
+                   str(int(b)) for b in sorted(set(s)))))
     if 'spotIntensity' in df.columns:
         agg['spot_intensity'] = ('spotIntensity', 'first')
     if collapse_bar_widths:
@@ -485,6 +458,10 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
         agg['fixed_ndfs'] = ('fixed_ndfs', 'first')
     if 'max_light_level' in df.columns:
         agg['max_light_level'] = ('max_light_level', 'first')
+    if 'filter_wheel_status' in df.columns:
+        agg['filter_wheel_status'] = (
+            'filter_wheel_status',
+            lambda values: ' | '.join(sorted(set(str(value) for value in values))))
     if 'series_resistance' in df.columns:
         agg['rs_mohm'] = ('series_resistance', lambda s: np.round(np.nanmedian(s) / 1e6, 2))
         agg['epochs_high_rs'] = ('n_epochs_high_rs', 'sum')
@@ -677,6 +654,7 @@ def fold_cycles(trace: np.ndarray, sample_rate: float, frequency: float,
 
 def analyze_group(exp_name: str, block_ids: Sequence[int],
                   online_analysis: Optional[str] = None,
+                  filter_wheel_ndf: Optional[float] = None,
                   temporal_frequency: Optional[float] = None,
                   bright_bar_contrast: Optional[float] = None,
                   bar_width: Optional[float] = None,
@@ -700,8 +678,9 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
     null, directly comparable to the Weber prediction. F1 and F2 amplitudes are
     computed on the same window.
 
-    ``temporal_frequency``, ``bright_bar_contrast``, and ``bar_width`` select
-    epochs when a block interleaves conditions. Frequency must be supplied when
+    ``filter_wheel_ndf``, ``temporal_frequency``, ``bright_bar_contrast``, and
+    ``bar_width`` select epochs when a block interleaves conditions. The wheel
+    selector uses only protected epoch ``parameters['NDF']`` readings. Frequency must be supplied when
     more than one is present; mixing it would make the cycle fold and F1/F2
     amplitudes invalid. The condition notebooks pass all three selectors.
 
@@ -719,7 +698,7 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
 
     dark, bright, bar = [], [], []
     diff, f1, f2, cycles_all = [], [], [], []
-    first_params, used_blocks, freq = None, [], None
+    first_params, used_blocks, freq, selected_wheel = None, [], None, None
     trace_rate = None
     raw = {'traces': [], 'spike_times_ms': [], 'dark': [], 'block_id': [],
            'series_resistance': [], 'sample_rate': None, 'exp_name': exp_name,
@@ -736,6 +715,23 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
         epoch_frequencies = sag._epoch_param(ep, 'currentTemporalFrequency')
         epoch_bright = sag._epoch_param(ep, 'currentBrightContrast')
         epoch_bar_width = sag._epoch_param(ep, 'currentBarWidth')
+        epoch_wheel = sag._epoch_param(ep, 'NDF')
+        available_wheels = np.unique(epoch_wheel[np.isfinite(epoch_wheel)])
+        if filter_wheel_ndf is None:
+            if len(available_wheels) > 1:
+                raise ValueError(
+                    f'{exp_name} block {bid} interleaves protected FilterWheel '
+                    f'readings {available_wheels.tolist()}; pass filter_wheel_ndf')
+            block_wheel = (float(available_wheels[0]) if len(available_wheels)
+                           else float(p0.get('NDF', np.nan)))
+        else:
+            block_wheel = float(filter_wheel_ndf)
+        if (selected_wheel is not None and np.isfinite(selected_wheel)
+                and not np.isclose(selected_wheel, block_wheel)):
+            raise ValueError(
+                f'{exp_name} blocks {list(block_ids)} span FilterWheel readings '
+                f'{selected_wheel:g} and {block_wheel:g}')
+        selected_wheel = block_wheel
         available_frequencies = np.unique(
             epoch_frequencies[np.isfinite(epoch_frequencies)])
         if temporal_frequency is None:
@@ -763,6 +759,9 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
                 if i not in set(drop_epochs)
                 and (not np.isfinite(epoch_frequencies[i])
                      or np.isclose(epoch_frequencies[i], f))]
+        if np.isfinite(block_wheel):
+            keep = [i for i in keep if np.isclose(
+                epoch_wheel[i], block_wheel)]
         if bright_bar_contrast is not None:
             keep = [i for i in keep if np.isclose(
                 epoch_bright[i], float(bright_bar_contrast))]
@@ -862,9 +861,11 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
 
     bright_mode = float(pd.Series(bright[valid]).mode().iloc[0])
     bg = float(first_params['backgroundIntensity'])
-    light_settings = ra.read_block_light_settings(
-        pd.DataFrame({'exp_name': exp_name, 'block_id': used_blocks}),
-        verbose=False)
+    selected_ndf = float(selected_wheel)
+    light_settings = ra.read_block_light_settings(pd.DataFrame({
+        'exp_name': exp_name, 'block_id': used_blocks,
+        'filter_wheel_ndf': selected_ndf,
+    }), verbose=False)
     combinations = light_settings['ndf_combination'].drop_duplicates()
     if len(combinations) != 1:
         raise ValueError(
@@ -899,6 +900,7 @@ def analyze_group(exp_name: str, block_ids: Sequence[int],
         pre_time_ms=float(first_params['preTime']), stim_time_ms=float(first_params['stimTime']),
         n_epochs=int(valid.sum()), block_ids=used_blocks,
         config={**{k: first_params.get(k) for k in CONFIG_KEYS},
+                'NDF': ndf,
                 'fixed_ndfs': ', '.join(fixed_ndfs),
                 'ndf_combination': ndf_combination,
                 'max_light_level': max_light_level,
@@ -1469,6 +1471,7 @@ def analyze_cell_conditions(
 
     view_columns = [
         'condition_index', 'ndf_combination', 'filter_wheel_ndf',
+        'filter_wheel_status',
         'backgroundIntensity', 'bright', 'bar_width', 'temporalFrequency',
         'max_light_level', 'rstar', 'blocks', 'epochs', 'block_ids']
     view_columns = [column for column in view_columns
@@ -1507,6 +1510,7 @@ def analyze_cell_conditions(
             display(metadata)
         record = analyze_group(
             exp_name, block_ids, online_analysis=online_analysis,
+            filter_wheel_ndf=float(row.filter_wheel_ndf),
             temporal_frequency=float(row.temporalFrequency),
             bright_bar_contrast=float(row.bright),
             bar_width=(None if collapse_bar_widths
@@ -1582,6 +1586,7 @@ def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
             rec = analyze_group(row['exp_name'],
                                 [int(b) for b in str(row['block_ids']).split(',')],
                                 online_analysis=row['onlineAnalysis'],
+                                filter_wheel_ndf=row['filter_wheel_ndf'],
                                 temporal_frequency=row['temporalFrequency'],
                                 bright_bar_contrast=bright_selector,
                                 bar_width=bar_selector,

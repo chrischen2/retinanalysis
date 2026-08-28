@@ -663,8 +663,9 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
     if exp_names is not None:
         blocks = blocks[blocks['exp_name'].isin(exp_names)]
 
-    # Cell identity comes from the experiment summary; stimulus config from the
-    # first epoch of each block (constant within a block).
+    # Cell identity comes from the experiment summary. Stimulus configuration is
+    # represented by the first epoch, but FilterWheel comes from every protected
+    # epoch reading so a mid-block hardware change becomes two condition rows.
     meta = pd.concat([
         ra.get_exp_summary(exp)[['exp_name', 'block_id', 'cell_label', 'cell_type',
                                  'recording_technique', 'group_label',
@@ -678,9 +679,17 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
             continue
         ids = [int(i) for i in (ep['id'] if 'id' in ep else ep.index)]
         p = (schema.Epoch() & f'id={ids[0]}').fetch1('parameters')
-        row = {'block_id': int(bid), 'n_epochs': len(ids)}
-        row.update({k: p.get(k, np.nan) for k in CONFIG_KEYS})
-        rows.append(row)
+        wheels = pd.to_numeric([
+            params.get('NDF', np.nan) for params in ep['parameters']],
+            errors='coerce')
+        wheel_counts = pd.Series(wheels).dropna().value_counts(sort=False)
+        if wheel_counts.empty:
+            wheel_counts = pd.Series({np.nan: len(ids)})
+        for wheel, count in wheel_counts.items():
+            row = {'block_id': int(bid), 'n_epochs': int(count)}
+            row.update({k: p.get(k, np.nan) for k in CONFIG_KEYS})
+            row['NDF'] = float(wheel)
+            rows.append(row)
 
     df = pd.DataFrame(rows).merge(blocks[['exp_name', 'block_id']], on='block_id')
     df = df.merge(meta, on=['exp_name', 'block_id'], how='left')
@@ -710,11 +719,14 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
     # Fixed filters come from the raw Stage device configurator. The numeric
     # wheel reading is consolidated independently from protected metadata over
     # every epoch in each block; embedded Stage FW labels are never trusted.
-    settings = ra.read_block_light_settings(
-        df[['exp_name', 'block_id']], verbose=show)
-    df = (df.drop(columns=['filter_wheel_ndf_recorded'])
-          .merge(settings.drop(columns=['exp_name', 'rig', 'n_epochs']), on='block_id',
-                 how='left', validate='one_to_one'))
+    requested_settings = df[[
+        'exp_name', 'block_id', 'filter_wheel_ndf_recorded']].rename(
+            columns={'filter_wheel_ndf_recorded': 'filter_wheel_ndf'})
+    settings = ra.read_block_light_settings(requested_settings, verbose=show)
+    df = (df.rename(columns={'filter_wheel_ndf_recorded': 'filter_wheel_ndf'})
+          .merge(settings.drop(columns=['exp_name', 'rig', 'n_epochs']),
+                 on=['block_id', 'filter_wheel_ndf'], how='left',
+                 validate='many_to_one'))
     df['has_filter_wheel'] = df['filter_wheel_ndf'].notna()
 
     maxima = []
@@ -954,7 +966,7 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
     if not collapse_bar_widths and 'bar_width' in df.columns:
         df['_condition_bar_width'] = df['bar_width']
         keys.append('_condition_bar_width')
-    agg = dict(blocks=('block_id', 'size'), epochs=('n_epochs', 'sum'),
+    agg = dict(blocks=('block_id', 'nunique'), epochs=('n_epochs', 'sum'),
                light_setting=('light_setting', 'first'),
                light_level=('light_level', 'first'),
                rstar=('rstar', 'first'),
@@ -968,7 +980,8 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
                # spot has to show it rather than report whichever came first.
                center_spot=('center_spot',
                             lambda s: ', '.join(sorted(set(str(v) for v in s)))),
-               block_ids=('block_id', lambda s: ', '.join(str(int(b)) for b in sorted(s))))
+               block_ids=('block_id', lambda s: ', '.join(
+                   str(int(b)) for b in sorted(set(s)))))
     if collapse_bar_widths:
         agg['bar_width'] = ('bar_width',
                             lambda s: ', '.join(f'{v:g}' for v in sorted(set(s))))
@@ -985,6 +998,10 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
         agg['fixed_ndfs'] = ('fixed_ndfs', 'first')
     if 'max_light_level' in df.columns:
         agg['max_light_level'] = ('max_light_level', 'first')
+    if 'filter_wheel_status' in df.columns:
+        agg['filter_wheel_status'] = (
+            'filter_wheel_status',
+            lambda values: ' | '.join(sorted(set(str(value) for value in values))))
     # Carry the amplifier reading through when check_series_resistance() has run,
     # so the recording-group table shows how each cell was actually held. In
     # MOhm here because the table is for reading; the ohms stay canonical.
@@ -1292,6 +1309,7 @@ def _subtract_global_baseline(response_means, baseline_rates) -> Tuple[float, np
 
 
 def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Optional[str] = None,
+                  filter_wheel_ndf: Optional[float] = None,
                   spike_th: float = DEFAULTS['spike_th'],
                   spike_offset: float = DEFAULTS['spike_offset'],
                   wc_offset: float = DEFAULTS['wc_offset'],
@@ -1344,7 +1362,7 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
     from scipy.ndimage import uniform_filter1d
 
     dark, bright, bar, pol, resp_stim, resp_base = [], [], [], [], [], []
-    traces_all, first_params, used_blocks = [], None, []
+    traces_all, first_params, used_blocks, selected_wheel = [], None, [], None
     n_samples = None
     rs_kept, n_high_rs, mode_mismatch = [], 0, False
     raw = {'traces': [], 'spike_times_ms': [], 'block_id': [], 'epoch_index': [],
@@ -1369,6 +1387,25 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
         stim_pts = int(round(float(p0['stimTime']) / 1e3 * sr))
 
         keep = [i for i in range(len(ep)) if i not in set(drop_epochs)]
+        epoch_wheel = _epoch_param(ep, 'NDF')
+        available_wheels = np.unique(epoch_wheel[np.isfinite(epoch_wheel)])
+        if filter_wheel_ndf is None:
+            if len(available_wheels) > 1:
+                raise ValueError(
+                    f'{exp_name} block {bid} interleaves protected FilterWheel '
+                    f'readings {available_wheels.tolist()}; pass filter_wheel_ndf')
+            block_wheel = (float(available_wheels[0]) if len(available_wheels)
+                           else float(p0.get('NDF', np.nan)))
+        else:
+            block_wheel = float(filter_wheel_ndf)
+        if (selected_wheel is not None and np.isfinite(selected_wheel)
+                and not np.isclose(selected_wheel, block_wheel)):
+            raise ValueError(
+                f'{exp_name} blocks {list(block_ids)} span FilterWheel readings '
+                f'{selected_wheel:g} and {block_wheel:g}')
+        selected_wheel = block_wheel
+        if np.isfinite(block_wheel):
+            keep = [i for i in keep if np.isclose(epoch_wheel[i], block_wheel)]
 
         # Access resistance, per epoch, straight from the h5. A missing reading
         # (no h5, old rig) leaves every epoch in: absent evidence is not
@@ -1498,10 +1535,11 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
     crossing_interp = interp_zero_crossing(contrasts, rel)
 
     bright_mode = float(pd.Series(bright[valid]).mode().iloc[0]) if valid.any() else np.nan
-    ndf = float(first_params.get('NDF', np.nan))
     bg = float(first_params['backgroundIntensity'])
-    light_settings = ra.read_block_light_settings(
-        pd.DataFrame({'exp_name': exp_name, 'block_id': used_blocks}), verbose=False)
+    light_settings = ra.read_block_light_settings(pd.DataFrame({
+        'exp_name': exp_name, 'block_id': used_blocks,
+        'filter_wheel_ndf': float(selected_wheel),
+    }), verbose=False)
     combinations = light_settings['ndf_combination'].drop_duplicates()
     if len(combinations) != 1:
         raise ValueError(
@@ -1551,6 +1589,7 @@ def analyze_group(exp_name: str, block_ids: Sequence[int], online_analysis: Opti
         series_resistance=rs_median, n_epochs_high_rs=n_high_rs,
         mode_mismatch=mode_mismatch, online_analysis_recorded=recorded_mode,
         config={**{k: first_params.get(k) for k in CONFIG_KEYS},
+                'NDF': ndf,
                 'fixed_ndfs': ', '.join(fixed_ndfs),
                 'ndf_combination': ndf_combination,
                 'max_light_level': max_light_level,
@@ -2428,6 +2467,7 @@ def analyze_cell_conditions(date_index: int, cell_label: str, online_analysis: s
 
     condition_view_columns = [
         'condition_index', 'ndf_combination', 'filter_wheel_ndf',
+        'filter_wheel_status',
         'backgroundIntensity', 'bright', 'bar_width', 'max_light_level', 'rstar',
         'blocks', 'epochs', 'block_ids',
     ]
@@ -2469,6 +2509,7 @@ def analyze_cell_conditions(date_index: int, cell_label: str, online_analysis: s
             display(metadata)
         record = analyze_group(
             exp_name, block_ids, online_analysis=online_analysis,
+            filter_wheel_ndf=float(row.filter_wheel_ndf),
             max_series_resistance=max_series_resistance,
             spike_offset=spike_offset, wc_offset=wc_offset,
             subtract_baseline=subtract_baseline,
@@ -2551,7 +2592,9 @@ def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
             print(describe_group_row(row, index=position, total=total))
         try:
             rec = analyze_group(row['exp_name'], block_ids,
-                                online_analysis=row['onlineAnalysis'], verbose=verbose, **kwargs)
+                                online_analysis=row['onlineAnalysis'],
+                                filter_wheel_ndf=row['filter_wheel_ndf'],
+                                verbose=verbose, **kwargs)
             records.append(rec)
             if save:
                 # Save as we go: a batch this long should survive an

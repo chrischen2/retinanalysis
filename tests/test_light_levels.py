@@ -51,9 +51,8 @@ def test_every_lookup_entry_round_trips_through_function():
             assert ra.visual_stimulus_max(rig, filters, wheel) == expected
 
 
-def test_conflicting_embedded_and_explicit_wheel_is_rejected():
-    with pytest.raises(ValueError, match="Conflicting"):
-        ra.visual_stimulus_max("E", "EL3+FW1", 0.5)
+def test_explicit_hardware_wheel_overrides_an_embedded_stage_token():
+    assert ra.visual_stimulus_max("E", "EL3+FW1", 0.5) == 10_000
 
 
 def test_block_filter_wheel_table_consolidates_all_epochs():
@@ -86,6 +85,36 @@ def test_block_filter_wheel_table_rejects_conflict_within_block():
     ]
     with pytest.raises(ValueError, match="block 10.*0.5, 1"):
         _block_filter_wheel_table([10], epoch_rows=epochs)
+
+
+def test_selected_block_filter_wheel_table_splits_a_mixed_block():
+    from retinanalysis.utils.light_levels import _selected_block_filter_wheel_table
+
+    epochs = [
+        {"id": 1, "parent_id": 10, "parameters": {"NDF": 0.5}},
+        {"id": 2, "parent_id": 10, "parameters": {"NDF": "0.5"}},
+        {"id": 3, "parent_id": 10, "parameters": {"NDF": 1.0}},
+    ]
+    wanted = pd.DataFrame({
+        "block_id": [10, 10],
+        "filter_wheel_ndf": [0.5, 1.0],
+    })
+
+    result = _selected_block_filter_wheel_table(wanted, epoch_rows=epochs)
+
+    assert result["filter_wheel_ndf"].tolist() == [0.5, 1.0]
+    assert result["filter_wheel_status"].tolist() == [
+        "selected from mixed block", "selected from mixed block"]
+
+
+def test_selected_block_filter_wheel_table_rejects_an_unrecorded_value():
+    from retinanalysis.utils.light_levels import _selected_block_filter_wheel_table
+
+    wanted = pd.DataFrame({"block_id": [10], "filter_wheel_ndf": [1.0]})
+    epochs = [{"id": 1, "parent_id": 10, "parameters": {"NDF": 0.5}}]
+
+    with pytest.raises(ValueError, match="no protected FilterWheel reading at 1"):
+        _selected_block_filter_wheel_table(wanted, epoch_rows=epochs)
 
 
 def test_read_block_light_settings_combines_trusted_sources(monkeypatch):

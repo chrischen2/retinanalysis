@@ -158,12 +158,11 @@ def visual_stimulus_max(
     """
     rig_key = _normalize_rig(rig)
     filters, embedded_wheel = _normalize_setting(ndfs)
-    if embedded_wheel is not None and filter_wheel_ndf is not None:
-        explicit_wheel = _normalize_wheel(filter_wheel_ndf)
-        if explicit_wheel != embedded_wheel:
-            raise ValueError("Conflicting embedded and explicit filter-wheel values")
-    wheel = (embedded_wheel if embedded_wheel is not None
-             else _normalize_wheel(filter_wheel_ndf))
+    # A separately supplied numeric value is the protected FilterWheel hardware
+    # reading. Any FW token embedded in the manually threaded fixed-NDF string
+    # is descriptive stale text and must never overrule that direct reading.
+    wheel = (_normalize_wheel(filter_wheel_ndf)
+             if filter_wheel_ndf is not None else embedded_wheel)
     measurements = VISUAL_STIMULUS_MAX[rig_key]
     exact = measurements.get((filters, wheel))
     if exact is not None:
@@ -258,11 +257,77 @@ def _block_filter_wheel_table(block_ids, epoch_rows=None):
     return pd.DataFrame(result, columns=columns)
 
 
+def _selected_block_filter_wheel_table(wanted, epoch_rows=None):
+    """Validate condition-specific wheel values against protected epoch metadata.
+
+    ``wanted`` contains ``block_id`` and ``filter_wheel_ndf``. A block may occur
+    more than once when its hardware setting changed between epochs. Each
+    requested value must occur in at least one protected ``parameters['NDF']``
+    reading; embedded Stage ``FW`` text never enters this check.
+    """
+    import numpy as np
+    import pandas as pd
+
+    ids = wanted["block_id"].astype(int).drop_duplicates().tolist()
+    rows = (_read_epoch_filter_wheel_parameters(ids)
+            if epoch_rows is None else list(epoch_rows))
+    grouped = {block_id: [] for block_id in ids}
+    for row in rows:
+        block_id = int(row["parent_id"])
+        if block_id not in grouped:
+            continue
+        parameters = row.get("parameters")
+        parameters = parameters if isinstance(parameters, Mapping) else {}
+        value = pd.to_numeric(parameters.get("NDF"), errors="coerce")
+        if pd.notna(value):
+            grouped[block_id].append(float(value))
+
+    result = []
+    for requested in wanted.itertuples(index=False):
+        block_id = int(requested.block_id)
+        selected = float(requested.filter_wheel_ndf)
+        values = grouped[block_id]
+        if not np.isfinite(selected):
+            if values:
+                available = ", ".join(f"{value:g}" for value in sorted(set(values)))
+                raise ValueError(
+                    f"Epoch block {block_id} requested a missing FilterWheel value "
+                    f"but protected readings exist: {available}"
+                )
+            result.append({
+                "block_id": block_id,
+                "filter_wheel_ndf": float("nan"),
+                "filter_wheel_status": "not recorded",
+                "n_epochs": 0,
+                "n_filter_wheel_readings": 0,
+            })
+            continue
+        matches = sum(np.isclose(value, selected) for value in values)
+        if not matches:
+            available = ", ".join(f"{value:g}" for value in sorted(set(values)))
+            raise ValueError(
+                f"Epoch block {block_id} has no protected FilterWheel reading "
+                f"at {selected:g}; recorded values: {available or 'none'}"
+            )
+        result.append({
+            "block_id": block_id,
+            "filter_wheel_ndf": selected,
+            "filter_wheel_status": (
+                "recorded" if len(set(values)) == 1 else "selected from mixed block"),
+            "n_epochs": len(values),
+            "n_filter_wheel_readings": len(values),
+        })
+    return pd.DataFrame(result)
+
+
 def read_block_light_settings(blocks, block_id=None, *, amp="Amp1", verbose=True):
     """Read one trusted fixed-NDF + FilterWheel setting per epoch block.
 
     ``blocks`` may be a frame containing ``exp_name`` and ``block_id``, or one
-    experiment name when ``block_id`` is supplied separately.  Fixed EL filters
+    experiment name when ``block_id`` is supplied separately. If the frame also
+    contains ``filter_wheel_ndf``, each row is treated as an epoch-level wheel
+    condition and validated against the protected readings; this allows a block
+    whose hardware setting changed mid-run to be split without guessing. Fixed EL filters
     come from the raw Stage device configurator.  Any ``FW`` token found in
     that list is ignored.  The numeric wheel OD comes independently from the
     protected ``FilterWheel:NDF`` metadata and is checked across every epoch in
@@ -294,9 +359,16 @@ def read_block_light_settings(blocks, block_id=None, *, amp="Amp1", verbose=True
     missing = required.difference(wanted.columns)
     if missing:
         raise ValueError(f"blocks is missing required column(s): {', '.join(sorted(missing))}")
-    wanted = wanted[["exp_name", "block_id"]].drop_duplicates().reset_index(drop=True)
+    has_selected_wheel = "filter_wheel_ndf" in wanted.columns
+    wanted_columns = ["exp_name", "block_id"]
+    if has_selected_wheel:
+        wanted_columns.append("filter_wheel_ndf")
+    wanted = wanted[wanted_columns].drop_duplicates().reset_index(drop=True)
     wanted["block_id"] = pd.to_numeric(wanted["block_id"], errors="raise").astype(int)
-    if wanted["block_id"].duplicated().any():
+    if has_selected_wheel:
+        wanted["filter_wheel_ndf"] = pd.to_numeric(
+            wanted["filter_wheel_ndf"], errors="raise").astype(float)
+    elif wanted["block_id"].duplicated().any():
         duplicates = wanted.loc[wanted["block_id"].duplicated(False), "block_id"].tolist()
         raise ValueError(f"block_id must identify one experiment; duplicated: {duplicates}")
 
@@ -309,9 +381,19 @@ def read_block_light_settings(blocks, block_id=None, *, amp="Amp1", verbose=True
         return pd.DataFrame(columns=output_columns)
 
     fixed_table = stage_ndf_table(wanted, amp=amp, verbose=verbose)
-    wheel_table = _block_filter_wheel_table(wanted["block_id"].tolist())
-    result = (wanted.merge(fixed_table, on="block_id", how="left", validate="one_to_one")
-              .merge(wheel_table, on="block_id", how="left", validate="one_to_one"))
+    wheel_table = (_selected_block_filter_wheel_table(wanted)
+                   if has_selected_wheel else
+                   _block_filter_wheel_table(wanted["block_id"].tolist()))
+    if has_selected_wheel:
+        result = (wanted.merge(fixed_table, on="block_id", how="left",
+                               validate="many_to_one")
+                  .merge(wheel_table, on=["block_id", "filter_wheel_ndf"],
+                         how="left", validate="one_to_one"))
+    else:
+        result = (wanted.merge(fixed_table, on="block_id", how="left",
+                               validate="one_to_one")
+                  .merge(wheel_table, on="block_id", how="left",
+                         validate="one_to_one"))
 
     fixed_values = []
     embedded_values = []
