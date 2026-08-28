@@ -3234,8 +3234,15 @@ def add_condition(summary: pd.DataFrame) -> pd.DataFrame:
     unchanged, while every other recorded cell type retains its own identity
     instead of being collapsed into an undifferentiated ``other`` group.
     """
-    short = summary['cell_type'].astype(str).str.split('\\').str[-1]
     out = summary.copy()
+    if out.empty:
+        # An empty store loads as a frame with no columns at all, so there is no
+        # cell_type to read. Hand back the labelling columns empty rather than
+        # raising, so a caller can test .empty and say what is actually wrong.
+        out['cell_type_short'] = pd.Series(dtype=object)
+        out['condition'] = pd.Series(dtype=object)
+        return out
+    short = summary['cell_type'].astype(str).str.split('\\').str[-1]
     out['cell_type_short'] = short
     out['condition'] = [f'{cell_type} / {site}'
                         for cell_type, site in zip(short, summary['grating_site'])]
