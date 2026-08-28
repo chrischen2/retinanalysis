@@ -1615,10 +1615,136 @@ def analyze_all(groups: pd.DataFrame, save: bool = True, plot: bool = False,
     return records
 
 
+def _resolve_light_groups(long: pd.DataFrame,
+                          light_groups: Optional[Sequence[Tuple[float, float]]],
+                          cell_col: str = 'cell') -> pd.DataFrame:
+    """Attach ``light_label`` / ``rstar_level`` for the light axis of the figure.
+
+    Without ``light_groups`` every nominal rung stays its own level, which is the
+    long-standing behaviour. With it, each ``(lo, hi)`` pair collapses the rungs
+    it spans — bounds are read on ``rstar_level``, the nominal ladder, so a
+    2280 R* recording that rounds to the 2000 rung joins a ``(1000, 2000)``
+    group instead of falling outside it. Rows in no group are dropped.
+
+    The label is the group's **measured** mean R*, averaged one cell at a time so
+    a cell recorded twice at the same light level does not pull it. That mean
+    also becomes ``rstar_level``, so the ordering and the dim-to-bright colour
+    ramp downstream keep working on a number that means what it says.
+    """
+    out = long.copy()
+    out['rstar_rung'] = out['rstar_level']
+    if not light_groups:
+        out['light_label'] = [f'{lvl:g} R*' if np.isfinite(lvl) else 'R* unknown'
+                              for lvl in out['rstar_level']]
+        return out
+
+    bounds = [(float(lo), float(hi)) for lo, hi in light_groups]
+    index = np.full(len(out), -1, dtype=int)
+    rungs = out['rstar_level'].to_numpy(dtype=float)
+    for position, (lo, hi) in enumerate(bounds):
+        hit = (index < 0) & np.isfinite(rungs) & (rungs >= lo) & (rungs <= hi)
+        index[hit] = position
+    out = out.loc[index >= 0].copy()
+    out['light_group'] = index[index >= 0]
+
+    labels, levels = {}, {}
+    for position, block in out.groupby('light_group'):
+        per_cell = block.groupby(cell_col, dropna=False)['rstar'].mean()
+        mean_rstar = float(per_cell.mean())
+        labels[position] = f'{mean_rstar:.0f} R*'
+        levels[position] = mean_rstar
+    out['light_label'] = out['light_group'].map(labels)
+    out['rstar_level'] = out['light_group'].map(levels)
+    return out.drop(columns='light_group')
+
+
+def _interpolate_to_panel_grid(per_cell: pd.DataFrame, panel_keys: Sequence[str],
+                               contrast_col: str = 'contrast',
+                               value_col: str = 'value') -> pd.DataFrame:
+    """Resample every cell's curve onto the union of contrasts in its panel.
+
+    Needed as soon as a panel pools recordings that did not share a contrast
+    grid — pooling the two reversal frequencies here does exactly that, since the
+    4 Hz blocks stepped contrast by 0.1 and the 2 Hz blocks used seven uneven
+    steps. Averaging those as measured makes the number of contributing cells
+    change from one x to the next — on the center block it swings 5, 3, 2, 3, 5
+    across neighbouring contrasts — putting a sawtooth on top of the curve being
+    measured.
+
+    Interpolation is linear and **never extrapolates**: a cell contributes only
+    between its own smallest and largest measured contrast, so a curve is never
+    invented past where the stimulus went.
+    """
+    cell_keys = [c for c in per_cell.columns if c not in (contrast_col, value_col)]
+    frames = []
+    for _, panel in per_cell.groupby(list(panel_keys), dropna=False):
+        grid = np.unique(np.round(panel[contrast_col].to_numpy(dtype=float), 4))
+        for _, curve in panel.groupby(cell_keys, dropna=False):
+            curve = curve.sort_values(contrast_col)
+            x = curve[contrast_col].to_numpy(dtype=float)
+            y = curve[value_col].to_numpy(dtype=float)
+            keep = np.isfinite(x) & np.isfinite(y)
+            x, y = x[keep], y[keep]
+            if x.size < 2:
+                continue
+            inside = grid[(grid >= x.min() - 1e-9) & (grid <= x.max() + 1e-9)]
+            if inside.size == 0:
+                continue
+            head = curve.iloc[[0]].drop(columns=[contrast_col, value_col])
+            block = head.loc[head.index.repeat(inside.size)].reset_index(drop=True)
+            block[contrast_col] = inside
+            block[value_col] = np.interp(inside, x, y)
+            frames.append(block)
+    if not frames:
+        return per_cell.iloc[0:0]
+    return pd.concat(frames, ignore_index=True)
+
+
+def light_group_summary(summary: pd.DataFrame,
+                        light_groups: Optional[Sequence[Tuple[float, float]]] = None
+                        ) -> pd.DataFrame:
+    """What each light group of :func:`population_contrast_response` pools.
+
+    One row per curve in the figure, naming the nominal rungs, reversal
+    frequencies and bright-bar contrasts that were merged into it. It runs the
+    same grouping the figure runs, so the mean R* printed here is the mean R*
+    in the legend rather than a second estimate of it.
+    """
+    df = summary.copy()
+    df['cell'] = df['exp_name'].astype(str) + '/' + df['cell_label'].astype(str)
+    tagged = _resolve_light_groups(df, light_groups)
+    if tagged.empty:
+        return pd.DataFrame()
+
+    def _join(values):
+        return ', '.join(f'{v:g}' for v in sorted(pd.unique(values.dropna())))
+
+    rows = []
+    for (label, level), block in tagged.groupby(['light_label', 'rstar_level'],
+                                                dropna=False):
+        rows.append({
+            'light_label': label,
+            'mean_rstar': float(level),
+            'rungs': _join(block['rstar_rung']),
+            'min_rstar': float(block['rstar'].min()),
+            'max_rstar': float(block['rstar'].max()),
+            'cells': int(block['cell'].nunique()),
+            'records': int(len(block)),
+            'epochs': int(block['n_epochs'].sum()) if 'n_epochs' in block else np.nan,
+            'temporal_frequencies': _join(block['temporal_frequency']),
+            'bright_bar_contrasts': _join(block['bright_bar_contrast']),
+        })
+    return (pd.DataFrame(rows).sort_values('mean_rstar').reset_index(drop=True))
+
+
 def population_contrast_response(summary: pd.DataFrame,
                                  records: Optional[Dict[str, Dict]] = None,
                                  harmonic: str = 'f2', normalize: bool = True,
-                                 min_contrasts: int = 3) -> pd.DataFrame:
+                                 min_contrasts: int = 3,
+                                 contrast_axis: str = 'dark',
+                                 pool_temporal_frequency: bool = False,
+                                 light_groups: Optional[Sequence[Tuple[float, float]]] = None,
+                                 interpolate: bool = False) -> pd.DataFrame:
     """Mean contrast-response curve per light level, pooled over cells.
 
     The CRG twin of :func:`spot_annular_grating.population_tuning`. What is
@@ -1633,14 +1759,37 @@ def population_contrast_response(summary: pd.DataFrame,
     response, so a raw mean is the loudest cell plus noise. It is a positive
     scalar, so the shape of every curve is untouched.
 
-    Groups on temporal frequency as well as light level, since the two
-    frequencies are different stimuli and F1/F2 are measured at them.
+    ``contrast_axis``
+        ``'dark'`` (default) plots the recorded dark-bar contrast. ``'ratio'``
+        divides it by that record's bright-bar contrast, which is what makes
+        blocks run at different bright bars comparable: the grating's two bars
+        are only equal in magnitude where the ratio is -1, and a -0.6 dark bar
+        against a 0.6 bright bar is the balanced stimulus that a -0.6 dark bar
+        against a 0.9 bright bar is not. Plotted signed, so the axis still runs
+        from the darkest bar on the left to no dark bar at zero.
+
+    ``pool_temporal_frequency``
+        Keeps 2 and 4 Hz in one panel instead of one panel each. They are
+        different stimuli and F1/F2 are measured at them, so this is a claim
+        that the contrast dependence does not turn on the reversal rate — pass
+        ``interpolate=True`` with it, since the two rates were run on different
+        contrast grids.
+
+    ``light_groups``
+        A sequence of ``(lo, hi)`` bounds on the nominal R* rung. Each pair
+        becomes one curve labelled by the measured mean R* of the cells inside
+        it; rungs in no pair are dropped.
+
+    Groups on temporal frequency as well as light level unless asked not to,
+    since the two frequencies are different stimuli.
     """
     df = add_condition(summary) if 'condition' not in summary.columns else summary.copy()
     if df.empty:
         return pd.DataFrame()
     if records is None:
         records = load_records(list(df['key']))
+    if contrast_axis not in ('dark', 'ratio'):
+        raise ValueError(f"contrast_axis must be 'dark' or 'ratio', got {contrast_axis!r}")
 
     field = {'f1': 'f1_mean', 'f2': 'f2_mean', 'diff': 'resp_mean'}.get(harmonic, harmonic)
     rows = []
@@ -1652,6 +1801,11 @@ def population_contrast_response(summary: pd.DataFrame,
         values = np.asarray(rec[field], dtype=float)
         if contrasts.size < min_contrasts or values.size != contrasts.size:
             continue
+        if contrast_axis == 'ratio':
+            bright = float(r.get('bright_bar_contrast', np.nan))
+            if not np.isfinite(bright) or bright == 0:
+                continue
+            contrasts = contrasts / bright
         if normalize:
             peak = np.nanmax(np.abs(values))
             if not np.isfinite(peak) or peak == 0:
@@ -1661,36 +1815,62 @@ def population_contrast_response(summary: pd.DataFrame,
             rows.append({'condition': r['condition'],
                          'online_analysis': r.get('online_analysis', ''),
                          'temporal_frequency': r.get('temporal_frequency', np.nan),
+                         'rstar': float(r.get('rstar', np.nan)),
                          'rstar_level': r.get('rstar_level', np.nan),
                          'units': 'normalized' if normalize else r.get('units', ''),
                          'cell': f"{r['exp_name']}/{r['cell_label']}",
-                         'dark_contrast': round(float(c), 4), 'value': float(v)})
+                         'contrast': round(float(c), 4), 'value': float(v)})
     long = pd.DataFrame(rows)
     if long.empty:
         return long
 
-    keys = ['condition', 'online_analysis', 'temporal_frequency', 'units',
-            'rstar_level', 'dark_contrast']
-    per_cell = long.groupby(keys + ['cell'], dropna=False)['value'].mean().reset_index()
-    return (per_cell.groupby(keys, dropna=False)['value']
-            .agg(mean='mean',
-                 sem=lambda s: float(s.std(ddof=1) / np.sqrt(len(s))) if len(s) > 1 else np.nan,
-                 n_cells='size')
-            .reset_index().sort_values(keys).reset_index(drop=True))
+    long = _resolve_light_groups(long, light_groups)
+    if long.empty:
+        return long
+
+    frequencies = sorted(long['temporal_frequency'].dropna().unique())
+    if pool_temporal_frequency and len(frequencies) > 1:
+        long['frequency_label'] = ', '.join(f'{f:g}' for f in frequencies) + ' Hz pooled'
+        long['temporal_frequency'] = np.nan
+    else:
+        long['frequency_label'] = [f'{f:g} Hz' if np.isfinite(f) else 'frequency unknown'
+                                   for f in long['temporal_frequency']]
+    long['contrast_axis'] = ('negative / bright bar contrast' if contrast_axis == 'ratio'
+                             else 'dark bar contrast')
+
+    panel_keys = ['condition', 'online_analysis', 'frequency_label', 'units',
+                  'contrast_axis']
+    keys = panel_keys + ['temporal_frequency', 'light_label', 'rstar_level']
+    per_cell = (long.groupby(keys + ['cell', 'contrast'], dropna=False)['value']
+                .mean().reset_index())
+    if interpolate:
+        per_cell = _interpolate_to_panel_grid(per_cell, panel_keys)
+        if per_cell.empty:
+            return per_cell
+
+    tuning = (per_cell.groupby(keys + ['contrast'], dropna=False)['value']
+              .agg(mean='mean',
+                   sem=lambda s: float(s.std(ddof=1) / np.sqrt(len(s))) if len(s) > 1 else np.nan,
+                   n_cells='size')
+              .reset_index().sort_values(keys + ['contrast']).reset_index(drop=True))
+    if contrast_axis == 'dark':
+        tuning['dark_contrast'] = tuning['contrast']
+    return tuning
 
 
 def plot_population_contrast_response(summary: pd.DataFrame,
                                       records: Optional[Dict[str, Dict]] = None,
                                       harmonic: str = 'f2', normalize: bool = True,
                                       min_cells: int = 1,
-                                      figsize: Tuple[float, float] = (10.0, 4.6),
+                                      figsize: Optional[Tuple[float, float]] = None,
                                       **kwargs):
     """Population contrast-response curves, one line per light level, overlaid.
 
-    One panel per (condition, temporal frequency); within a panel each light
-    level is its own curve of mean harmonic amplitude against dark-bar contrast,
-    shaded with the SEM across cells. Light level is ordered, so the curves use
-    the house sequential ramp (``cividis``, dim to bright) with the mapping built
+    One panel per (condition, temporal frequency) — or one per condition when
+    ``pool_temporal_frequency=True`` is passed through. Within a panel each light
+    level is its own curve of mean harmonic amplitude against contrast, shaded
+    with the SEM across cells. Light level is ordered, so the curves use the
+    house sequential ramp (``cividis``, dim to bright) with the mapping built
     once across every level, exactly as in the flashed notebook.
     """
     import matplotlib.pyplot as plt
@@ -1703,26 +1883,32 @@ def plot_population_contrast_response(summary: pd.DataFrame,
         print('no records with a contrast-response curve to plot')
         return None
 
-    levels = sorted(tuning['rstar_level'].dropna().unique())
-    colors = style.colors_for_conditions(levels)
-    panels = (tuning[['condition', 'temporal_frequency']].drop_duplicates()
-              .sort_values(['condition', 'temporal_frequency']).values.tolist())
+    order = (tuning[['rstar_level', 'light_label']].drop_duplicates()
+             .sort_values('rstar_level'))
+    labels = order['light_label'].tolist()
+    colors = style.colors_for_conditions(labels)
+    panels = (tuning[['condition', 'frequency_label', 'temporal_frequency']]
+              .drop_duplicates()
+              .sort_values(['condition', 'temporal_frequency'], na_position='first')
+              [['condition', 'frequency_label']].drop_duplicates().values.tolist())
+    if figsize is None:
+        figsize = (max(5.6, 4.8 * max(len(panels), 1)), 4.6)
     fig, axes = plt.subplots(1, max(len(panels), 1), figsize=figsize, squeeze=False)
-    for ax, (cond, freq) in zip(axes[0], panels):
+    for ax, (cond, freq_label) in zip(axes[0], panels):
         panel = tuning[tuning['condition'].eq(cond)
-                       & tuning['temporal_frequency'].eq(freq)]
-        for lvl in levels:
-            sub = panel[panel['rstar_level'].eq(lvl)].sort_values('dark_contrast')
+                       & tuning['frequency_label'].eq(freq_label)]
+        for label in labels:
+            sub = panel[panel['light_label'].eq(label)].sort_values('contrast')
             if sub.empty or int(sub['n_cells'].max()) < min_cells:
                 continue
             n = int(sub['n_cells'].max())
-            ax.fill_between(sub['dark_contrast'], sub['mean'] - sub['sem'].fillna(0),
+            ax.fill_between(sub['contrast'], sub['mean'] - sub['sem'].fillna(0),
                             sub['mean'] + sub['sem'].fillna(0),
-                            color=colors[lvl], alpha=0.16, lw=0, zorder=2)
-            ax.plot(sub['dark_contrast'], sub['mean'], 'o-', ms=4, lw=1.8,
-                    color=colors[lvl], zorder=3, label=f'{lvl:g} R* (n={n})')
-        ax.set_title(f'{cond} — {freq:g} Hz', fontsize=9)
-        ax.set_xlabel('dark bar contrast')
+                            color=colors[label], alpha=0.16, lw=0, zorder=2)
+            ax.plot(sub['contrast'], sub['mean'], 'o-', ms=4, lw=1.8,
+                    color=colors[label], zorder=3, label=f'{label} (n={n})')
+        ax.set_title(f'{cond} — {freq_label}', fontsize=9)
+        ax.set_xlabel(tuning['contrast_axis'].iloc[0])
         ax.legend(frameon=False, fontsize=7, title='light level', title_fontsize=7)
     units = tuning['units'].iloc[0]
     axes[0][0].set_ylabel(f'{harmonic.upper()} amplitude\n({units})')
