@@ -42,6 +42,33 @@ VISUAL_STIMULUS_MAX: Final[Mapping[str, Mapping[LightSetting, float]]] = {
     },
 }
 
+# Sessions where a manual EL filter sat in the beam for the whole recording but
+# Stage never wrote it into the device configuration. Without this, those blocks
+# resolve against the *no-filter* entry above, which on rig E reports 30,000,000
+# R*/s -- a thousand times every other block on that rig, and not a level any of
+# these retinas were exposed to.
+#
+# EL3 is the only fixed filter rig E has ever recorded, and five of these seven
+# sessions logged it on some blocks and not others (2026-03-03_E, for instance,
+# recorded it on 66 blocks and dropped it on 48). That intermittency within one
+# session is the direct evidence: the filter stayed mounted while the recording
+# of it came and went. 2025-10-15_E and 2026-01-02_E_2 never logged it on any
+# block of any protocol, so they rest on the rig-wide argument alone.
+#
+# Keyed by experiment, not block id: the filter is a property of the session,
+# and block ids are database surrogates that a re-ingest can renumber. Applied
+# only where nothing was recorded -- a block carrying a Stage or epoch setting
+# always keeps it, and reads back as ``fixed_ndf_source == "manual override"``.
+MANUAL_FIXED_NDFS: Final[Mapping[str, tuple[str, ...]]] = {
+    "2025-10-15_E": ("EL3",),
+    "2025-12-16_E": ("EL3",),
+    "2026-01-02_E_2": ("EL3",),
+    "2026-01-27_E": ("EL3",),
+    "2026-03-03_E": ("EL3",),
+    "2026-03-03_E_2": ("EL3",),
+    "2026-04-03_E_2": ("EL3",),
+}
+
 _RIG_ALIASES = {
     "E": "E",
     "RIG E": "E",
@@ -523,6 +550,18 @@ def read_block_light_settings(blocks, block_id=None, *, amp="Amp1", verbose=True
             result.at[index, "ignored_epoch_fw_tokens"] = ignored
             if fixed:
                 result.at[index, "fixed_ndf_source"] = "epoch fallback"
+
+    # Sessions whose manual filter was never recorded anywhere (see
+    # MANUAL_FIXED_NDFS). Declared from the rig's calibration rather than read
+    # off the recording, so it is flagged with its own source and never
+    # displaces a setting the recording did carry.
+    declared_missing = result["fixed_ndf_source"].eq("not recorded")
+    for index in result.index[declared_missing]:
+        declared = MANUAL_FIXED_NDFS.get(str(result.at[index, "exp_name"]))
+        if declared:
+            result.at[index, "fixed_ndfs"] = tuple(sorted(declared))
+            result.at[index, "fixed_ndf_source"] = "manual override"
+
     result["rig"] = result["exp_name"].astype(str).str.extract(
         r"_([A-Za-z])(?:_\d+)?$", expand=False).str.upper()
     result["ndf_combination"] = [
@@ -539,6 +578,7 @@ def read_block_light_settings(blocks, block_id=None, *, amp="Amp1", verbose=True
 
 
 __all__ = [
-    "VISUAL_STIMULUS_MAX", "filter_wheel_ndf_from_epoch_parameters",
+    "MANUAL_FIXED_NDFS", "VISUAL_STIMULUS_MAX",
+    "filter_wheel_ndf_from_epoch_parameters",
     "read_block_light_settings", "visual_stimulus_max",
 ]
