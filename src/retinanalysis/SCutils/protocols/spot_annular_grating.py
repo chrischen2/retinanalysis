@@ -996,12 +996,6 @@ def group_blocks(df: pd.DataFrame, show: bool = True, height: int = 420,
                              lambda s: ' | '.join(sorted({str(v) for v in s})))
     if 'fixed_ndfs' in df.columns:
         agg['fixed_ndfs'] = ('fixed_ndfs', 'first')
-    if 'fixed_ndf_source' in df.columns:
-        # Joined, like stage_ndfs: a group can span blocks that recorded their
-        # fixed filter and blocks that took it from MANUAL_FIXED_NDFS, and the
-        # table should say so rather than show whichever came first.
-        agg['fixed_ndf_source'] = ('fixed_ndf_source',
-                                   lambda s: ' | '.join(sorted({str(v) for v in s})))
     if 'max_light_level' in df.columns:
         agg['max_light_level'] = ('max_light_level', 'first')
     if 'filter_wheel_status' in df.columns:

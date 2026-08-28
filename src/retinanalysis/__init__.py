@@ -265,7 +265,6 @@ _ATTR_TO_MODULE = {
     'isomerization_converter_widget': 'retinanalysis.utils.isomerization',
     'isomerization_converter_browser': 'retinanalysis.utils.isomerization',
     'isomerizations_per_watt': 'retinanalysis.utils.isomerization',
-    'MANUAL_FIXED_NDFS': 'retinanalysis.utils.light_levels',
     'filter_wheel_ndf_from_epoch_parameters': 'retinanalysis.utils.light_levels',
     'read_block_light_settings': 'retinanalysis.utils.light_levels',
     'visual_stimulus_max': 'retinanalysis.utils.light_levels',
