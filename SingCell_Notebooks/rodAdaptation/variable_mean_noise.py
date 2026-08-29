@@ -581,6 +581,173 @@ def block_conditions(exp_name: str, blocks: Optional[pd.DataFrame] = None,
 
 
 # --------------------------------------------------------------------------
+# 2b. finding the raw files: the saved dates are two days early
+# --------------------------------------------------------------------------
+# The MATLAB wrote `expDate` from `datestr(epochList.elements(1).startDate)`,
+# and it does not agree with the experiment filenames: of the 16 saved dates,
+# one lands on a file and fifteen land two days before one. Matching at +2 and
+# then confirming on the cell label and cell type resolves 44 of the 45 saved
+# cells, and 39 of them agree on label, type and protocol at once, so the
+# offset is real rather than a coincidence of a dense recording calendar.
+#
+# The offsets are searched in this order and the first *confirmed* match wins,
+# so a date that really is exact (2021-08-18) still resolves correctly.
+DATE_OFFSETS = (2, 0, 1, 3, -1, -3, 4, -4)
+
+# Where the Symphony h5 and its parsed json metadata live. These are the same
+# directories config.ini declares as DataJoint ingest sources.
+SINGLE_CELL_ROOT = Path('/Volumes/ChrisNewSSD/single_cell')
+
+
+def _normalize_cell_type(value) -> str:
+    """``RGC\\ON-midget`` and ``OnMidget`` both become ``onmidget``."""
+    text = str(value or '').lower().replace('\\', '/').split('/')[-1]
+    return text.replace('-', '').replace(' ', '').replace('_', '')
+
+
+def metadata_files(root=None) -> pd.DataFrame:
+    """Every dated json/h5 pair under the single-cell tree.
+
+    One row per experiment file, with the calendar date and the rig suffix
+    parsed off the name (``2021-04-27_B`` -> rig ``B``), which is what
+    separates two experiments recorded on one day.
+    """
+    import re
+
+    root = Path(root) if root is not None else SINGLE_CELL_ROOT
+    rows = []
+    if not root.exists():
+        return pd.DataFrame(columns=['exp_name', 'calendar_date', 'rig', 'source',
+                                     'json_path', 'h5_path'])
+    for source in sorted(p for p in root.iterdir() if p.is_dir()):
+        json_dir, h5_dir = source / 'json', source / 'h5'
+        if not json_dir.is_dir():
+            continue
+        for json_path in sorted(json_dir.glob('*.json')):
+            match = re.match(r'(\d{4}-\d{2}-\d{2})(?:_([A-Za-z0-9]+))?', json_path.stem)
+            if not match:
+                continue
+            h5_path = h5_dir / f'{json_path.stem}.h5'
+            rows.append({
+                'exp_name': json_path.stem,
+                'calendar_date': match.group(1),
+                'rig': (match.group(2) or '')[:1].upper(),
+                'source': source.name,
+                'json_path': str(json_path),
+                'h5_path': str(h5_path) if h5_path.exists() else '',
+            })
+    return pd.DataFrame(rows)
+
+
+@lru_cache(maxsize=256)
+def _json_cells(json_path: str) -> Dict[str, Tuple[str, bool]]:
+    """``{cell_label: (cell_type, has_VariableMeanNoise)}`` for one metadata file."""
+    import json as _json
+
+    try:
+        data = _json.loads(Path(json_path).read_text())
+    except Exception:
+        return {}
+    out: Dict[str, Tuple[str, bool]] = {}
+    for animal in data.get('animals', []):
+        for prep in animal.get('preparations', []):
+            for cell in prep.get('cells', []):
+                protocols = {str(block.get('protocolID', '')).rsplit('.', 1)[-1]
+                             for group in cell.get('epoch_groups', [])
+                             for block in group.get('epoch_blocks', [])}
+                cell_type = str(cell.get('properties', {}).get('type')
+                                or cell.get('type') or '')
+                out[cell.get('label')] = (
+                    cell_type,
+                    any('VariableMeanNoise' in name for name in protocols))
+    return out
+
+
+def resolve_roster_files(roster: pd.DataFrame, root=None,
+                         offsets: Sequence[int] = DATE_OFFSETS,
+                         show: bool = True) -> pd.DataFrame:
+    """Locate each saved cell's raw files, correcting the two-day date offset.
+
+    For every roster row the candidate experiments at each offset are opened and
+    the cell is looked up **by label, case sensitively** -- the saved labels are
+    ``cell5`` for the older entries and ``Cell2`` for the newer ones, and both
+    appear in the metadata as written. A candidate is scored on whether the cell
+    type also agrees and whether that cell actually has VariableMeanNoise
+    blocks; the best-scoring candidate wins, and the search stops early on a
+    full match.
+
+    ``match_quality`` is one of ``label+type+protocol`` (all three agree),
+    ``label+protocol``, ``label+type``, ``label`` or ``not found``. Only the
+    first should be trusted without looking.
+    """
+    files = metadata_files(root)
+    if files.empty:
+        out = roster.copy()
+        for column in ('exp_name', 'rig', 'json_path', 'h5_path', 'match_quality'):
+            out[column] = ''
+        out['day_offset'] = np.nan
+        return out
+
+    by_date: Dict[str, List[pd.Series]] = {}
+    for _, row in files.iterrows():
+        by_date.setdefault(row.calendar_date, []).append(row)
+
+    import datetime as _dt
+    rows = []
+    for _, entry in roster.iterrows():
+        try:
+            day = _dt.date.fromisoformat(entry.calendar_date)
+        except ValueError:
+            rows.append({}); continue
+        best = None
+        for offset in offsets:
+            target = (day + _dt.timedelta(days=int(offset))).isoformat()
+            for candidate in by_date.get(target, []):
+                info = _json_cells(candidate.json_path).get(entry.cell_label)
+                if info is None:
+                    continue
+                cell_type, has_protocol = info
+                type_match = (_normalize_cell_type(cell_type)
+                              == _normalize_cell_type(entry.cell_type))
+                score = 2 * type_match + bool(has_protocol)
+                if best is None or score > best[0]:
+                    best = (score, candidate, offset, cell_type, has_protocol,
+                            type_match)
+            if best is not None and best[0] == 3:
+                break
+        if best is None:
+            rows.append({'exp_name': '', 'rig': '', 'json_path': '', 'h5_path': '',
+                         'day_offset': np.nan, 'matched_cell_type': '',
+                         'type_match': False, 'has_protocol': False,
+                         'match_quality': 'not found'})
+            continue
+        score, candidate, offset, cell_type, has_protocol, type_match = best
+        quality = ('label+type+protocol' if score == 3 else
+                   'label+type' if score == 2 else
+                   'label+protocol' if score == 1 else 'label')
+        rows.append({
+            'exp_name': candidate.exp_name, 'rig': candidate.rig,
+            'source': candidate.source,
+            'json_path': candidate.json_path, 'h5_path': candidate.h5_path,
+            'day_offset': int(offset), 'matched_cell_type': cell_type,
+            'type_match': bool(type_match), 'has_protocol': bool(has_protocol),
+            'match_quality': quality})
+
+    out = pd.concat([roster.reset_index(drop=True),
+                     pd.DataFrame(rows)], axis=1)
+    out['h5_present'] = out['h5_path'].fillna('').ne('')
+    if show:
+        found = out[out.match_quality.ne('not found')]
+        print(f'{len(found)} of {len(out)} saved cells located on disk '
+              f'({int(out.h5_present.sum())} with an h5)')
+        print(out.match_quality.value_counts().to_string())
+        if len(found):
+            print('\nday offset applied:')
+            print(found.day_offset.value_counts().sort_index().to_string())
+    return out
+
+
+# --------------------------------------------------------------------------
 # 3. light level -- LED filters only, the wheel is not in this path
 # --------------------------------------------------------------------------
 def led_attenuation(block_row, color: Optional[str] = None) -> Dict[str, object]:
@@ -1109,6 +1276,8 @@ __all__ = [
     'PROTOCOLS', 'PROTOCOL_SEARCH', 'DEFAULT_SUMMARY_PATH', 'SUMMARY_DIR',
     'STEP_DIRECTIONS', 'STEP_LABELS', 'LNModel', 'ConditionAnalysis',
     'summary_path', 'load_summary', 'load_cell',
+    'DATE_OFFSETS', 'SINGLE_CELL_ROOT', 'metadata_files',
+    'resolve_roster_files',
     'find_blocks', 'match_roster', 'block_cells', 'resolve_block_mode',
     'condition_table', 'block_conditions', 'epoch_parameters',
     'led_attenuation', 'matlab_randn', 'gaussian_noise_stimulus',
