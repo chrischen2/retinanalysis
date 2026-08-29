@@ -197,10 +197,10 @@ class LNModel:
     # which is near 1 almost regardless of how well the model predicts a trace.
     r2_train: float = np.nan
     nl_r2: float = np.nan
-    # `filter` is normalised to unit peak, as fitLN.m does, so the generator
-    # signal comes out in the same units as the contrast stimulus and lands
-    # near +/-1. The amplitude that normalisation divides out is the cell's
-    # gain, so it is kept here rather than lost.
+    # `filter` is divided by contrast_generator / contrast_stimulus, so the
+    # generator signal carries the same sigma/mean as the stimulus. That ratio
+    # is the amplitude the filter contributed, i.e. the cell's gain, and is
+    # kept here rather than lost.
     filter_gain: float = np.nan
     n_train: int = 0
     n_test: int = 0
@@ -1355,24 +1355,42 @@ def _fit_ln_once(stimulus, response, sampling_interval, filter_pts,
     filter_causal, _ = compute_filter(
         stimulus, response, filter_pts,
         correct_stim_power=correct_stim_power, **cutoff_kwargs)
-    # Normalise the filter so the generator signal carries the same contrast as
-    # the stimulus does. fitLN.m divides by max(abs(filter)), but that alone
-    # does not set the scale: convolution sums over every tap, so a unit-peak
-    # 1 s filter against a 0.4-contrast stimulus returns a generator of +/-40.
-    # Matching the standard deviations instead puts the nonlinearity's x axis
-    # in contrast units near +/-1 at every light level, which is what makes the
-    # means comparable. The amplitude divided out is the cell's gain and is
-    # returned rather than lost.
+    # Normalise the filter by the ratio of contrasts, not by its peak.
+    #
+    # The stimulus is raw LED intensity, so its contrast is sigma/mean -- the
+    # protocol's own `Contrast`. The generator signal is a convolution of the
+    # filter with that stimulus, so measuring its contrast against the same
+    # mean gives sigma_generator/mean, and
+    #
+    #     scale = contrast_generator / contrast_stimulus
+    #
+    # is exactly the factor by which the filter inflates it. Dividing the
+    # filter by that scale leaves the generator with the same sigma/mean as the
+    # stimulus, which is the invariant that makes two light levels comparable:
+    # the filter carries the kinetics, the gain it divided out is returned
+    # separately, and the nonlinearity's input is a contrast at every mean.
     filter_causal = np.asarray(filter_causal, dtype=float)
-    raw_peak = float(np.nanmax(np.abs(filter_causal)))
     generator = convolve_filter_with_stim(filter_causal, stimulus)
-    stim_sd = float(np.nanstd(stimulus))
-    gen_sd = float(np.nanstd(generator))
-    scale = (stim_sd / gen_sd) if (np.isfinite(gen_sd) and gen_sd > 0
-                                   and np.isfinite(stim_sd) and stim_sd > 0) else 1.0
-    filter_causal = filter_causal * scale
-    generator = generator * scale
-    gain = raw_peak if np.isfinite(raw_peak) and raw_peak else 1.0
+    stim_mean = float(np.nanmean(stimulus))
+    contrast_stimulus = (float(np.nanstd(stimulus)) / stim_mean
+                         if stim_mean else np.nan)
+    contrast_generator = (float(np.nanstd(generator)) / stim_mean
+                          if stim_mean else np.nan)
+    scale = (contrast_generator / contrast_stimulus
+             if np.isfinite(contrast_generator) and np.isfinite(contrast_stimulus)
+             and contrast_stimulus else 1.0)
+    if not np.isfinite(scale) or scale == 0:
+        scale = 1.0
+    # Both steps are folded into the filter itself -- dividing by the contrast
+    # ratio, then by the mean to state the generator as a contrast -- so that
+    # convolving this filter with the raw stimulus reproduces exactly the
+    # generator the nonlinearity was fitted against. Applying either step
+    # outside the filter would leave prediction and fit on different scales.
+    filter_causal = filter_causal / scale
+    if stim_mean:
+        filter_causal = filter_causal / stim_mean
+    generator = convolve_filter_with_stim(filter_causal, stimulus)
+    gain = float(scale)
     nl_x, nl_y = sample_nl(generator, response, num_bins=n_bins)
     params = fit_sigmoid(nl_x, nl_y)
     return filter_causal, generator, nl_x, nl_y, params, gain
@@ -1553,10 +1571,10 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
     For extracellular recordings the response is a smoothed spike rate; for
     voltage clamp it is the baseline-subtracted current.
 
-    **The stimulus is converted to contrast**, ``(I - lightMean) / lightMean``,
-    before fitting. Raw LED intensity scales with the mean, so a filter fitted
-    against it is in different units at every light level and the two cannot be
-    compared; in contrast units they can.
+    The stimulus stays in **raw intensity** units. Its contrast is
+    ``sigma / mean``, and :func:`fit_ln_model` normalises the filter by the
+    ratio of that to the generator signal's own contrast, so the generator ends
+    up with the same ``sigma / mean`` as the stimulus at every light level.
 
     ``skip_seconds`` drops the start of each epoch, where the cell is still
     responding to the step onto the epoch's first mean rather than to the
@@ -1620,14 +1638,13 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                 baseline = int(min(0.1 * sample_rate, amp.shape[1]))
                 trace = amp[index] - float(np.mean(amp[index][:baseline]))
             mean_level = float(row['lightMean'])
-            # Contrast, not raw intensity: the filter is then in the same units
-            # at every mean and the generator signal lands near +/-1.
-            contrast = ((stimulus[:width] - mean_level) / mean_level
-                        if mean_level else stimulus[:width])
+            # The stimulus stays in raw intensity units: its contrast is
+            # sigma/mean, and fit_ln_model normalises the filter by the ratio
+            # of that to the generator signal's own contrast.
             start = int(round(max(skip_seconds, 0.0) * sample_rate))
             if start >= width:
                 continue
-            stimuli.setdefault(mean_level, []).append(contrast[start:])
+            stimuli.setdefault(mean_level, []).append(stimulus[:width][start:])
             responses.setdefault(mean_level, []).append(trace[:width][start:])
             used += 1
 
@@ -1661,66 +1678,73 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
 
 
 def plot_condition(analysis: ConditionAnalysis, window_seconds: float = 10.0,
-                   figsize: Tuple[float, float] = (13.0, 7.6)):
-    """Two rows: the model on top, what it predicts underneath.
+                   width: float = 13.0, row_height: float = 2.3):
+    """The model on the first row, then one full-width row per trace window.
 
-    Top row is the fitted filter and nonlinearity. The filter is scaled so the
-    generator signal carries the same contrast as the stimulus, which puts the
-    nonlinearity's x axis near +/-1 at every light level and is what makes the
-    two means comparable; the amplitude divided out is the cell's *gain* and is
-    printed in the legend rather than lost.
+    The top row is the fitted filter, the nonlinearity, and gain against light
+    level. The filter is divided by ``contrast_generator / contrast_stimulus``,
+    so the generator signal carries the same ``sigma / mean`` as the stimulus
+    and the nonlinearity's x axis is a contrast at every light level; the ratio
+    divided out is the gain and is printed in the legend.
 
-    Bottom row is measured against predicted over the first, middle and last
-    ``window_seconds`` of an epoch. One window can flatter a model that drifts;
-    three spread across the epoch show whether it holds up as the cell adapts.
+    Each following row is one window of an epoch -- first, middle and last --
+    measured against predicted, full width. Three windows spread across the
+    epoch show whether the model holds up as the cell adapts, and giving each
+    its own row is the only way the individual events stay legible.
     """
     import matplotlib.pyplot as plt
+    from matplotlib.gridspec import GridSpec
     from retinanalysis.utils import style
 
     style.apply_publication_style()
     means = analysis.light_means
     colors = style.colors_for_conditions([f'{m:g}' for m in means])
-    fig, axes = plt.subplots(2, 3, figsize=figsize)
+    positions = ('first', 'middle', 'last')
+
+    fig = plt.figure(figsize=(width, row_height * (1 + len(positions)) + 0.6))
+    grid = GridSpec(1 + len(positions), 3, figure=fig,
+                    height_ratios=[1.5] + [1.0] * len(positions), hspace=0.55)
+    ax_filter = fig.add_subplot(grid[0, 0])
+    ax_nl = fig.add_subplot(grid[0, 1])
+    ax_gain = fig.add_subplot(grid[0, 2])
 
     for mean_level in means:
         model = analysis.ln_model[mean_level]
         color = colors[f'{mean_level:g}']
-        axes[0][0].plot(
+        ax_filter.plot(
             model.filter_time_s * 1e3, model.filter, lw=1.8, color=color,
             label=f'lightMean {mean_level:g} (n={analysis.n_epochs[mean_level]}, '
                   f'gain {model.filter_gain:.3g}, r²={model.r2:.2f})')
-        axes[0][1].plot(model.nl_x, model.nl_y, 'o', ms=3, alpha=0.6, color=color)
+        ax_nl.plot(model.nl_x, model.nl_y, 'o', ms=3, alpha=0.6, color=color)
         params = model.params
         if params and np.isfinite(params.get('alpha', np.nan)):
-            grid = np.linspace(np.nanmin(model.nl_x), np.nanmax(model.nl_x), 200)
-            axes[0][1].plot(grid, sigmoid(grid, params['alpha'], params['beta'],
-                                          params['gamma'], params['epsilon']),
-                            lw=1.6, color=color)
-    axes[0][0].axhline(0, color='#888888', lw=0.8, ls='--')
-    axes[0][0].set_xlabel('filter time (ms)')
-    axes[0][0].set_ylabel('filter (scaled so generator = contrast)')
-    axes[0][0].set_title('temporal filter', fontsize=9)
-    axes[0][0].legend(frameon=False, fontsize=7)
-    axes[0][1].set_xlabel('generator signal (contrast units)')
-    axes[0][1].set_ylabel(analysis.units)
-    axes[0][1].set_title('nonlinearity', fontsize=9)
+            grid_x = np.linspace(np.nanmin(model.nl_x), np.nanmax(model.nl_x), 200)
+            ax_nl.plot(grid_x, sigmoid(grid_x, params['alpha'], params['beta'],
+                                       params['gamma'], params['epsilon']),
+                       lw=1.6, color=color)
+    ax_filter.axhline(0, color='#888888', lw=0.8, ls='--')
+    ax_filter.set_xlabel('filter time (ms)')
+    ax_filter.set_ylabel('filter')
+    ax_filter.set_title('temporal filter', fontsize=9)
+    ax_filter.legend(frameon=False, fontsize=7)
+    ax_nl.set_xlabel('generator signal (contrast)')
+    ax_nl.set_ylabel(analysis.units)
+    ax_nl.set_title('nonlinearity', fontsize=9)
 
-    # Gain against light mean -- the adaptation, as one number per level.
     gains = [analysis.ln_model[m].filter_gain for m in means]
-    axes[0][2].plot(means, gains, 'o-', ms=6, lw=1.6, color='#444444')
+    ax_gain.plot(means, gains, '-', lw=1.6, color='#444444', zorder=1)
     for mean_level, gain in zip(means, gains):
-        axes[0][2].plot([mean_level], [gain], 'o', ms=8,
-                        color=colors[f'{mean_level:g}'])
-    axes[0][2].set_xlabel('light mean')
-    axes[0][2].set_ylabel('filter gain (peak before normalising)')
-    axes[0][2].set_title('gain vs light level', fontsize=9)
-    if len(means) > 1 and min(means) > 0:
-        axes[0][2].set_xscale('log')
-        axes[0][2].set_yscale('log')
+        ax_gain.plot([mean_level], [gain], 'o', ms=8,
+                     color=colors[f'{mean_level:g}'], zorder=2)
+    ax_gain.set_xlabel('light mean')
+    ax_gain.set_ylabel('gain')
+    ax_gain.set_title('gain vs light level', fontsize=9)
+    if len(means) > 1 and min(means) > 0 and min(gains) > 0:
+        ax_gain.set_xscale('log')
+        ax_gain.set_yscale('log')
 
-    # Bottom row: first, middle and last window of one epoch.
-    for column, position in enumerate(('first', 'middle', 'last')):
-        ax = axes[1][column]
+    for row, position in enumerate(positions, start=1):
+        ax = fig.add_subplot(grid[row, :])
         for mean_level in means:
             model = analysis.ln_model[mean_level]
             if not model.example_measured.size:
@@ -1735,18 +1759,23 @@ def plot_condition(analysis: ConditionAnalysis, window_seconds: float = 10.0,
                 lo = max(span - window_seconds, 0.0)
             keep = (time_s >= lo) & (time_s <= lo + window_seconds)
             color = colors[f'{mean_level:g}']
-            ax.plot(time_s[keep], model.example_measured[keep], lw=0.9,
-                    color=color, alpha=0.5)
-            ax.plot(time_s[keep], model.example_predicted[keep], lw=1.6, color=color)
-        ax.set_xlabel('time in epoch (s)')
-        if column == 0:
-            ax.set_ylabel(analysis.units)
-        ax.set_title(f'{position} {window_seconds:g} s — measured (thin) '
-                     f'vs predicted (thick)', fontsize=9)
+            ax.plot(time_s[keep], model.example_measured[keep], lw=0.8,
+                    color=color, alpha=0.45,
+                    label=f'lightMean {mean_level:g} measured' if row == 1 else None)
+            ax.plot(time_s[keep], model.example_predicted[keep], lw=1.5,
+                    color=color,
+                    label=f'lightMean {mean_level:g} predicted' if row == 1 else None)
+        ax.set_ylabel(analysis.units)
+        ax.set_title(f'{position} {window_seconds:g} s of an epoch — '
+                     f'measured (thin) vs predicted (thick)', fontsize=9)
+        if row == 1:
+            ax.legend(frameon=False, fontsize=7, ncol=2)
+        if row == len(positions):
+            ax.set_xlabel('time in epoch (s)')
 
     fig.suptitle(f'{analysis.exp_name} | blocks {analysis.block_ids} | '
                  f'{analysis.rec_type}', fontsize=11)
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
     return fig
 
 
