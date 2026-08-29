@@ -1,47 +1,58 @@
-"""VariableMeanNoise: LN models across a mean-luminance step, from rod levels up.
+"""VariableMeanNoise: LN models across a mean-luminance step, fitted in Python.
 
-Python port of ``analyzeVariableMeanNoise.m`` (rodAdaptation repo). The MATLAB
-drove an interactive riekesuite epoch tree; the analysis it produced was saved
-one cell at a time into ``summary/rodVariableMeanNoise.mat``, and every
-population figure in that script reads from the saved struct array rather than
-from the recordings. This module keeps that split and makes the saved file the
-primary source:
+The protocol
+------------
+``edu.washington.riekelab.{rieke,turner}.protocols.VariableMeanNoise`` -- the two
+packages carry the same protocol and the recorded epoch parameters are identical
+(``lightMean``, ``stdv``, ``seed``, ``led``, ``stimTime``, ``frequencyCutoff``,
+``numberOfFilters``), so :data:`PROTOCOLS` matches both and :func:`find_blocks`
+reports which variant each block came from.
 
-``load_summary``
-    the roster of saved cells -- one row per (date, cell, recording mode);
-``load_cell``
-    the arrays for one of them (adaptation kinetics, LN filters and
-    nonlinearities, the phase-resolved temporal LN model);
-``find_blocks`` / ``unanalyzed_dates``
-    discovery over the whole database, for the *other* direction -- finding
-    recordings that have not been analyzed yet.
+Gaussian noise of constant contrast is delivered **through an LED** while the
+mean light level steps periodically. One epoch therefore contains transitions in
+both directions, and the question is how the cell's linear-nonlinear model
+changes as it adapts to each new mean.
 
-**Why the saved file leads.** Of the 16 experiment dates in the summary, one
-(2021-08-18_B) currently has raw data reachable on this machine and one is in
-the DataJoint database. The analysis those 53 cells represent is therefore only
-reproducible from the saved arrays, so this module treats them as the data and
-the recordings as the optional extra.
+**No filter wheel.** The LED does not sit behind the wheel, so a recorded
+``background:FilterWheel:NDF`` does not attenuate this stimulus even though the
+block metadata carries one -- on 2021-08-18_B the blocks report ``FW3`` beside
+the LED's own ``B1, B12``. :func:`led_attenuation` uses the LED's ``ndfs`` only
+and returns the wheel separately, so the double-count cannot happen silently.
 
-**The stimulus.** Gaussian noise delivered at a mean luminance that steps
-part-way through each epoch, so one epoch contains a high-to-low transition and
-the next a low-to-high one. Throughout this module and the saved file, ``low``
-and ``high`` name the *step direction*: ``low`` is the response after a step
-down to the low mean, ``high`` after a step up. Each carries its own LN model,
-and ``temporalLNModel`` refits the model in five successive windows after the
-step so the filter and nonlinearity can be watched recovering.
+How this module is meant to be used
+-----------------------------------
+The saved MATLAB file is a **data-entry list**, not the data:
 
-**Model fitting is cascadegraph's**, the same library the MATLAB used
-(``SigmoidNlNode``, ``compute_filter``, ``sample_nl``), via its Python port at
-``cascadegraph/python``. Nothing here reimplements a filter or a sigmoid.
+1. :func:`load_summary` reads ``matlabSummary/rodVariableMeanNoise.mat`` -- the
+   53 cells the MATLAB analysis was run on;
+2. :func:`find_blocks` searches the database for VariableMeanNoise recordings,
+   the same discovery step as section 1 of the cone-disc notebooks;
+3. :func:`match_roster` intersects the two, so the analysis runs on cells that
+   were chosen *and* whose raw data is reachable;
+4. :func:`analyze_condition` loads those epochs, regenerates each epoch's
+   stimulus, and fits the LN model in Python with cascadegraph.
 
-**What cannot be read back.** Each saved model carries a ``node``, the fitted
-``SigmoidNlNode`` object. MATLAB stored it through the MCOS object mechanism,
-which ``scipy.io.loadmat`` cannot unpack -- it returns an opaque reference, so
-the stored ``alpha/beta/gamma/epsilon`` are not recoverable from Python. The
-measured nonlinearity (``nlX``/``nlY``) is saved as plain arrays and *is*
-readable, so :func:`fit_sigmoid` refits the same node class to those points.
-That is the same model fitted to the same data, but the parameters are a refit
-rather than the stored values, and :func:`fit_sigmoid` is where that happens.
+The MATLAB's own fits stay available through :func:`load_cell`, which is what
+makes step 4 checkable: the same cell can be refitted here and compared against
+what the MATLAB stored.
+
+**Reachability.** Of the 16 dates in the saved file, one (2021-08-18_B) is in
+the database. The wider search finds VariableMeanNoise blocks over ~146
+experiments, so the pipeline has plenty to run on -- but the overlap with the
+saved roster is currently one date, and :func:`match_roster` is where that
+shows up rather than in a confusing empty result later.
+
+Stimulus regeneration
+---------------------
+Symphony stores the noise **generator parameters and seed**, not the waveform,
+so the stimulus has to be rebuilt to fit an LN model.
+:func:`gaussian_noise_stimulus` ports ``GaussianNoiseGeneratorV2`` step for
+step, with one unavoidable dependency: MATLAB's
+``RandStream('mt19937ar').randn`` does not match any NumPy generator (its
+``rand`` does -- verified -- but ``randn`` uses a different transform from
+uniform to normal), so the Gaussian draw comes from the MATLAB engine and every
+later step is NumPy. Without the engine the function raises rather than
+returning a stimulus that silently is not the one presented.
 """
 from __future__ import annotations
 
@@ -53,22 +64,22 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-PROTOCOL = 'edu.washington.riekelab.grimes.protocols.VariableMeanNoise'
+# Both packages carry the same protocol; the recorded parameters are identical.
+PROTOCOLS = (
+    'edu.washington.riekelab.rieke.protocols.VariableMeanNoise',
+    'edu.washington.riekelab.turner.protocols.VariableMeanNoise',
+)
+PROTOCOL_SEARCH = 'VariableMeanNoise'
 
 # The saved analysis, kept beside this module so the notebook needs no absolute
-# path. This is the same file the MATLAB script writes to its `summary/` folder.
+# path. Same file the MATLAB script writes to its `summary/` folder.
 SUMMARY_DIR = Path(__file__).resolve().parent / 'matlabSummary'
 DEFAULT_SUMMARY_PATH = SUMMARY_DIR / 'rodVariableMeanNoise.mat'
 SUMMARY_VARIABLE = 'rodNoiseLNModelSummary'
 
-# The two step directions, in the order the figures should draw them.
 STEP_DIRECTIONS = ('low', 'high')
 STEP_LABELS = {'low': 'high → low', 'high': 'low → high'}
 
-# temporalLNModel windows, in order. The MATLAB always wrote five.
-PHASES = ('first', 'second', 'third', 'fourth', 'fifth')
-
-# Scalar identity fields on the saved struct, and the roster column they become.
 _IDENTITY = {
     'expDate': 'exp_date', 'cellLabel': 'cell_label', 'cellType': 'cell_type',
     'recType': 'rec_type', 'fitMode': 'fit_mode', 'exampleCell': 'example_cell',
@@ -77,10 +88,9 @@ _IDENTITY = {
 
 
 # --------------------------------------------------------------------------
-# reading the saved MATLAB summary
+# 1. the data-entry list: the saved MATLAB summary
 # --------------------------------------------------------------------------
 def _scalar(value):
-    """Unwrap the 0-d / 1-element arrays scipy leaves on MATLAB scalars."""
     if isinstance(value, np.ndarray):
         if value.size == 0:
             return np.nan
@@ -120,17 +130,16 @@ def summary_path(path=None) -> Path:
 
 
 def load_summary(path=None, show: bool = False) -> pd.DataFrame:
-    """The roster of analyzed cells saved by the MATLAB script.
+    """The cells the MATLAB analysis was run on -- the data-entry list.
 
     One row per saved entry, in file order, with ``index`` as the key
-    :func:`load_cell` takes. Scalars only -- the filters, nonlinearities and
-    generator signals stay on disk until :func:`load_cell` asks for one.
+    :func:`load_cell` takes and ``calendar_date`` as the key
+    :func:`match_roster` joins on. Scalars only; the saved arrays stay on disk
+    until asked for.
 
     ``duplicate`` marks entries whose (date, cell, mode) triple appears more
-    than once. The MATLAB appended to the struct array without checking, so
-    re-analyzing a cell added a second entry rather than replacing the first;
-    those rows are kept and flagged rather than dropped, since which one is
-    current can only be decided by looking.
+    than once -- the MATLAB appended a re-analysis rather than replacing the
+    original, so both are kept and flagged.
     """
     entries = _load_mat(str(summary_path(path)))
     rows = []
@@ -141,19 +150,17 @@ def load_summary(path=None, show: bool = False) -> pd.DataFrame:
         for direction in STEP_DIRECTIONS:
             row[f'tau_{direction}'] = _numeric(
                 getattr(getattr(entry, 'timeConsts', None), direction, np.nan))
-            row[f'half_point_{direction}'] = _numeric(
-                getattr(getattr(entry, 'halfPoint', None), direction, np.nan))
             model = getattr(getattr(entry, 'lnModel', None), direction, None)
             row[f'r2_{direction}'] = _numeric(getattr(model, 'r2', np.nan))
         rows.append(row)
     frame = pd.DataFrame(rows)
 
     # epochLen is normally the epoch duration in ms, but the MATLAB wrote
-    # `selectedNodes{1}.parent.splitValue`, which is whatever the parent tree
-    # node happened to split on. Where that parent was the NDF node the field
-    # holds an NDF list instead, so keep the raw text and add a numeric column
-    # that is NaN when it is not a duration.
+    # `selectedNodes{1}.parent.splitValue` -- whatever the parent tree node
+    # split on. Where that was the NDF node it holds an NDF list instead.
     frame['epoch_len_ms'] = pd.to_numeric(frame['epoch_len'], errors='coerce')
+    # The saved date is `yyyy/mm/dd`; the database writes `yyyy-mm-dd_R`.
+    frame['calendar_date'] = frame['exp_date'].str.replace('/', '-', regex=False)
     frame['cell_key'] = (frame['exp_date'] + '/' + frame['cell_label']
                          + '/' + frame['rec_type'])
     frame['duplicate'] = frame['cell_key'].duplicated(keep=False)
@@ -161,89 +168,43 @@ def load_summary(path=None, show: bool = False) -> pd.DataFrame:
                            .str.startswith('Y').fillna(False))
     if show:
         print(f'{len(frame)} saved cells | {frame.exp_date.nunique()} dates | '
-              f'{int(frame.duplicate.sum())} rows in duplicated '
-              f'(date, cell, mode) groups')
+              f'{int(frame.duplicate.sum())} rows in duplicated groups')
         print(pd.crosstab(frame.cell_type, frame.rec_type).to_string())
     return frame
 
 
 @dataclass
 class LNModel:
-    """One fitted linear-nonlinear model: filter, measured nonlinearity, r^2.
+    """A linear-nonlinear model: filter, sampled nonlinearity, variance explained.
 
-    ``filter_time_s`` is in seconds -- the saved ``filterTimeStamps`` run 0.001
-    to 1.0 over 1000 points, i.e. the 1000 ms filter the MATLAB configured,
-    expressed in seconds.
+    Used for both the models read back from the MATLAB file and the ones fitted
+    here, so the two can be compared directly. ``filter_time_s`` is in seconds;
+    ``source`` says which side produced it.
     """
 
-    direction: str
+    label: str
     r2: float
     filter: np.ndarray
     filter_time_s: np.ndarray
     nl_x: np.ndarray
     nl_y: np.ndarray
-    phase: Optional[str] = None
-
-    def sigmoid_fit(self) -> Dict[str, float]:
-        """Refit the saved nonlinearity; see the module docstring."""
-        return fit_sigmoid(self.nl_x, self.nl_y)
+    params: Dict[str, float] = field(default_factory=dict)
+    source: str = 'matlab'
 
     @property
     def biphasic_index(self) -> float:
-        """(peak - |trough|) / (peak + |trough|) of the filter.
-
-        The MATLAB's ``bpi``: +1 for a purely monophasic filter, 0 when the two
-        lobes are equal.
-        """
         peak, trough = np.nanmax(self.filter), abs(np.nanmin(self.filter))
         total = peak + trough
         return float((peak - trough) / total) if total else np.nan
 
     @property
     def time_to_peak_ms(self) -> float:
-        """Time of the filter's largest excursion, in milliseconds."""
         if self.filter.size == 0:
             return np.nan
-        index = int(np.nanargmax(np.abs(self.filter)))
-        return float(self.filter_time_s[index] * 1e3)
+        return float(self.filter_time_s[int(np.nanargmax(np.abs(self.filter)))] * 1e3)
 
 
-@dataclass
-class CellRecord:
-    """Everything saved for one analyzed cell."""
-
-    index: int
-    exp_date: str
-    cell_label: str
-    cell_type: str
-    rec_type: str
-    fit_mode: str
-    example_cell: str
-    epoch_len: str
-    bin_time_s: Dict[str, np.ndarray] = field(default_factory=dict)
-    bin_average: Dict[str, np.ndarray] = field(default_factory=dict)
-    bin_sem: Dict[str, np.ndarray] = field(default_factory=dict)
-    time_const_s: Dict[str, float] = field(default_factory=dict)
-    half_point_s: Dict[str, float] = field(default_factory=dict)
-    ln_model: Dict[str, LNModel] = field(default_factory=dict)
-    temporal_ln: Dict[str, Dict[str, LNModel]] = field(default_factory=dict)
-    phase_time_s: np.ndarray = field(default_factory=lambda: np.array([]))
-
-    @property
-    def key(self) -> str:
-        return f'{self.exp_date}/{self.cell_label}/{self.rec_type}'
-
-    @property
-    def units(self) -> str:
-        return 'firing rate (Hz)' if self.rec_type == 'extracellular' else 'current (pA)'
-
-    def __repr__(self) -> str:
-        return (f'<CellRecord {self.key} | {self.cell_type} | '
-                f"tau {self.time_const_s.get('low', float('nan')):.1f}/"
-                f"{self.time_const_s.get('high', float('nan')):.1f} s>")
-
-
-def _model_from(struct, direction: str, phase: Optional[str] = None) -> Optional[LNModel]:
+def _model_from(struct, label: str) -> Optional[LNModel]:
     if struct is None:
         return None
     filt = np.atleast_1d(np.asarray(getattr(struct, 'filter', []), dtype=float))
@@ -252,19 +213,24 @@ def _model_from(struct, direction: str, phase: Optional[str] = None) -> Optional
     if stamps.size != filt.size:
         stamps = np.arange(filt.size, dtype=float)
     return LNModel(
-        direction=direction, phase=phase,
-        r2=_numeric(getattr(struct, 'r2', np.nan)),
+        label=label, r2=_numeric(getattr(struct, 'r2', np.nan)),
         filter=filt, filter_time_s=stamps,
         nl_x=np.atleast_1d(np.asarray(getattr(struct, 'nlX', []), dtype=float)),
-        nl_y=np.atleast_1d(np.asarray(getattr(struct, 'nlY', []), dtype=float)))
+        nl_y=np.atleast_1d(np.asarray(getattr(struct, 'nlY', []), dtype=float)),
+        source='matlab')
 
 
-def load_cell(index, path=None) -> CellRecord:
-    """The saved arrays for one roster row.
+def load_cell(index, path=None) -> Dict[str, object]:
+    """The MATLAB's saved result for one roster row, for comparison.
 
-    ``index`` is the roster's ``index`` column, or a row/Series carrying it.
-    ``generatorSignal`` is deliberately not read: it is 123 MB of the file and
-    nothing downstream of the saved analysis uses it.
+    Returns the identity fields, the two step-direction LN models, and the
+    binned adaptation traces. This is the reference a Python refit is checked
+    against -- it is not the input to :func:`analyze_condition`.
+
+    The stored ``SigmoidNlNode`` object cannot be read back: MATLAB wrote it
+    through the MCOS mechanism and ``scipy.io.loadmat`` returns an opaque
+    reference, so the stored ``alpha/beta/gamma/epsilon`` are unavailable. The
+    measured ``nlX``/``nlY`` are plain arrays and come back intact.
     """
     if isinstance(index, (pd.Series, dict)):
         index = int(index['index'])
@@ -274,58 +240,318 @@ def load_cell(index, path=None) -> CellRecord:
         raise IndexError(f'index {index} outside 0..{entries.size - 1}')
     entry = entries[index]
 
-    record = CellRecord(
-        index=index,
-        exp_date=_text(getattr(entry, 'expDate', '')),
-        cell_label=_text(getattr(entry, 'cellLabel', '')),
-        cell_type=_text(getattr(entry, 'cellType', '')),
-        rec_type=_text(getattr(entry, 'recType', '')),
-        fit_mode=_text(getattr(entry, 'fitMode', '')),
-        example_cell=_text(getattr(entry, 'exampleCell', '')),
-        epoch_len=_text(getattr(entry, 'epochLen', '')))
-
+    out: Dict[str, object] = {
+        'index': index,
+        'exp_date': _text(getattr(entry, 'expDate', '')),
+        'cell_label': _text(getattr(entry, 'cellLabel', '')),
+        'cell_type': _text(getattr(entry, 'cellType', '')),
+        'rec_type': _text(getattr(entry, 'recType', '')),
+        'epoch_len': _text(getattr(entry, 'epochLen', '')),
+        'example_cell': _text(getattr(entry, 'exampleCell', '')),
+        'ln_model': {}, 'bin_time_s': {}, 'bin_average': {}, 'time_const_s': {},
+    }
     for direction in STEP_DIRECTIONS:
-        for name, target in (('binTimestamps', record.bin_time_s),
-                             ('binAverage', record.bin_average),
-                             ('binSte', record.bin_sem)):
+        for name, key in (('binTimestamps', 'bin_time_s'),
+                          ('binAverage', 'bin_average')):
             values = getattr(getattr(entry, name, None), direction, None)
-            target[direction] = (np.atleast_1d(np.asarray(values, dtype=float))
-                                 if values is not None else np.array([]))
-        record.time_const_s[direction] = _numeric(
+            out[key][direction] = (np.atleast_1d(np.asarray(values, dtype=float))
+                                   if values is not None else np.array([]))
+        out['time_const_s'][direction] = _numeric(
             getattr(getattr(entry, 'timeConsts', None), direction, np.nan))
-        record.half_point_s[direction] = _numeric(
-            getattr(getattr(entry, 'halfPoint', None), direction, np.nan))
         model = _model_from(
             getattr(getattr(entry, 'lnModel', None), direction, None), direction)
         if model is not None:
-            record.ln_model[direction] = model
-
-        block = getattr(getattr(entry, 'temporalLNModel', None), direction, None)
-        phase_models = {}
-        for phase in PHASES:
-            sub = _model_from(getattr(block, phase, None), direction, phase)
-            if sub is not None and sub.filter.size:
-                phase_models[phase] = sub
-        record.temporal_ln[direction] = phase_models
-
-    steps = getattr(getattr(entry, 'temporalLNModel', None), 'timeSteps', None)
-    record.phase_time_s = (np.atleast_1d(np.asarray(steps, dtype=float))
-                           if steps is not None else np.array([]))
-    return record
+            out['ln_model'][direction] = model
+    return out
 
 
 # --------------------------------------------------------------------------
-# model fitting -- cascadegraph, the library the MATLAB used
+# 2. dataset search -- the same discovery step as the cone-disc notebooks
+# --------------------------------------------------------------------------
+def find_blocks(exp_names: Optional[Sequence[str]] = None,
+                protocols: Sequence[str] = PROTOCOLS,
+                show: bool = True, height: int = 400) -> pd.DataFrame:
+    """VariableMeanNoise epoch blocks in the database.
+
+    Searches on the protocol name and keeps only the variants in ``protocols``,
+    so the rieke and turner copies of the same protocol are found together and
+    ``protocol_name`` says which is which. ``VariableMeanNoiseCurInject`` and
+    the monitor-based variants are different experiments and are excluded.
+    """
+    from retinanalysis.SCutils import explore as sc
+
+    frame = sc.find_blocks(PROTOCOL_SEARCH, show=False)
+    if frame.empty:
+        if show:
+            print(f'no blocks found for {PROTOCOL_SEARCH}')
+        return frame
+    frame = frame[frame.protocol_name.isin(list(protocols))].copy()
+    if exp_names is not None:
+        frame = frame[frame.exp_name.isin(list(exp_names))].copy()
+    frame['calendar_date'] = frame.exp_name.astype(str).str.slice(0, 10)
+    frame = frame.sort_values(['exp_name', 'block_id']).reset_index(drop=True)
+    if show:
+        print(f'{len(frame)} blocks | {frame.exp_name.nunique()} experiments')
+        print(frame.protocol_name.value_counts().to_string())
+        columns = [c for c in ('exp_name', 'block_id', 'protocol_name', 'ndfs',
+                               'filter_wheel_ndf', 'fixed_ndf_source')
+                   if c in frame.columns]
+        sc.scroll_table(frame[columns], height=height,
+                        num_cols=('block_id', 'filter_wheel_ndf'))
+    return frame
+
+
+def match_roster(roster: pd.DataFrame, blocks: Optional[pd.DataFrame] = None,
+                 show: bool = True) -> pd.DataFrame:
+    """Intersect the data-entry list with what the database actually holds.
+
+    One row per saved cell, with the experiment and blocks it maps onto where
+    the date is present. Matching is on calendar date: the saved file records
+    ``yyyy/mm/dd`` with no rig suffix, so it cannot distinguish two rigs run on
+    one day -- where that happens every matching experiment is listed and
+    ``n_experiments`` is above one.
+
+    Cell labels are deliberately **not** matched. The saved labels (``cell5``,
+    ``Cell2``) come from the riekesuite source tree and the database keeps its
+    own, so the date is the reliable join and the cell is chosen by hand.
+    """
+    blocks = find_blocks(show=False) if blocks is None else blocks
+    out = roster.copy()
+    if blocks.empty:
+        out['n_experiments'] = 0
+        out['experiments'] = ''
+        out['n_blocks'] = 0
+        out['reachable'] = False
+        return out
+
+    by_date = (blocks.groupby('calendar_date')
+               .agg(n_experiments=('exp_name', 'nunique'),
+                    experiments=('exp_name', lambda s: ', '.join(sorted(set(s)))),
+                    n_blocks=('block_id', 'nunique')).reset_index())
+    out = out.merge(by_date, on='calendar_date', how='left')
+    out['n_experiments'] = out['n_experiments'].fillna(0).astype(int)
+    out['n_blocks'] = out['n_blocks'].fillna(0).astype(int)
+    out['experiments'] = out['experiments'].fillna('')
+    out['reachable'] = out.n_blocks > 0
+    if show:
+        n = int(out.reachable.sum())
+        print(f'{n} of {len(out)} saved cells sit on a date the database has '
+              f'({out.loc[out.reachable, "calendar_date"].nunique()} of '
+              f'{out.calendar_date.nunique()} dates)')
+        if n:
+            print(out[out.reachable][['index', 'exp_date', 'cell_label',
+                                      'cell_type', 'rec_type', 'experiments',
+                                      'n_blocks']].to_string(index=False))
+    return out
+
+
+@lru_cache(maxsize=128)
+def _epoch_parameters_cached(block_id: int) -> pd.DataFrame:
+    import json
+    from retinanalysis.config import schema
+    epochs = (schema.Epoch() & f'parent_id={int(block_id)}').to_pandas().reset_index()
+    if epochs.empty:
+        return pd.DataFrame()
+    rows = []
+    for raw in epochs.parameters:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+        rows.append(value if isinstance(value, dict) else {})
+    return pd.DataFrame(rows)
+
+
+def epoch_parameters(block_id: int) -> pd.DataFrame:
+    """Recorded parameters for every epoch of one block, one row per epoch."""
+    return _epoch_parameters_cached(int(block_id)).copy()
+
+
+def block_conditions(exp_name: str, blocks: Optional[pd.DataFrame] = None,
+                     show: bool = True) -> pd.DataFrame:
+    """Per-block stimulus conditions for one experiment.
+
+    Reads the recorded epoch parameters rather than the protocol defaults, so
+    the ``lightMean`` values listed are the ones actually presented.
+    """
+    blocks = find_blocks(show=False) if blocks is None else blocks
+    subset = blocks[blocks.exp_name.eq(exp_name)]
+    rows = []
+    for block_id in subset.block_id.astype(int):
+        params = epoch_parameters(block_id)
+        if params.empty:
+            continue
+        row = {'exp_name': exp_name, 'block_id': int(block_id),
+               'n_epochs': len(params)}
+        for key in ('stimTime', 'sampleRate', 'frequencyCutoff',
+                    'numberOfFilters', 'led'):
+            values = pd.unique(params[key].dropna()) if key in params else []
+            row[key] = values[0] if len(values) == 1 else ', '.join(map(str, values))
+        for key in ('lightMean', 'stdv'):
+            values = (sorted(pd.to_numeric(params[key], errors='coerce')
+                             .dropna().unique()) if key in params else [])
+            row[key] = ', '.join(f'{v:g}' for v in values)
+        rows.append(row)
+    frame = pd.DataFrame(rows)
+    if show and len(frame):
+        print(f'{exp_name}: {len(frame)} VariableMeanNoise block(s)')
+        print(frame.to_string(index=False))
+    return frame
+
+
+# --------------------------------------------------------------------------
+# 3. light level -- LED filters only, the wheel is not in this path
+# --------------------------------------------------------------------------
+def led_attenuation(block_row, color: Optional[str] = None) -> Dict[str, object]:
+    """Optical density of the LED's own filters, ignoring the filter wheel.
+
+    The LED does not sit behind the wheel, so a recorded FilterWheel NDF must
+    not be added to this stimulus's attenuation. It comes back as
+    ``filter_wheel_ndf`` with ``wheel_ignored`` set, rather than being dropped
+    silently, because the same block metadata is right for a Stage protocol and
+    wrong here.
+
+    ``color`` defaults to the LED named in the block (``UV LED`` -> ``uv``).
+    """
+    from retinanalysis.utils.isomerization import (led_ndf_attenuations,
+                                                   parse_ndfs, infer_rig_name)
+
+    row = block_row.iloc[0] if isinstance(block_row, pd.DataFrame) else block_row
+    exp_name = str(row['exp_name'])
+    rig = infer_rig_name(exp_name)
+    tokens = tuple(t for t in parse_ndfs(row.get('ndfs'))
+                   if not str(t).upper().startswith('FW'))
+    if color is None:
+        led = str(row.get('led') or '')
+        color = led.split()[0].lower() if led else 'uv'
+
+    total, missing = 0.0, []
+    try:
+        table = dict(led_ndf_attenuations(rig, color))
+    except KeyError:
+        table = {}
+    for token in tokens:
+        if token in table:
+            total += float(table[token])
+        else:
+            missing.append(token)
+    wheel = row.get('filter_wheel_ndf')
+    return {
+        'exp_name': exp_name, 'rig': rig, 'led_color': color,
+        'led_ndfs': ', '.join(tokens) if tokens else '(none)',
+        'optical_density': np.nan if missing else total,
+        'attenuation': np.nan if missing else 10.0 ** -total,
+        'unknown_tokens': ', '.join(missing),
+        'filter_wheel_ndf': wheel,
+        'wheel_ignored': bool(pd.notna(wheel)),
+    }
+
+
+# --------------------------------------------------------------------------
+# 4. stimulus regeneration -- GaussianNoiseGeneratorV2
+# --------------------------------------------------------------------------
+_MATLAB_ENGINE = None
+
+
+def _matlab_engine():
+    """Start (once) and return a MATLAB engine. Only the Gaussian draw needs it."""
+    global _MATLAB_ENGINE
+    if _MATLAB_ENGINE is None:
+        try:
+            import matlab.engine
+        except ImportError as exc:                       # pragma: no cover
+            raise RuntimeError(
+                'Regenerating the stimulus needs the MATLAB engine, because '
+                "MATLAB's RandStream randn does not match any NumPy generator. "
+                'Install it into this env, or pass `noise=` explicitly.'
+            ) from exc
+        _MATLAB_ENGINE = matlab.engine.start_matlab()
+    return _MATLAB_ENGINE
+
+
+def matlab_randn(seed: int, n: int) -> np.ndarray:
+    """``RandStream('mt19937ar', 'Seed', seed).randn(1, n)``, exactly.
+
+    NumPy's Mersenne Twister matches MATLAB's ``rand`` but not its ``randn``
+    (verified in this project), because the two use different transforms from
+    uniform to normal. The stimulus has to be the one that was presented, so
+    this defers to MATLAB rather than approximating it.
+    """
+    engine = _matlab_engine()
+    engine.eval(f"cg_s = RandStream('mt19937ar','Seed',{int(seed)});", nargout=0)
+    values = engine.eval(f'cg_s.randn(1,{int(n)})', nargout=1)
+    return np.asarray(values, dtype=float).ravel()
+
+
+def gaussian_noise_stimulus(seed: int, stim_pts: int, st_dev: float,
+                            freq_cutoff: float, num_filters: int,
+                            mean: float, sample_rate: float,
+                            upper_limit: float = np.inf,
+                            lower_limit: float = -np.inf,
+                            inverted: bool = False,
+                            noise: Optional[np.ndarray] = None) -> np.ndarray:
+    """Port of ``GaussianNoiseGeneratorV2.generateStimulus``.
+
+    Follows the MATLAB step for step: draw ``stDev * randn``, FFT, apply a
+    Butterworth-shaped one-sided filter mirrored to full length, zero the DC
+    bin, return to the time domain, rescale so the post-smoothing standard
+    deviation is the requested one, add the mean, clip.
+
+    ``noise`` supplies the Gaussian draw directly, which is how this is tested
+    without the MATLAB engine.
+    """
+    stim_pts = int(stim_pts)
+    draw = matlab_randn(seed, stim_pts) if noise is None else np.asarray(noise, float)
+    if draw.size != stim_pts:
+        raise ValueError(f'noise has {draw.size} points, expected {stim_pts}')
+    noise_time = float(st_dev) * draw
+
+    noise_freq = np.fft.fft(noise_time)
+    freq_step = float(sample_rate) / stim_pts
+    if stim_pts % 2 == 0:
+        frequencies = np.arange(stim_pts // 2 + 1) * freq_step
+        one_sided = 1.0 / (1.0 + (frequencies / float(freq_cutoff))
+                           ** (2 * int(num_filters)))
+        filt = np.concatenate([one_sided, one_sided[1:-1][::-1]])
+    else:
+        frequencies = np.arange((stim_pts - 1) // 2 + 1) * freq_step
+        one_sided = 1.0 / (1.0 + (frequencies / float(freq_cutoff))
+                           ** (2 * int(num_filters)))
+        filt = np.concatenate([one_sided, one_sided[1:][::-1]])
+
+    # How much the filter shrinks the standard deviation. Variances of the
+    # sinusoidal components add, so this is an RMS over the filter, and the DC
+    # bin is excluded because it carries the mean rather than any variance.
+    filter_factor = np.sqrt(filt[1:] @ filt[1:] / (stim_pts - 1))
+
+    noise_freq = noise_freq * filt
+    noise_freq[0] = 0.0
+    noise_time = np.real(np.fft.ifft(noise_freq)) / filter_factor
+    if inverted:
+        noise_time = -noise_time
+    return np.clip(noise_time + float(mean), lower_limit, upper_limit)
+
+
+def epoch_stimulus(params, sample_rate: Optional[float] = None,
+                   noise: Optional[np.ndarray] = None) -> np.ndarray:
+    """Rebuild one epoch's stimulus from its recorded parameters."""
+    rate = float(sample_rate if sample_rate is not None else params['sampleRate'])
+    stim_pts = int(round(float(params['stimTime']) / 1e3 * rate))
+    return gaussian_noise_stimulus(
+        seed=int(float(params['seed'])), stim_pts=stim_pts,
+        st_dev=float(params['stdv']), freq_cutoff=float(params['frequencyCutoff']),
+        num_filters=int(float(params['numberOfFilters'])),
+        mean=float(params['lightMean']), sample_rate=rate, noise=noise)
+
+
+# --------------------------------------------------------------------------
+# 5. LN model fitting -- vendored cascadegraph
 # --------------------------------------------------------------------------
 def fit_sigmoid(nl_x, nl_y, optim_iters: int = 5) -> Dict[str, float]:
     """Fit ``alpha * Phi(beta * x + gamma) + epsilon`` with cascadegraph.
 
-    Uses ``cascadegraph.SigmoidNlNode``, the Python port of the same node class
-    the MATLAB fitted, so the parameter names and the model are identical.
-    Returns NaNs rather than raising when the fit fails, so a population loop
-    is not stopped by one bad cell.
+    ``SigmoidNlNode`` is the Python port of the node class the MATLAB fitted,
+    so parameter names and model are identical. Returns NaNs rather than
+    raising when the fit fails, so one bad cell does not stop a loop.
     """
-    from cascadegraph import SigmoidNlNode
+    from retinanalysis.utils.cascadegraph import SigmoidNlNode
 
     x = np.asarray(nl_x, dtype=float)
     y = np.asarray(nl_y, dtype=float)
@@ -334,10 +560,7 @@ def fit_sigmoid(nl_x, nl_y, optim_iters: int = 5) -> Dict[str, float]:
     failed = {k: np.nan for k in ('alpha', 'beta', 'gamma', 'epsilon', 'r2')}
     if x.size < 5:
         return failed
-
     node = SigmoidNlNode()
-    # The MATLAB's params0 for this protocol: twice the response spread for the
-    # maximum, unit steepness, no shift.
     guess = np.array([2 * float(np.max(np.abs(y))) or 1.0,
                       1.0 / (float(np.std(x)) or 1.0), 0.0, float(np.min(y))])
     try:
@@ -354,31 +577,27 @@ def fit_sigmoid(nl_x, nl_y, optim_iters: int = 5) -> Dict[str, float]:
 
 def sigmoid(x, alpha: float, beta: float, gamma: float, epsilon: float):
     """Evaluate the fitted form, for drawing a curve through the points."""
-    from cascadegraph import SigmoidNlNode
-    node = SigmoidNlNode()
-    return node.process_temp_params(
+    from retinanalysis.utils.cascadegraph import SigmoidNlNode
+    return SigmoidNlNode().process_temp_params(
         np.array([alpha, beta, gamma, epsilon]), np.asarray(x, dtype=float))
 
 
 def fit_ln_model(stimulus, response, sampling_interval: float,
-                 filter_length_s: float = 1.0,
+                 label: str = '', filter_length_s: float = 1.0,
                  frequency_cutoff: Optional[float] = None,
                  correct_stim_power: bool = True,
-                 n_bins: int = 100) -> Dict[str, object]:
-    """Fit an LN model to raw epochs, the way ``computeLNmodel.m`` does.
+                 n_bins: int = 100) -> LNModel:
+    """Fit an LN model to (epochs x time) stimulus and response matrices.
 
-    ``stimulus`` and ``response`` are (epochs x time) matrices on the same
-    clock. Every step is cascadegraph's: :func:`compute_filter` for the linear
-    stage, :func:`convolve_filter_with_stim` for the generator signal,
-    :func:`sample_nl` to bin the input-output relation, and
-    :class:`SigmoidNlNode` for the static nonlinearity.
-
-    This is the path for recordings that have *not* been through the MATLAB.
-    For the 53 saved cells, :func:`load_cell` already has the fitted result and
-    this does not need to run.
+    Every stage is cascadegraph's, matching ``computeLNmodel.m``:
+    ``compute_filter`` for the linear stage, ``convolve_filter_with_stim`` for
+    the generator signal, ``sample_nl`` to bin the input-output relation, and
+    ``SigmoidNlNode`` for the static nonlinearity.
     """
-    from cascadegraph import (compute_filter, convolve_filter_with_stim,
-                              sample_nl, compute_variance_explained)
+    from retinanalysis.utils.cascadegraph import (compute_filter,
+                                                  convolve_filter_with_stim,
+                                                  sample_nl,
+                                                  compute_variance_explained)
 
     stimulus = np.atleast_2d(np.asarray(stimulus, dtype=float))
     response = np.atleast_2d(np.asarray(response, dtype=float))
@@ -387,8 +606,15 @@ def fit_ln_model(stimulus, response, sampling_interval: float,
                          f'{response.shape} must have the same shape')
     filter_pts = int(round(filter_length_s / sampling_interval))
 
-    # compute_filter requires frequency_cutoff and sampling_interval together,
-    # so only hand it the pair when a cutoff was actually asked for.
+    # computeLNmodel.m low-passes the response at the same cutoff before
+    # fitting, so the model is not asked to explain noise the stimulus could
+    # not have driven.
+    if frequency_cutoff is not None:
+        from retinanalysis.utils.cascadegraph import apply_frequency_cutoff
+        response = np.atleast_2d(
+            apply_frequency_cutoff(response, frequency_cutoff, sampling_interval))
+
+    # compute_filter wants the cutoff and the interval together, or neither.
     cutoff_kwargs = ({} if frequency_cutoff is None else
                      dict(frequency_cutoff=frequency_cutoff,
                           sampling_interval=sampling_interval))
@@ -404,671 +630,203 @@ def fit_ln_model(stimulus, response, sampling_interval: float,
         r2 = float(compute_variance_explained(predicted, response))
     except Exception:
         r2 = params['r2']
-    return {
-        'filter': np.asarray(filter_causal, dtype=float),
-        'filter_time_s': np.arange(filter_pts) * sampling_interval,
-        'nl_x': np.asarray(nl_x, dtype=float),
-        'nl_y': np.asarray(nl_y, dtype=float),
-        'generator': generator, 'params': params, 'r2': r2,
-    }
+    return LNModel(label=label, r2=r2,
+                   filter=np.asarray(filter_causal, dtype=float),
+                   filter_time_s=np.arange(filter_pts) * sampling_interval,
+                   nl_x=np.asarray(nl_x, dtype=float),
+                   nl_y=np.asarray(nl_y, dtype=float),
+                   params=params, source='python')
 
 
-def fit_exponential(time_s, values) -> Tuple[float, np.ndarray]:
-    """Single exponential to an adaptation trace; returns ``(tau, fitted)``.
+def _block_average(trace: np.ndarray, factor: int) -> np.ndarray:
+    """Downsample by averaging within each window, as ``parseData.m`` does.
 
-    The MATLAB's ``fitExp`` returns a rate ``k`` and reports ``1/k``; this
-    returns that time constant directly, in the units of ``time_s``.
+    Slicing every nth sample would alias: the response is smoothed but the
+    stimulus carries power right up to its 60 Hz cutoff, and decimating a
+    10 kHz trace to 1 kHz without averaging folds that back in.
     """
-    from scipy.optimize import curve_fit
-    t = np.asarray(time_s, dtype=float)
-    y = np.asarray(values, dtype=float)
-    keep = np.isfinite(t) & np.isfinite(y)
-    t, y = t[keep], y[keep]
-    if t.size < 4:
-        return np.nan, np.full(np.size(time_s), np.nan)
-
-    def model(x, amplitude, rate, offset):
-        return amplitude * np.exp(-rate * x) + offset
-
-    try:
-        params, _ = curve_fit(
-            model, t, y, p0=[float(y[0] - y[-1]) or 1.0, 0.1, float(y[-1])],
-            maxfev=20000)
-    except Exception:
-        return np.nan, np.full_like(t, np.nan)
-    rate = params[1]
-    tau = float(1.0 / rate) if rate and np.isfinite(rate) else np.nan
-    return tau, model(t, *params)
+    factor = max(int(factor), 1)
+    if factor == 1:
+        return np.asarray(trace, dtype=float)
+    trace = np.asarray(trace, dtype=float)
+    width = (trace.size // factor) * factor
+    return trace[:width].reshape(-1, factor).mean(axis=1)
 
 
 # --------------------------------------------------------------------------
-# population tables
+# 6. the analysis: raw epochs -> stimulus -> LN model, split by light mean
 # --------------------------------------------------------------------------
-def select_population(roster: pd.DataFrame, rec_type: str = 'extracellular',
-                      cell_types: Optional[Sequence[str]] = None,
-                      drop_duplicates: bool = True,
-                      examples_only: bool = False) -> pd.DataFrame:
-    """Filter the roster for a population figure.
+@dataclass
+class ConditionAnalysis:
+    """LN models for one recording, one per mean light level."""
 
-    ``drop_duplicates`` keeps the *last* entry of each (date, cell, mode)
-    group, since the MATLAB appended a re-analysis rather than replacing the
-    original. Set it False to see every saved entry.
+    exp_name: str
+    block_ids: List[int]
+    rec_type: str
+    sample_rate: float
+    units: str
+    light_means: List[float] = field(default_factory=list)
+    n_epochs: Dict[float, int] = field(default_factory=dict)
+    ln_model: Dict[float, LNModel] = field(default_factory=dict)
+
+    def __repr__(self) -> str:
+        means = ', '.join(f'{m:g}' for m in self.light_means)
+        return (f'<ConditionAnalysis {self.exp_name} blocks={self.block_ids} '
+                f'| {self.rec_type} | lightMean {means}>')
+
+
+def analyze_condition(exp_name: str, block_ids: Sequence[int],
+                      rec_type: str = 'extracellular',
+                      filter_length_s: float = 1.0,
+                      downsample: int = 10,
+                      psth_sigma_ms: float = 10.0,
+                      n_bins: int = 100,
+                      frequency_cutoff: Optional[float] = None,
+                      max_epochs: Optional[int] = None,
+                      verbose: bool = True) -> ConditionAnalysis:
+    """Load epochs, regenerate their stimuli, and fit one LN model per light mean.
+
+    Epochs are grouped by their recorded ``lightMean``, since a filter fitted
+    across two mean levels would describe neither. ``downsample`` reduces the
+    10 kHz amplifier rate before fitting -- the noise is cut off at 60 Hz, so
+    1 kHz is already generous and the full rate makes the estimate slow without
+    making it better.
+
+    For extracellular recordings the response is a smoothed spike rate; for
+    voltage clamp it is the baseline-subtracted current.
+
+    ``frequency_cutoff`` defaults to the stimulus's own ``frequencyCutoff``
+    (60 Hz here) and is **load-bearing**, not cosmetic. The noise is 4-pole
+    filtered at that frequency, so its power above it is ~1e-9 of the power
+    below; dividing by that spectrum -- which is what ``correct_stim_power``
+    does -- amplifies noise without bound and returns a filter that is pure
+    noise. Cutting the filter off at the same frequency the stimulus was cut
+    off at is what ``computeLNmodel.m`` does through ``SETTINGS``.
     """
-    frame = roster[roster.rec_type.eq(rec_type)].copy()
-    if cell_types is not None:
-        frame = frame[frame.cell_type.isin(list(cell_types))]
-    if examples_only:
-        frame = frame[frame.is_example]
-    if drop_duplicates:
-        frame = frame.drop_duplicates('cell_key', keep='last')
-    return frame.reset_index(drop=True)
+    import retinanalysis as ra
+    from scipy.ndimage import gaussian_filter1d
 
+    spiking = rec_type == 'extracellular'
+    stimuli: Dict[float, List[np.ndarray]] = {}
+    responses: Dict[float, List[np.ndarray]] = {}
+    sample_rate = np.nan
+    cutoff = frequency_cutoff
+    used = 0
 
-def adaptation_traces(population: pd.DataFrame, path=None,
-                      normalize: bool = True) -> pd.DataFrame:
-    """Per-cell adaptation traces, long form.
-
-    ``normalize`` divides both directions by that cell's peak on the
-    low-to-high trace, which is the MATLAB's normalization: it puts the two
-    directions of one cell on a shared scale without flattening the difference
-    between them.
-    """
-    rows = []
-    for _, row in population.iterrows():
-        record = load_cell(row, path=path)
-        reference = np.nanmax(record.bin_average.get('high', np.array([np.nan])))
-        if normalize and (not np.isfinite(reference) or reference == 0):
+    for block_id in block_ids:
+        params = epoch_parameters(int(block_id))
+        if params.empty:
             continue
-        for direction in STEP_DIRECTIONS:
-            time_s = record.bin_time_s.get(direction, np.array([]))
-            values = record.bin_average.get(direction, np.array([]))
-            if time_s.size == 0 or values.size != time_s.size:
+        block = ra.SCResponseBlock(exp_name, int(block_id), b_spiking=spiking,
+                                   b_LED=True, verbose=False)
+        amp = np.asarray(block.amp_data, dtype=float)
+        sample_rate = float(block.amp_sample_rate)
+        # SCResponseBlock.get_spike_times() populates block.spike_times and
+        # returns None, so read the attribute rather than the return value.
+        spike_times = None
+        if spiking:
+            if getattr(block, 'spike_times', None) is None:
+                block.get_spike_times()
+            spike_times = block.spike_times
+        for index in range(min(len(params), amp.shape[0])):
+            if max_epochs is not None and used >= max_epochs:
+                break
+            row = params.iloc[index]
+            if cutoff is None and 'frequencyCutoff' in row:
+                cutoff = float(row['frequencyCutoff'])
+            try:
+                stimulus = epoch_stimulus(row, sample_rate=sample_rate)
+            except Exception as exc:
+                if verbose:
+                    print(f'  block {block_id} epoch {index}: '
+                          f'stimulus not rebuilt ({exc})')
                 continue
-            if normalize:
-                values = values / reference
-            for t, v in zip(time_s, values):
-                rows.append({'index': record.index, 'cell_key': record.key,
-                             'cell_type': record.cell_type,
-                             'rec_type': record.rec_type,
-                             'direction': direction, 'time_s': float(t),
-                             'value': float(v)})
-    return pd.DataFrame(rows)
+            width = min(stimulus.size, amp.shape[1])
+            if spiking:
+                trace = np.zeros(amp.shape[1], dtype=float)
+                times = np.asarray(spike_times[index], dtype=int)
+                times = times[(times >= 0) & (times < trace.size)]
+                trace[times] = 1.0
+                trace = gaussian_filter1d(
+                    trace, psth_sigma_ms / 1e3 * sample_rate) * sample_rate
+            else:
+                baseline = int(min(0.1 * sample_rate, amp.shape[1]))
+                trace = amp[index] - float(np.mean(amp[index][:baseline]))
+            mean_level = float(row['lightMean'])
+            stimuli.setdefault(mean_level, []).append(stimulus[:width])
+            responses.setdefault(mean_level, []).append(trace[:width])
+            used += 1
+
+    step = max(int(downsample), 1)
+    interval = step / sample_rate
+    analysis = ConditionAnalysis(
+        exp_name=exp_name, block_ids=[int(b) for b in block_ids],
+        rec_type=rec_type, sample_rate=sample_rate,
+        units='firing rate (Hz)' if spiking else 'current (pA)')
+    for mean_level in sorted(stimuli):
+        width = min(min(s.size for s in stimuli[mean_level]),
+                    min(r.size for r in responses[mean_level]))
+        stim = np.vstack([_block_average(s[:width], step)
+                          for s in stimuli[mean_level]])
+        resp = np.vstack([_block_average(r[:width], step)
+                          for r in responses[mean_level]])
+        analysis.light_means.append(mean_level)
+        analysis.n_epochs[mean_level] = int(stim.shape[0])
+        analysis.ln_model[mean_level] = fit_ln_model(
+            stim, resp, sampling_interval=interval,
+            label=f'lightMean {mean_level:g}',
+            filter_length_s=filter_length_s, n_bins=n_bins,
+            frequency_cutoff=cutoff)
+        if verbose:
+            model = analysis.ln_model[mean_level]
+            print(f'  lightMean {mean_level:g}: {stim.shape[0]} epochs | '
+                  f'r²={model.r2:.3f} | time-to-peak {model.time_to_peak_ms:.0f} ms')
+    return analysis
 
 
-def population_adaptation(population: pd.DataFrame, path=None,
-                          normalize: bool = True, n_bins: int = 30) -> pd.DataFrame:
-    """Mean adaptation trace per (cell type, direction), pooled over cells.
-
-    Cells were binned on their own time base, which differs between
-    recordings, so the traces are re-binned onto one grid before averaging --
-    the MATLAB's ``averageInBins``. Returns mean, SEM and the contributing cell
-    count per bin.
-    """
-    traces = adaptation_traces(population, path=path, normalize=normalize)
-    if traces.empty:
-        return traces
-    edges = np.linspace(traces.time_s.min(), traces.time_s.max(), n_bins + 1)
-    centres = 0.5 * (edges[:-1] + edges[1:])
-    traces = traces.assign(
-        bin=np.clip(np.digitize(traces.time_s, edges) - 1, 0, n_bins - 1))
-    grouped = (traces.groupby(['cell_type', 'direction', 'bin'], dropna=False)
-               .agg(mean=('value', 'mean'),
-                    sem=('value', lambda s: float(s.std(ddof=1) / np.sqrt(len(s)))
-                         if len(s) > 1 else np.nan),
-                    n_cells=('cell_key', 'nunique'))
-               .reset_index())
-    grouped['time_s'] = centres[grouped['bin'].to_numpy()]
-    return grouped.drop(columns='bin')
-
-
-def time_constant_table(population: pd.DataFrame, path=None,
-                        max_tau_s: float = 120.0) -> pd.DataFrame:
-    """Saved adaptation time constants per cell, plus a Python refit.
-
-    ``tau_saved_*`` is what the MATLAB stored; ``tau_refit_*`` is a single
-    exponential fitted here to the saved trace. They agree closely where the
-    fit was sound, so the useful column is ``implausible``: True when either
-    direction is negative, non-finite, or beyond ``max_tau_s``, which is how
-    a failed exponential fit shows up. The MATLAB kept those values without
-    flagging them and its population averages include them.
-    """
-    rows = []
-    for _, row in population.iterrows():
-        record = load_cell(row, path=path)
-        entry = {'index': record.index, 'cell_key': record.key,
-                 'cell_type': record.cell_type, 'rec_type': record.rec_type}
-        for direction in STEP_DIRECTIONS:
-            entry[f'tau_saved_{direction}'] = record.time_const_s.get(direction, np.nan)
-            tau, _ = fit_exponential(record.bin_time_s.get(direction, []),
-                                     record.bin_average.get(direction, []))
-            entry[f'tau_refit_{direction}'] = tau
-        saved = [entry[f'tau_saved_{d}'] for d in STEP_DIRECTIONS]
-        entry['implausible'] = any(
-            (not np.isfinite(v)) or v <= 0 or v > max_tau_s for v in saved)
-        rows.append(entry)
-    return pd.DataFrame(rows)
-
-
-def population_filters(population: pd.DataFrame, path=None,
-                       normalize: bool = True) -> pd.DataFrame:
-    """Mean temporal filter per (cell type, direction), pooled over cells.
-
-    Both directions are divided by the same per-cell scalar taken from the
-    high-to-low filter -- its peak for spikes, the magnitude of its trough for
-    voltage-clamp currents, which are inward and therefore negative. Using one
-    scalar for both keeps the gain change between directions visible; scaling
-    each separately would normalize it away.
-    """
-    rows = []
-    for _, row in population.iterrows():
-        record = load_cell(row, path=path)
-        reference_model = record.ln_model.get('low')
-        if reference_model is None or reference_model.filter.size == 0:
-            continue
-        if record.rec_type == 'extracellular':
-            reference = float(np.nanmax(reference_model.filter))
-        else:
-            reference = float(abs(np.nanmin(reference_model.filter)))
-        if normalize and (not np.isfinite(reference) or reference == 0):
-            continue
-        for direction, model in record.ln_model.items():
-            values = model.filter / reference if normalize else model.filter
-            for t, v in zip(model.filter_time_s, values):
-                rows.append({'cell_key': record.key, 'cell_type': record.cell_type,
-                             'direction': direction, 'time_s': float(t),
-                             'value': float(v)})
-    frame = pd.DataFrame(rows)
-    if frame.empty:
-        return frame
-    return (frame.groupby(['cell_type', 'direction', 'time_s'], dropna=False)
-            .agg(mean=('value', 'mean'),
-                 sem=('value', lambda s: float(s.std(ddof=1) / np.sqrt(len(s)))
-                      if len(s) > 1 else np.nan),
-                 n_cells=('cell_key', 'nunique'))
-            .reset_index())
-
-
-def population_nonlinearities(population: pd.DataFrame, path=None,
-                              normalize: bool = True,
-                              n_bins: int = 40) -> pd.DataFrame:
-    """Mean nonlinearity per (cell type, direction), pooled over cells.
-
-    Cells do not share a generator-signal axis, so each curve is resampled onto
-    a common quantile grid before averaging. Normalization follows
-    :func:`population_filters` -- one scalar from the low-to-high curve,
-    applied to both directions.
-    """
-    rows = []
-    for _, row in population.iterrows():
-        record = load_cell(row, path=path)
-        reference_model = record.ln_model.get('high')
-        if reference_model is None or reference_model.nl_y.size == 0:
-            continue
-        if record.rec_type == 'extracellular':
-            reference = float(np.nanmax(reference_model.nl_y))
-        else:
-            reference = float(abs(np.nanmin(reference_model.nl_y)))
-        if normalize and (not np.isfinite(reference) or reference == 0):
-            continue
-        for direction, model in record.ln_model.items():
-            if model.nl_x.size < 5:
-                continue
-            values = model.nl_y / reference if normalize else model.nl_y
-            for x, y in zip(model.nl_x, values):
-                rows.append({'cell_key': record.key, 'cell_type': record.cell_type,
-                             'direction': direction, 'generator': float(x),
-                             'value': float(y)})
-    frame = pd.DataFrame(rows)
-    if frame.empty:
-        return frame
-    out = []
-    for (cell_type, direction), block in frame.groupby(['cell_type', 'direction']):
-        edges = np.unique(np.nanquantile(block.generator,
-                                         np.linspace(0, 1, n_bins + 1)))
-        if edges.size < 3:
-            continue
-        centres = 0.5 * (edges[:-1] + edges[1:])
-        binned = np.clip(np.digitize(block.generator, edges) - 1, 0, centres.size - 1)
-        summary = (block.assign(bin=binned).groupby('bin')
-                   .agg(mean=('value', 'mean'),
-                        sem=('value', lambda s: float(s.std(ddof=1) / np.sqrt(len(s)))
-                             if len(s) > 1 else np.nan),
-                        n_cells=('cell_key', 'nunique'))
-                   .reset_index())
-        summary['generator'] = centres[summary['bin'].to_numpy()]
-        summary['cell_type'] = cell_type
-        summary['direction'] = direction
-        out.append(summary.drop(columns='bin'))
-    return pd.concat(out, ignore_index=True) if out else pd.DataFrame()
-
-
-def temporal_summary(population: pd.DataFrame, path=None) -> pd.DataFrame:
-    """Filter time-to-peak and biphasic index per phase after the step.
-
-    This is the phase-resolved model reduced to two numbers per window, which
-    is how the MATLAB's kinetics figures read it: recovery shows up as the
-    filter speeding up and becoming more biphasic as the phases advance.
-    """
-    rows = []
-    for _, row in population.iterrows():
-        record = load_cell(row, path=path)
-        for direction, phase_models in record.temporal_ln.items():
-            for order, (phase, model) in enumerate(phase_models.items()):
-                time_s = (float(record.phase_time_s[order])
-                          if order < record.phase_time_s.size else np.nan)
-                rows.append({
-                    'cell_key': record.key, 'cell_type': record.cell_type,
-                    'rec_type': record.rec_type, 'direction': direction,
-                    'phase': phase, 'phase_order': order, 'phase_time_s': time_s,
-                    'r2': model.r2, 'time_to_peak_ms': model.time_to_peak_ms,
-                    'biphasic_index': model.biphasic_index})
-    return pd.DataFrame(rows)
-
-
-# --------------------------------------------------------------------------
-# figures
-# --------------------------------------------------------------------------
-_DIRECTION_COLORS = {'low': '#33517A', 'high': '#B5802A'}
-
-
-def plot_cell(record: CellRecord, figsize: Tuple[float, float] = (11.0, 7.5)):
-    """One saved cell: adaptation trace, filter, nonlinearity, phase kinetics."""
+def plot_condition(analysis: ConditionAnalysis,
+                   figsize: Tuple[float, float] = (11.0, 4.4)):
+    """Filters and nonlinearities for one recording, one line per light mean."""
     import matplotlib.pyplot as plt
     from retinanalysis.utils import style
 
     style.apply_publication_style()
-    colors = _DIRECTION_COLORS
-    fig, axes = plt.subplots(2, 2, figsize=figsize)
-
-    ax = axes[0][0]
-    for direction in STEP_DIRECTIONS:
-        time_s = record.bin_time_s.get(direction, np.array([]))
-        values = record.bin_average.get(direction, np.array([]))
-        errors = record.bin_sem.get(direction, np.array([]))
-        if time_s.size == 0 or values.size != time_s.size:
-            continue
-        if errors.size == values.size:
-            ax.fill_between(time_s, values - errors, values + errors,
-                            color=colors[direction], alpha=0.18, lw=0)
-        ax.plot(time_s, values, 'o-', ms=3, lw=1.6, color=colors[direction],
-                label=f"{STEP_LABELS[direction]}  "
-                      f"τ={record.time_const_s.get(direction, float('nan')):.1f} s")
-    ax.set_xlabel('time after the step (s)')
-    ax.set_ylabel(record.units)
-    ax.set_title('adaptation after the mean step', fontsize=9)
-    ax.legend(frameon=False, fontsize=7)
-
-    ax = axes[0][1]
-    for direction, model in record.ln_model.items():
-        ax.plot(model.filter_time_s * 1e3, model.filter, lw=1.8,
-                color=colors[direction], label=STEP_LABELS[direction])
-    ax.axhline(0, color='#888888', lw=0.8, ls='--')
-    ax.set_xlabel('filter time (ms)')
-    ax.set_ylabel('filter (a.u.)')
-    ax.set_title('temporal filter', fontsize=9)
-    ax.legend(frameon=False, fontsize=7)
-
-    ax = axes[1][0]
-    for direction, model in record.ln_model.items():
-        ax.plot(model.nl_x, model.nl_y, 'o', ms=2.5, alpha=0.55,
-                color=colors[direction],
-                label=f'{STEP_LABELS[direction]} (r²={model.r2:.2f})')
-        params = model.sigmoid_fit()
-        if np.isfinite(params['alpha']):
-            grid = np.linspace(np.nanmin(model.nl_x), np.nanmax(model.nl_x), 200)
-            ax.plot(grid, sigmoid(grid, params['alpha'], params['beta'],
-                                  params['gamma'], params['epsilon']),
-                    lw=1.6, color=colors[direction])
-    ax.set_xlabel('generator signal')
-    ax.set_ylabel(record.units)
-    ax.set_title('nonlinearity (points saved, curve refitted)', fontsize=9)
-    ax.legend(frameon=False, fontsize=7)
-
-    ax = axes[1][1]
-    for direction, phase_models in record.temporal_ln.items():
-        if not phase_models:
-            continue
-        times, peaks = [], []
-        for order, model in enumerate(phase_models.values()):
-            times.append(float(record.phase_time_s[order])
-                         if order < record.phase_time_s.size else order)
-            peaks.append(model.time_to_peak_ms)
-        ax.plot(times, peaks, 'o-', ms=4, lw=1.6, color=colors[direction],
-                label=STEP_LABELS[direction])
-    ax.set_xlabel('time after the step (s)')
-    ax.set_ylabel('filter time-to-peak (ms)')
-    ax.set_title('filter kinetics across the step', fontsize=9)
-    ax.legend(frameon=False, fontsize=7)
-
-    fig.suptitle(f'{record.key} | {record.cell_type} | example: {record.example_cell}',
-                 fontsize=11)
-    fig.tight_layout()
-    return fig
-
-
-def plot_population_adaptation(population: pd.DataFrame, path=None,
-                               normalize: bool = True, n_bins: int = 30,
-                               min_cells: Optional[int] = None,
-                               figsize: Tuple[float, float] = (7.6, 5.0)):
-    """Population adaptation traces, one panel, colored by cell type.
-
-    Epoch lengths differ between recordings (50-60 s here), so the late bins
-    rest on only the longest epochs -- on this dataset the count falls from 18
-    cells to 2 after 50 s. ``min_cells`` drops bins below a threshold, and
-    defaults to half the maximum for that series, so the drawn curve is one
-    sample rather than a full population that thins into a handful of cells.
-    Pass ``min_cells=1`` to draw everything.
-    """
-    import matplotlib.pyplot as plt
-    from retinanalysis.utils import style
-
-    style.apply_publication_style()
-    table = population_adaptation(population, path=path,
-                                  normalize=normalize, n_bins=n_bins)
-    if table.empty:
-        print('no adaptation traces to plot')
-        return None
-    cell_types = sorted(table.cell_type.unique())
-    colors = style.colors_for_conditions(cell_types)
-    fig, ax = plt.subplots(figsize=figsize)
-    for cell_type in cell_types:
-        for direction in STEP_DIRECTIONS:
-            block = table[table.cell_type.eq(cell_type)
-                          & table.direction.eq(direction)].sort_values('time_s')
-            if block.empty:
-                continue
-            n = int(block.n_cells.max())
-            floor = int(np.ceil(n / 2)) if min_cells is None else int(min_cells)
-            block = block[block.n_cells >= floor]
-            if block.empty:
-                continue
-            ax.fill_between(block.time_s, block['mean'] - block['sem'].fillna(0),
-                            block['mean'] + block['sem'].fillna(0),
-                            color=colors[cell_type], alpha=0.14, lw=0)
-            ax.plot(block.time_s, block['mean'],
-                    ls='-' if direction == 'low' else '--',
-                    lw=1.9, color=colors[cell_type],
-                    label=f'{cell_type} {STEP_LABELS[direction]} (n={n})')
-    ax.set_xlabel('time after the mean step (s)')
-    ax.set_ylabel('normalized response' if normalize else 'response')
-    ax.legend(frameon=False, fontsize=7)
-    mode = population.rec_type.iloc[0] if len(population) else ''
-    fig.suptitle(f'Adaptation after a mean-luminance step — {mode}', fontsize=11)
-    fig.tight_layout()
-    return fig
-
-
-def plot_population_ln(population: pd.DataFrame, path=None, normalize: bool = True,
-                       figsize: Tuple[float, float] = (11.0, 4.4)):
-    """Population filters and nonlinearities side by side."""
-    import matplotlib.pyplot as plt
-    from retinanalysis.utils import style
-
-    style.apply_publication_style()
-    filters = population_filters(population, path=path, normalize=normalize)
-    nonlin = population_nonlinearities(population, path=path, normalize=normalize)
-    if filters.empty and nonlin.empty:
-        print('no LN models to plot')
-        return None
-    cell_types = sorted(set(filters.cell_type.unique()) | set(nonlin.cell_type.unique()))
-    colors = style.colors_for_conditions(cell_types)
+    means = analysis.light_means
+    colors = style.colors_for_conditions([f'{m:g}' for m in means])
     fig, axes = plt.subplots(1, 2, figsize=figsize)
-
-    for cell_type in cell_types:
-        for direction in STEP_DIRECTIONS:
-            block = filters[filters.cell_type.eq(cell_type)
-                            & filters.direction.eq(direction)].sort_values('time_s')
-            if not block.empty:
-                n = int(block.n_cells.max())
-                axes[0].fill_between(block.time_s * 1e3,
-                                     block['mean'] - block['sem'].fillna(0),
-                                     block['mean'] + block['sem'].fillna(0),
-                                     color=colors[cell_type], alpha=0.14, lw=0)
-                axes[0].plot(block.time_s * 1e3, block['mean'],
-                             ls='-' if direction == 'low' else '--',
-                             lw=1.8, color=colors[cell_type],
-                             label=f'{cell_type} {STEP_LABELS[direction]} (n={n})')
-            curve = nonlin[nonlin.cell_type.eq(cell_type)
-                           & nonlin.direction.eq(direction)].sort_values('generator')
-            if curve.empty:
-                continue
-            axes[1].fill_between(curve.generator,
-                                 curve['mean'] - curve['sem'].fillna(0),
-                                 curve['mean'] + curve['sem'].fillna(0),
-                                 color=colors[cell_type], alpha=0.14, lw=0)
-            axes[1].plot(curve.generator, curve['mean'],
-                         ls='-' if direction == 'low' else '--',
-                         lw=1.8, color=colors[cell_type])
+    for mean_level in means:
+        model = analysis.ln_model[mean_level]
+        color = colors[f'{mean_level:g}']
+        axes[0].plot(model.filter_time_s * 1e3, model.filter, lw=1.8, color=color,
+                     label=f'lightMean {mean_level:g} '
+                           f'(n={analysis.n_epochs[mean_level]}, r²={model.r2:.2f})')
+        axes[1].plot(model.nl_x, model.nl_y, 'o', ms=3, alpha=0.6, color=color)
+        params = model.params
+        if params and np.isfinite(params.get('alpha', np.nan)):
+            grid = np.linspace(np.nanmin(model.nl_x), np.nanmax(model.nl_x), 200)
+            axes[1].plot(grid, sigmoid(grid, params['alpha'], params['beta'],
+                                       params['gamma'], params['epsilon']),
+                         lw=1.6, color=color)
     axes[0].axhline(0, color='#888888', lw=0.8, ls='--')
     axes[0].set_xlabel('filter time (ms)')
-    axes[0].set_ylabel('normalized filter' if normalize else 'filter')
+    axes[0].set_ylabel('filter (a.u.)')
     axes[0].set_title('temporal filter', fontsize=9)
     axes[0].legend(frameon=False, fontsize=7)
     axes[1].set_xlabel('generator signal')
-    axes[1].set_ylabel('normalized response' if normalize else 'response')
+    axes[1].set_ylabel(analysis.units)
     axes[1].set_title('nonlinearity', fontsize=9)
+    fig.suptitle(f'{analysis.exp_name} | blocks {analysis.block_ids} | '
+                 f'{analysis.rec_type}', fontsize=11)
     fig.tight_layout()
     return fig
 
 
-# --------------------------------------------------------------------------
-# browsing the wider database (the not-yet-analyzed direction)
-# --------------------------------------------------------------------------
-def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
-                height: int = 400) -> pd.DataFrame:
-    """Every VariableMeanNoise epoch block in the DataJoint database.
-
-    This is the counterpart to :func:`load_summary`: the saved ``.mat`` holds
-    the cells that have been analyzed, and this finds recordings in general.
-    The two overlap only where a saved date was also ingested -- most saved
-    dates predate this database, so expect little overlap and use this to find
-    *new* recordings rather than to re-reach the saved ones.
-    """
-    from retinanalysis.SCutils import explore as sc
-
-    frame = sc.find_blocks(PROTOCOL, show=False)
-    if frame.empty:
-        if show:
-            print(f'no blocks found for {PROTOCOL}')
-        return frame
-    if exp_names is not None:
-        frame = frame[frame.exp_name.isin(list(exp_names))].copy()
-    frame = frame.sort_values(['exp_name', 'block_id']).reset_index(drop=True)
-    if show:
-        print(f'{len(frame)} blocks | {frame.exp_name.nunique()} experiments')
-        columns = [c for c in ('exp_name', 'cell_label', 'cell_type', 'block_id',
-                               'ndfs', 'ndf_fw', 'filter_wheel_ndf', 'protocol_name')
-                   if c in frame.columns]
-        sc.scroll_table(frame[columns], height=height)
-    return frame
-
-
-def unanalyzed_dates(roster: Optional[pd.DataFrame] = None,
-                     blocks: Optional[pd.DataFrame] = None) -> pd.DataFrame:
-    """Recorded dates that carry no saved analysis yet.
-
-    Dates are compared on the calendar date alone, since the saved file writes
-    ``yyyy/mm/dd`` while the database writes ``yyyy-mm-dd_R`` with a rig suffix.
-    """
-    roster = load_summary() if roster is None else roster
-    blocks = find_blocks(show=False) if blocks is None else blocks
-    if blocks.empty:
-        return blocks
-    analyzed = set(roster.exp_date.str.replace('/', '-', regex=False))
-    frame = blocks.copy()
-    frame['calendar_date'] = frame.exp_name.astype(str).str.slice(0, 10)
-    frame['has_saved_analysis'] = frame.calendar_date.isin(analyzed)
-    # sc.find_blocks returns different columns for different protocols -- cell
-    # labels are present for some and not others -- so aggregate over whatever
-    # this protocol actually has rather than assuming a schema.
-    agg = {'blocks': ('block_id', 'nunique')}
-    for column, name in (('cell_label', 'cells'), ('ndfs', 'ndf_combinations')):
-        if column in frame.columns:
-            agg[name] = (column, 'nunique')
-    return (frame.groupby(['exp_name', 'has_saved_analysis'], dropna=False)
-            .agg(**agg).reset_index()
-            .sort_values(['has_saved_analysis', 'exp_name']))
-
-
-# --------------------------------------------------------------------------
-# light level: NDF combinations and unit isomerizations
-# --------------------------------------------------------------------------
-# computeLedUnitIsom.m keeps its own attenuation tables and reference
-# isomerization rates. They are transcribed here so the two can be compared
-# rather than silently diverging; `retinanalysis.utils.isomerization` is the
-# source this module actually computes from.
-MATLAB_UV_OD = {
-    'two_photon': {'B1': .29, 'B2': .71, 'B3': 1.21, 'B4': 2.54, 'B5': 4.58,
-                   'B6': 2.71, 'B7': 5.13},
-    'shared_two_photon': {'G1': 1.0060, 'G2': 1.0524, 'G3': 2.1342, 'G4': 2.6278,
-                          'G6': .28, 'G7': .59, 'G8': 1.25, 'G9': 2.23},
-}
-# The gain setting on rig B is an attenuation too, and computeLedUnitIsom folds
-# it into the same sum.
-MATLAB_GAIN_OD = {'high': 0.0, 'medium': 1.0, 'low': 2.0}
-# Isomerizations per rod per second at LED intensity 1 with no attenuation, as
-# computeLedUnitIsom defines it. Rig B's comment reads "UV led, with FW and B2
-# NDFS, norm to attn"; rig G's reads "UV led, no NDFs".
-MATLAB_REFERENCE_ISOM = {'two_photon': 12822.0, 'shared_two_photon': 1377897.0}
-
-_FILTER_WHEEL_OD = {'FW0': 0.0, 'FW05': 0.5, 'FW1': 1.0, 'FW2': 2.0,
-                    'FW3': 3.0, 'FW4': 4.0}
-
-
-def parse_ndf_combination(value) -> Tuple[str, ...]:
-    """Split a saved NDF label into tokens.
-
-    Accepts what the various sources produce: a JSON-ish list
-    (``["G1","G3","G7"]``), a comma or space separated string, or a sequence.
-    Uses ``retinanalysis.utils.isomerization.parse_ndfs`` so the parsing
-    matches the rest of the package.
-    """
-    from retinanalysis.utils.isomerization import parse_ndfs
-
-    if isinstance(value, (list, tuple, set, np.ndarray)):
-        tokens = [str(v) for v in value]
-    else:
-        tokens = list(parse_ndfs(value))
-    return tuple(t.strip().strip('"').strip("'") for t in tokens if str(t).strip())
-
-
-def ndf_optical_density(tokens: Sequence[str], rig: str, color: str = 'uv',
-                        source: str = 'python') -> Tuple[float, List[str]]:
-    """Total optical density for a set of NDF tokens.
-
-    ``source='python'`` uses ``utils.isomerization.led_ndf_attenuations``, the
-    measured per-rig tables in ``utils.isomerization``. ``source='matlab'``
-    uses the transcribed :data:`MATLAB_UV_OD`. Filter-wheel tokens and rig-B
-    gain names resolve the same way in both. Returns the total and any tokens
-    that had no entry.
-    """
-    from retinanalysis.utils.isomerization import led_ndf_attenuations
-
-    if source == 'python':
-        table = dict(led_ndf_attenuations(rig, color))
-    elif source == 'matlab':
-        table = dict(MATLAB_UV_OD.get(rig, {}))
-    else:
-        raise ValueError("source must be 'python' or 'matlab'")
-    table.update(_FILTER_WHEEL_OD)
-    table.update(MATLAB_GAIN_OD)
-
-    total, missing = 0.0, []
-    for token in tokens:
-        key = str(token).strip()
-        if key in table:
-            total += float(table[key])
-            continue
-        try:                       # a bare number is already an optical density
-            total += float(key)
-        except ValueError:
-            missing.append(key)
-    return total, missing
-
-
-def unit_isomerization(tokens: Sequence[str], rig: str, color: str = 'uv',
-                       source: str = 'python',
-                       reference: Optional[float] = None) -> float:
-    """Isomerizations per rod per second at LED intensity 1, after the NDFs.
-
-    ``reference / 10**total_OD``, the calculation ``computeLedUnitIsom`` does.
-    The reference defaults to that function's per-rig value.
-    """
-    if reference is None:
-        reference = MATLAB_REFERENCE_ISOM.get(rig, np.nan)
-    total, missing = ndf_optical_density(tokens, rig, color, source=source)
-    if missing or not np.isfinite(reference):
-        return np.nan
-    return float(reference) / 10.0 ** total
-
-
-def ndf_table_comparison(rig: str, color: str = 'uv') -> pd.DataFrame:
-    """Per-token optical density from both tables, side by side.
-
-    The point of this table is to make disagreement visible. Where a token is
-    in one table only, the other column is NaN; where both have it, ``delta_od``
-    is the difference and ``light_ratio`` the factor it puts on the light level.
-    """
-    from retinanalysis.utils.isomerization import led_ndf_attenuations
-
-    python_table = dict(led_ndf_attenuations(rig, color))
-    matlab_table = dict(MATLAB_UV_OD.get(rig, {}))
-    rows = []
-    for token in sorted(set(python_table) | set(matlab_table)):
-        p = python_table.get(token, np.nan)
-        m = matlab_table.get(token, np.nan)
-        delta = p - m if np.isfinite(p) and np.isfinite(m) else np.nan
-        rows.append({'ndf': token, 'python_od': p, 'matlab_od': m,
-                     'delta_od': delta,
-                     'light_ratio': 10.0 ** delta if np.isfinite(delta) else np.nan})
-    return pd.DataFrame(rows)
-
-
-def isomerization_audit(combinations: Sequence, rig: str, color: str = 'uv',
-                        measured: Optional[Sequence[float]] = None) -> pd.DataFrame:
-    """Compute the light level for each NDF combination, both ways.
-
-    ``combinations`` is any sequence of NDF labels; ``measured`` is the recorded
-    R* where a recording saved one, compared against the computed value as a
-    ratio. A ratio far from 1 means the combination's attenuation and the saved
-    number disagree, which is the thing worth chasing.
-    """
-    rows = []
-    measured = list(measured) if measured is not None else [None] * len(combinations)
-    for value, saved in zip(combinations, measured):
-        tokens = parse_ndf_combination(value)
-        python_od, missing = ndf_optical_density(tokens, rig, color, 'python')
-        matlab_od, matlab_missing = ndf_optical_density(tokens, rig, color, 'matlab')
-        row = {
-            'ndf_combination': ', '.join(tokens) if tokens else '(none)',
-            'n_filters': len(tokens),
-            # A token absent from a table contributes nothing to its sum, which
-            # would read as "no attenuation" rather than "not known". Blank the
-            # total instead, per table, and name the tokens responsible.
-            'python_od': python_od if not missing else np.nan,
-            'matlab_od': matlab_od if not matlab_missing else np.nan,
-            'unknown_tokens': ', '.join(sorted(set(missing) | set(matlab_missing))),
-            'isom_python': unit_isomerization(tokens, rig, color, 'python'),
-            'isom_matlab': unit_isomerization(tokens, rig, color, 'matlab'),
-        }
-        if saved is not None and np.isfinite(float(saved)):
-            row['isom_saved'] = float(saved)
-            row['saved_over_python'] = (
-                float(saved) / row['isom_python']
-                if np.isfinite(row['isom_python']) and row['isom_python'] else np.nan)
-        rows.append(row)
-    return pd.DataFrame(rows)
-
-
 __all__ = [
-    'PROTOCOL', 'DEFAULT_SUMMARY_PATH', 'SUMMARY_DIR', 'STEP_DIRECTIONS',
-    'STEP_LABELS', 'PHASES', 'MATLAB_UV_OD', 'MATLAB_REFERENCE_ISOM',
-    'LNModel', 'CellRecord', 'summary_path', 'load_summary', 'load_cell',
-    'sigmoid', 'fit_sigmoid', 'fit_ln_model', 'fit_exponential',
-    'select_population', 'adaptation_traces', 'population_adaptation',
-    'time_constant_table', 'population_filters', 'population_nonlinearities',
-    'temporal_summary', 'plot_cell', 'plot_population_adaptation',
-    'plot_population_ln', 'find_blocks', 'unanalyzed_dates',
-    'parse_ndf_combination', 'ndf_optical_density', 'unit_isomerization',
-    'ndf_table_comparison', 'isomerization_audit',
+    'PROTOCOLS', 'PROTOCOL_SEARCH', 'DEFAULT_SUMMARY_PATH', 'SUMMARY_DIR',
+    'STEP_DIRECTIONS', 'STEP_LABELS', 'LNModel', 'ConditionAnalysis',
+    'summary_path', 'load_summary', 'load_cell',
+    'find_blocks', 'match_roster', 'block_conditions', 'epoch_parameters',
+    'led_attenuation', 'matlab_randn', 'gaussian_noise_stimulus',
+    'epoch_stimulus', 'fit_sigmoid', 'sigmoid', 'fit_ln_model',
+    'analyze_condition', 'plot_condition',
 ]
