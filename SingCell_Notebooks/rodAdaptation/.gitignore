@@ -4,3 +4,4 @@
 #   rodAdaptation/summary/rodVariableMeanNoise.mat
 # and is copied (or symlinked) into matlabSummary/ to run the notebook.
 matlabSummary/
+refs/
