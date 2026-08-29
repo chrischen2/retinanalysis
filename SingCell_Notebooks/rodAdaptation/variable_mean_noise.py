@@ -197,6 +197,11 @@ class LNModel:
     # which is near 1 almost regardless of how well the model predicts a trace.
     r2_train: float = np.nan
     nl_r2: float = np.nan
+    # `filter` is normalised to unit peak, as fitLN.m does, so the generator
+    # signal comes out in the same units as the contrast stimulus and lands
+    # near +/-1. The amplitude that normalisation divides out is the cell's
+    # gain, so it is kept here rather than lost.
+    filter_gain: float = np.nan
     n_train: int = 0
     n_test: int = 0
     example_time_s: np.ndarray = field(default_factory=lambda: np.array([]))
@@ -302,6 +307,40 @@ PROTOCOL_PARAMETERS = (
 # to fit a filter on. The recordings that matter here run 30-60 s.
 MIN_STIM_TIME_MS = 30_000
 
+# The primate ganglion-cell types this analysis is about. Everything else the
+# rigs recorded -- cones, horizontals, unlabelled cells -- is a different
+# experiment and is dropped rather than silently averaged in.
+PRIMATE_CELL_TYPES = ('ON-parasol', 'OFF-parasol', 'ON-midget', 'OFF-midget', 'AII')
+
+# Where the per-block recording-mode cache lives. Resolving a mode can need the
+# block's raw trace, which is seconds per block, so it is done once and stored.
+MODE_CACHE_PATH = Path(__file__).resolve().parent / 'block_modes.csv'
+
+
+def _match_cell_type(value, allowed=PRIMATE_CELL_TYPES) -> bool:
+    """True when a recorded cell type is one of ``allowed``, spelling aside."""
+    text = str(value or '').lower().replace('\\', '/').split('/')[-1]
+    text = text.replace('-', '').replace(' ', '').replace('_', '')
+    return any(text == str(a).lower().replace('-', '').replace(' ', '')
+               for a in allowed)
+
+
+def load_block_modes(path=None) -> pd.DataFrame:
+    """The cached per-block recording type, or an empty frame if not built.
+
+    Built by the notebook's mode-cache cell. Resolving a block needs its trace
+    whenever the epoch-group ``recordingTechnique`` and the series resistance do
+    not already settle it, which is why this is cached rather than recomputed.
+    """
+    path = Path(path) if path is not None else MODE_CACHE_PATH
+    if not path.exists():
+        return pd.DataFrame(columns=['exp_name', 'block_id', 'rec_type',
+                                     'n_epochs', 'series_resistance',
+                                     'mean_current_pa', 'rec_note'])
+    frame = pd.read_csv(path)
+    frame['block_id'] = pd.to_numeric(frame['block_id'], errors='coerce').astype('Int64')
+    return frame
+
 
 def _first_epoch_metadata(block_ids: Sequence[int]):
     """First-epoch parameters and epoch counts, in two batched queries.
@@ -341,6 +380,7 @@ def _first_epoch_metadata(block_ids: Sequence[int]):
 def find_blocks(exp_names: Optional[Sequence[str]] = None,
                 protocols: Sequence[str] = PROTOCOLS,
                 min_stim_time_ms: Optional[float] = MIN_STIM_TIME_MS,
+                cell_types: Optional[Sequence[str]] = PRIMATE_CELL_TYPES,
                 show: bool = True, height: int = 420) -> pd.DataFrame:
     """Every VariableMeanNoise block, with its cell and its protocol settings.
 
@@ -403,15 +443,35 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None,
     for name in PROTOCOL_PARAMETERS:
         frame[name] = [parameters.get(int(b), {}).get(name) for b in frame.block_id]
     frame['n_epochs'] = [int(counts.get(int(b), 0)) for b in frame.block_id]
+
+    # lightMean and stdv are written per epoch, so the first epoch only shows
+    # one of them. Read every epoch's to see what the block actually stepped
+    # between; contrast is stdv / lightMean and should be constant by design.
+    means, contrasts = [], []
+    for block_id in frame.block_id:
+        params = epoch_parameters(int(block_id))
+        light = pd.to_numeric(params.get('lightMean', pd.Series(dtype=float)),
+                              errors='coerce').dropna()
+        stdv = pd.to_numeric(params.get('stdv', pd.Series(dtype=float)),
+                             errors='coerce').dropna()
+        means.append(sorted(light.unique()))
+        ratio = (stdv / light).round(4) if len(light) == len(stdv) else pd.Series(dtype=float)
+        contrasts.append(sorted(ratio.dropna().unique()))
+    frame['light_means'] = means
+    frame['light_contrasts'] = contrasts
     frame['stimTime'] = pd.to_numeric(frame['stimTime'], errors='coerce')
     frame['stim_seconds'] = frame['stimTime'] / 1e3
     frame['led_color'] = (frame['led'].astype(str).str.split().str[0]
                           .str.lower().replace('none', ''))
 
-    dropped = 0
+    dropped = dropped_type = 0
     if min_stim_time_ms is not None:
         keep = frame.stimTime.ge(float(min_stim_time_ms))
         dropped = int((~keep).sum())
+        frame = frame[keep]
+    if cell_types is not None:
+        keep = frame.cell_type_short.map(lambda v: _match_cell_type(v, cell_types))
+        dropped_type = int((~keep).sum())
         frame = frame[keep]
     frame = frame.sort_values(['exp_name', 'cell_label', 'block_id']).reset_index(drop=True)
 
@@ -421,6 +481,8 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None,
         if dropped:
             print(f'  dropped {dropped} block(s) with stimTime < '
                   f'{min_stim_time_ms / 1e3:g} s')
+        if dropped_type:
+            print(f'  dropped {dropped_type} block(s) on non-primate-RGC cell types')
         print('  by protocol: ' + ', '.join(
             f'{n.rsplit(".", 1)[-1]} ({c})' if False else f'{n} {c}'
             for n, c in frame.protocol_name.value_counts().items()))
@@ -435,43 +497,194 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None,
 
 
 def find_protocol_cells(blocks: Optional[pd.DataFrame] = None,
-                        show: bool = True, height: int = 420) -> pd.DataFrame:
-    """One row per experiment/cell/LED condition -- the section 1 overview.
+                        modes: Optional[pd.DataFrame] = None,
+                        require_step: bool = True,
+                        single_contrast: bool = True,
+                        show: bool = True, height: int = 460) -> pd.DataFrame:
+    """One row per cell -- the section 1 table to pick a ``cell_index`` from.
 
-    The compact view the cone-disc notebooks open with: what is available to
-    analyze, with a ``date_index`` to copy into the next section. Per-epoch
-    settings are summarised across the cell's blocks, so a cell that ran two
-    light means shows both.
+    Per-epoch settings are summarised across the cell's blocks, and the cell is
+    kept only if it is worth analysing here:
+
+    ``require_step``
+        drops cells that only ever ran **one** light mean. This protocol is
+        about the step between means, and a cell that saw one mean has no step;
+    ``single_contrast``
+        drops cells that ran more than one noise contrast, since a filter
+        pooled across contrasts describes neither.
+
+    ``modes`` is the cached per-block recording type from
+    :func:`load_block_modes`. When it is available the epoch counts are broken
+    out into ``n_extracellular`` / ``n_exc`` / ``n_inh``, which is what says
+    whether a cell is worth opening and in which mode.
     """
     from retinanalysis.SCutils import explore as sc
 
     blocks = find_blocks(show=False) if blocks is None else blocks
     if blocks.empty:
         return blocks
+    modes = load_block_modes() if modes is None else modes
 
-    def joined(values):
-        seen = [str(v) for v in pd.unique(values.dropna()) if str(v) != '']
-        return ', '.join(seen)
+    frame = blocks.copy()
+    if not modes.empty:
+        frame = frame.merge(
+            modes[['block_id', 'rec_type']].astype({'block_id': 'int64'}),
+            on='block_id', how='left')
+    else:
+        frame['rec_type'] = ''
+    frame['rec_type'] = frame['rec_type'].fillna('')
 
-    cells = (blocks.groupby(['exp_name', 'cell_label', 'cell_type_short'],
-                            dropna=False)
-             .agg(blocks=('block_id', 'nunique'),
-                  epochs=('n_epochs', 'sum'),
-                  stim_seconds=('stim_seconds', joined),
-                  led=('led', joined), ndfs=('ndfs', joined),
-                  protocol_name=('protocol_name', joined),
-                  block_ids=('block_id', lambda s: ', '.join(
-                      str(int(b)) for b in sorted(set(s)))))
-             .reset_index())
+    rows = []
+    for (exp_name, cell_label, cell_type), group in frame.groupby(
+            ['exp_name', 'cell_label', 'cell_type_short'], dropna=False, sort=False):
+        means = sorted({m for values in group.light_means for m in values})
+        contrasts = sorted({c for values in group.light_contrasts for c in values})
+        counts = group.groupby('rec_type').n_epochs.sum()
+        rows.append({
+            'exp_name': exp_name, 'cell_label': cell_label,
+            'cell_type': cell_type,
+            'n_extracellular': int(counts.get('extracellular', 0)),
+            'n_exc': int(counts.get('exc', 0)),
+            'n_inh': int(counts.get('inh', 0)),
+            'n_unresolved': int(counts.get('', 0)),
+            'light_means': ', '.join(f'{m:g}' for m in means),
+            'n_light_means': len(means),
+            'light_contrast': ', '.join(f'{c:g}' for c in contrasts),
+            'n_contrasts': len(contrasts),
+            'stim_seconds': ', '.join(
+                f'{v:g}' for v in sorted(group.stim_seconds.dropna().unique())),
+            'led': ', '.join(sorted({str(v) for v in group.led.dropna()})),
+            '_block_ids': [int(b) for b in sorted(group.block_id)],
+        })
+    cells = pd.DataFrame(rows)
+    if cells.empty:
+        return cells
+
+    dropped_step = dropped_contrast = 0
+    if require_step:
+        keep = cells.n_light_means.gt(1)
+        dropped_step = int((~keep).sum())
+        cells = cells[keep]
+    if single_contrast:
+        keep = cells.n_contrasts.le(1)
+        dropped_contrast = int((~keep).sum())
+        cells = cells[keep]
+
     cells = cells.sort_values(['exp_name', 'cell_label']).reset_index(drop=True)
-    cells.insert(0, 'date_index',
-                 pd.factorize(cells['exp_name'], sort=False)[0] + 1)
+    cells.insert(0, 'cell_index', np.arange(len(cells)))
     if show:
-        print(f'{len(cells)} cell conditions across '
-              f'{cells.exp_name.nunique()} experiments')
-        sc.scroll_table(cells, height=height,
-                        num_cols=('date_index', 'blocks', 'epochs'))
+        print(f'{len(cells)} cells across {cells.exp_name.nunique()} experiments')
+        if dropped_step:
+            print(f'  dropped {dropped_step} cell(s) that ran only one light mean')
+        if dropped_contrast:
+            print(f'  dropped {dropped_contrast} cell(s) that ran more than one contrast')
+        if modes.empty:
+            print('  recording types not resolved yet -- build the mode cache '
+                  'to fill n_extracellular / n_exc / n_inh')
+        columns = ['exp_name', 'cell_index', 'cell_label', 'cell_type',
+                   'n_extracellular', 'n_exc', 'n_inh', 'light_means',
+                   'light_contrast', 'stim_seconds', 'led']
+        if int(cells.n_unresolved.sum()):
+            columns.insert(7, 'n_unresolved')
+        sc.tree_table(cells[columns], levels=['exp_name'], height=height,
+                      num_cols=('cell_index', 'n_extracellular', 'n_exc',
+                                'n_inh', 'n_unresolved'))
     return cells
+
+
+def cell_blocks(cells: pd.DataFrame, cell_index: int,
+                rec_type: Optional[str] = None,
+                modes: Optional[pd.DataFrame] = None) -> Tuple[str, List[int], str]:
+    """``(exp_name, block_ids, rec_type)`` for one row of the section 1 table.
+
+    Blocks of different recording types are never returned together: a spike
+    rate and a synaptic current are different quantities, and one cell often
+    has both. ``rec_type`` picks the group; the default is whichever has the
+    most epochs.
+    """
+    row = cells[cells.cell_index.eq(int(cell_index))]
+    if row.empty:
+        raise ValueError(f'cell_index {cell_index} is not in this table')
+    row = row.iloc[0]
+    modes = load_block_modes() if modes is None else modes
+    block_ids = list(row['_block_ids'])
+    if modes.empty:
+        return row.exp_name, block_ids, (rec_type or 'extracellular')
+
+    subset = modes[modes.block_id.isin(block_ids)]
+    if rec_type is None:
+        counts = subset.groupby('rec_type').n_epochs.sum().sort_values(ascending=False)
+        counts = counts[counts.index.astype(str).ne('')]
+        rec_type = counts.index[0] if len(counts) else 'extracellular'
+    chosen = [int(b) for b in subset.loc[subset.rec_type.eq(rec_type), 'block_id']]
+    return row.exp_name, (chosen or block_ids), rec_type
+
+
+def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
+                max_epochs: Optional[int] = 12, downsample: int = 50,
+                figsize: Tuple[float, float] = (12.0, 5.0)):
+    """Every epoch's response, coloured by the light mean it was recorded at.
+
+    Drawn before any fitting: this is where a dead epoch, a lost patch or a
+    mislabelled recording type shows up, and none of those are visible in a
+    filter.
+    """
+    import matplotlib.pyplot as plt
+    import retinanalysis as ra
+    from retinanalysis.utils import style
+    from scipy.ndimage import gaussian_filter1d
+
+    style.apply_publication_style()
+    spiking = rec_type == 'extracellular'
+    traces, labels = [], []
+    for block_id in block_ids:
+        params = epoch_parameters(int(block_id))
+        if params.empty:
+            continue
+        block = ra.SCResponseBlock(exp_name, int(block_id), b_spiking=spiking,
+                                   b_LED=True, verbose=False)
+        amp = np.asarray(block.amp_data, dtype=float)
+        rate = float(block.amp_sample_rate)
+        if spiking:
+            if getattr(block, 'spike_times', None) is None:
+                block.get_spike_times()
+        for index in range(min(len(params), amp.shape[0])):
+            if max_epochs is not None and len(traces) >= max_epochs:
+                break
+            if spiking:
+                trace = np.zeros(amp.shape[1], dtype=float)
+                times = np.asarray(block.spike_times[index], dtype=int)
+                times = times[(times >= 0) & (times < trace.size)]
+                trace[times] = 1.0
+                trace = gaussian_filter1d(trace, 0.01 * rate) * rate
+            else:
+                trace = amp[index] - float(np.mean(amp[index][:int(0.1 * rate)]))
+            traces.append((trace[::max(int(downsample), 1)],
+                           rate / max(int(downsample), 1)))
+            labels.append(float(params.iloc[index].get('lightMean', np.nan)))
+
+    if not traces:
+        print('no epochs to draw')
+        return None
+    means = sorted({m for m in labels if np.isfinite(m)})
+    colors = style.colors_for_conditions([f'{m:g}' for m in means])
+    fig, ax = plt.subplots(figsize=figsize)
+    offset_step = np.nanpercentile([np.ptp(t) for t, _ in traces], 90) or 1.0
+    for index, ((trace, rate), mean_level) in enumerate(zip(traces, labels)):
+        time_s = np.arange(trace.size) / rate
+        color = colors.get(f'{mean_level:g}', '#888888')
+        ax.plot(time_s, trace + index * offset_step, lw=0.7, color=color)
+    for mean_level in means:
+        ax.plot([], [], lw=2, color=colors[f'{mean_level:g}'],
+                label=f'lightMean {mean_level:g}')
+    ax.set_xlabel('time in epoch (s)')
+    ax.set_ylabel('firing rate (Hz)' if spiking else 'current (pA)')
+    ax.set_yticks([])
+    ax.legend(frameon=False, fontsize=7)
+    ax.set_title(f'{exp_name} | blocks {list(block_ids)} | {rec_type} | '
+                 f'{len(traces)} epochs, offset vertically', fontsize=10)
+    fig.tight_layout()
+    return fig
 
 
 @lru_cache(maxsize=128)
@@ -1142,10 +1355,27 @@ def _fit_ln_once(stimulus, response, sampling_interval, filter_pts,
     filter_causal, _ = compute_filter(
         stimulus, response, filter_pts,
         correct_stim_power=correct_stim_power, **cutoff_kwargs)
+    # Normalise the filter so the generator signal carries the same contrast as
+    # the stimulus does. fitLN.m divides by max(abs(filter)), but that alone
+    # does not set the scale: convolution sums over every tap, so a unit-peak
+    # 1 s filter against a 0.4-contrast stimulus returns a generator of +/-40.
+    # Matching the standard deviations instead puts the nonlinearity's x axis
+    # in contrast units near +/-1 at every light level, which is what makes the
+    # means comparable. The amplitude divided out is the cell's gain and is
+    # returned rather than lost.
+    filter_causal = np.asarray(filter_causal, dtype=float)
+    raw_peak = float(np.nanmax(np.abs(filter_causal)))
     generator = convolve_filter_with_stim(filter_causal, stimulus)
+    stim_sd = float(np.nanstd(stimulus))
+    gen_sd = float(np.nanstd(generator))
+    scale = (stim_sd / gen_sd) if (np.isfinite(gen_sd) and gen_sd > 0
+                                   and np.isfinite(stim_sd) and stim_sd > 0) else 1.0
+    filter_causal = filter_causal * scale
+    generator = generator * scale
+    gain = raw_peak if np.isfinite(raw_peak) and raw_peak else 1.0
     nl_x, nl_y = sample_nl(generator, response, num_bins=n_bins)
     params = fit_sigmoid(nl_x, nl_y)
-    return filter_causal, generator, nl_x, nl_y, params
+    return filter_causal, generator, nl_x, nl_y, params, gain
 
 
 def _predict(filter_vec, params, stimulus):
@@ -1231,7 +1461,7 @@ def fit_ln_model(stimulus, response, sampling_interval: float,
         test_idx = rng.choice(n_epochs, size=n_test, replace=False)
         train_idx = np.setdiff1d(np.arange(n_epochs), test_idx)
         try:
-            filt, _, _, _, params = _fit_ln_once(
+            filt, _, _, _, params, _ = _fit_ln_once(
                 stimulus[train_idx], response[train_idx], sampling_interval,
                 filter_pts, frequency_cutoff, correct_stim_power, n_bins)
             if not np.isfinite(params['alpha']):
@@ -1242,7 +1472,7 @@ def fit_ln_model(stimulus, response, sampling_interval: float,
             continue
 
     # Final model on every epoch -- the one worth plotting.
-    filt, generator, nl_x, nl_y, params = _fit_ln_once(
+    filt, generator, nl_x, nl_y, params, gain = _fit_ln_once(
         stimulus, response, sampling_interval, filter_pts,
         frequency_cutoff, correct_stim_power, n_bins)
     _, predicted_all = _predict(filt, params, stimulus)
@@ -1254,6 +1484,7 @@ def fit_ln_model(stimulus, response, sampling_interval: float,
         label=label,
         r2=float(np.nanmean(held_out)) if held_out else np.nan,
         r2_train=r2_train, nl_r2=params.get('r2', np.nan),
+        filter_gain=gain,
         n_train=int(n_epochs - n_test), n_test=int(n_test),
         filter=np.asarray(filt, dtype=float),
         filter_time_s=np.arange(filter_pts) * sampling_interval,
@@ -1308,6 +1539,7 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                       psth_sigma_ms: float = 10.0,
                       n_bins: int = 100,
                       frequency_cutoff: Optional[float] = None,
+                      skip_seconds: float = 2.0,
                       max_epochs: Optional[int] = None,
                       verbose: bool = True) -> ConditionAnalysis:
     """Load epochs, regenerate their stimuli, and fit one LN model per light mean.
@@ -1320,6 +1552,15 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
 
     For extracellular recordings the response is a smoothed spike rate; for
     voltage clamp it is the baseline-subtracted current.
+
+    **The stimulus is converted to contrast**, ``(I - lightMean) / lightMean``,
+    before fitting. Raw LED intensity scales with the mean, so a filter fitted
+    against it is in different units at every light level and the two cannot be
+    compared; in contrast units they can.
+
+    ``skip_seconds`` drops the start of each epoch, where the cell is still
+    responding to the step onto the epoch's first mean rather than to the
+    noise.
 
     ``frequency_cutoff`` defaults to the stimulus's own ``frequencyCutoff``
     (60 Hz here) and is **load-bearing**, not cosmetic. The noise is 4-pole
@@ -1379,8 +1620,15 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                 baseline = int(min(0.1 * sample_rate, amp.shape[1]))
                 trace = amp[index] - float(np.mean(amp[index][:baseline]))
             mean_level = float(row['lightMean'])
-            stimuli.setdefault(mean_level, []).append(stimulus[:width])
-            responses.setdefault(mean_level, []).append(trace[:width])
+            # Contrast, not raw intensity: the filter is then in the same units
+            # at every mean and the generator signal lands near +/-1.
+            contrast = ((stimulus[:width] - mean_level) / mean_level
+                        if mean_level else stimulus[:width])
+            start = int(round(max(skip_seconds, 0.0) * sample_rate))
+            if start >= width:
+                continue
+            stimuli.setdefault(mean_level, []).append(contrast[start:])
+            responses.setdefault(mean_level, []).append(trace[:width][start:])
             used += 1
 
     step = max(int(downsample), 1)
@@ -1412,15 +1660,19 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
     return analysis
 
 
-def plot_condition(analysis: ConditionAnalysis,
-                   example_seconds: float = 6.0,
-                   figsize: Tuple[float, float] = (13.0, 4.2)):
-    """Filter, nonlinearity, and measured-versus-predicted, per light mean.
+def plot_condition(analysis: ConditionAnalysis, window_seconds: float = 10.0,
+                   figsize: Tuple[float, float] = (13.0, 7.6)):
+    """Two rows: the model on top, what it predicts underneath.
 
-    The third panel is the one that says whether the model works: a filter and
-    a nonlinearity can both look reasonable while predicting a trace badly.
-    ``example_seconds`` limits how much of the first epoch is drawn, since a
-    60 s trace at 1 kHz is unreadable at full width.
+    Top row is the fitted filter and nonlinearity. The filter is scaled so the
+    generator signal carries the same contrast as the stimulus, which puts the
+    nonlinearity's x axis near +/-1 at every light level and is what makes the
+    two means comparable; the amplitude divided out is the cell's *gain* and is
+    printed in the legend rather than lost.
+
+    Bottom row is measured against predicted over the first, middle and last
+    ``window_seconds`` of an epoch. One window can flatter a model that drifts;
+    three spread across the epoch show whether it holds up as the cell adapts.
     """
     import matplotlib.pyplot as plt
     from retinanalysis.utils import style
@@ -1428,41 +1680,70 @@ def plot_condition(analysis: ConditionAnalysis,
     style.apply_publication_style()
     means = analysis.light_means
     colors = style.colors_for_conditions([f'{m:g}' for m in means])
-    fig, axes = plt.subplots(1, 3, figsize=figsize)
+    fig, axes = plt.subplots(2, 3, figsize=figsize)
+
     for mean_level in means:
         model = analysis.ln_model[mean_level]
         color = colors[f'{mean_level:g}']
-        axes[0].plot(model.filter_time_s * 1e3, model.filter, lw=1.8, color=color,
-                     label=f'lightMean {mean_level:g} '
-                           f'(n={analysis.n_epochs[mean_level]}, '
-                           f'r²={model.r2:.2f})')
-        axes[1].plot(model.nl_x, model.nl_y, 'o', ms=3, alpha=0.6, color=color)
+        axes[0][0].plot(
+            model.filter_time_s * 1e3, model.filter, lw=1.8, color=color,
+            label=f'lightMean {mean_level:g} (n={analysis.n_epochs[mean_level]}, '
+                  f'gain {model.filter_gain:.3g}, r²={model.r2:.2f})')
+        axes[0][1].plot(model.nl_x, model.nl_y, 'o', ms=3, alpha=0.6, color=color)
         params = model.params
         if params and np.isfinite(params.get('alpha', np.nan)):
             grid = np.linspace(np.nanmin(model.nl_x), np.nanmax(model.nl_x), 200)
-            axes[1].plot(grid, sigmoid(grid, params['alpha'], params['beta'],
-                                       params['gamma'], params['epsilon']),
-                         lw=1.6, color=color)
-        if model.example_measured.size:
-            keep = model.example_time_s <= example_seconds
-            axes[2].plot(model.example_time_s[keep], model.example_measured[keep],
-                         lw=1.0, color=color, alpha=0.55)
-            axes[2].plot(model.example_time_s[keep], model.example_predicted[keep],
-                         lw=1.6, color=color,
-                         label=f'lightMean {mean_level:g} prediction')
-    axes[0].axhline(0, color='#888888', lw=0.8, ls='--')
-    axes[0].set_xlabel('filter time (ms)')
-    axes[0].set_ylabel('filter (a.u.)')
-    axes[0].set_title('temporal filter', fontsize=9)
-    axes[0].legend(frameon=False, fontsize=7)
-    axes[1].set_xlabel('generator signal')
-    axes[1].set_ylabel(analysis.units)
-    axes[1].set_title('nonlinearity', fontsize=9)
-    axes[2].set_xlabel('time (s)')
-    axes[2].set_ylabel(analysis.units)
-    axes[2].set_title(f'measured (thin) vs predicted (thick), '
-                      f'first {example_seconds:g} s', fontsize=9)
-    axes[2].legend(frameon=False, fontsize=7)
+            axes[0][1].plot(grid, sigmoid(grid, params['alpha'], params['beta'],
+                                          params['gamma'], params['epsilon']),
+                            lw=1.6, color=color)
+    axes[0][0].axhline(0, color='#888888', lw=0.8, ls='--')
+    axes[0][0].set_xlabel('filter time (ms)')
+    axes[0][0].set_ylabel('filter (scaled so generator = contrast)')
+    axes[0][0].set_title('temporal filter', fontsize=9)
+    axes[0][0].legend(frameon=False, fontsize=7)
+    axes[0][1].set_xlabel('generator signal (contrast units)')
+    axes[0][1].set_ylabel(analysis.units)
+    axes[0][1].set_title('nonlinearity', fontsize=9)
+
+    # Gain against light mean -- the adaptation, as one number per level.
+    gains = [analysis.ln_model[m].filter_gain for m in means]
+    axes[0][2].plot(means, gains, 'o-', ms=6, lw=1.6, color='#444444')
+    for mean_level, gain in zip(means, gains):
+        axes[0][2].plot([mean_level], [gain], 'o', ms=8,
+                        color=colors[f'{mean_level:g}'])
+    axes[0][2].set_xlabel('light mean')
+    axes[0][2].set_ylabel('filter gain (peak before normalising)')
+    axes[0][2].set_title('gain vs light level', fontsize=9)
+    if len(means) > 1 and min(means) > 0:
+        axes[0][2].set_xscale('log')
+        axes[0][2].set_yscale('log')
+
+    # Bottom row: first, middle and last window of one epoch.
+    for column, position in enumerate(('first', 'middle', 'last')):
+        ax = axes[1][column]
+        for mean_level in means:
+            model = analysis.ln_model[mean_level]
+            if not model.example_measured.size:
+                continue
+            time_s = model.example_time_s
+            span = time_s[-1] if time_s.size else 0.0
+            if position == 'first':
+                lo = time_s[0]
+            elif position == 'middle':
+                lo = max(span / 2 - window_seconds / 2, 0.0)
+            else:
+                lo = max(span - window_seconds, 0.0)
+            keep = (time_s >= lo) & (time_s <= lo + window_seconds)
+            color = colors[f'{mean_level:g}']
+            ax.plot(time_s[keep], model.example_measured[keep], lw=0.9,
+                    color=color, alpha=0.5)
+            ax.plot(time_s[keep], model.example_predicted[keep], lw=1.6, color=color)
+        ax.set_xlabel('time in epoch (s)')
+        if column == 0:
+            ax.set_ylabel(analysis.units)
+        ax.set_title(f'{position} {window_seconds:g} s — measured (thin) '
+                     f'vs predicted (thick)', fontsize=9)
+
     fig.suptitle(f'{analysis.exp_name} | blocks {analysis.block_ids} | '
                  f'{analysis.rec_type}', fontsize=11)
     fig.tight_layout()
@@ -1476,8 +1757,10 @@ __all__ = [
     'DATE_OFFSETS', 'SAVED_DATE_OFFSET_DAYS', 'FALLBACK_OFFSETS',
     'SINGLE_CELL_ROOT', 'metadata_files', 'corrected_dates',
     'resolve_roster_files',
-    'find_blocks', 'find_protocol_cells', 'epoch_parameters',
-    'resolve_block_mode', 'PROTOCOL_PARAMETERS', 'MIN_STIM_TIME_MS',
+    'find_blocks', 'find_protocol_cells', 'cell_blocks', 'plot_traces',
+    'epoch_parameters', 'resolve_block_mode', 'load_block_modes',
+    'PROTOCOL_PARAMETERS', 'MIN_STIM_TIME_MS', 'PRIMATE_CELL_TYPES',
+    'MODE_CACHE_PATH',
     'led_attenuation', 'matlab_randn', 'gaussian_noise_stimulus',
     'epoch_stimulus', 'fit_sigmoid', 'sigmoid', 'fit_ln_model',
     'analyze_condition', 'plot_condition',

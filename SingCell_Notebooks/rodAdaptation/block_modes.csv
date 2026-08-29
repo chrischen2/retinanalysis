@@ -1,0 +1,494 @@
+exp_name,block_id,n_epochs,recordingTechnique,series_resistance,mean_current_pa,rec_type,rec_note
+2020-06-11_B,30238,14,whole-cell,4502721.425037111,-4907.0213738095235,exc,"'none' resolved to 'exc': series resistance is 4.5 MOhm, so whole-cell; polarity from the sign of the current"
+2020-06-11_B,30209,2,whole-cell,8439716.312056739,-739.41617125,exc,"'none' resolved to 'exc': series resistance is 8.4 MOhm, so whole-cell; polarity from the sign of the current"
+2020-06-11_B,30210,20,whole-cell,10935180.603661554,-2339.341992734375,exc,"'none' resolved to 'exc': series resistance is 10.9 MOhm, so whole-cell; polarity from the sign of the current"
+2020-06-11_B,30188,15,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-06-11_B,30174,19,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-06-11_B,30177,6,whole-cell,2989545.2876495263,-13203.161818055556,exc,"'none' resolved to 'exc': series resistance is 3.0 MOhm, so whole-cell; polarity from the sign of the current"
+2020-06-11_B,30216,14,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-06-11_B,30218,27,cell-attached,7514815.894297095,-2725.7807153549384,exc,"'none' resolved to 'exc': series resistance is 7.5 MOhm, so whole-cell; polarity from the sign of the current"
+2020-06-16_B,30318,10,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-06-16_B,30319,11,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-06-16_B,30325,4,whole-cell,7969707.897583845,-634.8130645833334,exc,"'none' resolved to 'exc': series resistance is 8.0 MOhm, so whole-cell; polarity from the sign of the current"
+2020-06-16_B,30326,7,whole-cell,7969707.897583845,-880.0988581845238,exc,"'none' resolved to 'exc': series resistance is 8.0 MOhm, so whole-cell; polarity from the sign of the current"
+2020-06-16_B,30331,10,whole-cell,14893617.021276595,-742.8767589166666,exc,"'none' resolved to 'exc': series resistance is 14.9 MOhm, so whole-cell; polarity from the sign of the current"
+2020-06-16_B,30332,8,whole-cell,14893617.021276595,-804.1861094791667,exc,"'none' resolved to 'exc': series resistance is 14.9 MOhm, so whole-cell; polarity from the sign of the current"
+2020-06-16_B,30333,16,whole-cell,14893617.021276595,-711.7574102083333,exc,"'none' resolved to 'exc': series resistance is 14.9 MOhm, so whole-cell; polarity from the sign of the current"
+2020-06-16_B,30336,8,whole-cell,14893617.021276595,-779.9616248958333,exc,"'none' resolved to 'exc': series resistance is 14.9 MOhm, so whole-cell; polarity from the sign of the current"
+2020-06-23_B,30406,10,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-06-23_B,30420,10,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-06-23_B,30421,10,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-07-13_G,10059,20,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-07-13_G,10062,15,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-07-13_G,10064,7,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-07-14_G,10090,6,whole-cell,,-415.48788489583336,none,
+2020-07-14_G,10099,5,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-07-14_G,10100,2,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-07-14_G,10101,5,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-07-14_G,10072,7,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-07-14_G,10074,10,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-07-14_G,10078,2,whole-cell,,-573.9150661458333,none,
+2020-07-14_G,10080,6,whole-cell,,-505.0440387152778,none,
+2020-07-29_G,10123,8,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-07-29_G,10114,4,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-07-29_G,10117,8,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-07-29_G,10119,6,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-07-29_G,10121,7,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-07-29_G,10103,2,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-07-29_G,10104,7,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-07-29_G,10105,3,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-07-29_G,10110,2,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-07-29_G,10111,6,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-07-29_G,10112,2,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-07-29_G,10107,12,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-07-29_G,10125,12,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-07-29_G,10129,7,whole-cell,,-1565.9903023065476,none,
+2020-07-29_G,10130,2,whole-cell,,-1737.18813203125,none,
+2020-07-29_G,10132,7,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-07-29_G,10134,2,whole-cell,,-5742.857584375,none,
+2020-07-29_G,10135,1,whole-cell,,-6745.9950885416665,none,
+2020-08-11_G,10159,12,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-08-11_G,10153,12,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-08-11_G,10156,2,whole-cell,,-1692.5936515625,none,
+2020-08-11_G,10157,7,whole-cell,,-1403.1783888392856,none,
+2020-08-11_G,10175,13,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-08-11_G,10184,16,whole-cell,,-1236.652217545573,none,
+2020-08-11_G,10187,2,whole-cell,,-705.0221216145833,none,
+2020-08-11_G,10188,4,whole-cell,,-643.8261723958333,none,
+2020-08-11_G,10145,1,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-08-11_G,10146,10,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-08-11_G,10149,2,whole-cell,,-2855.456009895833,none,
+2020-08-11_G,10151,6,whole-cell,,-3445.7139546875,none,
+2020-08-11_G,10152,12,whole-cell,,-3743.701936197917,none,
+2020-08-11_G,10137,14,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-08-11_G,10168,14,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-08-11_G,10171,15,whole-cell,,-2601.7096525694446,none,
+2020-08-11_G,10179,8,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-08-13_G,10193,12,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-08-13_G,10194,2,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-08-13_G,10195,12,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-08-13_G,10196,3,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-08-13_G,10199,2,whole-cell,,-2196.1216041666667,none,
+2020-08-13_G,10200,2,whole-cell,,-2066.2154651041665,none,
+2020-08-13_G,10201,7,whole-cell,,-2233.9945950892857,none,
+2020-08-13_G,10191,3,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-08-18_G,10206,14,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-08-18_G,10208,4,whole-cell,,-591.2790703125,none,
+2020-08-18_G,10204,4,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-08-25_G,10273,9,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-08-25_G,10275,12,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-08-25_G,10267,6,nan,,232.8106343936012,none,
+2020-08-25_G,10262,6,nan,,305.27807695075757,none,
+2020-08-25_G,10263,8,nan,,213.35361038352272,none,
+2020-08-25_G,10270,6,nan,,236.98918463541668,none,
+2020-08-25_G,10260,14,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-08-25_G,10256,14,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-08-25_G_scotopic,10252,14,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-08-25_G_scotopic,10246,14,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-08-25_G_scotopic,10248,8,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-08-25_G_scotopic,10249,7,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-10-20_G,10544,11,whole-cell,,-1144.4554971212121,none,
+2020-10-20_G,10545,5,whole-cell,,1116.5087615,none,
+2020-10-20_G,10550,12,whole-cell,,830.5571079861111,none,
+2020-10-20_G,10552,11,whole-cell,,-123.11172727272728,none,
+2020-10-20_G,10553,11,whole-cell,,1094.6704248106062,none,
+2020-10-20_G,10557,6,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-12-03_G,10940,12,nan,,171.87898399305558,none,
+2020-12-03_G,10948,8,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-12-03_G,10949,4,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-12-03_G,10942,12,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-12-03_G,10944,12,whole-cell,,-948.4272474392361,none,
+2020-12-03_G,10945,2,whole-cell,,1902.16428203125,none,
+2020-12-03_G,10946,8,whole-cell,,1738.3131822265625,none,
+2020-12-03_G,10930,11,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-12-03_G,10931,2,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-12-03_G,10934,6,whole-cell,,-863.3374133680555,none,
+2020-12-03_G,10936,12,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-12-03_G,10937,2,cell-attached,,,extracellular,epoch-group recordingTechnique is cell-attached
+2020-12-08_F,10967,2,whole-cell,19881199.272857618,735.9356908854166,inh,"'none' resolved to 'inh': series resistance is 19.9 MOhm, so whole-cell; polarity from the sign of the current"
+2020-12-08_F,10969,1,whole-cell,24385648.111800265,-69.4398546875,exc,"'none' resolved to 'exc': series resistance is 24.4 MOhm, so whole-cell; polarity from the sign of the current"
+2021-02-01_B,11401,12,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-02-01_B,11402,50,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-02-01_B,11392,31,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-03-02_B,11537,9,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-03-02_B,11548,10,whole-cell,16334934.797529168,-453.8920388541667,exc,"'none' resolved to 'exc': series resistance is 16.3 MOhm, so whole-cell; polarity from the sign of the current"
+2021-03-02_B,11528,10,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-03-02_B,11562,9,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-04-27_B,12017,12,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-04-27_B,12018,4,cell-attached,6556751.716538103,-1375.871075,exc,"'none' resolved to 'exc': series resistance is 6.6 MOhm, so whole-cell; polarity from the sign of the current"
+2021-04-27_B,12019,7,cell-attached,6556751.716538103,-2898.297827380952,exc,"'none' resolved to 'exc': series resistance is 6.6 MOhm, so whole-cell; polarity from the sign of the current"
+2021-04-27_B,12005,12,nan,0.0,-11.974508962499998,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2021-04-27_B,12013,12,nan,0.0,-164.69269736249996,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2021-04-27_B,12009,12,nan,0.0,-51.176513692708376,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2021-04-27_B,12011,11,nan,9042553.19148936,-2168.9514218181816,exc,"'none' resolved to 'exc': series resistance is 9.0 MOhm, so whole-cell; polarity from the sign of the current"
+2021-04-27_B,12021,7,nan,0.0,28.908819607142828,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2021-04-27_B,12024,7,nan,0.0,-238.43254641071428,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2021-04-27_B,12026,12,nan,0.0,-44.78410497552081,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2021-04-27_B,12015,7,nan,0.0,-300.73065782142857,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2021-05-05_B,12034,10,whole-cell,2892345.6605466856,-2922.7908464375,exc,"'none' resolved to 'exc': series resistance is 2.9 MOhm, so whole-cell; polarity from the sign of the current"
+2021-05-05_B,12031,13,whole-cell,0.0,-1219.4176697596154,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2021-05-25_B,12260,10,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-05-25_B,12261,5,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-05-25_B,12262,10,whole-cell,4330907.054871221,-4966.291271875,exc,"'none' resolved to 'exc': series resistance is 4.3 MOhm, so whole-cell; polarity from the sign of the current"
+2021-05-25_B,12265,13,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-05-25_B,12249,9,whole-cell,5175297.738525358,-5159.307402222223,exc,"'none' resolved to 'exc': series resistance is 5.2 MOhm, so whole-cell; polarity from the sign of the current"
+2021-05-25_B,12247,12,whole-cell,15748752.92680444,-1858.1909916666666,exc,"'none' resolved to 'exc': series resistance is 15.7 MOhm, so whole-cell; polarity from the sign of the current"
+2021-05-25_B,12248,3,whole-cell,15748752.92680444,-2424.101695,exc,"'none' resolved to 'exc': series resistance is 15.7 MOhm, so whole-cell; polarity from the sign of the current"
+2021-05-25_B,12243,11,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-05-25_B,12253,11,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-05-25_B,12252,13,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-05-25_B,12256,11,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-05-25_B,12258,6,whole-cell,7249976.567625833,-611.1301005208334,exc,"'none' resolved to 'exc': series resistance is 7.2 MOhm, so whole-cell; polarity from the sign of the current"
+2021-05-25_B,12245,13,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-05-25_B,12254,13,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-06-22_B,12536,12,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-06-22_B,12503,2,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-06-22_B,12513,10,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-06-22_B,12499,10,nan,0.0,95.26475959249996,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2021-06-22_B,12519,10,nan,0.0,16.286679244999995,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2021-06-22_B,12527,12,nan,8968635.862948578,-236.18229601041668,exc,"'none' resolved to 'exc': series resistance is 9.0 MOhm, so whole-cell; polarity from the sign of the current"
+2021-07-13_B,12619,6,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-07-19_B,12689,14,nan,0.0,-605.2774101041666,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2021-07-19_B,12690,12,nan,0.0,-539.22366796875,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2021-07-19_B,12684,14,nan,0.0,-85.63428038690476,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2021-07-19_B,12685,13,nan,0.0,-132.61521736378205,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2021-07-27_B,12699,15,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-07-27_B,12716,2,nan,0.0,-109.22684799999998,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2021-07-27_B,12721,14,nan,0.0,685.6263262276785,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2021-07-27_B,12722,5,nan,0.0,589.7726305208333,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2021-08-18_B,12748,18,nan,0.0,23.35856522685187,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2021-08-18_B,12753,12,nan,0.0,-139.1741021371526,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2021-08-18_B,12726,1,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-08-18_B,12757,10,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-08-18_B,12758,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-08-18_B,12743,13,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-08-18_B,12736,13,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-08-19_B,12777,6,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-08-19_B,12778,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-08-19_B,12771,9,nan,12467762.733720182,-684.2700911921296,exc,"'none' resolved to 'exc': series resistance is 12.5 MOhm, so whole-cell; polarity from the sign of the current"
+2021-08-19_B,12763,10,nan,0.0,-156.13481378333339,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2021-09-07_B,12789,12,nan,0.0,-127.26828805555556,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2021-09-07_B,12791,12,nan,0.0,-100.83337185503464,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2021-09-07_B,12796,4,nan,0.0,-200.17887796875,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2021-09-21_B,12869,14,whole-cell,10686653.771760156,-791.8952333779762,exc,"'none' resolved to 'exc': series resistance is 10.7 MOhm, so whole-cell; polarity from the sign of the current"
+2021-09-21_B,12880,12,whole-cell,6517800.7162418375,-757.3001583333333,exc,"'none' resolved to 'exc': series resistance is 6.5 MOhm, so whole-cell; polarity from the sign of the current"
+2021-09-23_B,12906,10,whole-cell,0.0,-839.7542807125,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2021-09-28_B,12910,10,whole-cell,0.0,-2620.8245321875,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2021-09-28_B,12930,14,nan,0.0,-996.2187619285714,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2021-09-28_B,12931,9,nan,0.0,-1046.9186651944444,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2021-10-07_B,12935,12,nan,9854758.567970444,-282.75051176041666,exc,"'none' resolved to 'exc': series resistance is 9.9 MOhm, so whole-cell; polarity from the sign of the current"
+2021-10-07_B,12937,12,nan,0.0,-522.7589784166667,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2021-10-14_B,12949,1,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-10-14_B,12950,1,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-10-14_B,12951,1,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-10-14_B,12952,1,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-10-14_B,12953,1,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-10-14_B,12954,1,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-10-14_B,12956,1,whole-cell,11630704.458311403,-635.8931784027777,exc,"'none' resolved to 'exc': series resistance is 11.6 MOhm, so whole-cell; polarity from the sign of the current"
+2021-10-14_B,12957,1,whole-cell,11630704.458311403,260.7844734027778,inh,"'none' resolved to 'inh': series resistance is 11.6 MOhm, so whole-cell; polarity from the sign of the current"
+2021-10-14_B,12958,1,whole-cell,11630704.458311403,-581.7620455555556,exc,"'none' resolved to 'exc': series resistance is 11.6 MOhm, so whole-cell; polarity from the sign of the current"
+2021-10-14_B,12959,1,whole-cell,11630704.458311403,151.3932802777778,inh,"'none' resolved to 'inh': series resistance is 11.6 MOhm, so whole-cell; polarity from the sign of the current"
+2021-10-14_B,12965,1,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-10-14_B,12966,1,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-10-14_B,12967,1,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-10-14_B,12945,1,whole-cell,7601592.059358263,-807.27750875,exc,"'none' resolved to 'exc': series resistance is 7.6 MOhm, so whole-cell; polarity from the sign of the current"
+2021-10-14_B,12946,1,whole-cell,7601592.059358263,-2007.0272720833334,exc,"'none' resolved to 'exc': series resistance is 7.6 MOhm, so whole-cell; polarity from the sign of the current"
+2021-10-14_B,12947,1,whole-cell,7601592.059358263,35.85326888888889,inh,"'none' resolved to 'inh': series resistance is 7.6 MOhm, so whole-cell; polarity from the sign of the current"
+2021-10-14_B,12963,1,whole-cell,0.0,-863.1213313888888,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2021-10-14_B,12964,1,whole-cell,0.0,235.45271569444444,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2021-10-14_B,12968,1,whole-cell,0.0,-665.0173622916667,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2021-10-14_B,12969,1,whole-cell,0.0,233.01030305555557,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2021-10-14_B,12960,1,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-10-14_B,12961,1,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2021-10-14_B,12962,1,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2022-04-06_B,4686,10,nan,13272134.52299245,-4177.598538854167,exc,"'none' resolved to 'exc': series resistance is 13.3 MOhm, so whole-cell; polarity from the sign of the current"
+2022-05-10_B,4734,9,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2022-05-10_B,4730,13,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2022-05-10_B,4732,7,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2022-05-10_B,4722,10,whole-cell,11549085.479656588,-2983.404444625,exc,"'none' resolved to 'exc': series resistance is 11.5 MOhm, so whole-cell; polarity from the sign of the current"
+2022-05-10_B,4723,10,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2022-05-10_B,4724,10,whole-cell,6636067.261496225,-2481.6671336875,exc,"'none' resolved to 'exc': series resistance is 6.6 MOhm, so whole-cell; polarity from the sign of the current"
+2022-05-10_B,4728,13,whole-cell,6269503.54609929,-888.4488636057692,exc,"'none' resolved to 'exc': series resistance is 6.3 MOhm, so whole-cell; polarity from the sign of the current"
+2022-05-10_B,4736,7,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2022-05-10_B,4720,7,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2022-05-18_B,4781,11,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2022-05-18_B,4784,10,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2022-05-18_B,4794,10,nan,0.0,-37.3179974,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2022-05-18_B,4795,12,nan,12374020.156774918,-1256.0599557291666,exc,"'none' resolved to 'exc': series resistance is 12.4 MOhm, so whole-cell; polarity from the sign of the current"
+2022-05-18_B,4782,10,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2022-05-18_B,4786,9,nan,0.0,-148.14691302083332,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2022-05-18_B,4788,9,nan,7429998.559147014,-1200.4828906944444,exc,"'none' resolved to 'exc': series resistance is 7.4 MOhm, so whole-cell; polarity from the sign of the current"
+2022-05-18_B,4789,7,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2022-05-18_B,4791,11,whole-cell,7218178.424785369,-1797.6085146590908,exc,"'none' resolved to 'exc': series resistance is 7.2 MOhm, so whole-cell; polarity from the sign of the current"
+2022-05-18_B,4796,10,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2022-05-18_B,4793,9,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2022-05-31_B,4800,11,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2022-05-31_B,4801,27,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2022-05-31_B,4803,24,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2022-05-31_B,4805,12,whole-cell,8895917.193789534,-753.1036233506944,exc,"'none' resolved to 'exc': series resistance is 8.9 MOhm, so whole-cell; polarity from the sign of the current"
+2022-05-31_B,4806,4,whole-cell,8895917.193789534,-663.90460546875,exc,"'none' resolved to 'exc': series resistance is 8.9 MOhm, so whole-cell; polarity from the sign of the current"
+2022-05-31_B,4798,21,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2022-06-07_B,4813,19,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2022-06-07_B,4816,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2022-06-07_B,4817,8,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2022-06-07_B,4818,11,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2022-06-07_B,4809,21,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2022-06-07_B,4811,23,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2023-05-17_B,4346,30,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2023-05-17_B,4340,22,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2023-05-17_B,4342,29,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-01-21_G,13726,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-01-21_G,13730,3,whole-cell,7156673.114119923,-357.12572743055557,exc,"'none' resolved to 'exc': series resistance is 7.2 MOhm, so whole-cell; polarity from the sign of the current"
+2025-01-21_G,13735,6,whole-cell,5149059.871350816,-96.61455138888888,exc,"'none' resolved to 'exc': series resistance is 5.1 MOhm, so whole-cell; polarity from the sign of the current"
+2025-01-21_G,13720,6,whole-cell,7028875.37993921,-751.1783711805556,exc,"'none' resolved to 'exc': series resistance is 7.0 MOhm, so whole-cell; polarity from the sign of the current"
+2025-01-21_G,13721,6,whole-cell,7028875.37993921,-705.0704364583333,exc,"'none' resolved to 'exc': series resistance is 7.0 MOhm, so whole-cell; polarity from the sign of the current"
+2025-01-21_G,13722,10,whole-cell,7028875.37993921,-851.65674875,exc,"'none' resolved to 'exc': series resistance is 7.0 MOhm, so whole-cell; polarity from the sign of the current"
+2025-01-21_G,13723,6,whole-cell,7028875.37993921,-1557.2663743055555,exc,"'none' resolved to 'exc': series resistance is 7.0 MOhm, so whole-cell; polarity from the sign of the current"
+2025-01-21_G,13714,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-01-28_G,13746,5,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-01-28_G,13747,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-01-28_G,13748,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-01-28_G,13736,1,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-01-28_G,13737,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-01-28_G,13738,5,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-01-28_G,13740,4,whole-cell,6658934.570468726,-689.9917321614583,exc,"'none' resolved to 'exc': series resistance is 6.7 MOhm, so whole-cell; polarity from the sign of the current"
+2025-01-28_G,13741,8,whole-cell,6658934.570468726,-620.3113510416666,exc,"'none' resolved to 'exc': series resistance is 6.7 MOhm, so whole-cell; polarity from the sign of the current"
+2025-01-28_G,13742,8,whole-cell,6658934.570468726,-710.1730295572917,exc,"'none' resolved to 'exc': series resistance is 6.7 MOhm, so whole-cell; polarity from the sign of the current"
+2025-01-28_G,13745,6,whole-cell,0.0,-357.09501666666665,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2025-02-04_B,13764,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-04_B,13765,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-04_B,13766,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-04_B,13759,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-04_B,13760,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-04_B,13761,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-04_B,13770,2,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-04_B,13771,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-04_B,13762,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-04_B,13763,2,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-04_B,13751,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-04_B,13752,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-04_B,13753,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-04_B,13754,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-04_B,13755,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-04_B,13757,3,whole-cell,7874376.46340222,-489.6078328125,exc,"'none' resolved to 'exc': series resistance is 7.9 MOhm, so whole-cell; polarity from the sign of the current"
+2025-02-04_B,13758,1,whole-cell,7874376.46340222,-724.0718807291667,exc,"'none' resolved to 'exc': series resistance is 7.9 MOhm, so whole-cell; polarity from the sign of the current"
+2025-02-12_G,13781,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-12_G,13782,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-12_G,13783,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-12_G,13784,1,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-12_G,13785,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-12_G,13786,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-12_G,13787,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-12_G,13788,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-12_G,13789,4,whole-cell,6959829.452827823,-434.90123033854167,exc,"'none' resolved to 'exc': series resistance is 7.0 MOhm, so whole-cell; polarity from the sign of the current"
+2025-02-12_G,13790,3,whole-cell,9679107.080572026,-600.9853546875,exc,"'none' resolved to 'exc': series resistance is 9.7 MOhm, so whole-cell; polarity from the sign of the current"
+2025-02-12_G,13791,1,whole-cell,9679107.080572026,-681.1455239583333,exc,"'none' resolved to 'exc': series resistance is 9.7 MOhm, so whole-cell; polarity from the sign of the current"
+2025-02-12_G,13792,4,whole-cell,9679107.080572026,-667.5772579427083,exc,"'none' resolved to 'exc': series resistance is 9.7 MOhm, so whole-cell; polarity from the sign of the current"
+2025-02-12_G,13793,4,whole-cell,9679107.080572026,-701.07489609375,exc,"'none' resolved to 'exc': series resistance is 9.7 MOhm, so whole-cell; polarity from the sign of the current"
+2025-02-12_G,13777,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-12_G,13778,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-12_G,13779,2,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-12_G,13773,4,whole-cell,9600415.153087702,-793.6999302083333,exc,"'none' resolved to 'exc': series resistance is 9.6 MOhm, so whole-cell; polarity from the sign of the current"
+2025-02-12_G,13774,4,whole-cell,9600415.153087702,-934.9282102864584,exc,"'none' resolved to 'exc': series resistance is 9.6 MOhm, so whole-cell; polarity from the sign of the current"
+2025-02-12_G,13797,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-12_G,13798,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-12_G,13799,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-19_G,13809,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-19_G,13810,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-19_G,13811,1,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-19_G,13812,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-19_G,13813,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-19_G,13814,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-19_G,13815,6,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-19_G,13816,2,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-19_G,13818,4,whole-cell,10670340.93822097,-175.13112364583333,exc,"'none' resolved to 'exc': series resistance is 10.7 MOhm, so whole-cell; polarity from the sign of the current"
+2025-02-19_G,13819,2,whole-cell,10670340.93822097,-173.02638291666668,exc,"'none' resolved to 'exc': series resistance is 10.7 MOhm, so whole-cell; polarity from the sign of the current"
+2025-02-19_G,13820,5,whole-cell,10670340.93822097,-161.724203125,exc,"'none' resolved to 'exc': series resistance is 10.7 MOhm, so whole-cell; polarity from the sign of the current"
+2025-02-19_G,13821,6,whole-cell,10670340.93822097,-135.0015990277778,exc,"'none' resolved to 'exc': series resistance is 10.7 MOhm, so whole-cell; polarity from the sign of the current"
+2025-02-19_G,13822,6,whole-cell,10670340.93822097,-133.22538677083332,exc,"'none' resolved to 'exc': series resistance is 10.7 MOhm, so whole-cell; polarity from the sign of the current"
+2025-02-19_G,13807,6,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-19_G,13824,2,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-19_G,13825,6,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-19_G,13826,6,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-19_G,13827,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-19_G,13831,3,whole-cell,629108.5840058695,-558.2506048611111,exc,"'none' resolved to 'exc': series resistance is 0.6 MOhm, so whole-cell; polarity from the sign of the current"
+2025-02-19_G,13800,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-19_G,13801,1,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-19_G,13802,1,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-19_G,13803,2,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-19_G,13804,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-19_G,13805,6,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-02-19_G,13806,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13854,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13855,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13856,6,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13857,5,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13858,5,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13859,6,nan,13072151.998115726,-1022.8564265625,exc,"'none' resolved to 'exc': series resistance is 13.1 MOhm, so whole-cell; polarity from the sign of the current"
+2025-03-06_G,13836,6,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13837,6,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13838,2,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13839,5,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13840,5,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13841,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13842,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13843,4,whole-cell,0.0,-383.115871640625,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2025-03-06_G,13844,4,whole-cell,0.0,-430.2227275260417,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2025-03-06_G,13845,3,whole-cell,0.0,-410.857161875,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2025-03-06_G,13846,5,whole-cell,0.0,-267.6129594166667,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2025-03-06_G,13847,2,whole-cell,0.0,-312.7813075,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2025-03-06_G,13848,1,whole-cell,0.0,-262.447915625,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2025-03-06_G,13849,2,whole-cell,0.0,-224.23861208333332,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2025-03-06_G,13850,6,whole-cell,0.0,-145.50423316840278,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2025-03-06_G,13851,6,whole-cell,0.0,-169.1482267013889,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2025-03-06_G,13832,5,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13833,5,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13834,5,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13835,5,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13866,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13867,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13868,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13869,1,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13870,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13871,5,whole-cell,0.0,-254.61397754166666,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2025-03-06_G,13872,4,whole-cell,0.0,-241.90171739583334,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2025-03-06_G,13873,4,whole-cell,0.0,-246.04424911458332,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2025-03-06_G,13864,6,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13865,6,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13860,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13861,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13862,5,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-06_G,13863,2,whole-cell,3177177.7502146745,-228.74665625,exc,"'none' resolved to 'exc': series resistance is 3.2 MOhm, so whole-cell; polarity from the sign of the current"
+2025-03-13_B,13880,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-13_B,13881,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-13_B,13882,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-13_B,13883,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-13_B,13884,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-13_B,13885,4,whole-cell,0.0,-137.77712544270832,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2025-03-13_B,13886,4,whole-cell,0.0,-138.38406356770832,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2025-03-13_B,13887,4,whole-cell,0.0,-149.26017166666668,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2025-03-13_B,13874,5,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-13_B,13875,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-13_B,13876,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-13_B,13877,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-13_B,13894,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-13_B,13895,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-13_B,13897,4,whole-cell,6944070.383337823,-494.91254401041664,exc,"'none' resolved to 'exc': series resistance is 6.9 MOhm, so whole-cell; polarity from the sign of the current"
+2025-03-13_B,13898,4,whole-cell,6944070.383337823,-510.8029808333333,exc,"'none' resolved to 'exc': series resistance is 6.9 MOhm, so whole-cell; polarity from the sign of the current"
+2025-03-13_B,13899,4,whole-cell,6944070.383337823,603.46930953125,inh,"'none' resolved to 'inh': series resistance is 6.9 MOhm, so whole-cell; polarity from the sign of the current"
+2025-03-13_B,13889,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-13_B,13890,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-13_B,13891,4,cell-attached,10863001.193736397,-542.9884740885417,exc,"'none' resolved to 'exc': series resistance is 10.9 MOhm, so whole-cell; polarity from the sign of the current"
+2025-03-13_B,13892,3,cell-attached,10863001.193736397,-721.5907329513889,exc,"'none' resolved to 'exc': series resistance is 10.9 MOhm, so whole-cell; polarity from the sign of the current"
+2025-03-13_B,13893,3,cell-attached,10863001.193736397,636.4971397222222,inh,"'none' resolved to 'inh': series resistance is 10.9 MOhm, so whole-cell; polarity from the sign of the current"
+2025-03-20_B,13903,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-20_B,13904,1,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-20_B,13905,5,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-20_B,13906,4,whole-cell,9271801.018879233,-262.488385859375,exc,"'none' resolved to 'exc': series resistance is 9.3 MOhm, so whole-cell; polarity from the sign of the current"
+2025-03-20_B,13907,4,whole-cell,9271801.018879233,-164.47342083333334,exc,"'none' resolved to 'exc': series resistance is 9.3 MOhm, so whole-cell; polarity from the sign of the current"
+2025-03-20_B,13917,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-20_B,13918,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-20_B,13919,4,nan,0.0,-276.3657000911458,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2025-03-20_B,13920,4,nan,0.0,-362.1452676953125,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2025-03-20_B,13921,4,nan,0.0,-399.2322759375,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2025-03-20_B,13922,3,nan,0.0,-460.0515504861111,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2025-03-20_B,13923,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-20_B,13924,3,whole-cell,0.0,-845.9568821527778,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2025-03-20_B,13912,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-20_B,13913,4,whole-cell,0.0,-332.33356078125,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2025-03-20_B,13914,4,whole-cell,0.0,-451.43060424479165,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2025-03-20_B,13915,4,whole-cell,0.0,-431.69932401041666,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2025-03-20_B,13916,3,whole-cell,0.0,-444.20734628472223,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2025-03-20_B,13902,5,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-20_B,13925,5,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-20_B,13926,5,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-20_B,13908,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-20_B,13909,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-03-20_B,13910,5,whole-cell,0.0,-413.5345115416667,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2025-03-20_B,13911,4,whole-cell,0.0,-420.61674109375,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2025-05-06_E,16969,15,whole-cell,0.0,-39.90798310694446,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2025-05-06_E,16970,4,whole-cell,0.0,-40.44954364843752,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2025-05-06_E,16971,16,whole-cell,0.0,-39.44766294270835,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2025-05-06_E,17006,16,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-05-06_E,17007,5,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-05-06_E,16996,32,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-05-06_E,17005,27,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-05-06_E,16983,32,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-05-13_E,17031,16,whole-cell,6532288.167226577,-577.7498724739584,exc,"'none' resolved to 'exc': series resistance is 6.5 MOhm, so whole-cell; polarity from the sign of the current"
+2025-05-13_E,17032,16,whole-cell,6648936.170212766,365.87819984375,inh,"'none' resolved to 'inh': series resistance is 6.6 MOhm, so whole-cell; polarity from the sign of the current"
+2025-05-13_E,17033,11,whole-cell,6648936.170212766,309.02225189393937,inh,"'none' resolved to 'inh': series resistance is 6.6 MOhm, so whole-cell; polarity from the sign of the current"
+2025-05-13_E,17034,13,whole-cell,6648936.170212766,-494.0408106730769,exc,"'none' resolved to 'exc': series resistance is 6.6 MOhm, so whole-cell; polarity from the sign of the current"
+2025-09-11_E,18177,10,whole-cell,0.0,-35.20629428125003,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2025-09-11_E,18178,10,whole-cell,0.0,-32.32428428125,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2025-09-11_E,18193,10,whole-cell,0.0,-40.10944928333332,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2025-09-11_E,18194,10,whole-cell,0.0,-36.965529334374985,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2025-09-11_E,18195,10,whole-cell,0.0,-36.24421876145834,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2025-09-11_E,18196,10,whole-cell,0.0,-34.52130546874999,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2025-09-11_E,18199,10,whole-cell,0.0,-44.30688803020837,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2025-09-11_E,18200,10,whole-cell,0.0,-44.30345103020832,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2025-09-11_E,18202,10,whole-cell,0.0,-48.01940833020835,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2025-09-11_E,18203,10,whole-cell,0.0,-44.593899338541654,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2025-09-24_E,18372,8,whole-cell,25007939.02826294,-79.75197345312496,exc,"'none' resolved to 'exc': series resistance is 25.0 MOhm, so whole-cell; polarity from the sign of the current"
+2025-12-16_G,14136,12,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-12-16_G,14126,12,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-12-16_G,14119,17,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-12-16_G,14128,5,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-12-16_G,14129,12,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-12-16_G,14132,11,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-12-16_G,14140,9,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2025-12-16_G,14123,10,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-02_G,14235,12,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-02_G,14219,11,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-02_G,14223,12,whole-cell,0.0,-217.51649527777778,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2026-01-02_G,14224,12,whole-cell,0.0,-196.26254041666667,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2026-01-02_G,14210,3,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-02_G,14211,12,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-02_G,14212,12,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-02_G,14215,10,whole-cell,15605961.19598838,-47.22741370833333,exc,"'none' resolved to 'exc': series resistance is 15.6 MOhm, so whole-cell; polarity from the sign of the current"
+2026-01-02_G,14216,12,whole-cell,20453540.366566755,-51.153785890625,exc,"'none' resolved to 'exc': series resistance is 20.5 MOhm, so whole-cell; polarity from the sign of the current"
+2026-01-02_G,14228,9,whole-cell,0.0,-49.17507275694443,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2026-01-02_G,14229,2,whole-cell,0.0,-55.725858354166675,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2026-01-02_G,14204,20,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-02_G,14205,11,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-13_G,14238,12,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-13_G,14248,12,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-13_G,14249,8,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-13_G,14266,12,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-13_G,14265,12,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-13_G,14256,12,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-13_G,14243,12,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-13_G,14242,10,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-13_G,14260,10,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-13_G,14263,3,whole-cell,28070944.46505041,-766.3701707638888,exc,"'none' resolved to 'exc': series resistance is 28.1 MOhm, so whole-cell; polarity from the sign of the current"
+2026-01-13_G,14264,4,whole-cell,28070944.46505041,-829.0154747916666,exc,"'none' resolved to 'exc': series resistance is 28.1 MOhm, so whole-cell; polarity from the sign of the current"
+2026-01-14_G,14272,10,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-14_G,14276,4,whole-cell,0.0,-812.7796045833334,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2026-01-14_G,14284,11,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-14_G,14268,19,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-14_G,14280,5,nan,0.0,-8.394746033333334,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2026-01-28_G,14618,5,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-28_G,14619,4,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-28_G,14620,6,whole-cell,10574785.646236902,-26.874293291666667,exc,"'none' resolved to 'exc': series resistance is 10.6 MOhm, so whole-cell; polarity from the sign of the current"
+2026-01-28_G,14627,8,nan,0.0,-8.476619049479167,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes
+2026-01-28_G,14630,10,nan,7751757.530611295,-199.48761320833333,exc,"'none' resolved to 'exc': series resistance is 7.8 MOhm, so whole-cell; polarity from the sign of the current"
+2026-01-28_G,14631,6,nan,7751757.530611295,-231.1032959982639,exc,"'none' resolved to 'exc': series resistance is 7.8 MOhm, so whole-cell; polarity from the sign of the current"
+2026-01-28_G,14608,10,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-28_G,14609,8,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-28_G,14613,8,whole-cell,8790454.569452511,-269.715577265625,exc,"'none' resolved to 'exc': series resistance is 8.8 MOhm, so whole-cell; polarity from the sign of the current"
+2026-01-28_G,14615,10,whole-cell,8790454.569452511,-205.1940059375,exc,"'none' resolved to 'exc': series resistance is 8.8 MOhm, so whole-cell; polarity from the sign of the current"
+2026-01-28_G,14638,8,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-28_G,14641,6,whole-cell,10512027.274449144,-140.04434277777779,exc,"'none' resolved to 'exc': series resistance is 10.5 MOhm, so whole-cell; polarity from the sign of the current"
+2026-01-28_G,14600,2,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-01-28_G,14603,7,nan,0.0,-76.45878057142858,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current"
+2026-02-05_G,14645,8,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-02-05_G,14649,7,whole-cell,14400622.729631552,-164.16295142857143,exc,"'none' resolved to 'exc': series resistance is 14.4 MOhm, so whole-cell; polarity from the sign of the current"
+2026-02-05_G,14653,8,whole-cell,14400622.729631552,-192.13933268229167,exc,"'none' resolved to 'exc': series resistance is 14.4 MOhm, so whole-cell; polarity from the sign of the current"
+2026-02-05_G,14654,8,whole-cell,14400622.729631552,-210.43668911458334,exc,"'none' resolved to 'exc': series resistance is 14.4 MOhm, so whole-cell; polarity from the sign of the current"
+2026-02-05_G,14657,8,whole-cell,6584671.359645654,-84.08411661458334,exc,"'none' resolved to 'exc': series resistance is 6.6 MOhm, so whole-cell; polarity from the sign of the current"
+2026-02-05_G,14661,3,whole-cell,5053570.88657541,-93.46094850694445,exc,"'none' resolved to 'exc': series resistance is 5.1 MOhm, so whole-cell; polarity from the sign of the current"
+2026-02-27_G,37101,10,whole-cell,8200354.609929078,-350.3843077400662,exc,"'none' resolved to 'exc': series resistance is 8.2 MOhm, so whole-cell; polarity from the sign of the current"
+2026-02-27_G,37104,5,whole-cell,8200354.609929078,-235.04351531456953,exc,"'none' resolved to 'exc': series resistance is 8.2 MOhm, so whole-cell; polarity from the sign of the current"
+2026-02-27_G,37090,6,whole-cell,11105182.418461949,-225.59271543874172,exc,"'none' resolved to 'exc': series resistance is 11.1 MOhm, so whole-cell; polarity from the sign of the current"
+2026-02-27_G,37107,10,cell-attached,0.0,,extracellular,epoch-group recordingTechnique is cell-attached
+2026-02-27_G,37110,8,nan,4893029.270012931,-1368.5778713524421,exc,"'none' resolved to 'exc': series resistance is 4.9 MOhm, so whole-cell; polarity from the sign of the current"
+2026-02-27_G,37082,2,whole-cell,8257699.74706145,-1257.277674254967,exc,"'none' resolved to 'exc': series resistance is 8.3 MOhm, so whole-cell; polarity from the sign of the current"
