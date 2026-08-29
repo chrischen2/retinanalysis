@@ -190,6 +190,18 @@ class LNModel:
     nl_y: np.ndarray
     params: Dict[str, float] = field(default_factory=dict)
     source: str = 'matlab'
+    # r2 above is the held-out value where one could be computed. The two below
+    # are kept apart because they are easy to mistake for it and are both
+    # optimistic: r2_train is measured on the epochs the filter was fitted to,
+    # and nl_r2 is the sigmoid's fit to the ~100 binned nonlinearity points,
+    # which is near 1 almost regardless of how well the model predicts a trace.
+    r2_train: float = np.nan
+    nl_r2: float = np.nan
+    n_train: int = 0
+    n_test: int = 0
+    example_time_s: np.ndarray = field(default_factory=lambda: np.array([]))
+    example_measured: np.ndarray = field(default_factory=lambda: np.array([]))
+    example_predicted: np.ndarray = field(default_factory=lambda: np.array([]))
 
     @property
     def biphasic_index(self) -> float:
@@ -754,23 +766,82 @@ def sigmoid(x, alpha: float, beta: float, gamma: float, epsilon: float):
         np.array([alpha, beta, gamma, epsilon]), np.asarray(x, dtype=float))
 
 
+def _fit_ln_once(stimulus, response, sampling_interval, filter_pts,
+                 frequency_cutoff, correct_stim_power, n_bins):
+    """One filter + nonlinearity fit. Returns the pieces, no scoring."""
+    from retinanalysis.utils.cascadegraph import (compute_filter,
+                                                  convolve_filter_with_stim,
+                                                  sample_nl)
+    cutoff_kwargs = ({} if frequency_cutoff is None else
+                     dict(frequency_cutoff=frequency_cutoff,
+                          sampling_interval=sampling_interval))
+    filter_causal, _ = compute_filter(
+        stimulus, response, filter_pts,
+        correct_stim_power=correct_stim_power, **cutoff_kwargs)
+    generator = convolve_filter_with_stim(filter_causal, stimulus)
+    nl_x, nl_y = sample_nl(generator, response, num_bins=n_bins)
+    params = fit_sigmoid(nl_x, nl_y)
+    return filter_causal, generator, nl_x, nl_y, params
+
+
+def _predict(filter_vec, params, stimulus):
+    from retinanalysis.utils.cascadegraph import convolve_filter_with_stim
+    generator = convolve_filter_with_stim(filter_vec, stimulus)
+    return generator, sigmoid(generator, params['alpha'], params['beta'],
+                              params['gamma'], params['epsilon'])
+
+
+def _variance_explained(predicted, measured) -> float:
+    """Mean row-wise variance explained.
+
+    ``compute_variance_explained`` returns one value per epoch for a 2-D input,
+    so this averages them. Calling ``float()`` on that vector raises, which is
+    how an earlier version of this function silently fell back to reporting the
+    nonlinearity's own fit quality instead of the model's.
+    """
+    from retinanalysis.utils.cascadegraph import compute_variance_explained
+    measured = np.atleast_2d(measured)
+    predicted = np.atleast_2d(predicted)
+    # An epoch the cell was silent through is flat after smoothing, so its
+    # total variance is zero and its r-squared is -inf. There is nothing to
+    # explain in such an epoch, so it is dropped rather than allowed to make
+    # the mean -inf; if every held-out epoch is flat the score is NaN.
+    varying = np.var(measured, axis=1) > 0
+    if not np.any(varying):
+        return np.nan
+    values = np.atleast_1d(compute_variance_explained(
+        predicted[varying], measured[varying]))
+    values = values[np.isfinite(values)]
+    return float(np.mean(values)) if values.size else np.nan
+
+
 def fit_ln_model(stimulus, response, sampling_interval: float,
                  label: str = '', filter_length_s: float = 1.0,
                  frequency_cutoff: Optional[float] = None,
                  correct_stim_power: bool = True,
-                 n_bins: int = 100) -> LNModel:
-    """Fit an LN model to (epochs x time) stimulus and response matrices.
+                 n_bins: int = 100,
+                 test_fraction: float = 0.2,
+                 eval_iterations: int = 3,
+                 random_state: Optional[int] = 0) -> LNModel:
+    """Fit an LN model to (epochs x time) matrices, scored on held-out epochs.
 
     Every stage is cascadegraph's, matching ``computeLNmodel.m``:
     ``compute_filter`` for the linear stage, ``convolve_filter_with_stim`` for
     the generator signal, ``sample_nl`` to bin the input-output relation, and
     ``SigmoidNlNode`` for the static nonlinearity.
-    """
-    from retinanalysis.utils.cascadegraph import (compute_filter,
-                                                  convolve_filter_with_stim,
-                                                  sample_nl,
-                                                  compute_variance_explained)
 
+    **Scoring follows ``LNModelWrapper.m``**: on each of ``eval_iterations``
+    rounds a random ``test_fraction`` of epochs is held out, the filter and
+    nonlinearity are fitted on the rest, and variance explained is measured on
+    the held-out epochs only. ``LNModel.r2`` is the mean of those rounds. An
+    in-sample number is far higher and means much less -- both are returned, as
+    ``r2`` and ``r2_train``, so the gap is visible rather than implied.
+
+    The returned filter and nonlinearity are refitted on **all** epochs once the
+    scoring is done, since that is the best estimate to plot; only the score
+    comes from the splits. With too few epochs to hold one out, ``r2`` is NaN
+    and ``n_test`` is 0.
+    """
     stimulus = np.atleast_2d(np.asarray(stimulus, dtype=float))
     response = np.atleast_2d(np.asarray(response, dtype=float))
     if stimulus.shape != response.shape:
@@ -786,28 +857,47 @@ def fit_ln_model(stimulus, response, sampling_interval: float,
         response = np.atleast_2d(
             apply_frequency_cutoff(response, frequency_cutoff, sampling_interval))
 
-    # compute_filter wants the cutoff and the interval together, or neither.
-    cutoff_kwargs = ({} if frequency_cutoff is None else
-                     dict(frequency_cutoff=frequency_cutoff,
-                          sampling_interval=sampling_interval))
-    filter_causal, _ = compute_filter(
-        stimulus, response, filter_pts,
-        correct_stim_power=correct_stim_power, **cutoff_kwargs)
-    generator = convolve_filter_with_stim(filter_causal, stimulus)
-    nl_x, nl_y = sample_nl(generator, response, num_bins=n_bins)
-    params = fit_sigmoid(nl_x, nl_y)
-    predicted = sigmoid(generator, params['alpha'], params['beta'],
-                        params['gamma'], params['epsilon'])
-    try:
-        r2 = float(compute_variance_explained(predicted, response))
-    except Exception:
-        r2 = params['r2']
-    return LNModel(label=label, r2=r2,
-                   filter=np.asarray(filter_causal, dtype=float),
-                   filter_time_s=np.arange(filter_pts) * sampling_interval,
-                   nl_x=np.asarray(nl_x, dtype=float),
-                   nl_y=np.asarray(nl_y, dtype=float),
-                   params=params, source='python')
+    n_epochs = stimulus.shape[0]
+    n_test = int(np.ceil(test_fraction * n_epochs)) if n_epochs > 1 else 0
+    n_test = min(n_test, n_epochs - 1) if n_epochs > 1 else 0
+
+    held_out = []
+    rng = np.random.default_rng(random_state)
+    for _ in range(eval_iterations if n_test else 0):
+        test_idx = rng.choice(n_epochs, size=n_test, replace=False)
+        train_idx = np.setdiff1d(np.arange(n_epochs), test_idx)
+        try:
+            filt, _, _, _, params = _fit_ln_once(
+                stimulus[train_idx], response[train_idx], sampling_interval,
+                filter_pts, frequency_cutoff, correct_stim_power, n_bins)
+            if not np.isfinite(params['alpha']):
+                continue
+            _, predicted = _predict(filt, params, stimulus[test_idx])
+            held_out.append(_variance_explained(predicted, response[test_idx]))
+        except Exception:
+            continue
+
+    # Final model on every epoch -- the one worth plotting.
+    filt, generator, nl_x, nl_y, params = _fit_ln_once(
+        stimulus, response, sampling_interval, filter_pts,
+        frequency_cutoff, correct_stim_power, n_bins)
+    _, predicted_all = _predict(filt, params, stimulus)
+    r2_train = (_variance_explained(predicted_all, response)
+                if np.isfinite(params['alpha']) else np.nan)
+
+    time_s = np.arange(response.shape[1]) * sampling_interval
+    return LNModel(
+        label=label,
+        r2=float(np.nanmean(held_out)) if held_out else np.nan,
+        r2_train=r2_train, nl_r2=params.get('r2', np.nan),
+        n_train=int(n_epochs - n_test), n_test=int(n_test),
+        filter=np.asarray(filt, dtype=float),
+        filter_time_s=np.arange(filter_pts) * sampling_interval,
+        nl_x=np.asarray(nl_x, dtype=float), nl_y=np.asarray(nl_y, dtype=float),
+        params=params, source='python',
+        example_time_s=time_s,
+        example_measured=np.asarray(response[0], dtype=float),
+        example_predicted=np.asarray(np.atleast_2d(predicted_all)[0], dtype=float))
 
 
 def _block_average(trace: np.ndarray, factor: int) -> np.ndarray:
@@ -951,27 +1041,37 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
             frequency_cutoff=cutoff)
         if verbose:
             model = analysis.ln_model[mean_level]
-            print(f'  lightMean {mean_level:g}: {stim.shape[0]} epochs | '
-                  f'r²={model.r2:.3f} | time-to-peak {model.time_to_peak_ms:.0f} ms')
+            print(f'  lightMean {mean_level:g}: {stim.shape[0]} epochs '
+                  f'({model.n_train} train / {model.n_test} test) | '
+                  f'r²={model.r2:.3f} held out, {model.r2_train:.3f} in sample | '
+                  f'time-to-peak {model.time_to_peak_ms:.0f} ms')
     return analysis
 
 
 def plot_condition(analysis: ConditionAnalysis,
-                   figsize: Tuple[float, float] = (11.0, 4.4)):
-    """Filters and nonlinearities for one recording, one line per light mean."""
+                   example_seconds: float = 6.0,
+                   figsize: Tuple[float, float] = (13.0, 4.2)):
+    """Filter, nonlinearity, and measured-versus-predicted, per light mean.
+
+    The third panel is the one that says whether the model works: a filter and
+    a nonlinearity can both look reasonable while predicting a trace badly.
+    ``example_seconds`` limits how much of the first epoch is drawn, since a
+    60 s trace at 1 kHz is unreadable at full width.
+    """
     import matplotlib.pyplot as plt
     from retinanalysis.utils import style
 
     style.apply_publication_style()
     means = analysis.light_means
     colors = style.colors_for_conditions([f'{m:g}' for m in means])
-    fig, axes = plt.subplots(1, 2, figsize=figsize)
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
     for mean_level in means:
         model = analysis.ln_model[mean_level]
         color = colors[f'{mean_level:g}']
         axes[0].plot(model.filter_time_s * 1e3, model.filter, lw=1.8, color=color,
                      label=f'lightMean {mean_level:g} '
-                           f'(n={analysis.n_epochs[mean_level]}, r²={model.r2:.2f})')
+                           f'(n={analysis.n_epochs[mean_level]}, '
+                           f'r²={model.r2:.2f})')
         axes[1].plot(model.nl_x, model.nl_y, 'o', ms=3, alpha=0.6, color=color)
         params = model.params
         if params and np.isfinite(params.get('alpha', np.nan)):
@@ -979,6 +1079,13 @@ def plot_condition(analysis: ConditionAnalysis,
             axes[1].plot(grid, sigmoid(grid, params['alpha'], params['beta'],
                                        params['gamma'], params['epsilon']),
                          lw=1.6, color=color)
+        if model.example_measured.size:
+            keep = model.example_time_s <= example_seconds
+            axes[2].plot(model.example_time_s[keep], model.example_measured[keep],
+                         lw=1.0, color=color, alpha=0.55)
+            axes[2].plot(model.example_time_s[keep], model.example_predicted[keep],
+                         lw=1.6, color=color,
+                         label=f'lightMean {mean_level:g} prediction')
     axes[0].axhline(0, color='#888888', lw=0.8, ls='--')
     axes[0].set_xlabel('filter time (ms)')
     axes[0].set_ylabel('filter (a.u.)')
@@ -987,6 +1094,11 @@ def plot_condition(analysis: ConditionAnalysis,
     axes[1].set_xlabel('generator signal')
     axes[1].set_ylabel(analysis.units)
     axes[1].set_title('nonlinearity', fontsize=9)
+    axes[2].set_xlabel('time (s)')
+    axes[2].set_ylabel(analysis.units)
+    axes[2].set_title(f'measured (thin) vs predicted (thick), '
+                      f'first {example_seconds:g} s', fontsize=9)
+    axes[2].legend(frameon=False, fontsize=7)
     fig.suptitle(f'{analysis.exp_name} | blocks {analysis.block_ids} | '
                  f'{analysis.rec_type}', fontsize=11)
     fig.tight_layout()
