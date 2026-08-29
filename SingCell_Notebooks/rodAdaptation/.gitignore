@@ -1,0 +1,6 @@
+# The saved MATLAB analysis is the input to this notebook, not source: the
+# rodVariableMeanNoise.mat alone is 364 MB, past GitHub's 100 MB file limit.
+# It lives in Dropbox at
+#   rodAdaptation/summary/rodVariableMeanNoise.mat
+# and is copied (or symlinked) into matlabSummary/ to run the notebook.
+matlabSummary/
