@@ -584,15 +584,19 @@ def block_conditions(exp_name: str, blocks: Optional[pd.DataFrame] = None,
 # 2b. finding the raw files: the saved dates are two days early
 # --------------------------------------------------------------------------
 # The MATLAB wrote `expDate` from `datestr(epochList.elements(1).startDate)`,
-# and it does not agree with the experiment filenames: of the 16 saved dates,
-# one lands on a file and fifteen land two days before one. Matching at +2 and
-# then confirming on the cell label and cell type resolves 44 of the 45 saved
-# cells, and 39 of them agree on label, type and protocol at once, so the
-# offset is real rather than a coincidence of a dense recording calendar.
+# and it is **two days early, across the board**. Whatever that call resolved
+# to, it is not the date the experiment was filed under: every saved date that
+# has a file at all has it two days later, and the cells confirm it -- matching
+# at +2 and then checking the cell label and type resolves the roster with 44 of
+# 53 entries agreeing on label, type and protocol at once.
 #
-# The offsets are searched in this order and the first *confirmed* match wins,
-# so a date that really is exact (2021-08-18) still resolves correctly.
-DATE_OFFSETS = (2, 0, 1, 3, -1, -3, 4, -4)
+# So +2 is applied as a correction rather than searched for. The fallback
+# offsets exist only for the two entries where +2 does not land on a file, and
+# any row that needed one is called out in `date_note` rather than quietly
+# resolved.
+SAVED_DATE_OFFSET_DAYS = 2
+FALLBACK_OFFSETS = (0, 1, 3, -1, -3, 4, -4)
+DATE_OFFSETS = (SAVED_DATE_OFFSET_DAYS,) + FALLBACK_OFFSETS
 
 # Where the Symphony h5 and its parsed json metadata live. These are the same
 # directories config.ini declares as DataJoint ingest sources.
@@ -663,29 +667,56 @@ def _json_cells(json_path: str) -> Dict[str, Tuple[str, bool]]:
     return out
 
 
+def corrected_dates(roster: pd.DataFrame,
+                    offset_days: int = SAVED_DATE_OFFSET_DAYS) -> pd.Series:
+    """The saved date shifted by the known offset, as ``yyyy-mm-dd``."""
+    import datetime as _dt
+
+    def shift(value):
+        try:
+            return (_dt.date.fromisoformat(str(value))
+                    + _dt.timedelta(days=int(offset_days))).isoformat()
+        except ValueError:
+            return ''
+
+    return roster['calendar_date'].map(shift)
+
+
 def resolve_roster_files(roster: pd.DataFrame, root=None,
-                         offsets: Sequence[int] = DATE_OFFSETS,
+                         offset_days: int = SAVED_DATE_OFFSET_DAYS,
+                         fallback_offsets: Sequence[int] = FALLBACK_OFFSETS,
                          show: bool = True) -> pd.DataFrame:
     """Locate each saved cell's raw files, correcting the two-day date offset.
 
-    For every roster row the candidate experiments at each offset are opened and
-    the cell is looked up **by label, case sensitively** -- the saved labels are
-    ``cell5`` for the older entries and ``Cell2`` for the newer ones, and both
-    appear in the metadata as written. A candidate is scored on whether the cell
-    type also agrees and whether that cell actually has VariableMeanNoise
-    blocks; the best-scoring candidate wins, and the search stops early on a
-    full match.
+    The saved ``expDate`` is two days early, so ``corrected_date`` is the date
+    actually searched. Within that date the cell is looked up **by label, case
+    sensitively** -- the saved labels are ``cell5`` for the older entries and
+    ``Cell2`` for the newer ones, and both appear in the metadata as written --
+    and the match is then confirmed against the cell type and against whether
+    that cell really has VariableMeanNoise blocks. The rig suffix on the
+    filename separates two experiments recorded on one day.
 
-    ``match_quality`` is one of ``label+type+protocol`` (all three agree),
-    ``label+protocol``, ``label+type``, ``label`` or ``not found``. Only the
-    first should be trusted without looking.
+    Columns worth reading before using a row:
+
+    ``corrected_date``
+        the saved date plus the offset -- the date searched;
+    ``day_offset`` / ``date_note``
+        what was actually used. ``date_note`` is empty for the corrected date
+        and says so loudly when a row only resolved at some other offset,
+        which happens for the two entries whose corrected date has no file;
+    ``match_quality``
+        ``label+type+protocol`` when all three agree. Anything less is listed
+        rather than trusted.
     """
     files = metadata_files(root)
+    out = roster.reset_index(drop=True).copy()
+    out['corrected_date'] = corrected_dates(out, offset_days)
     if files.empty:
-        out = roster.copy()
-        for column in ('exp_name', 'rig', 'json_path', 'h5_path', 'match_quality'):
+        for column in ('exp_name', 'rig', 'json_path', 'h5_path', 'match_quality',
+                       'date_note'):
             out[column] = ''
         out['day_offset'] = np.nan
+        out['h5_present'] = False
         return out
 
     by_date: Dict[str, List[pd.Series]] = {}
@@ -694,14 +725,19 @@ def resolve_roster_files(roster: pd.DataFrame, root=None,
 
     import datetime as _dt
     rows = []
-    for _, entry in roster.iterrows():
+    for _, entry in out.iterrows():
         try:
             day = _dt.date.fromisoformat(entry.calendar_date)
         except ValueError:
-            rows.append({}); continue
+            rows.append({'exp_name': '', 'rig': '', 'json_path': '', 'h5_path': '',
+                         'day_offset': np.nan, 'matched_cell_type': '',
+                         'type_match': False, 'has_protocol': False,
+                         'match_quality': 'not found',
+                         'date_note': 'unreadable saved date'})
+            continue
         best = None
-        for offset in offsets:
-            target = (day + _dt.timedelta(days=int(offset))).isoformat()
+        for offset in (int(offset_days), *[int(o) for o in fallback_offsets]):
+            target = (day + _dt.timedelta(days=offset)).isoformat()
             for candidate in by_date.get(target, []):
                 info = _json_cells(candidate.json_path).get(entry.cell_label)
                 if info is None:
@@ -713,37 +749,50 @@ def resolve_roster_files(roster: pd.DataFrame, root=None,
                 if best is None or score > best[0]:
                     best = (score, candidate, offset, cell_type, has_protocol,
                             type_match)
+            # Stop as soon as the corrected date produces any match at all: a
+            # worse match there still beats a better one on the wrong day.
+            if best is not None and offset == int(offset_days):
+                break
             if best is not None and best[0] == 3:
                 break
         if best is None:
             rows.append({'exp_name': '', 'rig': '', 'json_path': '', 'h5_path': '',
                          'day_offset': np.nan, 'matched_cell_type': '',
                          'type_match': False, 'has_protocol': False,
-                         'match_quality': 'not found'})
+                         'match_quality': 'not found',
+                         'date_note': f'no file holds {entry.cell_label} near '
+                                      f'{entry.corrected_date}'})
             continue
         score, candidate, offset, cell_type, has_protocol, type_match = best
         quality = ('label+type+protocol' if score == 3 else
                    'label+type' if score == 2 else
                    'label+protocol' if score == 1 else 'label')
+        note = ('' if offset == int(offset_days) else
+                f'corrected date {entry.corrected_date} has no matching file; '
+                f'resolved at {offset:+d} days instead -- verify')
         rows.append({
             'exp_name': candidate.exp_name, 'rig': candidate.rig,
             'source': candidate.source,
             'json_path': candidate.json_path, 'h5_path': candidate.h5_path,
             'day_offset': int(offset), 'matched_cell_type': cell_type,
             'type_match': bool(type_match), 'has_protocol': bool(has_protocol),
-            'match_quality': quality})
+            'match_quality': quality, 'date_note': note})
 
-    out = pd.concat([roster.reset_index(drop=True),
-                     pd.DataFrame(rows)], axis=1)
+    out = pd.concat([out, pd.DataFrame(rows)], axis=1)
     out['h5_present'] = out['h5_path'].fillna('').ne('')
     if show:
         found = out[out.match_quality.ne('not found')]
+        corrected = int((out.day_offset == int(offset_days)).sum())
+        print(f'saved dates corrected by {offset_days:+d} days '
+              f'({corrected} of {len(out)} entries resolve there)')
         print(f'{len(found)} of {len(out)} saved cells located on disk '
               f'({int(out.h5_present.sum())} with an h5)')
         print(out.match_quality.value_counts().to_string())
-        if len(found):
-            print('\nday offset applied:')
-            print(found.day_offset.value_counts().sort_index().to_string())
+        deviant = out[out.date_note.ne('')]
+        if len(deviant):
+            print(f'\n{len(deviant)} entr(ies) did not resolve on the corrected date:')
+            for _, row in deviant.iterrows():
+                print(f'  {row.exp_date} {row.cell_label}: {row.date_note}')
     return out
 
 
@@ -1276,7 +1325,8 @@ __all__ = [
     'PROTOCOLS', 'PROTOCOL_SEARCH', 'DEFAULT_SUMMARY_PATH', 'SUMMARY_DIR',
     'STEP_DIRECTIONS', 'STEP_LABELS', 'LNModel', 'ConditionAnalysis',
     'summary_path', 'load_summary', 'load_cell',
-    'DATE_OFFSETS', 'SINGLE_CELL_ROOT', 'metadata_files',
+    'DATE_OFFSETS', 'SAVED_DATE_OFFSET_DAYS', 'FALLBACK_OFFSETS',
+    'SINGLE_CELL_ROOT', 'metadata_files', 'corrected_dates',
     'resolve_roster_files',
     'find_blocks', 'match_roster', 'block_cells', 'resolve_block_mode',
     'condition_table', 'block_conditions', 'epoch_parameters',
