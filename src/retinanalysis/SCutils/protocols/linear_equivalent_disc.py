@@ -442,7 +442,14 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None, show: bool = True,
     df = df.drop(columns=['NDF'], errors='ignore')
     light = ra.read_block_light_settings(
         df[['exp_name', 'block_id']], verbose=show)
-    df = df.merge(light, on=['exp_name', 'block_id'], how='left',
+    # read_block_light_settings counts the epochs it consolidated the wheel
+    # reading over, so it carries its own n_epochs. Merged whole it collides
+    # with the count taken from DataJoint above and pandas renames both to
+    # n_epochs_x/_y, leaving no n_epochs for the summaries downstream. The two
+    # counts agree; keep this module's. `rig` is not dropped -- it only exists
+    # on the light frame.
+    df = df.merge(light.drop(columns='n_epochs'),
+                  on=['exp_name', 'block_id'], how='left',
                   validate='one_to_one')
     df['has_filter_wheel'] = df['filter_wheel_ndf'].notna()
     df['light_setting'] = [light_setting(n, b) for n, b in
