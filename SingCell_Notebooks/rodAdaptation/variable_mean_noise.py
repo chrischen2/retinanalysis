@@ -654,8 +654,11 @@ def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
                 trace = gaussian_filter1d(trace, 0.01 * rate) * rate
             else:
                 trace = amp[index] - float(np.mean(amp[index][:int(0.1 * rate)]))
-            traces.append((trace[::max(int(downsample), 1)],
-                           rate / max(int(downsample), 1)))
+            factor = max(int(downsample), 1)
+            # Block-average, not slicing: a whole-cell trace is unsmoothed at
+            # the amplifier rate, so taking every nth sample folds fast events
+            # into the drawn line. Same reduction the analysis uses.
+            traces.append((_block_average(trace, factor), rate / factor))
             labels.append(float(params.iloc[index].get('lightMean', np.nan)))
 
     if not traces:
@@ -1572,6 +1575,29 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
     ``skip_seconds`` drops the start of each epoch, where the cell is still
     responding to the step onto the epoch's first mean rather than to the
     noise.
+
+    **Downsampling.** Everything is built at the amplifier rate and reduced once,
+    at the end, by ``downsample`` (10, so 10 kHz to 1 kHz):
+
+    ==================  ==================================================
+    stimulus            regenerated at the amplifier rate from the seed
+    spiking response    spike times -> binary train -> Gaussian smoothed at
+                        ``psth_sigma_ms`` (10 ms), all at the amplifier rate
+    whole-cell response raw current, baseline subtracted
+    ==================  ==================================================
+
+    The reduction is a **block average** (:func:`_block_average`), never
+    ``trace[::n]``. Averaging is both the anti-alias filter and the decimation:
+    a 10-sample boxcar at 10 kHz has its first null at 1 kHz, far above the
+    stimulus's 60 Hz cutoff, so nothing the stimulus could have driven is lost,
+    while slicing would fold the amplifier's own high-frequency content back
+    into the band being fitted. It is also what ``parseData.m`` does.
+
+    Stimulus and response are truncated to a common length *before* the
+    average, so they stay sample-aligned, and ``sampling_interval`` handed to
+    :func:`fit_ln_model` is ``downsample / sample_rate`` -- the reduced rate,
+    not the amplifier's. On top of this :func:`fit_ln_model` low-passes the
+    response at the stimulus's own ``frequencyCutoff`` before fitting.
 
     ``frequency_cutoff`` defaults to the stimulus's own ``frequencyCutoff``
     (60 Hz here) and is **load-bearing**, not cosmetic. The noise is 4-pole
