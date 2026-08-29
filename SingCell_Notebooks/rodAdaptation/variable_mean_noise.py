@@ -364,6 +364,178 @@ def epoch_parameters(block_id: int) -> pd.DataFrame:
     return _epoch_parameters_cached(int(block_id)).copy()
 
 
+def block_cells(blocks: pd.DataFrame) -> pd.DataFrame:
+    """Attach ``cell_label`` and ``cell_type`` to a block table.
+
+    ``sc.find_blocks`` returns protocol and light metadata but no cell
+    identity, so this walks EpochBlock -> EpochGroup -> Cell once for the whole
+    table rather than per block.
+    """
+    from retinanalysis.config import schema
+
+    if blocks.empty:
+        return blocks
+    ids = sorted({int(b) for b in blocks.block_id})
+    # EpochBlock.parent_id -> EpochGroup.id -> EpochGroup.parent_id -> Cell.id.
+    # Every table keys on `id`, and the cell carries `label` and `type`.
+    block_rows = (schema.EpochBlock() & [f'id={i}' for i in ids]
+                  ).to_pandas().reset_index()[['id', 'parent_id']]
+    if block_rows.empty:
+        return blocks
+    group_ids = sorted({int(g) for g in block_rows.parent_id.dropna()})
+    groups = (schema.EpochGroup() & [f'id={g}' for g in group_ids]
+              ).to_pandas().reset_index()[['id', 'parent_id']]
+    cell_ids = sorted({int(c) for c in groups.parent_id.dropna()})
+    cells = (schema.Cell() & [f'id={c}' for c in cell_ids]
+             ).to_pandas().reset_index()[['id', 'label', 'type']]
+
+    joined = (block_rows.rename(columns={'id': 'block_id', 'parent_id': 'group_id'})
+              .merge(groups.rename(columns={'id': 'group_id', 'parent_id': 'cell_id'}),
+                     on='group_id', how='left')
+              .merge(cells.rename(columns={'id': 'cell_id', 'label': 'cell_label',
+                                           'type': 'cell_type'}),
+                     on='cell_id', how='left'))
+    out = blocks.merge(joined[['block_id', 'cell_label', 'cell_type']],
+                       on='block_id', how='left')
+    out['cell_type_short'] = (out['cell_type'].astype(str)
+                              .str.split('\\').str[-1].replace('nan', ''))
+    return out
+
+
+def resolve_block_mode(exp_name: str, block_id: int,
+                       amp_data: Optional[np.ndarray] = None,
+                       sample_rate: float = 1e4) -> Dict[str, object]:
+    """Decide how one block was recorded, from the amplifier rather than a label.
+
+    These blocks carry no ``onlineAnalysis`` -- the experimenter's menu choice
+    is simply absent -- so the reading determines the mode rather than
+    overruling it, which is the ``'none'`` path of
+    :func:`SCutils.recording_mode.resolve_recording_mode`:
+
+    * series resistance above zero means the cell was held whole-cell, and the
+      polarity comes from the sign of the current: inward (negative mean) is
+      ``exc``, outward is ``inh``;
+    * a reading of exactly zero is not by itself cell-attached -- it also
+      happens when whole-cell compensation was never run -- so it is confirmed
+      against the trace, and only a trace that really contains spikes is
+      called ``extracellular``.
+
+    ``amp_data`` is optional; without it the block is loaded to get it.
+    """
+    import retinanalysis as ra
+    from retinanalysis.SCutils.recording_mode import (read_series_resistance,
+                                                      resolve_recording_mode)
+
+    # Symphony writes seriesResistance into the epoch parameters for this
+    # protocol, which is both faster and more reliable than re-reading the h5;
+    # fall back to the h5 reader when the parameter is absent.
+    rs_median = np.nan
+    params = epoch_parameters(int(block_id))
+    if 'seriesResistance' in params:
+        values = pd.to_numeric(params['seriesResistance'], errors='coerce').dropna()
+        if len(values):
+            rs_median = float(np.median(values))
+    if not np.isfinite(rs_median):
+        try:
+            rs = np.asarray(read_series_resistance(exp_name, int(block_id)),
+                            dtype=float)
+            rs_median = float(np.nanmedian(rs)) if rs.size else np.nan
+        except Exception:
+            rs_median = np.nan
+
+    if amp_data is None:
+        block = ra.SCResponseBlock(exp_name, int(block_id), b_spiking=False,
+                                   b_LED=True, verbose=False)
+        amp_data = np.asarray(block.amp_data, dtype=float)
+        sample_rate = float(block.amp_sample_rate)
+
+    mode, note = resolve_recording_mode('none', rs_median, amp_data=amp_data,
+                                        sample_rate=sample_rate)
+    return {'rec_type': mode, 'rec_note': note,
+            'series_resistance_mohm': (rs_median / 1e6
+                                       if np.isfinite(rs_median) and rs_median > 1e3
+                                       else rs_median),
+            'mean_current_pa': float(np.nanmean(amp_data))}
+
+
+def condition_table(exp_names: Optional[Sequence[str]] = None,
+                    blocks: Optional[pd.DataFrame] = None,
+                    roster: Optional[pd.DataFrame] = None,
+                    resolve_modes: bool = True,
+                    show: bool = True, height: int = 400) -> pd.DataFrame:
+    """One row per block: cell, stimulus, and the recording type as verified.
+
+    This is the table to pick an ``entry`` from and hand to
+    :func:`analyze_condition`. ``lightMean`` and ``stdv`` are read off the
+    recorded epochs, so a row listing two means is a block that stepped between
+    them.
+
+    ``resolve_modes`` loads each block to check the recording type against the
+    amplifier (see :func:`resolve_block_mode`); it is the slow part, so pass
+    ``exp_names`` to keep it to the experiments being worked on. With it off the
+    stimulus columns still fill in and ``rec_type`` is blank.
+
+    ``roster_index`` links a row back to the saved data-entry list where the
+    date matches, so the MATLAB's own result for that cell can be pulled up.
+    """
+    blocks = find_blocks(show=False) if blocks is None else blocks
+    if exp_names is not None:
+        blocks = blocks[blocks.exp_name.isin(list(exp_names))]
+    if blocks.empty:
+        return pd.DataFrame()
+    blocks = block_cells(blocks)
+
+    roster_by_date = {}
+    if roster is not None:
+        for date, group in roster.groupby('calendar_date'):
+            roster_by_date[date] = ', '.join(str(i) for i in group['index'])
+
+    rows = []
+    for _, block in blocks.iterrows():
+        block_id = int(block.block_id)
+        params = epoch_parameters(block_id)
+        if params.empty:
+            continue
+        row = {
+            'entry': len(rows),
+            'exp_name': block.exp_name,
+            'cell_label': block.get('cell_label', ''),
+            'cell_type_short': block.get('cell_type_short', ''),
+            'block_id': block_id,
+            'n_epochs': len(params),
+        }
+        for key, name in (('stimTime', 'stimTime_ms'), ('led', 'led'),
+                          ('sampleRate', 'sampleRate')):
+            values = pd.unique(params[key].dropna()) if key in params else []
+            row[name] = values[0] if len(values) == 1 else ', '.join(map(str, values))
+        for key in ('lightMean', 'stdv'):
+            values = (sorted(pd.to_numeric(params[key], errors='coerce')
+                             .dropna().unique()) if key in params else [])
+            row[key] = ', '.join(f'{v:g}' for v in values)
+            row[f'n_{key}'] = len(values)
+        row['roster_index'] = roster_by_date.get(block.get('calendar_date', ''), '')
+        if resolve_modes:
+            row.update(resolve_block_mode(block.exp_name, block_id))
+        rows.append(row)
+
+    frame = pd.DataFrame(rows)
+    if show and len(frame):
+        columns = [c for c in ('entry', 'exp_name', 'cell_label', 'cell_type_short',
+                               'rec_type', 'series_resistance_mohm', 'mean_current_pa',
+                               'stimTime_ms', 'led', 'lightMean', 'stdv',
+                               'n_epochs', 'block_id', 'roster_index')
+                   if c in frame.columns]
+        print(f'{len(frame)} block(s) | {frame.exp_name.nunique()} experiment(s)')
+        if 'rec_type' in frame:
+            print(frame.rec_type.value_counts().to_string())
+        from retinanalysis.SCutils import explore as sc
+        sc.scroll_table(frame[columns].round(3), height=height,
+                        num_cols=('entry', 'series_resistance_mohm',
+                                  'mean_current_pa', 'stimTime_ms', 'n_epochs',
+                                  'block_id'))
+    return frame
+
+
 def block_conditions(exp_name: str, blocks: Optional[pd.DataFrame] = None,
                      show: bool = True) -> pd.DataFrame:
     """Per-block stimulus conditions for one experiment.
@@ -825,7 +997,8 @@ __all__ = [
     'PROTOCOLS', 'PROTOCOL_SEARCH', 'DEFAULT_SUMMARY_PATH', 'SUMMARY_DIR',
     'STEP_DIRECTIONS', 'STEP_LABELS', 'LNModel', 'ConditionAnalysis',
     'summary_path', 'load_summary', 'load_cell',
-    'find_blocks', 'match_roster', 'block_conditions', 'epoch_parameters',
+    'find_blocks', 'match_roster', 'block_cells', 'resolve_block_mode',
+    'condition_table', 'block_conditions', 'epoch_parameters',
     'led_attenuation', 'matlab_randn', 'gaussian_noise_stimulus',
     'epoch_stimulus', 'fit_sigmoid', 'sigmoid', 'fit_ln_model',
     'analyze_condition', 'plot_condition',
