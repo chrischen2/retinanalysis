@@ -197,11 +197,6 @@ class LNModel:
     # which is near 1 almost regardless of how well the model predicts a trace.
     r2_train: float = np.nan
     nl_r2: float = np.nan
-    # `filter` is divided by contrast_generator / contrast_stimulus, so the
-    # generator signal carries the same sigma/mean as the stimulus. That ratio
-    # is the amplitude the filter contributed, i.e. the cell's gain, and is
-    # kept here rather than lost.
-    filter_gain: float = np.nan
     n_train: int = 0
     n_test: int = 0
     example_time_s: np.ndarray = field(default_factory=lambda: np.array([]))
@@ -1390,10 +1385,9 @@ def _fit_ln_once(stimulus, response, sampling_interval, filter_pts,
     if stim_mean:
         filter_causal = filter_causal / stim_mean
     generator = convolve_filter_with_stim(filter_causal, stimulus)
-    gain = float(scale)
     nl_x, nl_y = sample_nl(generator, response, num_bins=n_bins)
     params = fit_sigmoid(nl_x, nl_y)
-    return filter_causal, generator, nl_x, nl_y, params, gain
+    return filter_causal, generator, nl_x, nl_y, params
 
 
 def _predict(filter_vec, params, stimulus):
@@ -1479,7 +1473,7 @@ def fit_ln_model(stimulus, response, sampling_interval: float,
         test_idx = rng.choice(n_epochs, size=n_test, replace=False)
         train_idx = np.setdiff1d(np.arange(n_epochs), test_idx)
         try:
-            filt, _, _, _, params, _ = _fit_ln_once(
+            filt, _, _, _, params = _fit_ln_once(
                 stimulus[train_idx], response[train_idx], sampling_interval,
                 filter_pts, frequency_cutoff, correct_stim_power, n_bins)
             if not np.isfinite(params['alpha']):
@@ -1490,7 +1484,7 @@ def fit_ln_model(stimulus, response, sampling_interval: float,
             continue
 
     # Final model on every epoch -- the one worth plotting.
-    filt, generator, nl_x, nl_y, params, gain = _fit_ln_once(
+    filt, generator, nl_x, nl_y, params = _fit_ln_once(
         stimulus, response, sampling_interval, filter_pts,
         frequency_cutoff, correct_stim_power, n_bins)
     _, predicted_all = _predict(filt, params, stimulus)
@@ -1502,7 +1496,6 @@ def fit_ln_model(stimulus, response, sampling_interval: float,
         label=label,
         r2=float(np.nanmean(held_out)) if held_out else np.nan,
         r2_train=r2_train, nl_r2=params.get('r2', np.nan),
-        filter_gain=gain,
         n_train=int(n_epochs - n_test), n_test=int(n_test),
         filter=np.asarray(filt, dtype=float),
         filter_time_s=np.arange(filter_pts) * sampling_interval,
@@ -1678,19 +1671,21 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
 
 
 def plot_condition(analysis: ConditionAnalysis, window_seconds: float = 10.0,
-                   width: float = 13.0, row_height: float = 2.3):
-    """The model on the first row, then one full-width row per trace window.
+                   positions: Sequence[str] = ('first', 'middle', 'last'),
+                   width: float = 13.0, row_height: float = 2.0):
+    """The model on the first row, then one row per light mean per window.
 
-    The top row is the fitted filter, the nonlinearity, and gain against light
-    level. The filter is divided by ``contrast_generator / contrast_stimulus``,
-    so the generator signal carries the same ``sigma / mean`` as the stimulus
-    and the nonlinearity's x axis is a contrast at every light level; the ratio
-    divided out is the gain and is printed in the legend.
+    The top row is the fitted filter and the nonlinearity. The filter is
+    divided by ``contrast_generator / contrast_stimulus``, so the generator
+    signal carries the same ``sigma / mean`` as the stimulus and the
+    nonlinearity's x axis is one contrast axis across light levels.
 
-    Each following row is one window of an epoch -- first, middle and last --
-    measured against predicted, full width. Three windows spread across the
-    epoch show whether the model holds up as the cell adapts, and giving each
-    its own row is the only way the individual events stay legible.
+    Every row below is a single light mean over one stretch of an epoch,
+    measured against predicted. Light means are drawn separately rather than
+    overlaid -- two rate traces on one axis hide each other -- and
+    ``window_seconds`` sets how much of the epoch each row shows.
+    ``positions`` chooses which stretches: 'first', 'middle' and 'last' by
+    default, so the model can be judged early and late in the same epoch.
     """
     import matplotlib.pyplot as plt
     from matplotlib.gridspec import GridSpec
@@ -1699,14 +1694,14 @@ def plot_condition(analysis: ConditionAnalysis, window_seconds: float = 10.0,
     style.apply_publication_style()
     means = analysis.light_means
     colors = style.colors_for_conditions([f'{m:g}' for m in means])
-    positions = ('first', 'middle', 'last')
+    positions = tuple(positions)
+    panels = [(m, p) for m in means for p in positions]
 
-    fig = plt.figure(figsize=(width, row_height * (1 + len(positions)) + 0.6))
-    grid = GridSpec(1 + len(positions), 3, figure=fig,
-                    height_ratios=[1.5] + [1.0] * len(positions), hspace=0.55)
+    fig = plt.figure(figsize=(width, row_height * (1.6 + len(panels)) + 0.4))
+    grid = GridSpec(1 + len(panels), 2, figure=fig,
+                    height_ratios=[1.6] + [1.0] * len(panels), hspace=0.75)
     ax_filter = fig.add_subplot(grid[0, 0])
     ax_nl = fig.add_subplot(grid[0, 1])
-    ax_gain = fig.add_subplot(grid[0, 2])
 
     for mean_level in means:
         model = analysis.ln_model[mean_level]
@@ -1714,7 +1709,7 @@ def plot_condition(analysis: ConditionAnalysis, window_seconds: float = 10.0,
         ax_filter.plot(
             model.filter_time_s * 1e3, model.filter, lw=1.8, color=color,
             label=f'lightMean {mean_level:g} (n={analysis.n_epochs[mean_level]}, '
-                  f'gain {model.filter_gain:.3g}, r²={model.r2:.2f})')
+                  f'r²={model.r2:.2f})')
         ax_nl.plot(model.nl_x, model.nl_y, 'o', ms=3, alpha=0.6, color=color)
         params = model.params
         if params and np.isfinite(params.get('alpha', np.nan)):
@@ -1731,24 +1726,11 @@ def plot_condition(analysis: ConditionAnalysis, window_seconds: float = 10.0,
     ax_nl.set_ylabel(analysis.units)
     ax_nl.set_title('nonlinearity', fontsize=9)
 
-    gains = [analysis.ln_model[m].filter_gain for m in means]
-    ax_gain.plot(means, gains, '-', lw=1.6, color='#444444', zorder=1)
-    for mean_level, gain in zip(means, gains):
-        ax_gain.plot([mean_level], [gain], 'o', ms=8,
-                     color=colors[f'{mean_level:g}'], zorder=2)
-    ax_gain.set_xlabel('light mean')
-    ax_gain.set_ylabel('gain')
-    ax_gain.set_title('gain vs light level', fontsize=9)
-    if len(means) > 1 and min(means) > 0 and min(gains) > 0:
-        ax_gain.set_xscale('log')
-        ax_gain.set_yscale('log')
-
-    for row, position in enumerate(positions, start=1):
+    for row, (mean_level, position) in enumerate(panels, start=1):
         ax = fig.add_subplot(grid[row, :])
-        for mean_level in means:
-            model = analysis.ln_model[mean_level]
-            if not model.example_measured.size:
-                continue
+        model = analysis.ln_model[mean_level]
+        color = colors[f'{mean_level:g}']
+        if model.example_measured.size:
             time_s = model.example_time_s
             span = time_s[-1] if time_s.size else 0.0
             if position == 'first':
@@ -1758,24 +1740,20 @@ def plot_condition(analysis: ConditionAnalysis, window_seconds: float = 10.0,
             else:
                 lo = max(span - window_seconds, 0.0)
             keep = (time_s >= lo) & (time_s <= lo + window_seconds)
-            color = colors[f'{mean_level:g}']
             ax.plot(time_s[keep], model.example_measured[keep], lw=0.8,
-                    color=color, alpha=0.45,
-                    label=f'lightMean {mean_level:g} measured' if row == 1 else None)
+                    color='#555555', alpha=0.75, label='measured')
             ax.plot(time_s[keep], model.example_predicted[keep], lw=1.5,
-                    color=color,
-                    label=f'lightMean {mean_level:g} predicted' if row == 1 else None)
+                    color=color, label='predicted')
+            ax.legend(frameon=False, fontsize=7, ncol=2, loc='upper right')
         ax.set_ylabel(analysis.units)
-        ax.set_title(f'{position} {window_seconds:g} s of an epoch — '
-                     f'measured (thin) vs predicted (thick)', fontsize=9)
-        if row == 1:
-            ax.legend(frameon=False, fontsize=7, ncol=2)
-        if row == len(positions):
+        ax.set_title(f'lightMean {mean_level:g} — {position} '
+                     f'{window_seconds:g} s of an epoch', fontsize=9)
+        if row == len(panels):
             ax.set_xlabel('time in epoch (s)')
 
     fig.suptitle(f'{analysis.exp_name} | blocks {analysis.block_ids} | '
                  f'{analysis.rec_type}', fontsize=11)
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    fig.tight_layout(rect=(0, 0, 1, 0.98))
     return fig
 
 
