@@ -280,81 +280,198 @@ def load_cell(index, path=None) -> Dict[str, object]:
 # --------------------------------------------------------------------------
 # 2. dataset search -- the same discovery step as the cone-disc notebooks
 # --------------------------------------------------------------------------
+# Protocol parameters worth carrying into the discovery table, taken from the
+# protocol's own properties (turner-package/.../VariableMeanNoise.m). The
+# rieke copy records the same set -- verified against the stored epochs, not
+# assumed. `lightMean`, `stdv` and `seed` are written per epoch rather than
+# once per block, so they are summarised separately.
+PROTOCOL_PARAMETERS = (
+    'stimTime',          # noise duration (ms) -- the analysis gate
+    'led',               # which LED delivered it
+    'ndfs',              # that LED's own filters (no filter wheel in this path)
+    'frequencyCutoff',   # noise smoothing cutoff (Hz)
+    'numberOfFilters',   # poles in the smoothing cascade
+    'Contrast',          # noise contrast(s) configured
+    'sampleRate',
+    'useRandomSeed',
+    'numberOfAverages',
+)
+
+# Epochs shorter than this cannot show the adaptation the analysis is after:
+# the mean steps part-way through, and a 600 ms epoch has no post-step stretch
+# to fit a filter on. The recordings that matter here run 30-60 s.
+MIN_STIM_TIME_MS = 30_000
+
+
+def _first_epoch_metadata(block_ids: Sequence[int]):
+    """First-epoch parameters and epoch counts, in two batched queries.
+
+    Copied from ``linear_equivalent_disc``: reading parameters block by block
+    is far too slow over the ~1700 blocks this protocol has.
+    """
+    import datajoint as dj
+    from retinanalysis.config import schema
+
+    ids = [int(b) for b in block_ids]
+    if not ids:
+        return {}, pd.Series(dtype=int)
+    epochs = schema.Epoch() & [{'parent_id': b} for b in ids]
+    summary = (dj.U('parent_id')
+               .aggr(epochs, first_epoch_id='min(id)', n_epochs='count(*)')
+               .to_pandas().reset_index())
+    if summary.empty:
+        return {}, pd.Series(0, index=ids, dtype=int)
+    first = (schema.Epoch() & [{'id': int(e)} for e in summary['first_epoch_id']]
+             ).to_pandas().reset_index()[['parent_id', 'parameters']]
+    import json as _json
+    parameters = {}
+    for row in first.itertuples():
+        value = row.parameters
+        if isinstance(value, str):
+            try:
+                value = _json.loads(value)
+            except ValueError:
+                value = {}
+        parameters[int(row.parent_id)] = value if isinstance(value, dict) else {}
+    counts = summary.set_index('parent_id')['n_epochs'].astype(int)
+    counts.index = counts.index.astype(int)
+    return parameters, counts
+
+
 def find_blocks(exp_names: Optional[Sequence[str]] = None,
                 protocols: Sequence[str] = PROTOCOLS,
-                show: bool = True, height: int = 400) -> pd.DataFrame:
-    """VariableMeanNoise epoch blocks in the database.
+                min_stim_time_ms: Optional[float] = MIN_STIM_TIME_MS,
+                show: bool = True, height: int = 420) -> pd.DataFrame:
+    """Every VariableMeanNoise block, with its cell and its protocol settings.
 
-    Searches on the protocol name and keeps only the variants in ``protocols``,
-    so the rieke and turner copies of the same protocol are found together and
-    ``protocol_name`` says which is which. ``VariableMeanNoiseCurInject`` and
-    the monitor-based variants are different experiments and are excluded.
+    One row per epoch block. Cell identity comes from
+    EpochBlock -> EpochGroup -> Cell, and the protocol settings from the
+    block's first epoch, both in batched queries rather than per block.
+
+    ``min_stim_time_ms`` keeps only blocks whose noise ran at least that long
+    (30 s by default). The protocol's own default is 600 ms, and a large share
+    of the recorded blocks are short runs that cannot show adaptation to a mean
+    step; what is dropped is always reported.
+
+    The two package copies of the protocol are searched together and
+    ``protocol_name`` says which one each block came from.
     """
+    from retinanalysis.config import schema
     from retinanalysis.SCutils import explore as sc
 
-    frame = sc.find_blocks(PROTOCOL_SEARCH, show=False)
-    if frame.empty:
+    protocol_df = schema.Protocol().to_pandas().reset_index()[['protocol_id', 'name']]
+    protocol_df = protocol_df[protocol_df['name'].isin(list(protocols))]
+    if protocol_df.empty:
         if show:
-            print(f'no blocks found for {PROTOCOL_SEARCH}')
-        return frame
-    frame = frame[frame.protocol_name.isin(list(protocols))].copy()
+            print(f'no protocol matched {list(protocols)}')
+        return pd.DataFrame()
+
+    blocks = (schema.EpochBlock() & [f'protocol_id={int(i)}'
+                                     for i in protocol_df.protocol_id]
+              ).to_pandas().reset_index()
+    if blocks.empty:
+        return pd.DataFrame()
+    blocks = blocks.rename(columns={'id': 'block_id', 'parent_id': 'group_id'})
+    blocks = blocks.merge(protocol_df.rename(columns={'name': 'protocol_name'}),
+                          on='protocol_id', how='left')
+
+    experiments = (schema.Experiment() & [f'id={int(i)}'
+                                          for i in blocks.experiment_id.unique()]
+                   ).to_pandas().reset_index()[['id', 'exp_name']]
+    groups = (schema.EpochGroup() & [f'id={int(i)}'
+                                     for i in blocks.group_id.unique()]
+              ).to_pandas().reset_index()[['id', 'parent_id']]
+    cells = (schema.Cell() & [f'id={int(i)}' for i in groups.parent_id.unique()]
+             ).to_pandas().reset_index()[['id', 'label', 'type']]
+    frame = (blocks
+             .merge(experiments.rename(columns={'id': 'experiment_id'}),
+                    on='experiment_id', how='left')
+             .merge(groups.rename(columns={'id': 'group_id',
+                                           'parent_id': 'cell_id'}),
+                    on='group_id', how='left')
+             .merge(cells.rename(columns={'id': 'cell_id', 'label': 'cell_label',
+                                          'type': 'cell_type'}),
+                    on='cell_id', how='left'))
+    frame['cell_type_short'] = (frame['cell_type'].astype(str)
+                                .str.split('\\').str[-1].replace('nan', 'Unknown'))
     if exp_names is not None:
-        frame = frame[frame.exp_name.isin(list(exp_names))].copy()
-    frame['calendar_date'] = frame.exp_name.astype(str).str.slice(0, 10)
-    frame = frame.sort_values(['exp_name', 'block_id']).reset_index(drop=True)
+        frame = frame[frame.exp_name.isin(list(exp_names))]
+    if frame.empty:
+        return frame
+
+    parameters, counts = _first_epoch_metadata(frame.block_id)
+    for name in PROTOCOL_PARAMETERS:
+        frame[name] = [parameters.get(int(b), {}).get(name) for b in frame.block_id]
+    frame['n_epochs'] = [int(counts.get(int(b), 0)) for b in frame.block_id]
+    frame['stimTime'] = pd.to_numeric(frame['stimTime'], errors='coerce')
+    frame['stim_seconds'] = frame['stimTime'] / 1e3
+    frame['led_color'] = (frame['led'].astype(str).str.split().str[0]
+                          .str.lower().replace('none', ''))
+
+    dropped = 0
+    if min_stim_time_ms is not None:
+        keep = frame.stimTime.ge(float(min_stim_time_ms))
+        dropped = int((~keep).sum())
+        frame = frame[keep]
+    frame = frame.sort_values(['exp_name', 'cell_label', 'block_id']).reset_index(drop=True)
+
     if show:
-        print(f'{len(frame)} blocks | {frame.exp_name.nunique()} experiments')
-        print(frame.protocol_name.value_counts().to_string())
-        columns = [c for c in ('exp_name', 'block_id', 'protocol_name', 'ndfs',
-                               'filter_wheel_ndf', 'fixed_ndf_source')
-                   if c in frame.columns]
+        print(f'{len(frame)} blocks | {frame.exp_name.nunique()} experiments | '
+              f'{frame.groupby(["exp_name", "cell_label"]).ngroups} cells')
+        if dropped:
+            print(f'  dropped {dropped} block(s) with stimTime < '
+                  f'{min_stim_time_ms / 1e3:g} s')
+        print('  by protocol: ' + ', '.join(
+            f'{n.rsplit(".", 1)[-1]} ({c})' if False else f'{n} {c}'
+            for n, c in frame.protocol_name.value_counts().items()))
+        columns = [c for c in ('exp_name', 'cell_label', 'cell_type_short',
+                               'block_id', 'stim_seconds', 'led', 'ndfs',
+                               'frequencyCutoff', 'numberOfFilters', 'Contrast',
+                               'n_epochs', 'protocol_name') if c in frame]
         sc.scroll_table(frame[columns], height=height,
-                        num_cols=('block_id', 'filter_wheel_ndf'))
+                        num_cols=('block_id', 'stim_seconds', 'frequencyCutoff',
+                                  'numberOfFilters', 'n_epochs'))
     return frame
 
 
-def match_roster(roster: pd.DataFrame, blocks: Optional[pd.DataFrame] = None,
-                 show: bool = True) -> pd.DataFrame:
-    """Intersect the data-entry list with what the database actually holds.
+def find_protocol_cells(blocks: Optional[pd.DataFrame] = None,
+                        show: bool = True, height: int = 420) -> pd.DataFrame:
+    """One row per experiment/cell/LED condition -- the section 1 overview.
 
-    One row per saved cell, with the experiment and blocks it maps onto where
-    the date is present. Matching is on calendar date: the saved file records
-    ``yyyy/mm/dd`` with no rig suffix, so it cannot distinguish two rigs run on
-    one day -- where that happens every matching experiment is listed and
-    ``n_experiments`` is above one.
-
-    Cell labels are deliberately **not** matched. The saved labels (``cell5``,
-    ``Cell2``) come from the riekesuite source tree and the database keeps its
-    own, so the date is the reliable join and the cell is chosen by hand.
+    The compact view the cone-disc notebooks open with: what is available to
+    analyze, with a ``date_index`` to copy into the next section. Per-epoch
+    settings are summarised across the cell's blocks, so a cell that ran two
+    light means shows both.
     """
-    blocks = find_blocks(show=False) if blocks is None else blocks
-    out = roster.copy()
-    if blocks.empty:
-        out['n_experiments'] = 0
-        out['experiments'] = ''
-        out['n_blocks'] = 0
-        out['reachable'] = False
-        return out
+    from retinanalysis.SCutils import explore as sc
 
-    by_date = (blocks.groupby('calendar_date')
-               .agg(n_experiments=('exp_name', 'nunique'),
-                    experiments=('exp_name', lambda s: ', '.join(sorted(set(s)))),
-                    n_blocks=('block_id', 'nunique')).reset_index())
-    out = out.merge(by_date, on='calendar_date', how='left')
-    out['n_experiments'] = out['n_experiments'].fillna(0).astype(int)
-    out['n_blocks'] = out['n_blocks'].fillna(0).astype(int)
-    out['experiments'] = out['experiments'].fillna('')
-    out['reachable'] = out.n_blocks > 0
+    blocks = find_blocks(show=False) if blocks is None else blocks
+    if blocks.empty:
+        return blocks
+
+    def joined(values):
+        seen = [str(v) for v in pd.unique(values.dropna()) if str(v) != '']
+        return ', '.join(seen)
+
+    cells = (blocks.groupby(['exp_name', 'cell_label', 'cell_type_short'],
+                            dropna=False)
+             .agg(blocks=('block_id', 'nunique'),
+                  epochs=('n_epochs', 'sum'),
+                  stim_seconds=('stim_seconds', joined),
+                  led=('led', joined), ndfs=('ndfs', joined),
+                  protocol_name=('protocol_name', joined),
+                  block_ids=('block_id', lambda s: ', '.join(
+                      str(int(b)) for b in sorted(set(s)))))
+             .reset_index())
+    cells = cells.sort_values(['exp_name', 'cell_label']).reset_index(drop=True)
+    cells.insert(0, 'date_index',
+                 pd.factorize(cells['exp_name'], sort=False)[0] + 1)
     if show:
-        n = int(out.reachable.sum())
-        print(f'{n} of {len(out)} saved cells sit on a date the database has '
-              f'({out.loc[out.reachable, "calendar_date"].nunique()} of '
-              f'{out.calendar_date.nunique()} dates)')
-        if n:
-            print(out[out.reachable][['index', 'exp_date', 'cell_label',
-                                      'cell_type', 'rec_type', 'experiments',
-                                      'n_blocks']].to_string(index=False))
-    return out
+        print(f'{len(cells)} cell conditions across '
+              f'{cells.exp_name.nunique()} experiments')
+        sc.scroll_table(cells, height=height,
+                        num_cols=('date_index', 'blocks', 'epochs'))
+    return cells
 
 
 @lru_cache(maxsize=128)
@@ -548,36 +665,60 @@ def condition_table(exp_names: Optional[Sequence[str]] = None,
     return frame
 
 
-def block_conditions(exp_name: str, blocks: Optional[pd.DataFrame] = None,
-                     show: bool = True) -> pd.DataFrame:
-    """Per-block stimulus conditions for one experiment.
+def resolve_block_mode(exp_name: str, block_id: int,
+                       amp_data: Optional[np.ndarray] = None,
+                       sample_rate: float = 1e4) -> Dict[str, object]:
+    """Decide how one block was recorded, from the amplifier rather than a label.
 
-    Reads the recorded epoch parameters rather than the protocol defaults, so
-    the ``lightMean`` values listed are the ones actually presented.
+    These blocks carry no ``onlineAnalysis`` -- the experimenter's menu choice
+    is simply absent -- so the reading determines the mode rather than
+    overruling it, which is the ``'none'`` path of
+    :func:`SCutils.recording_mode.resolve_recording_mode`:
+
+    * series resistance above zero means the cell was held whole-cell, and the
+      polarity comes from the sign of the current: inward (negative mean) is
+      ``exc``, outward is ``inh``;
+    * a reading of exactly zero is not by itself cell-attached -- it also
+      happens when whole-cell compensation was never run -- so it is confirmed
+      against the trace, and only a trace that really contains spikes is
+      called ``extracellular``.
+
+    ``amp_data`` is optional; without it the block is loaded to get it.
     """
-    blocks = find_blocks(show=False) if blocks is None else blocks
-    subset = blocks[blocks.exp_name.eq(exp_name)]
-    rows = []
-    for block_id in subset.block_id.astype(int):
-        params = epoch_parameters(block_id)
-        if params.empty:
-            continue
-        row = {'exp_name': exp_name, 'block_id': int(block_id),
-               'n_epochs': len(params)}
-        for key in ('stimTime', 'sampleRate', 'frequencyCutoff',
-                    'numberOfFilters', 'led'):
-            values = pd.unique(params[key].dropna()) if key in params else []
-            row[key] = values[0] if len(values) == 1 else ', '.join(map(str, values))
-        for key in ('lightMean', 'stdv'):
-            values = (sorted(pd.to_numeric(params[key], errors='coerce')
-                             .dropna().unique()) if key in params else [])
-            row[key] = ', '.join(f'{v:g}' for v in values)
-        rows.append(row)
-    frame = pd.DataFrame(rows)
-    if show and len(frame):
-        print(f'{exp_name}: {len(frame)} VariableMeanNoise block(s)')
-        print(frame.to_string(index=False))
-    return frame
+    import retinanalysis as ra
+    from retinanalysis.SCutils.recording_mode import (read_series_resistance,
+                                                      resolve_recording_mode)
+
+    # Symphony writes seriesResistance into the epoch parameters for this
+    # protocol, which is both faster and more reliable than re-reading the h5;
+    # fall back to the h5 reader when the parameter is absent.
+    rs_median = np.nan
+    params = epoch_parameters(int(block_id))
+    if 'seriesResistance' in params:
+        values = pd.to_numeric(params['seriesResistance'], errors='coerce').dropna()
+        if len(values):
+            rs_median = float(np.median(values))
+    if not np.isfinite(rs_median):
+        try:
+            rs = np.asarray(read_series_resistance(exp_name, int(block_id)),
+                            dtype=float)
+            rs_median = float(np.nanmedian(rs)) if rs.size else np.nan
+        except Exception:
+            rs_median = np.nan
+
+    if amp_data is None:
+        block = ra.SCResponseBlock(exp_name, int(block_id), b_spiking=False,
+                                   b_LED=True, verbose=False)
+        amp_data = np.asarray(block.amp_data, dtype=float)
+        sample_rate = float(block.amp_sample_rate)
+
+    mode, note = resolve_recording_mode('none', rs_median, amp_data=amp_data,
+                                        sample_rate=sample_rate)
+    return {'rec_type': mode, 'rec_note': note,
+            'series_resistance_mohm': (rs_median / 1e6
+                                       if np.isfinite(rs_median) and rs_median > 1e3
+                                       else rs_median),
+            'mean_current_pa': float(np.nanmean(amp_data))}
 
 
 # --------------------------------------------------------------------------
@@ -816,8 +957,13 @@ def led_attenuation(block_row, color: Optional[str] = None) -> Dict[str, object]
     row = block_row.iloc[0] if isinstance(block_row, pd.DataFrame) else block_row
     exp_name = str(row['exp_name'])
     rig = infer_rig_name(exp_name)
-    tokens = tuple(t for t in parse_ndfs(row.get('ndfs'))
-                   if not str(t).upper().startswith('FW'))
+    all_tokens = tuple(parse_ndfs(row.get('ndfs')))
+    # The wheel is not in the LED's path, so an FW token recorded in the LED's
+    # own ndfs list must not be added to this stimulus's attenuation. It is
+    # reported rather than dropped silently: the same list is right for a Stage
+    # protocol and wrong here.
+    wheel_tokens = tuple(t for t in all_tokens if str(t).upper().startswith('FW'))
+    tokens = tuple(t for t in all_tokens if t not in wheel_tokens)
     if color is None:
         led = str(row.get('led') or '')
         color = led.split()[0].lower() if led else 'uv'
@@ -834,13 +980,15 @@ def led_attenuation(block_row, color: Optional[str] = None) -> Dict[str, object]
             missing.append(token)
     wheel = row.get('filter_wheel_ndf')
     return {
-        'exp_name': exp_name, 'rig': rig, 'led_color': color,
+        'exp_name': exp_name, 'rig': rig, 'led': row.get('led', ''),
+        'led_color': color,
         'led_ndfs': ', '.join(tokens) if tokens else '(none)',
         'optical_density': np.nan if missing else total,
         'attenuation': np.nan if missing else 10.0 ** -total,
         'unknown_tokens': ', '.join(missing),
+        'wheel_tokens_ignored': ', '.join(wheel_tokens),
         'filter_wheel_ndf': wheel,
-        'wheel_ignored': bool(pd.notna(wheel)),
+        'wheel_ignored': bool(wheel_tokens) or bool(pd.notna(wheel)),
     }
 
 
@@ -1328,8 +1476,8 @@ __all__ = [
     'DATE_OFFSETS', 'SAVED_DATE_OFFSET_DAYS', 'FALLBACK_OFFSETS',
     'SINGLE_CELL_ROOT', 'metadata_files', 'corrected_dates',
     'resolve_roster_files',
-    'find_blocks', 'match_roster', 'block_cells', 'resolve_block_mode',
-    'condition_table', 'block_conditions', 'epoch_parameters',
+    'find_blocks', 'find_protocol_cells', 'epoch_parameters',
+    'resolve_block_mode', 'PROTOCOL_PARAMETERS', 'MIN_STIM_TIME_MS',
     'led_attenuation', 'matlab_randn', 'gaussian_noise_stimulus',
     'epoch_stimulus', 'fit_sigmoid', 'sigmoid', 'fit_ln_model',
     'analyze_condition', 'plot_condition',
