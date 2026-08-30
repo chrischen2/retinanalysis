@@ -321,6 +321,36 @@ def _match_cell_type(value, allowed=PRIMATE_CELL_TYPES) -> bool:
                for a in allowed)
 
 
+def build_mode_cache(protocol_blocks: pd.DataFrame,
+                     path: Optional[Path] = None,
+                     verbose: bool = True) -> pd.DataFrame:
+    """Resolve every block's recording type and write the cache.
+
+    Reading one block's traces to decide whether it is extracellular, exc or
+    inh takes about 5.5 s, so doing it for the whole protocol takes several
+    minutes; the answer never changes, so it is written once to
+    :data:`MODE_CACHE_PATH` and read back by :func:`load_block_modes`.
+
+    Was a loop in the notebook. Returns the frame it wrote.
+    """
+    path = MODE_CACHE_PATH if path is None else Path(path)
+    rows = []
+    total = len(protocol_blocks)
+    for n, (_, row) in enumerate(protocol_blocks.iterrows(), 1):
+        block_id = int(row['block_id'])
+        exp_name = str(row['exp_name'])
+        rows.append(dict(exp_name=exp_name, block_id=block_id,
+                         n_epochs=len(epoch_parameters(block_id)),
+                         **resolve_block_mode(exp_name, block_id)))
+        if verbose and n % 50 == 0:
+            print(f'  {n}/{total}')
+    frame = pd.DataFrame(rows)
+    frame.to_csv(path, index=False)
+    if verbose:
+        print(f'wrote {len(frame)} blocks to {path.name}')
+    return frame
+
+
 def load_block_modes(path=None) -> pd.DataFrame:
     """The cached per-block recording type, or an empty frame if not built.
 
@@ -1463,9 +1493,11 @@ def sigmoid_start_and_bounds(x, y, rec_type: Optional[str] = None,
     is an absolute level, not an amplitude, so under voltage clamp it carries
     the holding current -- one cell here sits at -14.4 nA while modulating by
     946 pA. Capping it at "a few thousand pA" would refuse that cell's baseline
-    outright. It is bounded by the data's own range instead, one range either
-    side, which also leaves room above ``max(y)`` for a falling nonlinearity,
-    whose ``epsilon`` is its *upper* asymptote.
+    outright. It is bounded relative to the data instead, by one ``alpha``
+    ceiling either side: the curve spans ``epsilon`` to ``epsilon + alpha`` and
+    must pass through the sampled points, so that is exactly how far the
+    asymptote can be from them. Either side, because a falling nonlinearity's
+    ``epsilon`` is its *upper* asymptote.
 
     The start point matters as much as the box. The old guess fixed ``gamma``
     at 0 and left every bound infinite, and the optimiser drifted along a ridge
@@ -1516,10 +1548,17 @@ def sigmoid_start_and_bounds(x, y, rec_type: Optional[str] = None,
     x50_max = float(np.max(np.abs(x))) + SIGMOID_X50_HEADROOM * x_range
     gamma_max = beta_max * x50_max
 
+    # The curve runs from `epsilon` to `epsilon + alpha` and has to pass
+    # through the data, so the asymptote can sit at most one `alpha` outside
+    # it -- on either side, since a falling curve's `epsilon` is its upper
+    # asymptote. Deriving it from `alpha_max` rather than picking a multiple of
+    # the data range matters: an unsaturated nonlinearity's asymptote is
+    # legitimately far outside the sampled points, and a fixed one-range box
+    # pinned 11 of 18 windowed fits on this cell at exactly its limit.
     lower = np.array([-alpha_max, -beta_max, -gamma_max,
-                      float(np.min(y)) - y_range])
+                      float(np.min(y)) - alpha_max])
     upper = np.array([alpha_max, beta_max, gamma_max,
-                      float(np.max(y)) + y_range])
+                      float(np.max(y)) + alpha_max])
     guess = np.clip(np.array([alpha0, beta0, gamma0, epsilon0]), lower, upper)
     return guess, lower, upper
 
@@ -1815,6 +1854,10 @@ class ConditionAnalysis:
     # so anything fitted downstream (the windowed models in particular) cuts
     # off where the stimulus does instead of guessing a number.
     frequency_cutoff: float = np.nan
+    # The fit settings the loader was called with, so `fit_condition` and the
+    # windowed models reproduce them without being told again.
+    filter_length_s: float = 1.0
+    n_bins: int = 100
     stimulus: Dict[float, np.ndarray] = field(default_factory=dict)
     response: Dict[float, np.ndarray] = field(default_factory=dict)
     # What the whole-cell salvage did: epochs refused on series resistance,
@@ -1841,8 +1884,15 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                       max_series_resistance: Optional[float] = 30e6,
                       align_epoch_means: bool = True,
                       max_epochs: Optional[int] = None,
+                      fit: bool = True,
                       verbose: bool = True) -> ConditionAnalysis:
     """Load epochs, regenerate their stimuli, and fit one LN model per light mean.
+
+    ``fit=False`` stops after the traces are loaded, aligned and downsampled,
+    leaving ``ln_model`` empty. That is the point at which the group mean is
+    worth looking at -- it is the data the models will be fitted to, and seeing
+    it first is what tells you whether a fit is worth trusting.
+    :func:`fit_condition` finishes the job on the same object.
 
     Epochs are grouped by their recorded ``lightMean``, since a filter fitted
     across two mean levels would describe neither. ``downsample`` reduces the
@@ -2062,21 +2112,10 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
         analysis.n_epochs[mean_level] = int(stim.shape[0])
         analysis.stimulus[mean_level] = stim
         analysis.response[mean_level] = resp
-        analysis.ln_model[mean_level] = fit_ln_model(
-            stim, resp, sampling_interval=interval,
-            label=f'lightMean {mean_level:g}',
-            filter_length_s=filter_length_s, n_bins=n_bins,
-            frequency_cutoff=cutoff, rec_type=rec_type)
-        if verbose:
-            model = analysis.ln_model[mean_level]  # noqa: F841 -- printed below
-            bounded = model.params.get('at_bounds') or ()
-            print(f'  lightMean {mean_level:g}: {stim.shape[0]} epochs '
-                  f'({model.n_train} train / {model.n_test} test) | '
-                  f'r²={model.r2:.3f} held out, {model.r2_train:.3f} in sample | '
-                  f'time-to-peak {model.time_to_peak_ms:.0f} ms'
-                  + (f' | at bound: {", ".join(bounded)}' if bounded else ''))
 
     analysis.frequency_cutoff = float(cutoff) if cutoff is not None else np.nan
+    analysis.filter_length_s = float(filter_length_s)
+    analysis.n_bins = int(n_bins)
     analysis.dropped_epochs = pd.DataFrame(dropped)
     analysis.epoch_adjustments = pd.DataFrame(adjustments)
     if verbose:
@@ -2096,6 +2135,43 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                       f'{group.mean_after_pa.iloc[0]:+.0f} pA | offsets '
                       f'{group.offset_pa.min():+.0f} to '
                       f'{group.offset_pa.max():+.0f} pA')
+    if fit:
+        fit_condition(analysis, verbose=verbose)
+    return analysis
+
+
+def fit_condition(analysis: ConditionAnalysis,
+                  filter_length_s: Optional[float] = None,
+                  n_bins: Optional[int] = None,
+                  verbose: bool = True) -> ConditionAnalysis:
+    """Fit one LN model per light mean on an already-loaded condition.
+
+    Split out of :func:`analyze_condition` so the group-mean response can be
+    drawn from the same arrays before anything is fitted to them. Defaults come
+    off the analysis, so this reproduces what ``analyze_condition`` would have
+    done. Fills ``analysis.ln_model`` and returns the same object.
+    """
+    filter_length_s = (analysis.filter_length_s if filter_length_s is None
+                       else float(filter_length_s))
+    n_bins = analysis.n_bins if n_bins is None else int(n_bins)
+    cutoff = (analysis.frequency_cutoff
+              if np.isfinite(analysis.frequency_cutoff) else None)
+    for mean_level in analysis.light_means:
+        stim = analysis.stimulus[mean_level]
+        resp = analysis.response[mean_level]
+        model = fit_ln_model(
+            stim, resp, sampling_interval=analysis.sampling_interval,
+            label=f'lightMean {mean_level:g}',
+            filter_length_s=filter_length_s, n_bins=n_bins,
+            frequency_cutoff=cutoff, rec_type=analysis.rec_type)
+        analysis.ln_model[mean_level] = model
+        if verbose:
+            bounded = model.params.get('at_bounds') or ()
+            print(f'  lightMean {mean_level:g}: {stim.shape[0]} epochs '
+                  f'({model.n_train} train / {model.n_test} test) | '
+                  f'r²={model.r2:.3f} held out, {model.r2_train:.3f} in sample | '
+                  f'time-to-peak {model.time_to_peak_ms:.0f} ms'
+                  + (f' | at bound: {", ".join(bounded)}' if bounded else ''))
     return analysis
 
 
@@ -2169,7 +2245,57 @@ def plot_mean_response(analysis: ConditionAnalysis, window_s: float = 1.0,
     return fig
 
 
-def temporal_ln_model(analysis: ConditionAnalysis, window_seconds: float = 5.0,
+# Shortest window that still supports an LN fit, in seconds.
+#
+# Measured, not assumed: over 18 condition/cell combinations the held-out r2 of
+# a windowed fit, as a fraction of the fit on the whole usable stretch, runs
+#
+#     0.5 s  1.0   1.5   2.0   3.0   4.0   5.0   7.0   10.0  14.0
+#     0.64   0.78  0.82  0.85  0.90  0.92  0.94  0.96  0.97  0.98
+#
+# and the spread across windows of one condition falls from 0.135 to 0.034 over
+# the same range. There is no knee -- it is a smooth trade -- so 3 s is the
+# point where a window keeps 90% of what the full stretch achieves. Below 2 s
+# the scatter between windows is as large as the adaptation being measured, and
+# at 0.5 s individual fits diverge outright.
+#
+# The degrees-of-freedom argument agrees. A filter band-limited to the
+# stimulus's cutoff and lasting L seconds has about `2*f_c*L` free parameters,
+# and a window of T seconds over n epochs supplies about `2*f_c*T*n`
+# independent samples, so the ratio is just `n*T/L`. At 3 s with 7 epochs and a
+# 1 s filter that is ~21 samples per parameter, which is the usual floor for a
+# regression to reach most of its achievable variance explained.
+MIN_LN_WINDOW_S = 3.0
+
+
+def temporal_windows(usable_seconds: float,
+                     min_window_s: float = MIN_LN_WINDOW_S) -> Tuple[int, float]:
+    """``(n_windows, window_seconds)`` covering ``usable_seconds`` with no remainder.
+
+    Fitting fixed-width windows and dropping the remainder loses real data --
+    a 5 s window on the 29 s left of a 30 s epoch after ``skip_seconds`` gives
+    five windows and throws the last 4 s away, which is 14% of the recording
+    and the part furthest into the adaptation. Instead take as many windows as
+    :data:`MIN_LN_WINDOW_S` allows and divide the stretch evenly between them,
+    so every sample is used and the windows stay equal.
+
+    The count depends only on ``usable_seconds``, so two cells recorded with
+    the same epoch length and the same ``skip_seconds`` get the same number of
+    windows and their windows line up -- which is what makes them poolable.
+    """
+    usable = float(usable_seconds)
+    if not np.isfinite(usable) or usable <= 0:
+        return 0, float('nan')
+    # A hair of tolerance so an epoch one sample short of an exact multiple
+    # does not silently drop a whole window relative to its neighbours.
+    n_windows = int(np.floor(usable / float(min_window_s) + 1e-6))
+    n_windows = max(n_windows, 1)
+    return n_windows, usable / n_windows
+
+
+def temporal_ln_model(analysis: ConditionAnalysis,
+                      window_seconds: Optional[float] = None,
+                      min_window_s: float = MIN_LN_WINDOW_S,
                       filter_length_s: float = 1.0,
                       frequency_cutoff: Optional[float] = None,
                       n_bins: int = 100,
@@ -2182,9 +2308,14 @@ def temporal_ln_model(analysis: ConditionAnalysis, window_seconds: float = 5.0,
     within a window -- all the first five seconds together, then all the second
     five -- because one epoch's window is far too little data for a filter.
 
-    Windows are a fixed ``window_seconds`` rather than a fixed count, so the
-    same call means the same thing on a 30 s and a 60 s epoch; the last partial
-    window is dropped.
+    **The windows are sized to fit the epoch, not fixed.** With
+    ``window_seconds=None`` (the default) :func:`temporal_windows` takes as many
+    windows of at least ``min_window_s`` as the usable stretch allows and
+    divides it evenly between them, so nothing is dropped: a 30 s epoch with
+    ``skip_seconds=1`` gives nine windows of 3.22 s rather than five of 5 s
+    plus 4 s discarded. Passing ``window_seconds`` explicitly asks for that
+    width, but the stretch is still divided evenly into the nearest whole
+    number of windows rather than leaving a remainder.
 
     ``frequency_cutoff`` defaults to ``analysis.frequency_cutoff`` -- the
     stimulus's own ``frequencyCutoff``, which is what ``SETTINGS`` carries into
@@ -2202,9 +2333,23 @@ def temporal_ln_model(analysis: ConditionAnalysis, window_seconds: float = 5.0,
                 'no frequency cutoff: analysis.frequency_cutoff is unset, so '
                 'pass frequency_cutoff= explicitly (the stimulus parameter is '
                 'called frequencyCutoff)')
+    # One window count for the whole condition, taken from the shortest epoch
+    # stretch, so the light means stay comparable window for window.
+    widths = [analysis.stimulus[m].shape[1] for m in analysis.light_means
+              if analysis.stimulus.get(m) is not None
+              and analysis.stimulus[m].size]
+    if not widths:
+        return {}
+    usable_s = min(widths) * analysis.sampling_interval
+    if window_seconds is None:
+        n_windows, window_seconds = temporal_windows(usable_s, min_window_s)
+    else:
+        n_windows = max(int(round(usable_s / float(window_seconds))), 1)
+        window_seconds = usable_s / n_windows
     if verbose:
-        print(f'  cutoff {frequency_cutoff:g} Hz (the stimulus\'s own), '
-              f'{window_seconds:g} s windows')
+        print(f'  cutoff {frequency_cutoff:g} Hz (the stimulus\'s own) | '
+              f'{n_windows} windows of {window_seconds:.2f} s '
+              f'covering {usable_s:.2f} s')
 
     out: Dict[float, List[LNModel]] = {}
     for mean_level in analysis.light_means:
@@ -2212,25 +2357,23 @@ def temporal_ln_model(analysis: ConditionAnalysis, window_seconds: float = 5.0,
         resp = analysis.response.get(mean_level)
         if stim is None or resp is None or not stim.size:
             continue
-        step = max(int(round(window_seconds / analysis.sampling_interval)), 1)
-        n_windows = stim.shape[1] // step
-        if n_windows == 0:
-            if verbose:
-                print(f'  lightMean {mean_level:g}: epoch shorter than one '
-                      f'{window_seconds:g} s window')
-            continue
+        # Split by sample index rather than by rounding each edge, so the
+        # windows tile the stretch exactly and none overlap.
+        edges = np.linspace(0, stim.shape[1], n_windows + 1).round().astype(int)
         models = []
         # stim[:, lo:hi] keeps every row -- all the epochs of this light mean --
         # and slices only time, so each window is fitted once over every epoch's
         # samples for that stretch. One model per window, not a model per epoch
         # averaged; temporalLNModel.m indexes the same way, `(:,frameRange)`.
         for index in range(n_windows):
-            lo, hi = index * step, (index + 1) * step
+            lo, hi = int(edges[index]), int(edges[index + 1])
+            if hi - lo < 2:
+                continue
             start_s = lo * analysis.sampling_interval + analysis.skip_seconds
             model = fit_ln_model(
                 stim[:, lo:hi], resp[:, lo:hi],
                 sampling_interval=analysis.sampling_interval,
-                label=f'{start_s:g}-{start_s + window_seconds:g} s',
+                label=f'{start_s:.1f}-{hi * analysis.sampling_interval + analysis.skip_seconds:.1f} s',
                 filter_length_s=min(filter_length_s, window_seconds / 2),
                 frequency_cutoff=frequency_cutoff, n_bins=n_bins,
                 rec_type=analysis.rec_type)
@@ -2243,6 +2386,177 @@ def temporal_ln_model(analysis: ConditionAnalysis, window_seconds: float = 5.0,
                       f'{model.time_to_peak_ms:.0f} ms')
         out[mean_level] = models
     return out
+
+
+def condition_summary(analysis: ConditionAnalysis,
+                      show: bool = False) -> pd.DataFrame:
+    """One row per light mean: fit quality and the filter's shape.
+
+    Was a loop in the notebook; it is here because every protocol notebook
+    wants the same table and none of it is specific to one cell.
+    """
+    rows = []
+    for mean_level in analysis.light_means:
+        model = analysis.ln_model.get(mean_level)
+        if model is None:
+            continue
+        rows.append({
+            'lightMean': mean_level,
+            'n_epochs': analysis.n_epochs.get(mean_level, 0),
+            'n_train': model.n_train, 'n_test': model.n_test,
+            'r2': model.r2, 'r2_train': model.r2_train, 'nl_r2': model.nl_r2,
+            'time_to_peak_ms': model.time_to_peak_ms,
+            'biphasic_index': model.biphasic_index,
+            'at_bounds': ','.join(model.params.get('at_bounds') or ()),
+        })
+    frame = pd.DataFrame(rows)
+    if show and len(frame) > 1:
+        dim, bright = frame.iloc[0], frame.iloc[-1]
+        ratio = (bright.lightMean / dim.lightMean if dim.lightMean else np.nan)
+        print(f'lightMean {dim.lightMean:g} -> {bright.lightMean:g} '
+              f'({ratio:.0f}x brighter):')
+        print(f'  time-to-peak   {dim.time_to_peak_ms:.0f} -> '
+              f'{bright.time_to_peak_ms:.0f} ms')
+        print(f'  biphasic index {dim.biphasic_index:+.2f} -> '
+              f'{bright.biphasic_index:+.2f}')
+    return frame
+
+
+def temporal_summary(models: Dict[float, List[LNModel]]) -> pd.DataFrame:
+    """One row per (light mean, window): filter shape and sigmoid parameters.
+
+    The long form behind :func:`plot_temporal_kinetics` -- the same numbers the
+    figure draws, for when they are wanted as numbers.
+    """
+    rows = []
+    for mean_level, window_models in models.items():
+        for order, model in enumerate(window_models):
+            params = model.params or {}
+            rows.append({
+                'lightMean': mean_level, 'window': model.label, 'order': order,
+                'start_s': _window_start(model.label),
+                'centre_s': _window_centre(model.label),
+                'r2': model.r2, 'nl_r2': model.nl_r2,
+                'time_to_peak_ms': model.time_to_peak_ms,
+                'biphasic_index': model.biphasic_index,
+                'alpha': params.get('alpha', np.nan),
+                'beta': params.get('beta', np.nan),
+                'gamma': params.get('gamma', np.nan),
+                'epsilon': params.get('epsilon', np.nan),
+                'at_bounds': ','.join(params.get('at_bounds') or ()),
+            })
+    return pd.DataFrame(rows)
+
+
+def _window_bounds(label: str) -> Tuple[float, float]:
+    """``(start, end)`` in seconds from a ``'1.0-4.2 s'`` window label."""
+    try:
+        lo, hi = label.replace(' s', '').split('-')
+        return float(lo), float(hi)
+    except Exception:
+        return np.nan, np.nan
+
+
+def _window_start(label: str) -> float:
+    return _window_bounds(label)[0]
+
+
+def _window_centre(label: str) -> float:
+    lo, hi = _window_bounds(label)
+    return (lo + hi) / 2.0
+
+
+def plot_temporal_kinetics(analysis: ConditionAnalysis,
+                           models: Dict[float, List[LNModel]],
+                           figsize: Tuple[float, float] = (13.5, 6.5)):
+    """How the fitted model's parameters move across the epoch.
+
+    Against time-since-step: the filter's **time-to-peak** and **biphasic
+    index** on the top row with the fit quality, and the nonlinearity's **four
+    parameters** on the bottom. The windowed
+    filters and nonlinearities themselves are curves, and a pile of curves
+    hides a trend; these are the numbers that describe them, so a filter
+    speeding up or a nonlinearity steepening is a line going somewhere rather
+    than something to be read off a legend.
+
+    Held-out r2 is drawn alongside so a parameter that moves only where the fit
+    is poor can be recognised as such. Windows whose fit ended on a bound are
+    ringed, since those parameters are set by the limit and not by the data.
+    """
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    frame = temporal_summary(models)
+    if frame.empty:
+        print('no windowed models to plot')
+        return None
+    means = [m for m in analysis.light_means if models.get(m)]
+    colors = style.colors_for_conditions([f'{m:g}' for m in means])
+
+    unit = analysis.units.split()[-1].strip('()')
+    # Row 1 is the linear stage and the fit; row 2 is the nonlinearity's four
+    # parameters, kept together so they read as one object changing.
+    panels = [('time_to_peak_ms', 'filter time-to-peak (ms)'),
+              ('biphasic_index', 'filter biphasic index'),
+              ('r2', 'held-out r$^2$'),
+              (None, None),
+              ('alpha', f'nl alpha -- rise ({unit})'),
+              ('beta', 'nl beta -- slope (1/generator)'),
+              ('gamma', 'nl gamma -- threshold'),
+              ('epsilon', f'nl epsilon -- baseline ({unit})')]
+    fig, axes = plt.subplots(2, 4, figsize=figsize, sharex=True)
+    for ax, (column, ylabel) in zip(axes.ravel(), panels):
+        if column is None:
+            ax.axis('off')
+            continue
+        for mean_level in means:
+            block = frame[frame.lightMean.eq(mean_level)].sort_values('centre_s')
+            if block.empty:
+                continue
+            color = colors[f'{mean_level:g}']
+            ax.plot(block.centre_s, block[column], 'o-', ms=4, lw=1.6,
+                    color=color, label=f'lightMean {mean_level:g}')
+            constrained = block[block.at_bounds.ne('')]
+            if len(constrained):
+                ax.plot(constrained.centre_s, constrained[column], 'o', ms=10,
+                        mfc='none', mec=color, mew=1.4)
+        ax.set_ylabel(ylabel, fontsize=9)
+        ax.tick_params(labelsize=8)
+    for ax in axes[-1]:
+        ax.set_xlabel('time since luminance step (s)', fontsize=9)
+    axes[0][0].legend(frameon=False, fontsize=7)
+    n_windows = int(frame.groupby('lightMean').size().max())
+    fig.suptitle(f'{analysis.exp_name} | {analysis.rec_type} | '
+                 f'{n_windows} windows | rings mark a fit on a bound',
+                 fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    return fig
+
+
+def light_level_table(protocol_blocks: pd.DataFrame,
+                      show: bool = False) -> pd.DataFrame:
+    """One row per (experiment, LED): the resolved attenuation for each.
+
+    Wraps the per-group :func:`led_attenuation` call that was a loop in the
+    notebook.
+    """
+    rows = []
+    for (exp_name, led), group in protocol_blocks.groupby(['exp_name', 'led'],
+                                                          dropna=False):
+        entry = led_attenuation(group.iloc[0])
+        entry['n_blocks'] = len(group)
+        rows.append(entry)
+    frame = pd.DataFrame(rows)
+    if show and len(frame):
+        unresolved = frame[frame.unknown_tokens.ne('')]
+        print(f'{len(frame)} experiment x LED combinations | '
+              f'{int(frame.wheel_ignored.sum())} list an FW filter that is not '
+              f'in the LED path (stripped, named in wheel_tokens_ignored)')
+        if len(unresolved):
+            print(f'{len(unresolved)} with filters missing from the rig LED '
+                  f'table: {sorted(set(unresolved.unknown_tokens))}')
+    return frame
 
 
 def plot_temporal_ln(analysis: ConditionAnalysis,
