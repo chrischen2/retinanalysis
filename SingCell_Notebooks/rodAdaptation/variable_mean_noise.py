@@ -2679,63 +2679,150 @@ def _decode_metrics(estimate, truth_sign) -> dict:
 MIN_DECODE_WINDOW_S = 1.0
 
 
+def _lagged(binned, n_lags: int):
+    """``(samples x n_lags)`` design matrix and the bin each row predicts.
+
+    The cell answers late, so the stimulus in bin ``i`` is read out of the
+    response in bins ``i .. i+n_lags-1``. Every decoder here sees the same
+    feature vector, which is what makes their scores comparable.
+    """
+    binned = np.atleast_2d(np.asarray(binned, dtype=float))
+    n_epochs, n_bins = binned.shape
+    n_rows = n_bins - n_lags + 1
+    if n_rows <= 0:
+        return np.zeros((0, n_lags)), np.zeros((0,), dtype=int), np.zeros((0,), dtype=int)
+    windows = np.lib.stride_tricks.sliding_window_view(binned, n_lags, axis=1)
+    design = windows.reshape(n_epochs * n_rows, n_lags)
+    epoch_of = np.repeat(np.arange(n_epochs), n_rows)
+    bin_of = np.tile(np.arange(n_rows), n_epochs)
+    return design, epoch_of, bin_of
+
+
+def _fit_linear_classifier(design, labels, ridge: float = 1e-2):
+    """Least-squares (LDA-equivalent) linear discriminant on +/-1 labels.
+
+    Regression onto +/-1 targets gives the same direction as Fisher's linear
+    discriminant for two classes, so this is the "straight linear decoder":
+    one weight per lag, one dot product per sample, nothing else.
+    """
+    design = np.asarray(design, dtype=float)
+    labels = np.asarray(labels, dtype=float)
+    centre = design.mean(axis=0)
+    centred = design - centre
+    gram = centred.T @ centred
+    scale = float(np.trace(gram)) / max(gram.shape[0], 1)
+    weights = np.linalg.solve(gram + ridge * (scale or 1.0) * np.eye(gram.shape[0]),
+                              centred.T @ (labels - labels.mean()))
+    return {'kind': 'linear', 'centre': centre, 'weights': weights,
+            'offset': float(labels.mean())}
+
+
+def _fit_naive_bayes(design, labels, var_floor: float = 1e-12):
+    """Gaussian naive Bayes: per-class mean and variance, features independent.
+
+    The independence assumption is wrong here -- neighbouring response lags are
+    strongly correlated -- which is exactly why it is worth running beside the
+    linear decoder. If it scores as well, the correlations between lags carry
+    no polarity information; if it scores worse, they do.
+    """
+    design = np.asarray(design, dtype=float)
+    labels = np.asarray(labels)
+    stats = {}
+    for value in (-1.0, 1.0):
+        block = design[labels == value]
+        if block.shape[0] < 2:
+            return None
+        variance = block.var(axis=0)
+        stats[value] = (block.mean(axis=0),
+                        np.maximum(variance, var_floor + 1e-6 * variance.mean()),
+                        float(block.shape[0]) / design.shape[0])
+    return {'kind': 'naive_bayes', 'stats': stats}
+
+
+def _apply_classifier(model, design):
+    """Continuous decision variable: positive means 'increment'."""
+    design = np.asarray(design, dtype=float)
+    if design.size == 0:
+        return np.zeros(0)
+    if model['kind'] == 'linear':
+        return (design - model['centre']) @ model['weights']
+    scores = {}
+    for value, (mean, variance, prior) in model['stats'].items():
+        scores[value] = (-0.5 * np.sum((design - mean) ** 2 / variance
+                                       + np.log(variance), axis=1)
+                         + np.log(prior))
+    return scores[1.0] - scores[-1.0]
+
+
+DECODERS = ('reconstruction', 'linear', 'naive_bayes')
+
+
 def decode_windows(analysis: ConditionAnalysis,
                    mode: str = 'per_window',
+                   decoder: str = 'reconstruction',
                    steady_state_s: float = 10.0,
                    window_seconds: Optional[float] = None,
                    min_window_s: float = MIN_DECODE_WINDOW_S,
                    decode_bin_ms: float = 25.0,
+                   decode_lag_ms: float = 200.0,
                    noise_ratio: float = 0.1,
                    max_folds: int = 5,
                    random_state: Optional[int] = 0,
                    verbose: bool = True) -> pd.DataFrame:
-    """Decode stimulus polarity from the response, window by window.
+    """Decode light polarity from the response, window by window.
 
-    A linear decoder is fitted from response back onto stimulus
-    (:func:`decoding_filter`), the reconstruction is averaged into
-    ``decode_bin_ms`` bins, and its sign is compared with the true light
-    polarity in the same bins -- scored **separately for increments and
-    decrements**, because the two are not symmetric in a rectifying cell and
-    pooling them hides which one adaptation costs.
+    Three decoders, all trained and scored the same way, so the numbers are
+    comparable:
+
+    ``'reconstruction'``
+        Fit the Wiener filter that maps response back onto stimulus
+        (:func:`decoding_filter`), then take the sign of the reconstruction.
+        Regression first, classification as an afterthought.
+    ``'linear'``
+        Least-squares linear discriminant straight onto the +/-1 polarity
+        label, over a lagged vector of response bins. Classification directly,
+        with no reconstruction in between.
+    ``'naive_bayes'``
+        Gaussian naive Bayes over the same lagged vector. Same features as
+        ``'linear'``, but treats the lags as independent, so the gap between
+        the two says whether correlations across lags carry polarity.
+
+    Increments and decrements are always scored **separately**: a rectifying
+    cell is not symmetric, and pooling them hides which polarity adaptation
+    costs. ``acc_increment`` and ``acc_decrement`` are per-class recall, and
+    ``asymmetry`` is their difference.
+
+    Two train/test regimes, and the comparison between them is the point:
+
+    ``'per_window'``
+        Train inside each window on training epochs, score a held-out epoch of
+        that same window. Measures the polarity information present at that
+        moment, whatever the operating point.
+
+    ``'steady_state'``
+        Train once on the last ``steady_state_s`` -- the adapted state -- and
+        score the earlier windows, which the decoder never saw (windows
+        overlapping the training stretch are refused, not merely assumed
+        disjoint). Measures what a reader with a fixed, adapted calibration
+        makes of the un-adapted response.
 
     ``decode_bin_ms`` sets the question being asked: at 1 ms it is "was the
     light above its mean in this millisecond", which even a perfect decoder
     answers poorly because a spike rate in one millisecond is nearly all noise.
-    25 ms is near the filter's own width, so the question is one the response
-    can actually carry. On 2020-06-11_B mean AUC runs 0.79 at 100 ms bins and
-    0.85 at 25 ms.
+    25 ms is near the filter's own width. On 2020-06-11_B mean reconstruction
+    AUC runs 0.79 at 100 ms bins and 0.85 at 25 ms.
 
     **``skip_seconds`` decides whether the recovery is visible at all.** The
     step happens at t=0 of every epoch, the rate transient is over within about
     3 s, and an ``analysis`` built with ``skip_seconds=1`` has already thrown
     away the first third of it. Build the analysis passed here with
     ``skip_seconds=0``.
-
-    Two modes, and the comparison between them is the point:
-
-    ``'per_window'``
-        Fit the model inside each window on training epochs and decode a
-        held-out epoch of that same window. The decoder is recalibrated as the
-        cell adapts, so this measures how much polarity information the
-        response carries at that moment, independent of any drift.
-
-    ``'steady_state'``
-        Fit one model on the last ``steady_state_s`` of the epoch -- the
-        adapted state -- and decode the earlier windows with it. **Windows
-        overlapping the training stretch are excluded**, so nothing is decoded
-        by a model that saw it. This measures what a downstream reader with a
-        fixed, adapted calibration would make of the un-adapted response, which
-        is the quantity that should recover with time since the step.
-
-    Held-out epochs matter for ``'per_window'`` and would matter for
-    ``'steady_state'`` too were the training stretch not disjoint in time; it
-    is, which is why the exclusion is enforced rather than assumed.
     """
     if mode not in ('per_window', 'steady_state'):
         raise ValueError("mode must be 'per_window' or 'steady_state'")
+    if decoder not in DECODERS:
+        raise ValueError(f'decoder must be one of {DECODERS}')
 
-    cutoff = (analysis.frequency_cutoff
-              if np.isfinite(analysis.frequency_cutoff) else None)
     interval = analysis.sampling_interval
     widths = [analysis.stimulus[m].shape[1] for m in analysis.light_means
               if analysis.stimulus.get(m) is not None and analysis.stimulus[m].size]
@@ -2748,6 +2835,43 @@ def decode_windows(analysis: ConditionAnalysis,
         n_windows = max(int(round(usable_s / float(window_seconds))), 1)
         window_seconds = usable_s / n_windows
 
+    bin_samples = max(int(round(decode_bin_ms / 1e3 / interval)), 1)
+    n_lags = max(int(round(decode_lag_ms / decode_bin_ms)), 1)
+
+    def train(resp_block, stim_block):
+        """Fit whichever decoder was asked for on one stretch."""
+        if decoder == 'reconstruction':
+            return decoding_filter(resp_block, stim_block, noise_ratio=noise_ratio)
+        design, _, bin_of = _lagged(_bin_mean(resp_block, bin_samples), n_lags)
+        truth_bins = np.sign(_bin_mean(
+            stim_block - stim_block.mean(axis=1, keepdims=True), bin_samples))
+        if design.size == 0:
+            return None
+        # `_lagged` orders its rows epoch-major, so the label for row
+        # (epoch, bin) is truth_bins[epoch, bin] flattened the same way.
+        labels = truth_bins[:, :int(bin_of.max()) + 1].reshape(-1)
+        keep = labels != 0
+        if keep.sum() < 2 * n_lags or len(set(labels[keep])) < 2:
+            return None
+        if decoder == 'linear':
+            return _fit_linear_classifier(design[keep], labels[keep])
+        return _fit_naive_bayes(design[keep], labels[keep])
+
+    def score(model, resp_block, stim_block):
+        """Decision variable and matching truth for one held-out stretch."""
+        centred_stim = stim_block - stim_block.mean(axis=1, keepdims=True)
+        if decoder == 'reconstruction':
+            estimate = apply_decoding_filter(model, resp_block)
+            estimate = estimate - estimate.mean(axis=1, keepdims=True)
+            return (_bin_mean(estimate, bin_samples),
+                    np.sign(_bin_mean(centred_stim, bin_samples)))
+        design, _, bin_of = _lagged(_bin_mean(resp_block, bin_samples), n_lags)
+        truth_bins = np.sign(_bin_mean(centred_stim, bin_samples))
+        if design.size == 0:
+            return np.zeros(0), np.zeros(0)
+        labels = truth_bins[:, :np.max(bin_of) + 1].reshape(-1)
+        return _apply_classifier(model, design), labels
+
     rng = np.random.default_rng(random_state)
     rows: List[dict] = []
     for mean_level in analysis.light_means:
@@ -2757,19 +2881,15 @@ def decode_windows(analysis: ConditionAnalysis,
             continue
         n_epochs, n_time = stim.shape
         edges = np.linspace(0, n_time, n_windows + 1).round().astype(int)
-        # Polarity is defined against each epoch's own mean intensity, which is
-        # the light level the cell is adapting to -- not against zero.
-        truth = np.sign(stim - stim.mean(axis=1, keepdims=True))
 
-        steady_lo = n_time
-        steady_model = None
+        steady_lo, steady_model = n_time, None
         if mode == 'steady_state':
             steady_lo = max(int(round((usable_s - steady_state_s) / interval)), 0)
             if n_time - steady_lo < 2:
                 continue
-            steady_model = decoding_filter(resp[:, steady_lo:],
-                                           stim[:, steady_lo:],
-                                           noise_ratio=noise_ratio)
+            steady_model = train(resp[:, steady_lo:], stim[:, steady_lo:])
+            if steady_model is None:
+                continue
 
         for index in range(n_windows):
             lo, hi = int(edges[index]), int(edges[index + 1])
@@ -2780,49 +2900,39 @@ def decode_windows(analysis: ConditionAnalysis,
             label = f'{start_s:.1f}-{end_s:.1f} s'
 
             if mode == 'steady_state':
-                # Refuse any window that touches what the model was fitted on.
-                if hi > steady_lo:
+                if hi > steady_lo:      # refuse anything the model was fitted on
                     continue
                 folds = [(np.arange(n_epochs), steady_model)]
             else:
-                order = rng.permutation(n_epochs)
                 folds = []
-                for held in order[:min(max_folds, n_epochs)]:
-                    train = np.setdiff1d(np.arange(n_epochs), [held])
-                    if not train.size:
+                for held in rng.permutation(n_epochs)[:min(max_folds, n_epochs)]:
+                    train_idx = np.setdiff1d(np.arange(n_epochs), [held])
+                    if not train_idx.size:
                         continue
-                    folds.append((np.array([held]),
-                                  decoding_filter(resp[train, lo:hi],
-                                                  stim[train, lo:hi],
-                                                  noise_ratio=noise_ratio)))
+                    model = train(resp[train_idx, lo:hi], stim[train_idx, lo:hi])
+                    if model is not None:
+                        folds.append((np.array([held]), model))
 
-            bin_samples = max(int(round(decode_bin_ms / 1e3 / interval)), 1)
-            for test_idx, decoder in folds:
-                if decoder is None:
-                    continue
+            for test_idx, model in folds:
                 columns = np.arange(lo, hi)
-                estimate = apply_decoding_filter(
-                    decoder, resp[np.ix_(test_idx, columns)])
-                true_block = (stim[np.ix_(test_idx, columns)]
-                              - stim[test_idx].mean(axis=1, keepdims=True))
-                # Score at the bin the response can actually resolve, not at
-                # the sampling interval.
-                metrics = _decode_metrics(
-                    _bin_mean(estimate - estimate.mean(axis=1, keepdims=True),
-                              bin_samples),
-                    np.sign(_bin_mean(true_block, bin_samples)))
+                estimate, truth = score(model, resp[np.ix_(test_idx, columns)],
+                                        stim[np.ix_(test_idx, columns)])
+                if np.asarray(estimate).size == 0:
+                    continue
+                metrics = _decode_metrics(estimate, truth)
                 rows.append(dict(lightMean=mean_level, window=label, order=index,
                                  start_s=start_s, centre_s=0.5 * (start_s + end_s),
-                                 mode=mode, n_test_epochs=int(test_idx.size),
+                                 mode=mode, decoder=decoder,
+                                 n_test_epochs=int(test_idx.size),
                                  bin_ms=decode_bin_ms, **metrics))
 
     frame = pd.DataFrame(rows)
     if frame.empty:
         if verbose:
-            print('  no windows decoded')
+            print(f'  {decoder} / {mode}: no windows decoded')
         return frame
-    grouped = (frame.groupby(['lightMean', 'order', 'window', 'centre_s', 'mode'],
-                             as_index=False)
+    grouped = (frame.groupby(['lightMean', 'order', 'window', 'centre_s',
+                              'mode', 'decoder'], as_index=False)
                .agg(acc_increment=('acc_increment', 'mean'),
                     acc_decrement=('acc_decrement', 'mean'),
                     accuracy=('accuracy', 'mean'),
@@ -2830,38 +2940,60 @@ def decode_windows(analysis: ConditionAnalysis,
                     bias=('bias', 'mean'),
                     n_folds=('accuracy', 'size'))
                .sort_values(['lightMean', 'order']).reset_index(drop=True))
+    grouped['asymmetry'] = grouped.acc_increment - grouped.acc_decrement
     if verbose:
-        span = (f'{grouped.centre_s.min():.1f}-{grouped.centre_s.max():.1f} s'
-                if len(grouped) else 'nothing')
-        print(f'  {mode}: {len(grouped)} windows decoded ({span})'
-              + (f', last {steady_state_s:g} s held back as the training stretch'
-                 if mode == 'steady_state' else ''))
         for mean_level, group in grouped.groupby('lightMean'):
             first, last = group.iloc[0], group.iloc[-1]
-            print(f'    lightMean {mean_level:g}: AUC {first.auc:.3f} -> '
-                  f'{last.auc:.3f} | increments {first.acc_increment:.3f} -> '
-                  f'{last.acc_increment:.3f} | decrements '
-                  f'{first.acc_decrement:.3f} -> {last.acc_decrement:.3f}')
+            print(f'    {decoder:>14} / {mode:<12} lightMean {mean_level:g}: '
+                  f'AUC {first.auc:.3f} -> {last.auc:.3f} | '
+                  f'inc {first.acc_increment:.2f} -> {last.acc_increment:.2f} | '
+                  f'dec {first.acc_decrement:.2f} -> {last.acc_decrement:.2f}')
     return grouped
 
 
-def decode_recovery(analysis: ConditionAnalysis, **kwargs) -> pd.DataFrame:
-    """Both decoding modes in one frame, for plotting side by side."""
-    frames = [decode_windows(analysis, mode=mode, **kwargs)
-              for mode in ('per_window', 'steady_state')]
-    frames = [f for f in frames if not f.empty]
-    return (pd.concat(frames, ignore_index=True) if frames else pd.DataFrame())
+def decode_recovery(analysis: ConditionAnalysis,
+                    decoders: Sequence[str] = DECODERS,
+                    modes: Sequence[str] = ('per_window', 'steady_state'),
+                    verbose: bool = True, **kwargs) -> pd.DataFrame:
+    """Every decoder x every train/test regime, in one long frame."""
+    frames = []
+    for decoder in decoders:
+        for mode in modes:
+            frame = decode_windows(analysis, mode=mode, decoder=decoder,
+                                   verbose=verbose, **kwargs)
+            if not frame.empty:
+                frames.append(frame)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def decoder_summary(decoded: pd.DataFrame) -> pd.DataFrame:
+    """One row per decoder x regime x light mean: recovery and asymmetry.
+
+    ``auc_first``/``auc_last`` are the recovery; ``asymmetry`` is the mean
+    increment-minus-decrement recall, whose *sign* is the polarity the cell
+    reports better.
+    """
+    if decoded is None or decoded.empty:
+        return pd.DataFrame()
+    ordered = decoded.sort_values('centre_s')
+    return (ordered.groupby(['decoder', 'mode', 'lightMean'], as_index=False)
+            .agg(auc_first=('auc', 'first'), auc_last=('auc', 'last'),
+                 auc_mean=('auc', 'mean'),
+                 inc=('acc_increment', 'mean'), dec=('acc_decrement', 'mean'),
+                 asymmetry=('asymmetry', 'mean'), n_windows=('auc', 'size'))
+            .assign(auc_gain=lambda f: f.auc_last - f.auc_first))
 
 
 def plot_decoding(analysis: ConditionAnalysis, decoded: pd.DataFrame,
-                  figsize: Tuple[float, float] = (12.0, 7.0)):
-    """Decoding performance against time since the step, by polarity.
+                  figsize: Optional[Tuple[float, float]] = None):
+    """Polarity recall against time since the step: decoders x regimes.
 
-    Columns are the two modes: a decoder recalibrated in every window, and one
-    calibrated on the adapted state and applied backwards. Rows are the
-    threshold-free AUC and the per-class recall. If adaptation costs the cell
-    information, AUC recovers in both; if it only moves the operating point,
-    AUC is flat and the recovery shows up in the fixed-calibration column.
+    Rows are decoders, columns the two train/test regimes. Within a panel,
+    solid is increment recall and dashed is decrement, coloured by light mean,
+    so the vertical gap between a matched pair **is** the increment/decrement
+    asymmetry. Mean AUC is printed in each panel, since a decoder can be
+    lopsided and informative at the same time and the two should not be read
+    off one curve.
     """
     import matplotlib.pyplot as plt
     from retinanalysis.utils import style
@@ -2870,43 +3002,48 @@ def plot_decoding(analysis: ConditionAnalysis, decoded: pd.DataFrame,
     if decoded is None or decoded.empty:
         print('nothing decoded')
         return None
-    modes = [m for m in ('per_window', 'steady_state')
-             if m in set(decoded['mode'])]
-    means = [m for m in analysis.light_means
-             if m in set(decoded.lightMean)]
+    decoders = [d for d in DECODERS if d in set(decoded.decoder)]
+    modes = [m for m in ('per_window', 'steady_state') if m in set(decoded['mode'])]
+    means = [m for m in analysis.light_means if m in set(decoded.lightMean)]
     colors = style.colors_for_conditions([f'{m:g}' for m in means])
     titles = {'per_window': 'recalibrated each window',
               'steady_state': 'calibrated on the adapted state'}
+    names = {'reconstruction': 'reconstruction\n(Wiener)', 'linear': 'linear\ndiscriminant',
+             'naive_bayes': 'naive Bayes\n(Gaussian)'}
+    if figsize is None:
+        figsize = (5.4 * len(modes), 2.5 * len(decoders) + 1.2)
 
-    fig, axes = plt.subplots(2, len(modes), figsize=figsize, squeeze=False,
-                             sharex=True, sharey='row')
-    for col, mode in enumerate(modes):
-        block_mode = decoded[decoded['mode'].eq(mode)]
-        top, bottom = axes[0][col], axes[1][col]
-        for mean_level in means:
-            block = block_mode[block_mode.lightMean.eq(mean_level)].sort_values('centre_s')
-            if block.empty:
-                continue
-            color = colors[f'{mean_level:g}']
-            top.plot(block.centre_s, block.auc, 'o-', ms=4, lw=1.7, color=color,
-                     label=f'lightMean {mean_level:g}')
-            bottom.plot(block.centre_s, block.acc_increment, 'o-', ms=4, lw=1.6,
+    fig, axes = plt.subplots(len(decoders), len(modes), figsize=figsize,
+                             squeeze=False, sharex=True, sharey=True)
+    for row, decoder in enumerate(decoders):
+        for col, mode in enumerate(modes):
+            ax = axes[row][col]
+            block_dm = decoded[decoded.decoder.eq(decoder) & decoded['mode'].eq(mode)]
+            for mean_level in means:
+                block = block_dm[block_dm.lightMean.eq(mean_level)].sort_values('centre_s')
+                if block.empty:
+                    continue
+                color = colors[f'{mean_level:g}']
+                ax.plot(block.centre_s, block.acc_increment, '-', lw=1.7,
                         color=color, label=f'{mean_level:g} increment')
-            bottom.plot(block.centre_s, block.acc_decrement, 's--', ms=4, lw=1.6,
-                        color=color, mfc='none', label=f'{mean_level:g} decrement')
-        for ax in (top, bottom):
+                ax.plot(block.centre_s, block.acc_decrement, '--', lw=1.5,
+                        color=color, label=f'{mean_level:g} decrement')
             ax.axhline(0.5, color='0.6', lw=0.8, ls=':')
-            ax.set_xlabel('time since luminance step (s)', fontsize=9)
-        top.set_title(titles[mode], fontsize=10)
-        if col == 0:
-            top.set_ylabel('AUC (threshold-free)', fontsize=9)
-            bottom.set_ylabel('recall by polarity', fontsize=9)
-            top.legend(frameon=False, fontsize=7)
-            bottom.legend(frameon=False, fontsize=6, ncol=2)
-    fig.suptitle(f'{analysis.exp_name} | {analysis.rec_type} | '
-                 f'decoding light polarity from the response  '
-                 f'(dotted line = chance)', fontsize=10)
-    fig.tight_layout(rect=(0, 0, 1, 0.95))
+            if len(block_dm):
+                ax.text(0.98, 0.06, f'AUC {block_dm.auc.mean():.3f}',
+                        transform=ax.transAxes, ha='right', fontsize=8,
+                        color='0.35')
+            if row == 0:
+                ax.set_title(titles[mode], fontsize=10)
+            if col == 0:
+                ax.set_ylabel(names[decoder], fontsize=9)
+            if row == len(decoders) - 1:
+                ax.set_xlabel('time since luminance step (s)', fontsize=9)
+    axes[0][0].legend(frameon=False, fontsize=6.5, ncol=2, loc='lower left')
+    fig.suptitle(f'{analysis.exp_name} | {analysis.rec_type} | polarity recall '
+                 f'(solid = increment, dashed = decrement, dotted = chance)',
+                 fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.955))
     return fig
 
 
