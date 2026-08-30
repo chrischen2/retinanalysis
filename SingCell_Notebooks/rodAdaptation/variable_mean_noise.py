@@ -1611,15 +1611,21 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
     For extracellular recordings the response is a smoothed spike rate; for
     voltage clamp it is the recorded current, **not** baseline subtracted.
 
-    **Whole-cell drift.** The holding current wanders over a recording, and
-    over epochs this long it wanders a lot: on 2021-04-27_B cell1 the epoch
-    means span 1741 pA while the modulation within an epoch is about 300 pA, so
-    the offset is roughly five times the signal. Two guards handle it, and both
-    apply to voltage clamp only.
+    **Whole-cell drift -- ``exc`` and ``inh`` only.** Neither guard below runs
+    for an ``extracellular`` recording, whatever its arguments say: that
+    response is a spike rate built from spike times, with no holding current to
+    wander and no series resistance to refuse on. They correct a voltage-clamp
+    artefact and nothing else, and which way they resolved is printed at the
+    top of every run.
+
+    The holding current wanders over a recording, and over epochs this long it
+    wanders a lot: on 2021-04-27_B cell1 the epoch means span 1741 pA while the
+    modulation within an epoch is about 300 pA, so the offset is roughly five
+    times the signal.
 
     ``max_series_resistance``
-        drops epochs whose recorded series resistance is above it (30 MOhm by
-        default); what was dropped is printed and kept in
+        drops voltage-clamp epochs whose recorded series resistance is above it
+        (30 MOhm by default); what was dropped is printed and kept in
         ``ConditionAnalysis.dropped_epochs``.
     ``align_epoch_means``
         shifts each epoch so its mean matches the **median of the epoch means
@@ -1689,6 +1695,13 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
     from scipy.ndimage import gaussian_filter1d
 
     spiking = rec_type == 'extracellular'
+    # The drift guards below correct a *holding current*, which only a
+    # voltage-clamp recording has. An extracellular response is a spike rate
+    # built from spike times: nothing to drift, no series resistance to refuse
+    # on, and shifting one would move a firing rate for no reason. Both guards
+    # are gated on this rather than on their own arguments, so passing them for
+    # an extracellular cell is simply inert.
+    whole_cell = not spiking
     stimuli: Dict[float, List[np.ndarray]] = {}
     responses: Dict[float, List[np.ndarray]] = {}
     sources: Dict[float, List[dict]] = {}
@@ -1696,6 +1709,17 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
     sample_rate = np.nan
     cutoff = frequency_cutoff
     used = 0
+
+    if verbose:
+        if whole_cell:
+            gate = ('off' if max_series_resistance is None
+                    else f'{max_series_resistance / 1e6:g} MOhm')
+            print(f'{rec_type}: whole-cell drift guards apply -- '
+                  f'series-resistance limit {gate}, align epoch means '
+                  f'{"on" if align_epoch_means else "off"}')
+        else:
+            print(f'{rec_type}: spike rate, so the whole-cell drift guards do '
+                  f'not apply -- nothing to drift and no series resistance')
 
     for block_id in block_ids:
         params = epoch_parameters(int(block_id))
@@ -1749,7 +1773,7 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
             series_resistance = np.nan
             if 'seriesResistance' in row:
                 series_resistance = _numeric(row['seriesResistance'])
-            if (not spiking and max_series_resistance is not None
+            if (whole_cell and max_series_resistance is not None
                     and np.isfinite(series_resistance)
                     and series_resistance > float(max_series_resistance)):
                 dropped.append({'block_id': int(block_id), 'epoch': index,
@@ -1790,7 +1814,7 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
         # epoch cannot drag the level the others are judged against, and it is
         # taken within the light mean because the two means genuinely differ
         # in holding current.
-        if not spiking and align_epoch_means and resp.shape[0] > 1:
+        if whole_cell and align_epoch_means and resp.shape[0] > 1:
             epoch_means = resp.mean(axis=1)
             target = float(np.median(epoch_means))
             offsets = target - epoch_means
