@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from cascadegraph.nodes.base import ParameterizedNode
+from ..nodes.base import ParameterizedNode
 
 
 class RodLinearNode(ParameterizedNode):

@@ -133,3 +133,85 @@ def test_missing_engine_raises_rather_than_falling_back():
     finally:
         builtins.__import__ = real_import
         vmn._MATLAB_ENGINE = saved
+
+
+def test_vendored_cascadegraph_is_self_contained():
+    """The vendored copy must not fall through to a sibling checkout.
+
+    ``utils/cascadegraph`` exists so this repository does not depend on
+    ``~/Documents/GitHub/cascadegraph`` being present and on ``sys.path``. Its
+    imports were absolute (``from cascadegraph.nodes.base import ...``), so the
+    copy was a facade and the real code came from the sibling. This blocks the
+    top-level name outright and imports the copy anyway.
+    """
+    import builtins
+    import importlib
+
+    for name in [n for n in list(sys.modules)
+                 if n == 'cascadegraph' or n.startswith('cascadegraph.')
+                 or 'utils.cascadegraph' in n]:
+        del sys.modules[name]
+
+    real_import = builtins.__import__
+
+    def block_cascadegraph(name, *args, **kwargs):
+        if name == 'cascadegraph' or name.startswith('cascadegraph.'):
+            raise ImportError('top-level cascadegraph is not importable here')
+        return real_import(name, *args, **kwargs)
+
+    saved_path = list(sys.path)
+    sys.path = [p for p in sys.path if 'GitHub/cascadegraph' not in p]
+    builtins.__import__ = block_cascadegraph
+    try:
+        cg = importlib.import_module('retinanalysis.utils.cascadegraph')
+        assert 'retinanalysis' in cg.__file__
+        for name in ('compute_filter', 'convolve_filter_with_stim', 'sample_nl',
+                     'compute_variance_explained', 'apply_frequency_cutoff',
+                     'SigmoidNlNode'):
+            assert hasattr(cg, name), name
+        assert 'cascadegraph' not in sys.modules
+    finally:
+        builtins.__import__ = real_import
+        sys.path = saved_path
+
+
+def test_sigmoid_start_is_read_off_the_data():
+    """Each start value is the statistic of the sampled curve it names.
+
+    The parameters of ``alpha*Phi(beta*x + gamma) + epsilon`` are the baseline,
+    the rise, the steepness and the midpoint, so a curve with known values must
+    produce a start close to them -- otherwise the optimiser is being handed a
+    generic guess and left to find its own way, which is what let ``alpha`` run
+    to 1.35e7 against an ``epsilon`` of -1.35e7.
+    """
+    from scipy.stats import norm
+
+    x = np.linspace(-2.0, 2.0, 100)
+    alpha, beta, gamma, epsilon = 50.0, 2.0, -1.0, -10.0
+    y = alpha * norm.cdf(beta * x + gamma) + epsilon
+
+    guess, lower, upper = vmn.sigmoid_start_and_bounds(x, y)
+    assert np.all(lower <= guess) and np.all(guess <= upper)
+    assert guess[0] > 0                                   # rising, so alpha > 0
+    assert 0.5 * alpha < guess[0] < 2.0 * alpha           # the rise
+    assert abs(guess[3] - epsilon) < 0.25 * alpha         # the baseline
+    # gamma/beta places the midpoint; check the implied x50 rather than the
+    # raw pair, since only their ratio is identifiable from a location.
+    assert abs(-guess[2] / guess[1] - (-gamma / beta)) < 0.2 * np.ptp(x)
+
+    # The fit that follows recovers the true parameters and stays conditioned.
+    fitted = vmn.fit_sigmoid(x, y)
+    assert fitted['r2'] > 0.999
+    assert abs(fitted['alpha']) < 10 * np.ptp(y)
+
+
+def test_sigmoid_start_handles_a_falling_curve():
+    """A negative-going nonlinearity must start with a negative alpha."""
+    from scipy.stats import norm
+
+    x = np.linspace(-2.0, 2.0, 100)
+    y = -40.0 * norm.cdf(1.5 * x) + 5.0
+    guess, lower, upper = vmn.sigmoid_start_and_bounds(x, y)
+    assert guess[0] < 0
+    assert np.all(lower <= guess) and np.all(guess <= upper)
+    assert vmn.fit_sigmoid(x, y)['r2'] > 0.999

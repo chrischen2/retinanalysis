@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 
-from cascadegraph.nodes.base import ModelNode
+from ..nodes.base import ModelNode
 
 
 class DataNode(ModelNode):

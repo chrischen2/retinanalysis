@@ -1391,12 +1391,103 @@ def epoch_stimulus(params, sample_rate: Optional[float] = None,
 # --------------------------------------------------------------------------
 # 5. LN model fitting -- vendored cascadegraph
 # --------------------------------------------------------------------------
-def fit_sigmoid(nl_x, nl_y, optim_iters: int = 5) -> Dict[str, float]:
+def sigmoid_start_and_bounds(x, y, alpha_max_factor: float = 10.0):
+    """Starting parameters and bounds for ``alpha * Phi(beta*x + gamma) + eps``.
+
+    Every number is read off the sampled nonlinearity, because each parameter
+    of this form *is* a summary statistic of it:
+
+    ``epsilon``
+        the lower asymptote -- what the curve approaches as ``beta*x + gamma``
+        runs to -inf, so the baseline: ``min(y)`` for a rising nonlinearity,
+        ``max(y)`` for a falling one.
+    ``alpha``
+        the total rise, since the curve spans ``epsilon`` to
+        ``epsilon + alpha``. So ``+/- (max(y) - min(y))``, signed by the
+        direction of the relationship.
+    ``beta``
+        the steepness. The steepest slope of the form is
+        ``alpha * beta / sqrt(2*pi)``, so matching that to the average slope
+        ``(max(y) - min(y)) / (max(x) - min(x))`` gives
+        ``beta = sqrt(2*pi) / x_range`` -- a transition that takes up about the
+        whole sampled range, which is what an unsaturated nonlinearity looks
+        like.
+    ``gamma``
+        places the midpoint. The curve is at half height where
+        ``beta*x + gamma == 0``, so ``gamma = -beta * x50`` with ``x50``
+        interpolated at the half-height crossing.
+
+    The old guess fixed ``gamma`` at 0 and left every bound infinite, and the
+    optimiser drifted along a degenerate ridge: ``alpha`` and ``epsilon`` grow
+    together and nearly cancel, using a sliver of ``Phi`` as a near-linear
+    segment. On 2026-02-27_G lightMean 0.3 it stopped at ``alpha`` 1.35e7 with
+    ``epsilon`` -1.35e7 -- a difference of 282 out of 1.35e7, so seven digits
+    cancel and the individual parameters carry no information. Across a
+    six-cell sample, letting ``alpha`` run from 3.7e3 to 1.25e11 bought 6e-5 of
+    r squared and cost 14x the time.
+
+    **The ridge is a real optimum, not a numerical accident**, and cutting it
+    off costs a little fit: on that lightMean 0.3 nonlinearity the bounded fit
+    reaches r squared 0.9802 against the ridge's 0.9916, and the LN model's
+    held-out r squared goes 0.5311 to 0.5241. The two curves differ only in the
+    tails. That trade -- a well-conditioned, interpretable parameter set and a
+    fit that runs 2-14x faster, against about 0.01 of nonlinearity r squared --
+    is the default. Raise ``alpha_max_factor`` to widen the box; note that this
+    alone will not return the old numbers, because the data-driven start
+    converges to the well-conditioned optimum from either side.
+
+    The other bounds do not constrain any shape the data can show: ``beta``
+    within 20x the steepness that would fit the transition into the sampled
+    range, ``gamma`` wide enough to put the midpoint anywhere in or near that
+    range, and ``epsilon`` no higher than ``max(y)`` (cascadegraph's own
+    default).
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    x_range = float(np.max(x) - np.min(x))
+    y_range = float(np.max(y) - np.min(y))
+    if not np.isfinite(x_range) or x_range <= 0:
+        x_range = float(np.std(x)) or 1.0
+    if not np.isfinite(y_range) or y_range <= 0:
+        y_range = float(np.std(y)) or 1.0
+
+    # Direction of the relationship, from the sign of the least-squares slope.
+    x_centered, y_centered = x - x.mean(), y - y.mean()
+    denominator = float(np.sum(x_centered ** 2))
+    slope = float(np.sum(x_centered * y_centered) / denominator) if denominator else 1.0
+    direction = 1.0 if slope >= 0 else -1.0
+
+    alpha0 = direction * y_range
+    epsilon0 = float(np.min(y)) if direction > 0 else float(np.max(y))
+    beta0 = direction * np.sqrt(2.0 * np.pi) / x_range
+
+    # Half-height crossing. Interpolating on y sorted ascending (carrying x
+    # along) is monotone by construction, so this works whichever way the
+    # nonlinearity runs and does not care that y is noisy.
+    order = np.argsort(y)
+    x50 = float(np.interp(float(np.min(y) + 0.5 * y_range), y[order], x[order]))
+    gamma0 = -beta0 * x50
+
+    alpha_max = float(alpha_max_factor) * y_range
+    beta_max = 20.0 * np.sqrt(2.0 * np.pi) / x_range
+    gamma_max = beta_max * (float(np.max(np.abs(x))) + x_range)
+    lower = np.array([-alpha_max, -beta_max, -gamma_max, float(np.min(y)) - y_range])
+    upper = np.array([alpha_max, beta_max, gamma_max, float(np.max(y))])
+    guess = np.clip(np.array([alpha0, beta0, gamma0, epsilon0]), lower, upper)
+    return guess, lower, upper
+
+
+def fit_sigmoid(nl_x, nl_y, optim_iters: int = 5,
+                alpha_max_factor: float = 10.0) -> Dict[str, float]:
     """Fit ``alpha * Phi(beta * x + gamma) + epsilon`` with cascadegraph.
 
     ``SigmoidNlNode`` is the Python port of the node class the MATLAB fitted,
     so parameter names and model are identical. Returns NaNs rather than
     raising when the fit fails, so one bad cell does not stop a loop.
+
+    The start point and bounds come from :func:`sigmoid_start_and_bounds`,
+    which estimates each parameter from the sampled points rather than handing
+    the optimiser a generic guess and an unbounded box.
     """
     from retinanalysis.utils.cascadegraph import SigmoidNlNode
 
@@ -1408,10 +1499,11 @@ def fit_sigmoid(nl_x, nl_y, optim_iters: int = 5) -> Dict[str, float]:
     if x.size < 5:
         return failed
     node = SigmoidNlNode()
-    guess = np.array([2 * float(np.max(np.abs(y))) or 1.0,
-                      1.0 / (float(np.std(x)) or 1.0), 0.0, float(np.min(y))])
+    guess, lower, upper = sigmoid_start_and_bounds(
+        x, y, alpha_max_factor=alpha_max_factor)
     try:
-        params = node.fit_to_sample(x, y, params0=guess, optim_iters=optim_iters)
+        params = node.fit_to_sample(x, y, params0=guess, lower_bounds=lower,
+                                    upper_bounds=upper, optim_iters=optim_iters)
     except Exception:
         return failed
     predicted = node.process(x)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from cascadegraph.utils.signal import apply_frequency_cutoff_to_fft
+from ..utils.signal import apply_frequency_cutoff_to_fft
 
 
 def compute_filter(

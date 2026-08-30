@@ -8,7 +8,7 @@ import numpy as np
 from scipy.optimize import least_squares
 from scipy.stats import norm
 
-from cascadegraph.nodes.base import ModelNode, ParameterizedNode
+from ..nodes.base import ModelNode, ParameterizedNode
 
 
 class PolyfitNlNode(ModelNode):

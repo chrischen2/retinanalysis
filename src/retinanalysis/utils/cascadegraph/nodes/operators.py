@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from cascadegraph.nodes.base import ModelNode
+from ..nodes.base import ModelNode
 
 
 class SumNode(ModelNode):

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import numpy as np
 
-from cascadegraph.nodes.base import HyperNode
-from cascadegraph.nodes.data import DataNode
-from cascadegraph.nodes.filter import ParamFilterNode
-from cascadegraph.nodes.nonlinearity import SigmoidNlNode
-from cascadegraph.nodes.operators import SumNode
+from ..nodes.base import HyperNode
+from ..nodes.data import DataNode
+from ..nodes.filter import ParamFilterNode
+from ..nodes.nonlinearity import SigmoidNlNode
+from ..nodes.operators import SumNode
 
 
 class LnHyperNode(HyperNode):

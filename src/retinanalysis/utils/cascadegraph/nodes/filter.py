@@ -6,8 +6,8 @@ from typing import Any
 
 import numpy as np
 
-from cascadegraph.nodes.base import ModelNode, ParameterizedNode
-from cascadegraph.utils.filters import convolve_filter_with_stim
+from ..nodes.base import ModelNode, ParameterizedNode
+from ..utils.filters import convolve_filter_with_stim
 
 
 class FilterNode(ModelNode):

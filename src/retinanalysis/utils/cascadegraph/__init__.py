@@ -8,18 +8,18 @@ This is an unmodified copy. Fixes belong upstream and should be re-vendored
 here rather than edited in place, so the two cannot drift.
 """
 
-from cascadegraph.nodes.base import ModelNode, ParameterizedNode, HyperNode
-from cascadegraph.nodes.data import DataNode
-from cascadegraph.nodes.filter import FilterNode, ParamFilterNode
-from cascadegraph.nodes.nonlinearity import PolyfitNlNode, SigmoidNlNode
-from cascadegraph.nodes.operators import SumNode, NegativeNode
-from cascadegraph.nodes.composite import LnHyperNode, TwoArmLnHyperNode
-from cascadegraph.nodes.biophysical import RodLinearNode, RodBiophysNode
+from .nodes.base import ModelNode, ParameterizedNode, HyperNode
+from .nodes.data import DataNode
+from .nodes.filter import FilterNode, ParamFilterNode
+from .nodes.nonlinearity import PolyfitNlNode, SigmoidNlNode
+from .nodes.operators import SumNode, NegativeNode
+from .nodes.composite import LnHyperNode, TwoArmLnHyperNode
+from .nodes.biophysical import RodLinearNode, RodBiophysNode
 
-from cascadegraph.utils.filters import compute_filter, convolve_filter_with_stim
-from cascadegraph.utils.nonlinearity import sample_nl
-from cascadegraph.utils.metrics import compute_variance_explained
-from cascadegraph.utils.signal import (
+from .utils.filters import compute_filter, convolve_filter_with_stim
+from .utils.nonlinearity import sample_nl
+from .utils.metrics import compute_variance_explained
+from .utils.signal import (
     apply_frequency_cutoff,
     apply_frequency_cutoff_to_fft,
     baseline_subtract,
