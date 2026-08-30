@@ -1391,11 +1391,37 @@ def epoch_stimulus(params, sample_rate: Optional[float] = None,
 # --------------------------------------------------------------------------
 # 5. LN model fitting -- vendored cascadegraph
 # --------------------------------------------------------------------------
-def sigmoid_start_and_bounds(x, y, alpha_max_factor: float = 10.0):
+# Physiological ceilings for the sigmoid nonlinearity.
+#
+# `alpha` is a response amplitude, so its ceiling depends on what the response
+# is measured in; `beta` and `gamma` live on the generator axis, which is in
+# contrast units whatever the amplifier was doing, so one number covers both
+# recording modes. Every value below is a ceiling no real cell reaches, not a
+# typical value -- the point is to cut off the degenerate ridge where `alpha`
+# and `epsilon` grow together and cancel, without touching any shape the data
+# can actually show. Measured over 57 fits from 24 cells: `alpha` reached
+# 3742 pA whole cell and 492 Hz extracellular, `beta` 32, `gamma` -14.3, and
+# the generator spanned -3.0 to +2.6.
+SIGMOID_AMPLITUDE_MAX = {
+    'exc': 5_000.0,            # pA -- a few nA of synaptic current
+    'inh': 5_000.0,            # pA
+    'extracellular': 1_000.0,  # Hz -- above any primate RGC's maintained rate
+}
+# 1 / generator unit. The transition of `alpha*Phi(beta*x + gamma)` takes about
+# `4/|beta|` generator units, so 100 is a step spanning 0.04 of an axis that
+# runs to about +/-3: sharper than the binned nonlinearity can resolve.
+SIGMOID_SLOPE_MAX = 100.0
+# The midpoint `-gamma/beta` may sit this many full generator ranges outside
+# the sampled data -- enough for a nonlinearity seen only in its tail.
+SIGMOID_X50_HEADROOM = 1.0
+
+
+def sigmoid_start_and_bounds(x, y, rec_type: Optional[str] = None,
+                             alpha_max_factor: float = 10.0):
     """Starting parameters and bounds for ``alpha * Phi(beta*x + gamma) + eps``.
 
-    Every number is read off the sampled nonlinearity, because each parameter
-    of this form *is* a summary statistic of it:
+    Every start value is read off the sampled nonlinearity, because each
+    parameter of this form *is* a summary statistic of it:
 
     ``epsilon``
         the lower asymptote -- what the curve approaches as ``beta*x + gamma``
@@ -1409,7 +1435,7 @@ def sigmoid_start_and_bounds(x, y, alpha_max_factor: float = 10.0):
         the steepness. The steepest slope of the form is
         ``alpha * beta / sqrt(2*pi)``, so matching that to the average slope
         ``(max(y) - min(y)) / (max(x) - min(x))`` gives
-        ``beta = sqrt(2*pi) / x_range`` -- a transition that takes up about the
+        ``beta = sqrt(2*pi) / x_range`` -- a transition taking up about the
         whole sampled range, which is what an unsaturated nonlinearity looks
         like.
     ``gamma``
@@ -1417,30 +1443,44 @@ def sigmoid_start_and_bounds(x, y, alpha_max_factor: float = 10.0):
         ``beta*x + gamma == 0``, so ``gamma = -beta * x50`` with ``x50``
         interpolated at the half-height crossing.
 
-    The old guess fixed ``gamma`` at 0 and left every bound infinite, and the
-    optimiser drifted along a degenerate ridge: ``alpha`` and ``epsilon`` grow
-    together and nearly cancel, using a sliver of ``Phi`` as a near-linear
-    segment. On 2026-02-27_G lightMean 0.3 it stopped at ``alpha`` 1.35e7 with
-    ``epsilon`` -1.35e7 -- a difference of 282 out of 1.35e7, so seven digits
-    cancel and the individual parameters carry no information. Across a
-    six-cell sample, letting ``alpha`` run from 3.7e3 to 1.25e11 bought 6e-5 of
+    **The bounds are physiological**, and the two axes are bounded differently
+    because they mean different things.
+
+    ``alpha`` is a response amplitude, so its ceiling is in the units of the
+    recording: :data:`SIGMOID_AMPLITUDE_MAX` gives 5 nA for ``exc``/``inh`` and
+    1000 Hz for ``extracellular``, passed in through ``rec_type``. It is also
+    held within ``alpha_max_factor`` times the observed range, since a curve
+    cannot rise by much more than the data it was sampled from; the tighter of
+    the two applies. With ``rec_type=None`` only the data-relative cap does.
+
+    ``beta`` and ``gamma`` live on the *generator* axis, which is in contrast
+    units whatever the amplifier was doing, so one pair of numbers serves every
+    recording mode: :data:`SIGMOID_SLOPE_MAX` for the steepness, and a ``gamma``
+    ceiling that lets the midpoint sit :data:`SIGMOID_X50_HEADROOM` full ranges
+    outside the sampled data.
+
+    ``epsilon`` is *not* given an absolute ceiling, and this is deliberate: it
+    is an absolute level, not an amplitude, so under voltage clamp it carries
+    the holding current -- one cell here sits at -14.4 nA while modulating by
+    946 pA. Capping it at "a few thousand pA" would refuse that cell's baseline
+    outright. It is bounded by the data's own range instead, one range either
+    side, which also leaves room above ``max(y)`` for a falling nonlinearity,
+    whose ``epsilon`` is its *upper* asymptote.
+
+    The start point matters as much as the box. The old guess fixed ``gamma``
+    at 0 and left every bound infinite, and the optimiser drifted along a ridge
+    where ``alpha`` and ``epsilon`` grow together and nearly cancel, using a
+    sliver of ``Phi`` as a near-linear segment: on 2026-02-27_G lightMean 0.3 it
+    stopped at ``alpha`` 1.35e7 against ``epsilon`` -1.35e7, a difference of 282
+    out of 1.35e7, so seven digits cancelled and neither parameter carried any
+    information. Letting ``alpha`` run from 3.7e3 to 1.25e11 bought 6e-5 of
     r squared and cost 14x the time.
 
-    **The ridge is a real optimum, not a numerical accident**, and cutting it
-    off costs a little fit: on that lightMean 0.3 nonlinearity the bounded fit
-    reaches r squared 0.9802 against the ridge's 0.9916, and the LN model's
-    held-out r squared goes 0.5311 to 0.5241. The two curves differ only in the
-    tails. That trade -- a well-conditioned, interpretable parameter set and a
-    fit that runs 2-14x faster, against about 0.01 of nonlinearity r squared --
-    is the default. Raise ``alpha_max_factor`` to widen the box; note that this
-    alone will not return the old numbers, because the data-driven start
-    converges to the well-conditioned optimum from either side.
-
-    The other bounds do not constrain any shape the data can show: ``beta``
-    within 20x the steepness that would fit the transition into the sampled
-    range, ``gamma`` wide enough to put the midpoint anywhere in or near that
-    range, and ``epsilon`` no higher than ``max(y)`` (cascadegraph's own
-    default).
+    That ridge is a real optimum, so cutting it off costs a little fit on
+    near-linear nonlinearities -- about 0.01 of r squared -- in exchange for
+    parameters that mean what they are named. :func:`fit_sigmoid` reports which
+    parameters ended on a bound, so a fit that was actually constrained is
+    visible rather than silent.
     """
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -1469,15 +1509,23 @@ def sigmoid_start_and_bounds(x, y, alpha_max_factor: float = 10.0):
     gamma0 = -beta0 * x50
 
     alpha_max = float(alpha_max_factor) * y_range
-    beta_max = 20.0 * np.sqrt(2.0 * np.pi) / x_range
-    gamma_max = beta_max * (float(np.max(np.abs(x))) + x_range)
-    lower = np.array([-alpha_max, -beta_max, -gamma_max, float(np.min(y)) - y_range])
-    upper = np.array([alpha_max, beta_max, gamma_max, float(np.max(y))])
+    physiological = SIGMOID_AMPLITUDE_MAX.get(str(rec_type))
+    if physiological is not None:
+        alpha_max = min(alpha_max, float(physiological))
+    beta_max = SIGMOID_SLOPE_MAX
+    x50_max = float(np.max(np.abs(x))) + SIGMOID_X50_HEADROOM * x_range
+    gamma_max = beta_max * x50_max
+
+    lower = np.array([-alpha_max, -beta_max, -gamma_max,
+                      float(np.min(y)) - y_range])
+    upper = np.array([alpha_max, beta_max, gamma_max,
+                      float(np.max(y)) + y_range])
     guess = np.clip(np.array([alpha0, beta0, gamma0, epsilon0]), lower, upper)
     return guess, lower, upper
 
 
 def fit_sigmoid(nl_x, nl_y, optim_iters: int = 5,
+                rec_type: Optional[str] = None,
                 alpha_max_factor: float = 10.0) -> Dict[str, float]:
     """Fit ``alpha * Phi(beta * x + gamma) + epsilon`` with cascadegraph.
 
@@ -1486,8 +1534,14 @@ def fit_sigmoid(nl_x, nl_y, optim_iters: int = 5,
     raising when the fit fails, so one bad cell does not stop a loop.
 
     The start point and bounds come from :func:`sigmoid_start_and_bounds`,
-    which estimates each parameter from the sampled points rather than handing
-    the optimiser a generic guess and an unbounded box.
+    which estimates each parameter from the sampled points and bounds it
+    physiologically -- pass ``rec_type`` so the amplitude ceiling is the one
+    for the units the response is in.
+
+    The returned dict carries ``at_bounds``: the names of any parameters that
+    ended on their limit, empty when none did. A constrained fit is a fit whose
+    parameters are being reported by the bound rather than by the data, and
+    that should be visible rather than silent.
     """
     from retinanalysis.utils.cascadegraph import SigmoidNlNode
 
@@ -1496,22 +1550,31 @@ def fit_sigmoid(nl_x, nl_y, optim_iters: int = 5,
     keep = np.isfinite(x) & np.isfinite(y)
     x, y = x[keep], y[keep]
     failed = {k: np.nan for k in ('alpha', 'beta', 'gamma', 'epsilon', 'r2')}
+    failed['at_bounds'] = ()
     if x.size < 5:
         return failed
     node = SigmoidNlNode()
     guess, lower, upper = sigmoid_start_and_bounds(
-        x, y, alpha_max_factor=alpha_max_factor)
+        x, y, rec_type=rec_type, alpha_max_factor=alpha_max_factor)
     try:
         params = node.fit_to_sample(x, y, params0=guess, lower_bounds=lower,
                                     upper_bounds=upper, optim_iters=optim_iters)
     except Exception:
         return failed
+    span = upper - lower
+    at_bounds = tuple(
+        name for name, value, low, high, width
+        in zip(('alpha', 'beta', 'gamma', 'epsilon'),
+               np.asarray(params).ravel(), lower, upper, span)
+        if np.isfinite(width) and width > 0
+        and (abs(value - low) <= 1e-6 * width or abs(value - high) <= 1e-6 * width))
     predicted = node.process(x)
     denominator = float(np.sum((y - y.mean()) ** 2))
     r2 = (1.0 - float(np.sum((y - predicted) ** 2)) / denominator
           if denominator else np.nan)
     return dict(zip(('alpha', 'beta', 'gamma', 'epsilon'),
-                    (float(p) for p in np.asarray(params).ravel())), r2=r2)
+                    (float(p) for p in np.asarray(params).ravel())),
+                r2=r2, at_bounds=at_bounds)
 
 
 def sigmoid(x, alpha: float, beta: float, gamma: float, epsilon: float):
@@ -1536,7 +1599,7 @@ def _crop_for_equal_n(*arrays, n_bins: int):
 
 def _fit_ln_once(stimulus, response, sampling_interval, filter_pts,
                  frequency_cutoff, correct_stim_power, n_bins,
-                 bin_type='equalN'):
+                 bin_type='equalN', rec_type=None):
     """One filter + nonlinearity fit. Returns the pieces, no scoring."""
     from retinanalysis.utils.cascadegraph import (compute_filter,
                                                   convolve_filter_with_stim,
@@ -1591,7 +1654,7 @@ def _fit_ln_once(stimulus, response, sampling_interval, filter_pts,
                                if bin_type == 'equalN' else (generator, response))
     nl_x, nl_y = sample_nl(gen_binned, resp_binned, num_bins=n_bins,
                            bin_type=bin_type)
-    params = fit_sigmoid(nl_x, nl_y)
+    params = fit_sigmoid(nl_x, nl_y, rec_type=rec_type)
     return filter_causal, generator, nl_x, nl_y, params
 
 
@@ -1633,6 +1696,7 @@ def fit_ln_model(stimulus, response, sampling_interval: float,
                  n_bins: int = 100, bin_type: str = 'equalN',
                  test_fraction: float = 0.2,
                  eval_iterations: int = 3,
+                 rec_type: Optional[str] = None,
                  random_state: Optional[int] = 0) -> LNModel:
     """Fit an LN model to (epochs x time) matrices, scored on held-out epochs.
 
@@ -1681,7 +1745,7 @@ def fit_ln_model(stimulus, response, sampling_interval: float,
             filt, _, _, _, params = _fit_ln_once(
                 stimulus[train_idx], response[train_idx], sampling_interval,
                 filter_pts, frequency_cutoff, correct_stim_power, n_bins,
-                bin_type)
+                bin_type, rec_type)
             if not np.isfinite(params['alpha']):
                 continue
             _, predicted = _predict(filt, params, stimulus[test_idx])
@@ -1692,7 +1756,7 @@ def fit_ln_model(stimulus, response, sampling_interval: float,
     # Final model on every epoch -- the one worth plotting.
     filt, generator, nl_x, nl_y, params = _fit_ln_once(
         stimulus, response, sampling_interval, filter_pts,
-        frequency_cutoff, correct_stim_power, n_bins, bin_type)
+        frequency_cutoff, correct_stim_power, n_bins, bin_type, rec_type)
     _, predicted_all = _predict(filt, params, stimulus)
     r2_train = (_variance_explained(predicted_all, response)
                 if np.isfinite(params['alpha']) else np.nan)
@@ -2002,13 +2066,15 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
             stim, resp, sampling_interval=interval,
             label=f'lightMean {mean_level:g}',
             filter_length_s=filter_length_s, n_bins=n_bins,
-            frequency_cutoff=cutoff)
+            frequency_cutoff=cutoff, rec_type=rec_type)
         if verbose:
             model = analysis.ln_model[mean_level]  # noqa: F841 -- printed below
+            bounded = model.params.get('at_bounds') or ()
             print(f'  lightMean {mean_level:g}: {stim.shape[0]} epochs '
                   f'({model.n_train} train / {model.n_test} test) | '
                   f'r²={model.r2:.3f} held out, {model.r2_train:.3f} in sample | '
-                  f'time-to-peak {model.time_to_peak_ms:.0f} ms')
+                  f'time-to-peak {model.time_to_peak_ms:.0f} ms'
+                  + (f' | at bound: {", ".join(bounded)}' if bounded else ''))
 
     analysis.frequency_cutoff = float(cutoff) if cutoff is not None else np.nan
     analysis.dropped_epochs = pd.DataFrame(dropped)
@@ -2166,7 +2232,8 @@ def temporal_ln_model(analysis: ConditionAnalysis, window_seconds: float = 5.0,
                 sampling_interval=analysis.sampling_interval,
                 label=f'{start_s:g}-{start_s + window_seconds:g} s',
                 filter_length_s=min(filter_length_s, window_seconds / 2),
-                frequency_cutoff=frequency_cutoff, n_bins=n_bins)
+                frequency_cutoff=frequency_cutoff, n_bins=n_bins,
+                rec_type=analysis.rec_type)
             models.append(model)
             if verbose:
                 print(f'  lightMean {mean_level:g}  {model.label:>12}: '

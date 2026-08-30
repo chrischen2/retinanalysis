@@ -215,3 +215,87 @@ def test_sigmoid_start_handles_a_falling_curve():
     assert guess[0] < 0
     assert np.all(lower <= guess) and np.all(guess <= upper)
     assert vmn.fit_sigmoid(x, y)['r2'] > 0.999
+
+
+def test_amplitude_ceiling_follows_the_recording_units():
+    """``alpha`` is a response amplitude, so its bound is in the response's units.
+
+    5 nA means nothing to an extracellular recording and 1000 Hz means nothing
+    to a voltage clamp, so the ceiling has to come from ``rec_type`` rather than
+    from one constant.
+    """
+    from scipy.stats import norm
+
+    x = np.linspace(-2.0, 2.0, 100)
+    # A large-amplitude curve, so the data-relative cap is far above both
+    # physiological ceilings and the units decide which one applies.
+    y = 4000.0 * norm.cdf(1.5 * x) - 2000.0
+
+    _, low_wc, high_wc = vmn.sigmoid_start_and_bounds(x, y, rec_type='exc')
+    _, low_ex, high_ex = vmn.sigmoid_start_and_bounds(x, y, rec_type='extracellular')
+    assert high_wc[0] == vmn.SIGMOID_AMPLITUDE_MAX['exc'] == 5000.0
+    assert high_ex[0] == vmn.SIGMOID_AMPLITUDE_MAX['extracellular'] == 1000.0
+    assert low_wc[0] == -high_wc[0] and low_ex[0] == -high_ex[0]
+
+    # 'inh' shares the whole-cell ceiling; an unknown mode falls back to the
+    # data-relative cap alone rather than silently applying a wrong unit.
+    _, _, high_inh = vmn.sigmoid_start_and_bounds(x, y, rec_type='inh')
+    _, _, high_none = vmn.sigmoid_start_and_bounds(x, y, rec_type=None)
+    assert high_inh[0] == 5000.0
+    assert high_none[0] > 5000.0
+
+
+def test_epsilon_is_not_capped_at_an_absolute_current():
+    """The baseline carries the holding current, which reaches -14 nA here.
+
+    ``epsilon`` is an absolute level, not an amplitude: one cell in this
+    dataset modulates by 946 pA about a holding current of -14.4 nA. A ceiling
+    of "a few thousand pA" on ``epsilon`` would refuse that cell outright, so
+    it is bounded by the data's own range instead.
+    """
+    from scipy.stats import norm
+
+    x = np.linspace(-2.0, 2.0, 100)
+    y = 946.0 * norm.cdf(1.5 * x) - 14_357.0      # the real cell's scale
+
+    guess, lower, upper = vmn.sigmoid_start_and_bounds(x, y, rec_type='exc')
+    assert lower[3] < -14_357.0 < upper[3]
+    assert np.all(lower <= guess) and np.all(guess <= upper)
+
+    fitted = vmn.fit_sigmoid(x, y, rec_type='exc')
+    assert fitted['r2'] > 0.999
+    assert abs(fitted['epsilon'] + 14_357.0) < 200.0
+    assert not fitted['at_bounds'], fitted['at_bounds']
+
+
+def test_generator_axis_bounds_do_not_depend_on_units():
+    """``beta`` and ``gamma`` live on the generator axis, which is contrast.
+
+    The generator signal runs to about +/-3 whatever the amplifier was doing,
+    so one pair of limits serves every recording mode.
+    """
+    from scipy.stats import norm
+
+    x = np.linspace(-2.0, 2.0, 100)
+    y = 100.0 * norm.cdf(2.0 * x)
+    bounds = [vmn.sigmoid_start_and_bounds(x, y, rec_type=r)[2][1:3]
+              for r in ('exc', 'inh', 'extracellular', None)]
+    for other in bounds[1:]:
+        np.testing.assert_allclose(bounds[0], other)
+    assert bounds[0][0] == vmn.SIGMOID_SLOPE_MAX == 100.0
+
+
+def test_fit_sigmoid_reports_a_constrained_fit():
+    """A fit resting on its bound must say so rather than report the bound."""
+    x = np.linspace(-1.0, 1.0, 100)
+    y = 300.0 * x                       # a line: alpha runs away without a bound
+
+    fitted = vmn.fit_sigmoid(x, y, rec_type='extracellular')
+    assert 'at_bounds' in fitted
+    if fitted['at_bounds']:
+        assert abs(fitted['alpha']) <= vmn.SIGMOID_AMPLITUDE_MAX['extracellular']
+    # A curve the box comfortably contains reports nothing.
+    from scipy.stats import norm
+    clean = vmn.fit_sigmoid(x, 80.0 * norm.cdf(2.5 * x) + 5.0,
+                            rec_type='extracellular')
+    assert clean['at_bounds'] == ()
