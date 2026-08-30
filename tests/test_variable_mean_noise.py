@@ -299,3 +299,34 @@ def test_fit_sigmoid_reports_a_constrained_fit():
     clean = vmn.fit_sigmoid(x, 80.0 * norm.cdf(2.5 * x) + 5.0,
                             rec_type='extracellular')
     assert clean['at_bounds'] == ()
+
+
+def test_psth_binning_matches_smoothing_at_the_full_rate():
+    """Binning then smoothing must equal smoothing then binning.
+
+    The PSTH used to be laid down at the amplifier's 10 kHz, Gaussian-smoothed
+    there, and only then block-averaged to the analysis rate -- a 302k-sample
+    array convolved with an 801-tap kernel per epoch, which was most of the
+    cost of loading a condition. Convolution commutes with the boxcar that
+    block-averaging applies, so doing it at the reduced rate is the same trace
+    for ~100x less arithmetic; this pins that they agree.
+    """
+    from scipy.ndimage import gaussian_filter1d
+
+    rng = np.random.default_rng(0)
+    n_samples, sample_rate, step, sigma_ms = 302_000, 10_000.0, 10, 10.0
+    spikes = np.sort(rng.choice(n_samples, size=1800, replace=False))
+
+    dense = np.zeros(n_samples)
+    dense[spikes] = 1.0
+    slow = vmn._block_average(
+        gaussian_filter1d(dense, sigma_ms / 1e3 * sample_rate) * sample_rate, step)
+    fast = vmn._spike_rate(spikes, n_samples, sample_rate, step, sigma_ms)
+
+    assert fast.shape == slow.shape
+    assert np.corrcoef(slow, fast)[0, 1] > 0.999
+    # Absolute agreement relative to the peak rate, not to zero: the two orders
+    # differ only by where the boxcar falls, which is sub-bin.
+    assert np.max(np.abs(slow - fast)) < 0.05 * slow.max()
+    # Total spike count is preserved either way.
+    assert abs(fast.sum() - slow.sum()) < 0.01 * slow.sum()

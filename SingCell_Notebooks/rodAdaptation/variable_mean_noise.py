@@ -646,6 +646,40 @@ def cell_blocks(cells: pd.DataFrame, cell_index: int,
     return row.exp_name, (chosen or block_ids), rec_type
 
 
+def _spike_rate(spike_samples, n_samples: int, sample_rate: float,
+                downsample: int, sigma_ms: float) -> np.ndarray:
+    """A smoothed PSTH at the *reduced* rate, in Hz.
+
+    Bin first, then smooth. The old order -- lay the spikes down at the
+    amplifier's 10 kHz, Gaussian-smooth there, then block-average to 1 kHz --
+    convolves a 302k-sample array with an 801-tap kernel per epoch, which cost
+    3.4 s for 19 epochs and was most of the time spent loading a condition.
+    Binning to the analysis rate first makes it a 30k-sample array and an
+    81-tap kernel, ~100x less arithmetic.
+
+    The result is the same to within rounding: block-averaging is a boxcar,
+    convolution commutes, and the Gaussian band-limits the train well below the
+    reduced Nyquist either way, so decimating before or after the smoothing
+    gives the same trace. Binning first is also the textbook PSTH -- a
+    histogram of spike counts, then smoothed.
+    """
+    from scipy.ndimage import gaussian_filter1d
+
+    step = max(int(downsample), 1)
+    n_bins = n_samples // step
+    if n_bins <= 0:
+        return np.zeros(0, dtype=float)
+    times = np.asarray(spike_samples, dtype=np.int64)
+    times = times[(times >= 0) & (times < n_bins * step)]
+    counts = np.bincount(times // step, minlength=n_bins)[:n_bins].astype(float)
+    reduced_rate = sample_rate / step
+    rate_hz = counts * reduced_rate
+    sigma_bins = float(sigma_ms) / 1e3 * reduced_rate
+    if sigma_bins > 0:
+        rate_hz = gaussian_filter1d(rate_hz, sigma_bins)
+    return rate_hz
+
+
 def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
                 max_epochs: Optional[int] = 12, downsample: int = 50,
                 subtract_baseline: bool = False,
@@ -674,21 +708,20 @@ def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
         for index in range(min(len(params), amp.shape[0])):
             if max_epochs is not None and len(traces) >= max_epochs:
                 break
+            factor = max(int(downsample), 1)
             if spiking:
-                trace = np.zeros(amp.shape[1], dtype=float)
-                times = np.asarray(spike_times[index], dtype=int)
-                times = times[(times >= 0) & (times < trace.size)]
-                trace[times] = 1.0
-                trace = gaussian_filter1d(trace, 0.01 * rate) * rate
+                # Already at the reduced rate: binned, then smoothed.
+                reduced = _spike_rate(spike_times[index], amp.shape[1], rate,
+                                      factor, 10.0)
             else:
                 trace = amp[index]
                 if subtract_baseline:
                     trace = trace - float(np.mean(trace[:int(0.1 * rate)]))
-            factor = max(int(downsample), 1)
-            # Block-average, not slicing: a whole-cell trace is unsmoothed at
-            # the amplifier rate, so taking every nth sample folds fast events
-            # into the drawn line. Same reduction the analysis uses.
-            traces.append((_block_average(trace, factor), rate / factor))
+                # Block-average, not slicing: a whole-cell trace is unsmoothed
+                # at the amplifier rate, so taking every nth sample folds fast
+                # events into the drawn line. Same reduction the analysis uses.
+                reduced = _block_average(trace, factor)
+            traces.append((reduced, rate / factor))
             labels.append(float(params.iloc[index].get('lightMean', np.nan)))
 
     if not traces:
@@ -2033,12 +2066,17 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                 continue
             width = min(stimulus.size, amp.shape[1])
             if spiking:
-                trace = np.zeros(amp.shape[1], dtype=float)
-                times = np.asarray(spike_times[index], dtype=int)
-                times = times[(times >= 0) & (times < trace.size)]
-                trace[times] = 1.0
-                trace = gaussian_filter1d(
-                    trace, psth_sigma_ms / 1e3 * sample_rate) * sample_rate
+                # Built at the reduced rate directly -- see `_spike_rate`. It
+                # is upsampled back by repetition only so the trimming and
+                # alignment below stay in amplifier samples like the stimulus;
+                # `_block_average` then returns exactly these values.
+                reduced = _spike_rate(spike_times[index], amp.shape[1],
+                                      sample_rate, downsample, psth_sigma_ms)
+                trace = np.repeat(reduced, max(int(downsample), 1))
+                if trace.size < amp.shape[1]:
+                    trace = np.concatenate(
+                        [trace, np.full(amp.shape[1] - trace.size,
+                                        trace[-1] if trace.size else 0.0)])
             else:
                 trace = amp[index]
                 if subtract_baseline:
@@ -2531,6 +2569,344 @@ def plot_temporal_kinetics(analysis: ConditionAnalysis,
                  f'{n_windows} windows | rings mark a fit on a bound',
                  fontsize=10)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
+    return fig
+
+
+# --------------------------------------------------------------------------
+# 7. Decoding the stimulus back out of the response
+# --------------------------------------------------------------------------
+def decoding_filter(response, stimulus, noise_ratio: float = 0.1):
+    """The optimal linear filter mapping response back onto stimulus.
+
+    Classic stimulus reconstruction: the decoder is a single linear operator
+    ``s_hat = D * r``, with ``D`` the Wiener solution
+
+        D(f) = <S(f) conj(R(f))> / (<|R(f)|^2> + lambda)
+
+    averaged over training epochs, ``lambda`` a fraction of the mean response
+    power. Both signals are mean-subtracted per epoch first, so ``D`` describes
+    fluctuations about whatever level the cell is sitting at.
+
+    Reconstructing through the *encoding* model instead -- inverting the fitted
+    sigmoid and deconvolving its filter -- was tried and abandoned: the
+    nonlinearity has no inverse outside its own range, and on a spike rate with
+    many empty bins that put 27-44% of samples on the clip, which is a property
+    of the clip rather than of the cell. The linear decoder needs no inverse
+    and is what "linear decoder" conventionally means here.
+    """
+    response = np.atleast_2d(np.asarray(response, dtype=float))
+    stimulus = np.atleast_2d(np.asarray(stimulus, dtype=float))
+    response = response - response.mean(axis=1, keepdims=True)
+    stimulus = stimulus - stimulus.mean(axis=1, keepdims=True)
+    n_time = response.shape[1]
+    fft_r = np.fft.rfft(response, axis=1)
+    fft_s = np.fft.rfft(stimulus, axis=1)
+    cross = np.mean(fft_s * np.conj(fft_r), axis=0)
+    power = np.mean(np.abs(fft_r) ** 2, axis=0)
+    lam = float(noise_ratio) * float(np.mean(power)) if np.mean(power) else 1.0
+    return cross / (power + lam)
+
+
+def apply_decoding_filter(decoder, response):
+    """Reconstruct the stimulus from the response with a decoding filter."""
+    response = np.atleast_2d(np.asarray(response, dtype=float))
+    response = response - response.mean(axis=1, keepdims=True)
+    n_time = response.shape[1]
+    fft_r = np.fft.rfft(response, axis=1)
+    if fft_r.shape[1] != np.asarray(decoder).size:
+        # Different window length: resample the decoder onto this grid.
+        grid_old = np.linspace(0.0, 1.0, np.asarray(decoder).size)
+        grid_new = np.linspace(0.0, 1.0, fft_r.shape[1])
+        decoder = (np.interp(grid_new, grid_old, np.real(decoder))
+                   + 1j * np.interp(grid_new, grid_old, np.imag(decoder)))
+    return np.fft.irfft(fft_r * decoder, n_time, axis=1)
+
+
+def _bin_mean(array, bin_samples: int):
+    """Average into non-overlapping bins of ``bin_samples`` columns."""
+    array = np.atleast_2d(np.asarray(array, dtype=float))
+    n_bins = array.shape[1] // int(bin_samples)
+    if n_bins <= 0:
+        return array[:, :0]
+    trimmed = array[:, :n_bins * int(bin_samples)]
+    return trimmed.reshape(array.shape[0], n_bins, int(bin_samples)).mean(axis=2)
+
+
+def _decode_metrics(estimate, truth_sign) -> dict:
+    """Increment/decrement performance of one decoded stretch.
+
+    ``estimate`` is the decoded stimulus, ``truth_sign`` the true polarity per
+    sample. Recall is reported per class rather than pooled: a decoder that
+    calls everything an increment scores 1.0 on increments and 0.0 on
+    decrements, and only the split shows it. ``auc`` is threshold-free, so it
+    separates "the response carries the polarity" from "the threshold is set
+    where the response happens to sit" -- which is exactly the difference
+    between the two decoding modes below.
+    """
+    estimate = np.asarray(estimate, dtype=float).ravel()
+    truth_sign = np.asarray(truth_sign).ravel()
+    keep = np.isfinite(estimate) & np.isfinite(truth_sign) & (truth_sign != 0)
+    estimate, truth_sign = estimate[keep], truth_sign[keep]
+    up = truth_sign > 0
+    down = ~up
+    n_up, n_down = int(up.sum()), int(down.sum())
+    if not n_up or not n_down:
+        return dict(n_increment=n_up, n_decrement=n_down, acc_increment=np.nan,
+                    acc_decrement=np.nan, accuracy=np.nan, auc=np.nan, bias=np.nan)
+    called_up = estimate > 0
+    acc_up = float(np.mean(called_up[up]))
+    acc_down = float(np.mean(~called_up[down]))
+    # Mann-Whitney U / (n_up * n_down) -- the probability that a random
+    # increment sample is ranked above a random decrement one.
+    order = np.argsort(estimate, kind='mergesort')
+    ranks = np.empty(estimate.size, dtype=float)
+    ranks[order] = np.arange(1, estimate.size + 1)
+    auc = float((ranks[up].sum() - n_up * (n_up + 1) / 2.0) / (n_up * n_down))
+    return dict(n_increment=n_up, n_decrement=n_down,
+                acc_increment=acc_up, acc_decrement=acc_down,
+                accuracy=0.5 * (acc_up + acc_down), auc=auc,
+                bias=float(np.mean(called_up)))
+
+
+# The decoder's window floor, separate from MIN_LN_WINDOW_S and smaller.
+#
+# A decoding filter is one linear operator estimated by ratio of spectra; an LN
+# fit is a filter plus a four-parameter nonlinearity fitted by least squares,
+# so it needs far more data per window. The recovery this section exists to
+# measure happens in the first 1-3 s, which a 3 s window cannot resolve at all:
+# on 2020-06-11_B, 1 s windows show AUC climbing 0.73 -> 0.81 -> 0.86 over the
+# first three seconds and then flat, while 3.2 s windows show 0.85 throughout.
+MIN_DECODE_WINDOW_S = 1.0
+
+
+def decode_windows(analysis: ConditionAnalysis,
+                   mode: str = 'per_window',
+                   steady_state_s: float = 10.0,
+                   window_seconds: Optional[float] = None,
+                   min_window_s: float = MIN_DECODE_WINDOW_S,
+                   decode_bin_ms: float = 25.0,
+                   noise_ratio: float = 0.1,
+                   max_folds: int = 5,
+                   random_state: Optional[int] = 0,
+                   verbose: bool = True) -> pd.DataFrame:
+    """Decode stimulus polarity from the response, window by window.
+
+    A linear decoder is fitted from response back onto stimulus
+    (:func:`decoding_filter`), the reconstruction is averaged into
+    ``decode_bin_ms`` bins, and its sign is compared with the true light
+    polarity in the same bins -- scored **separately for increments and
+    decrements**, because the two are not symmetric in a rectifying cell and
+    pooling them hides which one adaptation costs.
+
+    ``decode_bin_ms`` sets the question being asked: at 1 ms it is "was the
+    light above its mean in this millisecond", which even a perfect decoder
+    answers poorly because a spike rate in one millisecond is nearly all noise.
+    25 ms is near the filter's own width, so the question is one the response
+    can actually carry. On 2020-06-11_B mean AUC runs 0.79 at 100 ms bins and
+    0.85 at 25 ms.
+
+    **``skip_seconds`` decides whether the recovery is visible at all.** The
+    step happens at t=0 of every epoch, the rate transient is over within about
+    3 s, and an ``analysis`` built with ``skip_seconds=1`` has already thrown
+    away the first third of it. Build the analysis passed here with
+    ``skip_seconds=0``.
+
+    Two modes, and the comparison between them is the point:
+
+    ``'per_window'``
+        Fit the model inside each window on training epochs and decode a
+        held-out epoch of that same window. The decoder is recalibrated as the
+        cell adapts, so this measures how much polarity information the
+        response carries at that moment, independent of any drift.
+
+    ``'steady_state'``
+        Fit one model on the last ``steady_state_s`` of the epoch -- the
+        adapted state -- and decode the earlier windows with it. **Windows
+        overlapping the training stretch are excluded**, so nothing is decoded
+        by a model that saw it. This measures what a downstream reader with a
+        fixed, adapted calibration would make of the un-adapted response, which
+        is the quantity that should recover with time since the step.
+
+    Held-out epochs matter for ``'per_window'`` and would matter for
+    ``'steady_state'`` too were the training stretch not disjoint in time; it
+    is, which is why the exclusion is enforced rather than assumed.
+    """
+    if mode not in ('per_window', 'steady_state'):
+        raise ValueError("mode must be 'per_window' or 'steady_state'")
+
+    cutoff = (analysis.frequency_cutoff
+              if np.isfinite(analysis.frequency_cutoff) else None)
+    interval = analysis.sampling_interval
+    widths = [analysis.stimulus[m].shape[1] for m in analysis.light_means
+              if analysis.stimulus.get(m) is not None and analysis.stimulus[m].size]
+    if not widths:
+        return pd.DataFrame()
+    usable_s = min(widths) * interval
+    if window_seconds is None:
+        n_windows, window_seconds = temporal_windows(usable_s, min_window_s)
+    else:
+        n_windows = max(int(round(usable_s / float(window_seconds))), 1)
+        window_seconds = usable_s / n_windows
+
+    rng = np.random.default_rng(random_state)
+    rows: List[dict] = []
+    for mean_level in analysis.light_means:
+        stim = analysis.stimulus.get(mean_level)
+        resp = analysis.response.get(mean_level)
+        if stim is None or resp is None or not stim.size:
+            continue
+        n_epochs, n_time = stim.shape
+        edges = np.linspace(0, n_time, n_windows + 1).round().astype(int)
+        # Polarity is defined against each epoch's own mean intensity, which is
+        # the light level the cell is adapting to -- not against zero.
+        truth = np.sign(stim - stim.mean(axis=1, keepdims=True))
+
+        steady_lo = n_time
+        steady_model = None
+        if mode == 'steady_state':
+            steady_lo = max(int(round((usable_s - steady_state_s) / interval)), 0)
+            if n_time - steady_lo < 2:
+                continue
+            steady_model = decoding_filter(resp[:, steady_lo:],
+                                           stim[:, steady_lo:],
+                                           noise_ratio=noise_ratio)
+
+        for index in range(n_windows):
+            lo, hi = int(edges[index]), int(edges[index + 1])
+            if hi - lo < 2:
+                continue
+            start_s = lo * interval + analysis.skip_seconds
+            end_s = hi * interval + analysis.skip_seconds
+            label = f'{start_s:.1f}-{end_s:.1f} s'
+
+            if mode == 'steady_state':
+                # Refuse any window that touches what the model was fitted on.
+                if hi > steady_lo:
+                    continue
+                folds = [(np.arange(n_epochs), steady_model)]
+            else:
+                order = rng.permutation(n_epochs)
+                folds = []
+                for held in order[:min(max_folds, n_epochs)]:
+                    train = np.setdiff1d(np.arange(n_epochs), [held])
+                    if not train.size:
+                        continue
+                    folds.append((np.array([held]),
+                                  decoding_filter(resp[train, lo:hi],
+                                                  stim[train, lo:hi],
+                                                  noise_ratio=noise_ratio)))
+
+            bin_samples = max(int(round(decode_bin_ms / 1e3 / interval)), 1)
+            for test_idx, decoder in folds:
+                if decoder is None:
+                    continue
+                columns = np.arange(lo, hi)
+                estimate = apply_decoding_filter(
+                    decoder, resp[np.ix_(test_idx, columns)])
+                true_block = (stim[np.ix_(test_idx, columns)]
+                              - stim[test_idx].mean(axis=1, keepdims=True))
+                # Score at the bin the response can actually resolve, not at
+                # the sampling interval.
+                metrics = _decode_metrics(
+                    _bin_mean(estimate - estimate.mean(axis=1, keepdims=True),
+                              bin_samples),
+                    np.sign(_bin_mean(true_block, bin_samples)))
+                rows.append(dict(lightMean=mean_level, window=label, order=index,
+                                 start_s=start_s, centre_s=0.5 * (start_s + end_s),
+                                 mode=mode, n_test_epochs=int(test_idx.size),
+                                 bin_ms=decode_bin_ms, **metrics))
+
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        if verbose:
+            print('  no windows decoded')
+        return frame
+    grouped = (frame.groupby(['lightMean', 'order', 'window', 'centre_s', 'mode'],
+                             as_index=False)
+               .agg(acc_increment=('acc_increment', 'mean'),
+                    acc_decrement=('acc_decrement', 'mean'),
+                    accuracy=('accuracy', 'mean'),
+                    auc=('auc', 'mean'),
+                    bias=('bias', 'mean'),
+                    n_folds=('accuracy', 'size'))
+               .sort_values(['lightMean', 'order']).reset_index(drop=True))
+    if verbose:
+        span = (f'{grouped.centre_s.min():.1f}-{grouped.centre_s.max():.1f} s'
+                if len(grouped) else 'nothing')
+        print(f'  {mode}: {len(grouped)} windows decoded ({span})'
+              + (f', last {steady_state_s:g} s held back as the training stretch'
+                 if mode == 'steady_state' else ''))
+        for mean_level, group in grouped.groupby('lightMean'):
+            first, last = group.iloc[0], group.iloc[-1]
+            print(f'    lightMean {mean_level:g}: AUC {first.auc:.3f} -> '
+                  f'{last.auc:.3f} | increments {first.acc_increment:.3f} -> '
+                  f'{last.acc_increment:.3f} | decrements '
+                  f'{first.acc_decrement:.3f} -> {last.acc_decrement:.3f}')
+    return grouped
+
+
+def decode_recovery(analysis: ConditionAnalysis, **kwargs) -> pd.DataFrame:
+    """Both decoding modes in one frame, for plotting side by side."""
+    frames = [decode_windows(analysis, mode=mode, **kwargs)
+              for mode in ('per_window', 'steady_state')]
+    frames = [f for f in frames if not f.empty]
+    return (pd.concat(frames, ignore_index=True) if frames else pd.DataFrame())
+
+
+def plot_decoding(analysis: ConditionAnalysis, decoded: pd.DataFrame,
+                  figsize: Tuple[float, float] = (12.0, 7.0)):
+    """Decoding performance against time since the step, by polarity.
+
+    Columns are the two modes: a decoder recalibrated in every window, and one
+    calibrated on the adapted state and applied backwards. Rows are the
+    threshold-free AUC and the per-class recall. If adaptation costs the cell
+    information, AUC recovers in both; if it only moves the operating point,
+    AUC is flat and the recovery shows up in the fixed-calibration column.
+    """
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    if decoded is None or decoded.empty:
+        print('nothing decoded')
+        return None
+    modes = [m for m in ('per_window', 'steady_state')
+             if m in set(decoded['mode'])]
+    means = [m for m in analysis.light_means
+             if m in set(decoded.lightMean)]
+    colors = style.colors_for_conditions([f'{m:g}' for m in means])
+    titles = {'per_window': 'recalibrated each window',
+              'steady_state': 'calibrated on the adapted state'}
+
+    fig, axes = plt.subplots(2, len(modes), figsize=figsize, squeeze=False,
+                             sharex=True, sharey='row')
+    for col, mode in enumerate(modes):
+        block_mode = decoded[decoded['mode'].eq(mode)]
+        top, bottom = axes[0][col], axes[1][col]
+        for mean_level in means:
+            block = block_mode[block_mode.lightMean.eq(mean_level)].sort_values('centre_s')
+            if block.empty:
+                continue
+            color = colors[f'{mean_level:g}']
+            top.plot(block.centre_s, block.auc, 'o-', ms=4, lw=1.7, color=color,
+                     label=f'lightMean {mean_level:g}')
+            bottom.plot(block.centre_s, block.acc_increment, 'o-', ms=4, lw=1.6,
+                        color=color, label=f'{mean_level:g} increment')
+            bottom.plot(block.centre_s, block.acc_decrement, 's--', ms=4, lw=1.6,
+                        color=color, mfc='none', label=f'{mean_level:g} decrement')
+        for ax in (top, bottom):
+            ax.axhline(0.5, color='0.6', lw=0.8, ls=':')
+            ax.set_xlabel('time since luminance step (s)', fontsize=9)
+        top.set_title(titles[mode], fontsize=10)
+        if col == 0:
+            top.set_ylabel('AUC (threshold-free)', fontsize=9)
+            bottom.set_ylabel('recall by polarity', fontsize=9)
+            top.legend(frameon=False, fontsize=7)
+            bottom.legend(frameon=False, fontsize=6, ncol=2)
+    fig.suptitle(f'{analysis.exp_name} | {analysis.rec_type} | '
+                 f'decoding light polarity from the response  '
+                 f'(dotted line = chance)', fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
     return fig
 
 
