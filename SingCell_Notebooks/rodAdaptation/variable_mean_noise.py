@@ -1573,6 +1573,10 @@ class ConditionAnalysis:
     # data rather than reloaded and re-reduced.
     sampling_interval: float = np.nan
     skip_seconds: float = 0.0
+    # The stimulus's own ``frequencyCutoff``, as resolved from the epochs. Kept
+    # so anything fitted downstream (the windowed models in particular) cuts
+    # off where the stimulus does instead of guessing a number.
+    frequency_cutoff: float = np.nan
     stimulus: Dict[float, np.ndarray] = field(default_factory=dict)
     response: Dict[float, np.ndarray] = field(default_factory=dict)
     # What the whole-cell salvage did: epochs refused on series resistance,
@@ -1842,6 +1846,7 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                   f'r²={model.r2:.3f} held out, {model.r2_train:.3f} in sample | '
                   f'time-to-peak {model.time_to_peak_ms:.0f} ms')
 
+    analysis.frequency_cutoff = float(cutoff) if cutoff is not None else np.nan
     analysis.dropped_epochs = pd.DataFrame(dropped)
     analysis.epoch_adjustments = pd.DataFrame(adjustments)
     if verbose:
@@ -1936,7 +1941,7 @@ def plot_mean_response(analysis: ConditionAnalysis, window_s: float = 1.0,
 
 def temporal_ln_model(analysis: ConditionAnalysis, window_seconds: float = 5.0,
                       filter_length_s: float = 1.0,
-                      frequency_cutoff: Optional[float] = 60.0,
+                      frequency_cutoff: Optional[float] = None,
                       n_bins: int = 100,
                       verbose: bool = True) -> Dict[float, List[LNModel]]:
     """One LN model per successive window of the epoch, per light mean.
@@ -1950,7 +1955,27 @@ def temporal_ln_model(analysis: ConditionAnalysis, window_seconds: float = 5.0,
     Windows are a fixed ``window_seconds`` rather than a fixed count, so the
     same call means the same thing on a 30 s and a 60 s epoch; the last partial
     window is dropped.
+
+    ``frequency_cutoff`` defaults to ``analysis.frequency_cutoff`` -- the
+    stimulus's own ``frequencyCutoff``, which is what ``SETTINGS`` carries into
+    ``computeFilter`` in ``LNNodeModelWrapper.m``. It is not a constant across
+    this dataset: 60 Hz on 196 of the 373 blocks, but 30, 10, 5, 20 or 1 Hz on
+    177 of them. Passing a number here overrides it, which is worth doing only
+    to fit below the stimulus's own cutoff, never above it -- above it
+    ``correct_stim_power`` divides by a spectrum the 4-pole filter has already
+    driven to ~1e-9 of its in-band value, and the filter comes back as noise.
     """
+    if frequency_cutoff is None:
+        frequency_cutoff = analysis.frequency_cutoff
+        if not np.isfinite(frequency_cutoff):
+            raise ValueError(
+                'no frequency cutoff: analysis.frequency_cutoff is unset, so '
+                'pass frequency_cutoff= explicitly (the stimulus parameter is '
+                'called frequencyCutoff)')
+    if verbose:
+        print(f'  cutoff {frequency_cutoff:g} Hz (the stimulus\'s own), '
+              f'{window_seconds:g} s windows')
+
     out: Dict[float, List[LNModel]] = {}
     for mean_level in analysis.light_means:
         stim = analysis.stimulus.get(mean_level)
@@ -1965,6 +1990,10 @@ def temporal_ln_model(analysis: ConditionAnalysis, window_seconds: float = 5.0,
                       f'{window_seconds:g} s window')
             continue
         models = []
+        # stim[:, lo:hi] keeps every row -- all the epochs of this light mean --
+        # and slices only time, so each window is fitted once over every epoch's
+        # samples for that stretch. One model per window, not a model per epoch
+        # averaged; temporalLNModel.m indexes the same way, `(:,frameRange)`.
         for index in range(n_windows):
             lo, hi = index * step, (index + 1) * step
             start_s = lo * analysis.sampling_interval + analysis.skip_seconds
@@ -1977,6 +2006,8 @@ def temporal_ln_model(analysis: ConditionAnalysis, window_seconds: float = 5.0,
             models.append(model)
             if verbose:
                 print(f'  lightMean {mean_level:g}  {model.label:>12}: '
+                      f'{stim.shape[0]} epochs pooled '
+                      f'({model.n_train} train / {model.n_test} test) | '
                       f'r²={model.r2:.3f} | time-to-peak '
                       f'{model.time_to_peak_ms:.0f} ms')
         out[mean_level] = models
