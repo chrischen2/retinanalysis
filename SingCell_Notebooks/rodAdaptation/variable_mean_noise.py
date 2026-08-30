@@ -56,6 +56,7 @@ returning a stimulus that silently is not the one presented.
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -629,7 +630,6 @@ def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
     the block is visible here.
     """
     import matplotlib.pyplot as plt
-    import retinanalysis as ra
     from retinanalysis.utils import style
     from scipy.ndimage import gaussian_filter1d
 
@@ -640,19 +640,13 @@ def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
         params = epoch_parameters(int(block_id))
         if params.empty:
             continue
-        block = ra.SCResponseBlock(exp_name, int(block_id), b_spiking=spiking,
-                                   b_LED=True, verbose=False)
-        amp = np.asarray(block.amp_data, dtype=float)
-        rate = float(block.amp_sample_rate)
-        if spiking:
-            if getattr(block, 'spike_times', None) is None:
-                block.get_spike_times()
+        amp, rate, spike_times = load_block(exp_name, int(block_id), spiking)
         for index in range(min(len(params), amp.shape[0])):
             if max_epochs is not None and len(traces) >= max_epochs:
                 break
             if spiking:
                 trace = np.zeros(amp.shape[1], dtype=float)
-                times = np.asarray(block.spike_times[index], dtype=int)
+                times = np.asarray(spike_times[index], dtype=int)
                 times = times[(times >= 0) & (times < trace.size)]
                 trace[times] = 1.0
                 trace = gaussian_filter1d(trace, 0.01 * rate) * rate
@@ -1231,6 +1225,77 @@ def _matlab_engine():
     return _MATLAB_ENGINE
 
 
+# --------------------------------------------------------------------------
+# Caches
+#
+# Re-running one analysis cell is the normal way to work in the notebook, and
+# without these every re-run pays the same two costs again: the MATLAB engine
+# redraws every epoch's noise, and the amplifier traces come back off disk.
+# Both are pure functions of their keys -- the stimulus of the recorded
+# generator parameters, the traces of the block -- so both are memoised.
+#
+# They are bounded because the arrays are large: one 30 s epoch at 10 kHz is
+# 2.4 MB and one block of ten is 24 MB, so the caps below are roughly 150 MB
+# and 100 MB. `clear_caches()` empties them.
+# --------------------------------------------------------------------------
+STIMULUS_CACHE_MAX = 64
+BLOCK_CACHE_MAX = 4
+_STIMULUS_CACHE: "OrderedDict[tuple, np.ndarray]" = OrderedDict()
+_BLOCK_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
+
+
+def _cache_get(cache: OrderedDict, key):
+    if key in cache:
+        cache.move_to_end(key)
+        return cache[key]
+    return None
+
+
+def _cache_put(cache: OrderedDict, key, value, max_entries: int):
+    cache[key] = value
+    cache.move_to_end(key)
+    while len(cache) > max_entries:
+        cache.popitem(last=False)
+    return value
+
+
+def clear_caches() -> None:
+    """Empty the stimulus and trace caches.
+
+    Only needed if the underlying H5 has been rewritten under a running
+    kernel, or to hand back the memory.
+    """
+    _STIMULUS_CACHE.clear()
+    _BLOCK_CACHE.clear()
+
+
+def load_block(exp_name: str, block_id: int, spiking: bool):
+    """``(amp, sample_rate, spike_times)`` for one block, memoised.
+
+    The arrays are handed out as-is rather than copied -- they are large, and
+    every caller here reads them. Do not write into what this returns.
+    """
+    import retinanalysis as ra
+
+    key = (str(exp_name), int(block_id), bool(spiking))
+    hit = _cache_get(_BLOCK_CACHE, key)
+    if hit is not None:
+        return hit
+    block = ra.SCResponseBlock(exp_name, int(block_id), b_spiking=spiking,
+                               b_LED=True, verbose=False)
+    amp = np.asarray(block.amp_data, dtype=float)
+    rate = float(block.amp_sample_rate)
+    spike_times = None
+    if spiking:
+        # SCResponseBlock.get_spike_times() populates block.spike_times and
+        # returns None, so read the attribute rather than the return value.
+        if getattr(block, 'spike_times', None) is None:
+            block.get_spike_times()
+        spike_times = block.spike_times
+    return _cache_put(_BLOCK_CACHE, key, (amp, rate, spike_times),
+                      BLOCK_CACHE_MAX)
+
+
 def matlab_randn(seed: int, n: int) -> np.ndarray:
     """``RandStream('mt19937ar', 'Seed', seed).randn(1, n)``, exactly.
 
@@ -1240,8 +1305,15 @@ def matlab_randn(seed: int, n: int) -> np.ndarray:
     this defers to MATLAB rather than approximating it.
     """
     engine = _matlab_engine()
-    engine.eval(f"cg_s = RandStream('mt19937ar','Seed',{int(seed)});", nargout=0)
-    values = engine.eval(f'cg_s.randn(1,{int(n)})', nargout=1)
+    # One `eval` rather than two. Assigning the stream and then drawing from it
+    # costs a second round trip through the engine for no benefit -- the
+    # functional form draws from exactly the same stream and returns
+    # byte-identical values (checked against the pinned reference in
+    # tests/test_variable_mean_noise.py), at 40 ms per 302k-sample epoch
+    # against 75 ms.
+    values = engine.eval(
+        f"randn(RandStream('mt19937ar','Seed',{int(seed)}),1,{int(n)})",
+        nargout=1)
     return np.asarray(values, dtype=float).ravel()
 
 
@@ -1299,11 +1371,21 @@ def epoch_stimulus(params, sample_rate: Optional[float] = None,
     """Rebuild one epoch's stimulus from its recorded parameters."""
     rate = float(sample_rate if sample_rate is not None else params['sampleRate'])
     stim_pts = int(round(float(params['stimTime']) / 1e3 * rate))
-    return gaussian_noise_stimulus(
+    kwargs = dict(
         seed=int(float(params['seed'])), stim_pts=stim_pts,
         st_dev=float(params['stdv']), freq_cutoff=float(params['frequencyCutoff']),
         num_filters=int(float(params['numberOfFilters'])),
-        mean=float(params['lightMean']), sample_rate=rate, noise=noise)
+        mean=float(params['lightMean']), sample_rate=rate)
+    if noise is not None:
+        # A supplied draw is the test path; it is not part of the key, so it
+        # must not be served from or written to the cache.
+        return gaussian_noise_stimulus(noise=noise, **kwargs)
+    key = tuple(sorted(kwargs.items()))
+    hit = _cache_get(_STIMULUS_CACHE, key)
+    if hit is not None:
+        return hit.copy()
+    return _cache_put(_STIMULUS_CACHE, key, gaussian_noise_stimulus(**kwargs),
+                      STIMULUS_CACHE_MAX).copy()
 
 
 # --------------------------------------------------------------------------
@@ -1695,7 +1777,6 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
     noise. Cutting the filter off at the same frequency the stimulus was cut
     off at is what ``computeLNmodel.m`` does through ``SETTINGS``.
     """
-    import retinanalysis as ra
     from scipy.ndimage import gaussian_filter1d
 
     spiking = rec_type == 'extracellular'
@@ -1729,17 +1810,8 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
         params = epoch_parameters(int(block_id))
         if params.empty:
             continue
-        block = ra.SCResponseBlock(exp_name, int(block_id), b_spiking=spiking,
-                                   b_LED=True, verbose=False)
-        amp = np.asarray(block.amp_data, dtype=float)
-        sample_rate = float(block.amp_sample_rate)
-        # SCResponseBlock.get_spike_times() populates block.spike_times and
-        # returns None, so read the attribute rather than the return value.
-        spike_times = None
-        if spiking:
-            if getattr(block, 'spike_times', None) is None:
-                block.get_spike_times()
-            spike_times = block.spike_times
+        amp, sample_rate, spike_times = load_block(exp_name, int(block_id),
+                                                   spiking)
         for index in range(min(len(params), amp.shape[0])):
             if max_epochs is not None and used >= max_epochs:
                 break
