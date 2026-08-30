@@ -1575,6 +1575,11 @@ class ConditionAnalysis:
     skip_seconds: float = 0.0
     stimulus: Dict[float, np.ndarray] = field(default_factory=dict)
     response: Dict[float, np.ndarray] = field(default_factory=dict)
+    # What the whole-cell salvage did: epochs refused on series resistance,
+    # and the per-epoch offsets removed to bring their holding currents onto a
+    # common level. Both are kept so a fit can be traced back to the traces.
+    dropped_epochs: pd.DataFrame = field(default_factory=pd.DataFrame)
+    epoch_adjustments: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     def __repr__(self) -> str:
         means = ', '.join(f'{m:g}' for m in self.light_means)
@@ -1591,6 +1596,8 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                       frequency_cutoff: Optional[float] = None,
                       skip_seconds: float = 2.0,
                       subtract_baseline: bool = False,
+                      max_series_resistance: Optional[float] = 30e6,
+                      align_epoch_means: bool = True,
                       max_epochs: Optional[int] = None,
                       verbose: bool = True) -> ConditionAnalysis:
     """Load epochs, regenerate their stimuli, and fit one LN model per light mean.
@@ -1603,6 +1610,29 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
 
     For extracellular recordings the response is a smoothed spike rate; for
     voltage clamp it is the recorded current, **not** baseline subtracted.
+
+    **Whole-cell drift.** The holding current wanders over a recording, and
+    over epochs this long it wanders a lot: on 2021-04-27_B cell1 the epoch
+    means span 1741 pA while the modulation within an epoch is about 300 pA, so
+    the offset is roughly five times the signal. Two guards handle it, and both
+    apply to voltage clamp only.
+
+    ``max_series_resistance``
+        drops epochs whose recorded series resistance is above it (30 MOhm by
+        default); what was dropped is printed and kept in
+        ``ConditionAnalysis.dropped_epochs``.
+    ``align_epoch_means``
+        shifts each epoch so its mean matches the **median of the epoch means
+        within its own light mean**. Per light mean, not globally -- the two
+        means genuinely differ in holding current and that difference is
+        signal. The median rather than the mean, so one badly drifted epoch
+        does not drag the level it is being compared against. The shifts are
+        printed and kept in ``ConditionAnalysis.epoch_adjustments``.
+
+    A constant offset per epoch is not something the model can explain: it adds
+    between-epoch variance to the response while the stimulus says nothing
+    about it. Removing it leaves the within-epoch modulation, which is the part
+    the filter is fitted to, untouched.
 
     ``subtract_baseline`` defaults to False because this protocol has no
     baseline to subtract: ``preTime`` and ``tailTime`` are zero -- neither is
@@ -1661,6 +1691,8 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
     spiking = rec_type == 'extracellular'
     stimuli: Dict[float, List[np.ndarray]] = {}
     responses: Dict[float, List[np.ndarray]] = {}
+    sources: Dict[float, List[dict]] = {}
+    dropped: List[dict] = []
     sample_rate = np.nan
     cutoff = frequency_cutoff
     used = 0
@@ -1713,12 +1745,33 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
             start = int(round(max(skip_seconds, 0.0) * sample_rate))
             if start >= width:
                 continue
+
+            series_resistance = np.nan
+            if 'seriesResistance' in row:
+                series_resistance = _numeric(row['seriesResistance'])
+            if (not spiking and max_series_resistance is not None
+                    and np.isfinite(series_resistance)
+                    and series_resistance > float(max_series_resistance)):
+                dropped.append({'block_id': int(block_id), 'epoch': index,
+                                'light_mean': mean_level,
+                                'series_resistance_mohm': series_resistance / 1e6,
+                                'reason': f'series resistance above '
+                                          f'{max_series_resistance / 1e6:g} MOhm'})
+                continue
+
             stimuli.setdefault(mean_level, []).append(stimulus[:width][start:])
             responses.setdefault(mean_level, []).append(trace[:width][start:])
+            sources.setdefault(mean_level, []).append(
+                {'block_id': int(block_id), 'epoch': index,
+                 'light_mean': mean_level,
+                 'series_resistance_mohm': (series_resistance / 1e6
+                                            if np.isfinite(series_resistance)
+                                            else np.nan)})
             used += 1
 
     step = max(int(downsample), 1)
     interval = step / sample_rate
+    adjustments: List[dict] = []
     analysis = ConditionAnalysis(
         exp_name=exp_name, block_ids=[int(b) for b in block_ids],
         rec_type=rec_type, sample_rate=sample_rate,
@@ -1731,6 +1784,24 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                           for s in stimuli[mean_level]])
         resp = np.vstack([_block_average(r[:width], step)
                           for r in responses[mean_level]])
+
+        # Bring the epochs of this light mean onto a common holding level. The
+        # target is the median of the epoch means, so a single badly drifted
+        # epoch cannot drag the level the others are judged against, and it is
+        # taken within the light mean because the two means genuinely differ
+        # in holding current.
+        if not spiking and align_epoch_means and resp.shape[0] > 1:
+            epoch_means = resp.mean(axis=1)
+            target = float(np.median(epoch_means))
+            offsets = target - epoch_means
+            resp = resp + offsets[:, None]
+            for record, before, offset in zip(sources.get(mean_level, []),
+                                              epoch_means, offsets):
+                adjustments.append({**record,
+                                    'mean_before_pa': float(before),
+                                    'offset_pa': float(offset),
+                                    'mean_after_pa': float(target)})
+
         analysis.light_means.append(mean_level)
         analysis.n_epochs[mean_level] = int(stim.shape[0])
         analysis.stimulus[mean_level] = stim
@@ -1741,11 +1812,31 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
             filter_length_s=filter_length_s, n_bins=n_bins,
             frequency_cutoff=cutoff)
         if verbose:
-            model = analysis.ln_model[mean_level]
+            model = analysis.ln_model[mean_level]  # noqa: F841 -- printed below
             print(f'  lightMean {mean_level:g}: {stim.shape[0]} epochs '
                   f'({model.n_train} train / {model.n_test} test) | '
                   f'r²={model.r2:.3f} held out, {model.r2_train:.3f} in sample | '
                   f'time-to-peak {model.time_to_peak_ms:.0f} ms')
+
+    analysis.dropped_epochs = pd.DataFrame(dropped)
+    analysis.epoch_adjustments = pd.DataFrame(adjustments)
+    if verbose:
+        if dropped:
+            print(f'\n  dropped {len(dropped)} epoch(s) on series resistance '
+                  f'> {max_series_resistance / 1e6:g} MOhm:')
+            for record in dropped:
+                print(f'    block {record["block_id"]} epoch {record["epoch"]} '
+                      f'(lightMean {record["light_mean"]:g}): '
+                      f'{record["series_resistance_mohm"]:.1f} MOhm')
+        if adjustments:
+            frame = analysis.epoch_adjustments
+            print(f'\n  aligned {len(frame)} epoch(s) to the median holding '
+                  f'current of their light mean:')
+            for mean_level, group in frame.groupby('light_mean'):
+                print(f'    lightMean {mean_level:g}: target '
+                      f'{group.mean_after_pa.iloc[0]:+.0f} pA | offsets '
+                      f'{group.offset_pa.min():+.0f} to '
+                      f'{group.offset_pa.max():+.0f} pA')
     return analysis
 
 
