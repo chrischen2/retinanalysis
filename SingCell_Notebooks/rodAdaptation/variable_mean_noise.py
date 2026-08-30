@@ -1341,8 +1341,22 @@ def sigmoid(x, alpha: float, beta: float, gamma: float, epsilon: float):
         np.array([alpha, beta, gamma, epsilon]), np.asarray(x, dtype=float))
 
 
+def _crop_for_equal_n(*arrays, n_bins: int):
+    """Trim columns so the flattened point count divides by ``n_bins``.
+
+    ``sample_nl``'s equal-N binning refuses a count that does not divide
+    evenly, and epoch lengths never happen to. Dropping at most ``n_bins``
+    samples off the end of each epoch is the smallest change that satisfies it.
+    """
+    rows, cols = np.atleast_2d(arrays[0]).shape
+    while cols > 1 and (rows * cols) % int(n_bins):
+        cols -= 1
+    return [np.atleast_2d(a)[:, :cols] for a in arrays]
+
+
 def _fit_ln_once(stimulus, response, sampling_interval, filter_pts,
-                 frequency_cutoff, correct_stim_power, n_bins):
+                 frequency_cutoff, correct_stim_power, n_bins,
+                 bin_type='equalN'):
     """One filter + nonlinearity fit. Returns the pieces, no scoring."""
     from retinanalysis.utils.cascadegraph import (compute_filter,
                                                   convolve_filter_with_stim,
@@ -1388,7 +1402,15 @@ def _fit_ln_once(stimulus, response, sampling_interval, filter_pts,
     if stim_mean:
         filter_causal = filter_causal / stim_mean
     generator = convolve_filter_with_stim(filter_causal, stimulus)
-    nl_x, nl_y = sample_nl(generator, response, num_bins=n_bins)
+    # equalN puts the same number of points in every bin, as the MATLAB's
+    # SETTINGS.binningType does. Equal-width bins put almost nothing in the
+    # tails, where the nonlinearity actually saturates, so the fit is pulled
+    # around by a handful of samples out there.
+    gen_binned, resp_binned = (_crop_for_equal_n(generator, response,
+                                                 n_bins=n_bins)
+                               if bin_type == 'equalN' else (generator, response))
+    nl_x, nl_y = sample_nl(gen_binned, resp_binned, num_bins=n_bins,
+                           bin_type=bin_type)
     params = fit_sigmoid(nl_x, nl_y)
     return filter_causal, generator, nl_x, nl_y, params
 
@@ -1428,7 +1450,7 @@ def fit_ln_model(stimulus, response, sampling_interval: float,
                  label: str = '', filter_length_s: float = 1.0,
                  frequency_cutoff: Optional[float] = None,
                  correct_stim_power: bool = True,
-                 n_bins: int = 100,
+                 n_bins: int = 100, bin_type: str = 'equalN',
                  test_fraction: float = 0.2,
                  eval_iterations: int = 3,
                  random_state: Optional[int] = 0) -> LNModel:
@@ -1478,7 +1500,8 @@ def fit_ln_model(stimulus, response, sampling_interval: float,
         try:
             filt, _, _, _, params = _fit_ln_once(
                 stimulus[train_idx], response[train_idx], sampling_interval,
-                filter_pts, frequency_cutoff, correct_stim_power, n_bins)
+                filter_pts, frequency_cutoff, correct_stim_power, n_bins,
+                bin_type)
             if not np.isfinite(params['alpha']):
                 continue
             _, predicted = _predict(filt, params, stimulus[test_idx])
@@ -1489,7 +1512,7 @@ def fit_ln_model(stimulus, response, sampling_interval: float,
     # Final model on every epoch -- the one worth plotting.
     filt, generator, nl_x, nl_y, params = _fit_ln_once(
         stimulus, response, sampling_interval, filter_pts,
-        frequency_cutoff, correct_stim_power, n_bins)
+        frequency_cutoff, correct_stim_power, n_bins, bin_type)
     _, predicted_all = _predict(filt, params, stimulus)
     r2_train = (_variance_explained(predicted_all, response)
                 if np.isfinite(params['alpha']) else np.nan)
@@ -1539,6 +1562,13 @@ class ConditionAnalysis:
     light_means: List[float] = field(default_factory=list)
     n_epochs: Dict[float, int] = field(default_factory=dict)
     ln_model: Dict[float, LNModel] = field(default_factory=dict)
+    # The downsampled (epochs x time) arrays the models were fitted to, kept so
+    # the group mean and the windowed models are built from exactly the same
+    # data rather than reloaded and re-reduced.
+    sampling_interval: float = np.nan
+    skip_seconds: float = 0.0
+    stimulus: Dict[float, np.ndarray] = field(default_factory=dict)
+    response: Dict[float, np.ndarray] = field(default_factory=dict)
 
     def __repr__(self) -> str:
         means = ', '.join(f'{m:g}' for m in self.light_means)
@@ -1672,6 +1702,7 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
     analysis = ConditionAnalysis(
         exp_name=exp_name, block_ids=[int(b) for b in block_ids],
         rec_type=rec_type, sample_rate=sample_rate,
+        sampling_interval=interval, skip_seconds=float(skip_seconds),
         units='firing rate (Hz)' if spiking else 'current (pA)')
     for mean_level in sorted(stimuli):
         width = min(min(s.size for s in stimuli[mean_level]),
@@ -1682,6 +1713,8 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                           for r in responses[mean_level]])
         analysis.light_means.append(mean_level)
         analysis.n_epochs[mean_level] = int(stim.shape[0])
+        analysis.stimulus[mean_level] = stim
+        analysis.response[mean_level] = resp
         analysis.ln_model[mean_level] = fit_ln_model(
             stim, resp, sampling_interval=interval,
             label=f'lightMean {mean_level:g}',
@@ -1694,6 +1727,183 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                   f'r²={model.r2:.3f} held out, {model.r2_train:.3f} in sample | '
                   f'time-to-peak {model.time_to_peak_ms:.0f} ms')
     return analysis
+
+
+def mean_response(analysis: ConditionAnalysis,
+                  window_s: float = 1.0) -> pd.DataFrame:
+    """Group-mean response per light mean, averaged in fixed windows.
+
+    Epochs differ from one another -- different noise seeds, so different
+    responses -- but they share the light mean and the time since the mean
+    stepped, which is the axis adaptation runs along. Averaging across the
+    epochs of one light mean and then within ``window_s`` windows leaves the
+    slow course of the rate, with the noise-driven modulation averaged out.
+
+    ``time_s`` is measured from the start of the fitted stretch, so it already
+    excludes the ``skip_seconds`` dropped at the head of each epoch.
+    """
+    rows = []
+    for mean_level in analysis.light_means:
+        block = analysis.response.get(mean_level)
+        if block is None or not block.size:
+            continue
+        step = max(int(round(window_s / analysis.sampling_interval)), 1)
+        width = (block.shape[1] // step) * step
+        if width == 0:
+            continue
+        windows = block[:, :width].reshape(block.shape[0], -1, step).mean(axis=2)
+        centres = (np.arange(windows.shape[1]) + 0.5) * step * analysis.sampling_interval
+        for index, centre in enumerate(centres):
+            values = windows[:, index]
+            rows.append({
+                'light_mean': mean_level,
+                'time_s': float(centre + analysis.skip_seconds),
+                'mean': float(np.nanmean(values)),
+                'sem': (float(np.nanstd(values, ddof=1) / np.sqrt(values.size))
+                        if values.size > 1 else np.nan),
+                'n_epochs': int(values.size)})
+    return pd.DataFrame(rows)
+
+
+def plot_mean_response(analysis: ConditionAnalysis, window_s: float = 1.0,
+                       figsize: Tuple[float, float] = (9.0, 4.0)):
+    """The group mean response over the epoch, one line per light mean."""
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    table = mean_response(analysis, window_s=window_s)
+    if table.empty:
+        print('no responses to average')
+        return None
+    colors = style.colors_for_conditions(
+        [f'{m:g}' for m in analysis.light_means])
+    fig, ax = plt.subplots(figsize=figsize)
+    for mean_level in analysis.light_means:
+        block = table[table.light_mean.eq(mean_level)].sort_values('time_s')
+        if block.empty:
+            continue
+        color = colors[f'{mean_level:g}']
+        ax.fill_between(block.time_s, block['mean'] - block['sem'].fillna(0),
+                        block['mean'] + block['sem'].fillna(0),
+                        color=color, alpha=0.18, lw=0)
+        ax.plot(block.time_s, block['mean'], 'o-', ms=3, lw=1.6, color=color,
+                label=f'lightMean {mean_level:g} '
+                      f'(n={int(block.n_epochs.max())} epochs)')
+    ax.set_xlabel('time in epoch (s)')
+    ax.set_ylabel(analysis.units)
+    ax.set_title(f'{analysis.exp_name} | mean response in {window_s:g} s windows',
+                 fontsize=10)
+    ax.legend(frameon=False, fontsize=7)
+    fig.tight_layout()
+    return fig
+
+
+def temporal_ln_model(analysis: ConditionAnalysis, window_seconds: float = 5.0,
+                      filter_length_s: float = 1.0,
+                      frequency_cutoff: Optional[float] = 60.0,
+                      n_bins: int = 100,
+                      verbose: bool = True) -> Dict[float, List[LNModel]]:
+    """One LN model per successive window of the epoch, per light mean.
+
+    The MATLAB's ``temporalLNModel``: cut the fitted stretch into successive
+    windows and fit the model separately in each, so the filter and the
+    nonlinearity can be watched changing as the cell adapts. Epochs are pooled
+    within a window -- all the first five seconds together, then all the second
+    five -- because one epoch's window is far too little data for a filter.
+
+    Windows are a fixed ``window_seconds`` rather than a fixed count, so the
+    same call means the same thing on a 30 s and a 60 s epoch; the last partial
+    window is dropped.
+    """
+    out: Dict[float, List[LNModel]] = {}
+    for mean_level in analysis.light_means:
+        stim = analysis.stimulus.get(mean_level)
+        resp = analysis.response.get(mean_level)
+        if stim is None or resp is None or not stim.size:
+            continue
+        step = max(int(round(window_seconds / analysis.sampling_interval)), 1)
+        n_windows = stim.shape[1] // step
+        if n_windows == 0:
+            if verbose:
+                print(f'  lightMean {mean_level:g}: epoch shorter than one '
+                      f'{window_seconds:g} s window')
+            continue
+        models = []
+        for index in range(n_windows):
+            lo, hi = index * step, (index + 1) * step
+            start_s = lo * analysis.sampling_interval + analysis.skip_seconds
+            model = fit_ln_model(
+                stim[:, lo:hi], resp[:, lo:hi],
+                sampling_interval=analysis.sampling_interval,
+                label=f'{start_s:g}-{start_s + window_seconds:g} s',
+                filter_length_s=min(filter_length_s, window_seconds / 2),
+                frequency_cutoff=frequency_cutoff, n_bins=n_bins)
+            models.append(model)
+            if verbose:
+                print(f'  lightMean {mean_level:g}  {model.label:>12}: '
+                      f'r²={model.r2:.3f} | time-to-peak '
+                      f'{model.time_to_peak_ms:.0f} ms')
+        out[mean_level] = models
+    return out
+
+
+def plot_temporal_ln(analysis: ConditionAnalysis,
+                     models: Dict[float, List[LNModel]],
+                     figsize: Optional[Tuple[float, float]] = None):
+    """Filter and nonlinearity per window, one column per light mean.
+
+    Windows run dark to light within a column, so a filter that speeds up or a
+    nonlinearity that steepens as the cell adapts reads as a progression rather
+    than a pile of lines.
+    """
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    means = [m for m in analysis.light_means if models.get(m)]
+    if not means:
+        print('no windowed models to plot')
+        return None
+    if figsize is None:
+        figsize = (5.2 * len(means), 7.0)
+    fig, axes = plt.subplots(2, len(means), figsize=figsize, squeeze=False)
+    for column, mean_level in enumerate(means):
+        window_models = models[mean_level]
+        shades = style.colors_for_conditions(
+            [m.label for m in window_models], cmap_name='CubicL'
+            if False else 'cividis')
+        for model in window_models:
+            color = shades[model.label]
+            axes[0][column].plot(model.filter_time_s * 1e3, model.filter,
+                                 lw=1.6, color=color,
+                                 label=f'{model.label} (r²={model.r2:.2f})')
+            axes[1][column].plot(model.nl_x, model.nl_y, 'o', ms=2.5,
+                                 alpha=0.5, color=color)
+            params = model.params
+            if params and np.isfinite(params.get('alpha', np.nan)):
+                grid = np.linspace(np.nanmin(model.nl_x),
+                                   np.nanmax(model.nl_x), 200)
+                axes[1][column].plot(
+                    grid, sigmoid(grid, params['alpha'], params['beta'],
+                                  params['gamma'], params['epsilon']),
+                    lw=1.5, color=color, label=model.label)
+        axes[0][column].axhline(0, color='#888888', lw=0.8, ls='--')
+        axes[0][column].set_xlabel('filter time (ms)')
+        axes[0][column].set_title(f'lightMean {mean_level:g} — filter',
+                                  fontsize=9)
+        axes[0][column].legend(frameon=False, fontsize=6.5)
+        axes[1][column].set_xlabel('generator signal (contrast)')
+        axes[1][column].set_title(f'lightMean {mean_level:g} — nonlinearity',
+                                  fontsize=9)
+        axes[1][column].legend(frameon=False, fontsize=6.5)
+        if column == 0:
+            axes[0][column].set_ylabel('filter')
+            axes[1][column].set_ylabel(analysis.units)
+    fig.suptitle(f'{analysis.exp_name} | LN model per window, '
+                 f'{analysis.rec_type}', fontsize=11)
+    fig.tight_layout()
+    return fig
 
 
 def plot_condition(analysis: ConditionAnalysis, window_seconds: float = 10.0,
@@ -1796,5 +2006,6 @@ __all__ = [
     'MODE_CACHE_PATH',
     'led_attenuation', 'matlab_randn', 'gaussian_noise_stimulus',
     'epoch_stimulus', 'fit_sigmoid', 'sigmoid', 'fit_ln_model',
-    'analyze_condition', 'plot_condition',
+    'analyze_condition', 'plot_condition', 'mean_response',
+    'plot_mean_response', 'temporal_ln_model', 'plot_temporal_ln',
 ]
