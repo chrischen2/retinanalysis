@@ -617,12 +617,16 @@ def cell_blocks(cells: pd.DataFrame, cell_index: int,
 
 def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
                 max_epochs: Optional[int] = 12, downsample: int = 50,
+                subtract_baseline: bool = False,
                 figsize: Tuple[float, float] = (12.0, 5.0)):
     """Every epoch's response, coloured by the light mean it was recorded at.
 
     Drawn before any fitting: this is where a dead epoch, a lost patch or a
     mislabelled recording type shows up, and none of those are visible in a
-    filter.
+    filter. Whole-cell traces are drawn as recorded -- see
+    :func:`analyze_condition` for why there is no baseline to subtract -- so
+    the holding current is part of what is shown, and a patch that drifts over
+    the block is visible here.
     """
     import matplotlib.pyplot as plt
     import retinanalysis as ra
@@ -653,7 +657,9 @@ def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
                 trace[times] = 1.0
                 trace = gaussian_filter1d(trace, 0.01 * rate) * rate
             else:
-                trace = amp[index] - float(np.mean(amp[index][:int(0.1 * rate)]))
+                trace = amp[index]
+                if subtract_baseline:
+                    trace = trace - float(np.mean(trace[:int(0.1 * rate)]))
             factor = max(int(downsample), 1)
             # Block-average, not slicing: a whole-cell trace is unsmoothed at
             # the amplifier rate, so taking every nth sample folds fast events
@@ -1584,6 +1590,7 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                       n_bins: int = 100,
                       frequency_cutoff: Optional[float] = None,
                       skip_seconds: float = 2.0,
+                      subtract_baseline: bool = False,
                       max_epochs: Optional[int] = None,
                       verbose: bool = True) -> ConditionAnalysis:
     """Load epochs, regenerate their stimuli, and fit one LN model per light mean.
@@ -1595,7 +1602,18 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
     making it better.
 
     For extracellular recordings the response is a smoothed spike rate; for
-    voltage clamp it is the baseline-subtracted current.
+    voltage clamp it is the recorded current, **not** baseline subtracted.
+
+    ``subtract_baseline`` defaults to False because this protocol has no
+    baseline to subtract: ``preTime`` and ``tailTime`` are zero -- neither is
+    even written to the epoch -- so the noise runs from the first sample and
+    the leading 100 ms is stimulus-driven like every other stretch. Removing
+    its mean would subtract a response, not a resting level, and would also
+    discard the holding current, which is the part of a voltage-clamp trace
+    that says how much excitation or inhibition the cell is receiving. Nothing
+    downstream needs it removed: ``compute_filter`` zeroes the DC bin,
+    ``convolve_filter_with_stim`` mean-subtracts the stimulus, and the
+    sigmoid's ``epsilon`` absorbs a constant offset in the response.
 
     The stimulus stays in **raw intensity** units. Its contrast is
     ``sigma / mean``, and :func:`fit_ln_model` normalises the filter by the
@@ -1613,7 +1631,7 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
     stimulus            regenerated at the amplifier rate from the seed
     spiking response    spike times -> binary train -> Gaussian smoothed at
                         ``psth_sigma_ms`` (10 ms), all at the amplifier rate
-    whole-cell response raw current, baseline subtracted
+    whole-cell response the recorded current as-is
     ==================  ==================================================
 
     The reduction is a **block average** (:func:`_block_average`), never
@@ -1684,8 +1702,10 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                 trace = gaussian_filter1d(
                     trace, psth_sigma_ms / 1e3 * sample_rate) * sample_rate
             else:
-                baseline = int(min(0.1 * sample_rate, amp.shape[1]))
-                trace = amp[index] - float(np.mean(amp[index][:baseline]))
+                trace = amp[index]
+                if subtract_baseline:
+                    baseline = int(min(0.1 * sample_rate, amp.shape[1]))
+                    trace = trace - float(np.mean(trace[:baseline]))
             mean_level = float(row['lightMean'])
             # The stimulus stays in raw intensity units: its contrast is
             # sigma/mean, and fit_ln_model normalises the filter by the ratio
