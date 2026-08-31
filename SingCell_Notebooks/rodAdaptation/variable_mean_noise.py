@@ -2697,6 +2697,114 @@ def reconstruction_metrics(estimate, truth) -> dict:
 MIN_DECODE_WINDOW_S = 1.0
 
 
+def reconstruct_traces(analysis: ConditionAnalysis,
+                       mode: str = 'per_window',
+                       steady_state_s: float = 10.0,
+                       window_seconds: Optional[float] = None,
+                       min_window_s: float = MIN_DECODE_WINDOW_S,
+                       decode_bin_ms: float = 25.0,
+                       noise_ratio: float = 0.1,
+                       verbose: bool = True) -> pd.DataFrame:
+    """Held-out stimulus reconstructions as a tidy frame, one row per bin.
+
+    ``reconstruct_stimulus`` summarises these traces into three numbers per
+    phase; this returns the traces themselves, so the figures and the metrics
+    are computed from exactly the same reconstruction rather than from two
+    parallel loops that could drift apart.
+
+    Columns: ``lightMean``, ``mode``, ``epoch``, ``window``, ``order``,
+    ``time_s`` (bin centre since the step), ``stimulus`` and
+    ``reconstruction`` -- both about their own mean, in stimulus units.
+
+    **Every epoch is held out exactly once**, rather than a random sample of
+    them: a mean over folds is insensitive to which epochs were drawn, but an
+    average aligned on phase onsets is not, and repeated epochs would weight
+    their own onsets several times over.
+    """
+    if mode not in ('per_window', 'steady_state'):
+        raise ValueError("mode must be 'per_window' or 'steady_state'")
+
+    interval = analysis.sampling_interval
+    widths = [analysis.stimulus[m].shape[1] for m in analysis.light_means
+              if analysis.stimulus.get(m) is not None and analysis.stimulus[m].size]
+    if not widths:
+        return pd.DataFrame()
+    usable_s = min(widths) * interval
+    if window_seconds is None:
+        n_windows, window_seconds = temporal_windows(usable_s, min_window_s)
+    else:
+        n_windows = max(int(round(usable_s / float(window_seconds))), 1)
+        window_seconds = usable_s / n_windows
+    bin_samples = max(int(round(decode_bin_ms / 1e3 / interval)), 1)
+
+    pieces: List[pd.DataFrame] = []
+    for mean_level in analysis.light_means:
+        stim = analysis.stimulus.get(mean_level)
+        resp = analysis.response.get(mean_level)
+        if stim is None or resp is None or not stim.size or stim.shape[0] < 2:
+            continue
+        n_epochs, n_time = stim.shape
+        edges = np.linspace(0, n_time, n_windows + 1).round().astype(int)
+
+        steady_lo, steady_decoder = n_time, None
+        if mode == 'steady_state':
+            steady_lo = max(int(round((usable_s - steady_state_s) / interval)), 0)
+            if n_time - steady_lo < 2:
+                continue
+            steady_decoder = decoding_filter(resp[:, steady_lo:],
+                                             stim[:, steady_lo:],
+                                             noise_ratio=noise_ratio)
+
+        for index in range(n_windows):
+            lo, hi = int(edges[index]), int(edges[index + 1])
+            if hi - lo < 2:
+                continue
+            start_s = lo * interval + analysis.skip_seconds
+            label = f'{start_s:.1f}-{hi * interval + analysis.skip_seconds:.1f} s'
+            columns = np.arange(lo, hi)
+
+            if mode == 'steady_state':
+                if hi > steady_lo:      # refuse anything the decoder was fitted on
+                    continue
+                folds = [(epoch, steady_decoder) for epoch in range(n_epochs)]
+            else:
+                folds = []
+                for epoch in range(n_epochs):     # full leave-one-out
+                    train = np.setdiff1d(np.arange(n_epochs), [epoch])
+                    if train.size:
+                        folds.append((epoch,
+                                      decoding_filter(resp[train, lo:hi],
+                                                      stim[train, lo:hi],
+                                                      noise_ratio=noise_ratio)))
+
+            for epoch, decoder in folds:
+                if decoder is None:
+                    continue
+                estimate = apply_decoding_filter(decoder, resp[epoch:epoch + 1, columns])
+                estimate = estimate - estimate.mean()
+                truth = stim[epoch:epoch + 1, columns] - stim[epoch].mean()
+                binned_e = _bin_mean(estimate, bin_samples).ravel()
+                binned_t = _bin_mean(truth, bin_samples).ravel()
+                if binned_e.size == 0:
+                    continue
+                time_s = ((np.arange(binned_e.size) + 0.5) * bin_samples * interval
+                          + lo * interval + analysis.skip_seconds)
+                pieces.append(pd.DataFrame({
+                    'lightMean': mean_level, 'mode': mode, 'epoch': epoch,
+                    'window': label, 'order': index, 'time_s': time_s,
+                    'stimulus': binned_t, 'reconstruction': binned_e}))
+
+    frame = pd.concat(pieces, ignore_index=True) if pieces else pd.DataFrame()
+    if verbose:
+        if frame.empty:
+            print(f'  {mode}: nothing reconstructed')
+        else:
+            print(f'  {mode}: {len(frame)} bins from '
+                  f'{frame.groupby(["lightMean", "epoch"]).ngroups} '
+                  f'(light mean x epoch) reconstructions')
+    return frame
+
+
 def reconstruct_stimulus(analysis: ConditionAnalysis,
                          mode: str = 'per_window',
                          steady_state_s: float = 10.0,
@@ -2704,8 +2812,6 @@ def reconstruct_stimulus(analysis: ConditionAnalysis,
                          min_window_s: float = MIN_DECODE_WINDOW_S,
                          decode_bin_ms: float = 25.0,
                          noise_ratio: float = 0.1,
-                         max_folds: int = 5,
-                         random_state: Optional[int] = 0,
                          verbose: bool = True) -> pd.DataFrame:
     """Reconstruct the stimulus trace window by window and score it by phase.
 
@@ -2739,85 +2845,28 @@ def reconstruct_stimulus(analysis: ConditionAnalysis,
     ``analysis`` built with ``skip_seconds=1`` has already thrown away the
     first third of it. Build the one passed here with ``skip_seconds=0``.
     """
-    if mode not in ('per_window', 'steady_state'):
-        raise ValueError("mode must be 'per_window' or 'steady_state'")
-
-    interval = analysis.sampling_interval
-    widths = [analysis.stimulus[m].shape[1] for m in analysis.light_means
-              if analysis.stimulus.get(m) is not None and analysis.stimulus[m].size]
-    if not widths:
-        return pd.DataFrame()
-    usable_s = min(widths) * interval
-    if window_seconds is None:
-        n_windows, window_seconds = temporal_windows(usable_s, min_window_s)
-    else:
-        n_windows = max(int(round(usable_s / float(window_seconds))), 1)
-        window_seconds = usable_s / n_windows
-    bin_samples = max(int(round(decode_bin_ms / 1e3 / interval)), 1)
-
-    rng = np.random.default_rng(random_state)
-    rows: List[dict] = []
-    for mean_level in analysis.light_means:
-        stim = analysis.stimulus.get(mean_level)
-        resp = analysis.response.get(mean_level)
-        if stim is None or resp is None or not stim.size:
-            continue
-        n_epochs, n_time = stim.shape
-        edges = np.linspace(0, n_time, n_windows + 1).round().astype(int)
-
-        steady_lo, steady_decoder = n_time, None
-        if mode == 'steady_state':
-            steady_lo = max(int(round((usable_s - steady_state_s) / interval)), 0)
-            if n_time - steady_lo < 2:
-                continue
-            steady_decoder = decoding_filter(resp[:, steady_lo:],
-                                             stim[:, steady_lo:],
-                                             noise_ratio=noise_ratio)
-
-        for index in range(n_windows):
-            lo, hi = int(edges[index]), int(edges[index + 1])
-            if hi - lo < 2:
-                continue
-            start_s = lo * interval + analysis.skip_seconds
-            end_s = hi * interval + analysis.skip_seconds
-            label = f'{start_s:.1f}-{end_s:.1f} s'
-
-            if mode == 'steady_state':
-                if hi > steady_lo:      # refuse anything the decoder was fitted on
-                    continue
-                folds = [(np.arange(n_epochs), steady_decoder)]
-            else:
-                folds = []
-                for held in rng.permutation(n_epochs)[:min(max_folds, n_epochs)]:
-                    train = np.setdiff1d(np.arange(n_epochs), [held])
-                    if train.size:
-                        folds.append((np.array([held]),
-                                      decoding_filter(resp[train, lo:hi],
-                                                      stim[train, lo:hi],
-                                                      noise_ratio=noise_ratio)))
-
-            for test_idx, decoder in folds:
-                if decoder is None:
-                    continue
-                columns = np.arange(lo, hi)
-                estimate = apply_decoding_filter(
-                    decoder, resp[np.ix_(test_idx, columns)])
-                estimate = estimate - estimate.mean(axis=1, keepdims=True)
-                true_block = (stim[np.ix_(test_idx, columns)]
-                              - stim[test_idx].mean(axis=1, keepdims=True))
-                metrics = reconstruction_metrics(
-                    _bin_mean(estimate, bin_samples),
-                    _bin_mean(true_block, bin_samples))
-                rows.append(dict(lightMean=mean_level, window=label, order=index,
-                                 start_s=start_s, centre_s=0.5 * (start_s + end_s),
-                                 mode=mode, n_test_epochs=int(test_idx.size),
-                                 bin_ms=decode_bin_ms, **metrics))
-
-    frame = pd.DataFrame(rows)
-    if frame.empty:
+    traces = reconstruct_traces(
+        analysis, mode=mode, steady_state_s=steady_state_s,
+        window_seconds=window_seconds, min_window_s=min_window_s,
+        decode_bin_ms=decode_bin_ms, noise_ratio=noise_ratio, verbose=False)
+    if traces.empty:
         if verbose:
             print(f'  {mode}: no windows reconstructed')
-        return frame
+        return pd.DataFrame()
+
+    rows: List[dict] = []
+    for (mean_level, order, label), block in traces.groupby(
+            ['lightMean', 'order', 'window'], sort=True):
+        for epoch, piece in block.groupby('epoch'):
+            metrics = reconstruction_metrics(piece.reconstruction.values,
+                                             piece.stimulus.values)
+            rows.append(dict(lightMean=mean_level, window=label, order=order,
+                             start_s=float(piece.time_s.min()),
+                             centre_s=float(piece.time_s.mean()),
+                             mode=mode, epoch=int(epoch),
+                             bin_ms=decode_bin_ms, **metrics))
+
+    frame = pd.DataFrame(rows)
     value_cols = [c for c in frame.columns
                   if c.startswith(('r_', 'gain_', 'nrmse_', 'n_'))]
     grouped = (frame.groupby(['lightMean', 'order', 'window', 'centre_s', 'mode'],
@@ -2946,6 +2995,280 @@ def plot_reconstruction_trace(analysis: ConditionAnalysis,
                  f'light trace (shading = true increment phase)', fontsize=10)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     return fig
+
+
+def phase_slopes(stimulus, reconstruction) -> Dict[str, float]:
+    """Through-origin slope of reconstruction on stimulus, each side of zero.
+
+    These are the same quantity as ``gain_increment`` / ``gain_decrement`` in
+    :func:`reconstruction_metrics` -- deliberately, so the transfer-function
+    figure cannot disagree with the table beside it.
+    """
+    stimulus = np.asarray(stimulus, dtype=float).ravel()
+    reconstruction = np.asarray(reconstruction, dtype=float).ravel()
+    keep = np.isfinite(stimulus) & np.isfinite(reconstruction)
+    stimulus, reconstruction = stimulus[keep], reconstruction[keep]
+    out = {}
+    for name, mask in (('increment', stimulus > 0), ('decrement', stimulus < 0)):
+        t, e = stimulus[mask], reconstruction[mask]
+        denom = float(np.sum(t * t))
+        out[name] = float(np.sum(e * t) / denom) if denom else np.nan
+    return out
+
+
+def _phase_onsets(stimulus, pre_bins: int, post_bins: int, min_bins: int):
+    """Indices where the stimulus crosses zero, upward and downward.
+
+    Returns ``(increment_onsets, decrement_onsets)``. Two filters, both of
+    which matter:
+
+    * a crossing is kept only if the phase it starts lasts ``min_bins`` -- the
+      band-limited noise still produces brief excursions, and averaging over
+      them contributes noise rather than a phase;
+    * a crossing is kept only if the full cut ``pre_bins .. post_bins`` fits
+      inside the trace, because the reconstruction is an FFT operation and its
+      first and last bins carry edge artefacts.
+    """
+    stimulus = np.asarray(stimulus, dtype=float).ravel()
+    sign = np.sign(stimulus)
+    crossings = np.flatnonzero(np.diff(sign) != 0) + 1
+    if crossings.size == 0:
+        return np.zeros(0, dtype=int), np.zeros(0, dtype=int)
+    # A phase runs from one crossing to the next; the last runs to the end.
+    ends = np.r_[crossings[1:], stimulus.size]
+    durations = ends - crossings
+    keep = ((durations >= min_bins)
+            & (crossings - pre_bins >= 0)
+            & (crossings + post_bins < stimulus.size))
+    crossings = crossings[keep]
+    rising = stimulus[crossings] > 0
+    return crossings[rising], crossings[~rising]
+
+
+def plot_reconstruction_transfer(analysis: ConditionAnalysis,
+                                 traces: pd.DataFrame,
+                                 gridsize: int = 44,
+                                 figsize: Optional[Tuple[float, float]] = None):
+    """Reconstruction against true stimulus: where in stimulus space accuracy goes.
+
+    The decoding transfer function. **The phase split is the x axis** -- samples
+    left of zero are the decrement phase and those right of it the increment
+    phase -- so no conditioning is needed and gain, compression and noise are
+    visible at once. A line on the identity means the stimulus is recovered at
+    full amplitude; a line flatter than identity on one side means that phase
+    is compressed, which is what the ``gain`` column reports as a number.
+
+    Density is the raw scatter of every held-out bin; the heavy line is the
+    mean reconstruction given the stimulus, with an inter-quartile band. The
+    two straight segments are through-origin fits either side of zero, and
+    their slopes are :func:`phase_slopes`, the same numbers as
+    ``gain_increment`` and ``gain_decrement``.
+    """
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    if traces is None or traces.empty:
+        print('nothing to plot')
+        return None
+    modes = [m for m in ('per_window', 'steady_state') if m in set(traces['mode'])]
+    means = [m for m in analysis.light_means if m in set(traces.lightMean)]
+    if not means or not modes:
+        print('nothing to plot')
+        return None
+    colors = style.colors_for_conditions([f'{m:g}' for m in means])
+    titles = {'per_window': 'decoder refitted each window',
+              'steady_state': 'decoder fitted on the adapted state'}
+    if figsize is None:
+        figsize = (4.6 * len(modes) + 0.8, 4.1 * len(means))
+
+    fig, axes = plt.subplots(len(means), len(modes), figsize=figsize,
+                             squeeze=False)
+    for row, mean_level in enumerate(means):
+        for col, mode in enumerate(modes):
+            ax = axes[row][col]
+            block = traces[traces.lightMean.eq(mean_level) & traces['mode'].eq(mode)]
+            if block.empty:
+                ax.axis('off')
+                continue
+            x = block.stimulus.values
+            y = block.reconstruction.values
+            limit = float(np.nanpercentile(np.abs(x), 99.5)) or 1.0
+            ax.hexbin(x, y, gridsize=gridsize, cmap='Greys', mincnt=1,
+                      extent=(-limit, limit, -limit, limit), linewidths=0)
+            ax.plot([-limit, limit], [-limit, limit], ls='--', lw=1.1,
+                    color='0.45', zorder=3)
+
+            # Conditional mean of the reconstruction given the stimulus.
+            edges = np.linspace(-limit, limit, 19)
+            centres = 0.5 * (edges[:-1] + edges[1:])
+            which = np.digitize(x, edges) - 1
+            mid, low, high = [], [], []
+            for b in range(centres.size):
+                vals = y[which == b]
+                if vals.size < 8:
+                    mid.append(np.nan); low.append(np.nan); high.append(np.nan)
+                else:
+                    mid.append(np.mean(vals))
+                    low.append(np.percentile(vals, 25))
+                    high.append(np.percentile(vals, 75))
+            color = colors[f'{mean_level:g}']
+            ax.fill_between(centres, low, high, color=color, alpha=.22, lw=0, zorder=4)
+            ax.plot(centres, mid, '-', lw=2.0, color=color, zorder=5)
+
+            slopes = phase_slopes(x, y)
+            for name, span in (('decrement', np.array([-limit, 0.0])),
+                               ('increment', np.array([0.0, limit]))):
+                if np.isfinite(slopes[name]):
+                    # Vermillion, not gold: the cividis condition palette is
+                    # gold at the bright end and the slope line would vanish
+                    # into the conditional-mean curve it is meant to summarise.
+                    ax.plot(span, slopes[name] * span, '-', lw=1.4,
+                            color='#D55E00', zorder=6)
+            ax.axvline(0, color='0.5', lw=0.9)
+            ax.axhline(0, color='0.5', lw=0.9)
+            ax.set_xlim(-limit, limit); ax.set_ylim(-limit, limit)
+            ax.set_aspect('equal', adjustable='box')
+            ax.text(0.03, 0.95, f"decrement\nslope {slopes['decrement']:.2f}",
+                    transform=ax.transAxes, va='top', fontsize=8, color='#D55E00')
+            ax.text(0.97, 0.06, f"increment\nslope {slopes['increment']:.2f}",
+                    transform=ax.transAxes, ha='right', fontsize=8, color='#D55E00')
+            if row == 0:
+                ax.set_title(titles[mode], fontsize=10)
+            if col == 0:
+                ax.set_ylabel(f'lightMean {mean_level:g}\nreconstruction', fontsize=9)
+            if row == len(means) - 1:
+                ax.set_xlabel('true stimulus (about its mean)', fontsize=9)
+    fig.suptitle(f'{analysis.exp_name} | {analysis.rec_type} | decoding transfer '
+                 f'function (grey dashed = identity, orange = per-phase slope, '
+                 f'coloured = mean reconstruction given stimulus)', fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.955))
+    return fig
+
+
+def plot_phase_triggered(analysis: ConditionAnalysis, traces: pd.DataFrame,
+                         pre_ms: float = 100.0, post_ms: float = 300.0,
+                         min_phase_ms: float = 100.0,
+                         mode: Optional[str] = None,
+                         figsize: Optional[Tuple[float, float]] = None):
+    """Onset-aligned averages: when within a phase the accuracy goes.
+
+    Every zero crossing of the true stimulus starts a phase. Averaging the
+    stimulus and its reconstruction over all increment onsets, and separately
+    over all decrement onsets, shows whether a compressed reconstruction is
+    compressed from the start or only fails to keep up -- which the transfer
+    function, having no time axis, cannot distinguish.
+
+    The peak ratio annotated on each panel is reconstruction peak over stimulus
+    peak, the amplitude recovered for that phase; the latency is the difference
+    between the two peak times, quantised to ``decode_bin_ms``.
+
+    ``min_phase_ms`` is load-bearing rather than cosmetic. The stimulus is
+    band-limited noise, so it crosses zero constantly and most crossings start
+    an excursion lasting one or two bins; averaging over those gives the
+    zero-crossing waveform of the noise, not the response to a sustained phase.
+    On 2020-06-11_B the surviving onset count runs 884 at 50 ms, 251 at 100 ms,
+    77 at 150 ms and 23 at 200 ms, so 100 ms is where the phases are long
+    enough to mean something and still numerous enough to average.
+    """
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    if traces is None or traces.empty:
+        print('nothing to plot')
+        return None
+    if mode is None:
+        mode = ('per_window' if 'per_window' in set(traces['mode'])
+                else sorted(set(traces['mode']))[0])
+    frame = traces[traces['mode'].eq(mode)]
+    means = [m for m in analysis.light_means if m in set(frame.lightMean)]
+    if not means:
+        print('nothing to plot')
+        return None
+
+    # Bin width from the traces themselves, so this cannot disagree with them.
+    sample = frame[frame.lightMean.eq(means[0])]
+    first = sample.groupby(['epoch', 'window']).time_s.apply(
+        lambda v: np.median(np.diff(np.sort(v.values))) if v.size > 1 else np.nan)
+    bin_s = float(np.nanmedian(first.values))
+    pre_bins = max(int(round(pre_ms / 1e3 / bin_s)), 1)
+    post_bins = max(int(round(post_ms / 1e3 / bin_s)), 1)
+    min_bins = max(int(round(min_phase_ms / 1e3 / bin_s)), 1)
+    lag_ms = (np.arange(-pre_bins, post_bins + 1)) * bin_s * 1e3
+
+    colors = style.colors_for_conditions([f'{m:g}' for m in means])
+    if figsize is None:
+        figsize = (11.0, 3.1 * len(means) + 1.0)
+    fig, axes = plt.subplots(len(means), 2, figsize=figsize, squeeze=False,
+                             sharex=True)
+    for row, mean_level in enumerate(means):
+        block = frame[frame.lightMean.eq(mean_level)]
+        cuts = {'increment': {'stim': [], 'rec': []},
+                'decrement': {'stim': [], 'rec': []}}
+        for _, piece in block.groupby(['epoch', 'window'], sort=False):
+            piece = piece.sort_values('time_s')
+            stim = piece.stimulus.values
+            rec = piece.reconstruction.values
+            up, down = _phase_onsets(stim, pre_bins, post_bins, min_bins)
+            for name, onsets in (('increment', up), ('decrement', down)):
+                for onset in onsets:
+                    sl = slice(onset - pre_bins, onset + post_bins + 1)
+                    cuts[name]['stim'].append(stim[sl])
+                    cuts[name]['rec'].append(rec[sl])
+
+        for col, name in enumerate(('increment', 'decrement')):
+            ax = axes[row][col]
+            stim_cuts = cuts[name]['stim']
+            if not stim_cuts:
+                ax.text(0.5, 0.5, f'no {name} onsets survive the\nedge and '
+                        f'duration filters', transform=ax.transAxes, ha='center',
+                        va='center', fontsize=8, color='0.45')
+                ax.set_xticks([])
+                continue
+            stim_arr = np.vstack(stim_cuts)
+            rec_arr = np.vstack(cuts[name]['rec'])
+            n = stim_arr.shape[0]
+            color = colors[f'{mean_level:g}']
+            for arr, style_kw, label in (
+                    (stim_arr, dict(color='0.25', lw=1.8, ls='-'), 'true stimulus'),
+                    (rec_arr, dict(color=color, lw=1.7, ls='--'), 'reconstruction')):
+                mean_trace = arr.mean(axis=0)
+                sem = arr.std(axis=0, ddof=1) / np.sqrt(n) if n > 1 else np.zeros_like(mean_trace)
+                ax.fill_between(lag_ms, mean_trace - sem, mean_trace + sem,
+                                color=style_kw['color'], alpha=.20, lw=0)
+                ax.plot(lag_ms, mean_trace, label=label, **style_kw)
+            ax.axvline(0, color='0.5', lw=0.9)
+            ax.axhline(0, color='0.5', lw=0.9)
+
+            peak = np.argmax if name == 'increment' else np.argmin
+            s_mean, r_mean = stim_arr.mean(axis=0), rec_arr.mean(axis=0)
+            s_i, r_i = peak(s_mean), peak(r_mean)
+            ratio = (r_mean[r_i] / s_mean[s_i]) if s_mean[s_i] else np.nan
+            ax.text(0.97, 0.06 if name == 'increment' else 0.90,
+                    f'n = {n}   peak ratio {ratio:.2f}\n'
+                    f'latency {lag_ms[r_i] - lag_ms[s_i]:+.0f} ms',
+                    transform=ax.transAxes, ha='right',
+                    va='bottom' if name == 'increment' else 'top',
+                    fontsize=8, color='0.35')
+            if row == 0:
+                ax.set_title(f'{name} onsets', fontsize=10)
+                if col == 0:
+                    ax.legend(frameon=False, fontsize=8, loc='upper left')
+            if col == 0:
+                ax.set_ylabel(f'lightMean {mean_level:g}\n(stimulus units)', fontsize=9)
+            if row == len(means) - 1:
+                ax.set_xlabel('time from phase onset (ms)', fontsize=9)
+    fig.suptitle(f'{analysis.exp_name} | {analysis.rec_type} | phase-onset '
+                 f'triggered average ({titles_mode(mode)})', fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.955))
+    return fig
+
+
+def titles_mode(mode: str) -> str:
+    """Human-readable name for a decoding regime."""
+    return {'per_window': 'decoder refitted each window',
+            'steady_state': 'decoder fitted on the adapted state'}.get(mode, mode)
 
 
 def plot_decoding(analysis: ConditionAnalysis, decoded: pd.DataFrame,

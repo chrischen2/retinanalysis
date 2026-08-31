@@ -418,3 +418,87 @@ def test_steady_state_mode_never_scores_its_training_stretch():
     ends = (frame.window.str.split('-').str[1]
             .str.replace(' s', '', regex=False).astype(float))
     assert ends.max() <= 14.0 + 1e-6
+
+
+def test_transfer_slopes_equal_the_reported_gains():
+    """The figure's per-phase slopes must be the table's per-phase gains.
+
+    ``plot_reconstruction_transfer`` draws a slope for each side of zero and
+    ``reconstruction_metrics`` reports ``gain_increment``/``gain_decrement``.
+    They are the same estimator by construction; this pins that, so the figure
+    cannot drift away from the numbers printed beside it.
+    """
+    stim, resp = _polarity_dataset()
+    decoder = vmn.decoding_filter(resp[:-1], stim[:-1])
+    estimate = vmn.apply_decoding_filter(decoder, resp[-1:])
+    estimate = estimate - estimate.mean(axis=1, keepdims=True)
+    truth = stim[-1:] - stim[-1:].mean(axis=1, keepdims=True)
+    binned_e = vmn._bin_mean(estimate, 10).ravel()
+    binned_t = vmn._bin_mean(truth, 10).ravel()
+
+    slopes = vmn.phase_slopes(binned_t, binned_e)
+    metrics = vmn.reconstruction_metrics(binned_e, binned_t)
+    assert slopes['increment'] == pytest.approx(metrics['gain_increment'], rel=1e-9)
+    assert slopes['decrement'] == pytest.approx(metrics['gain_decrement'], rel=1e-9)
+
+
+def test_rectified_cell_has_a_steeper_increment_transfer_slope():
+    """The asymmetry the figure exists to reveal must be found where it is real.
+
+    The synthetic cell is half-wave rectified, so the response above the mean
+    is a scaled copy of the stimulus and below it is noise. If the transfer
+    slopes cannot separate those, a null result on real data means nothing.
+    """
+    stim, resp = _polarity_dataset()
+    decoder = vmn.decoding_filter(resp[:-1], stim[:-1])
+    estimate = vmn.apply_decoding_filter(decoder, resp[-1:])
+    estimate = estimate - estimate.mean(axis=1, keepdims=True)
+    truth = stim[-1:] - stim[-1:].mean(axis=1, keepdims=True)
+
+    slopes = vmn.phase_slopes(vmn._bin_mean(truth, 10),
+                             vmn._bin_mean(estimate, 10))
+    assert slopes['increment'] > slopes['decrement']
+
+
+def test_phase_onsets_are_exact_and_respect_both_filters():
+    """Onset detection on a square wave, where the answer is known by hand."""
+    # 10 full cycles of 8 up then 8 down: 10 upward and 10 downward crossings,
+    # minus whichever fall too close to the ends for the cut to fit.
+    cycle = np.r_[np.ones(8), -np.ones(8)]
+    wave = np.tile(cycle, 10)
+    up, down = vmn._phase_onsets(wave, pre_bins=2, post_bins=2, min_bins=4)
+    assert up.size == 9 and down.size == 10        # first up-phase starts at 0
+    assert np.all(wave[up] > 0) and np.all(wave[down] < 0)
+
+    # Every phase is 8 bins, so a 9-bin minimum must reject all of them.
+    up_strict, down_strict = vmn._phase_onsets(wave, 2, 2, min_bins=9)
+    assert up_strict.size == 0 and down_strict.size == 0
+
+    # Edge exclusion: nothing within post_bins of the end, nor before pre_bins.
+    up_wide, down_wide = vmn._phase_onsets(wave, pre_bins=6, post_bins=6, min_bins=4)
+    for onsets in (up_wide, down_wide):
+        assert np.all(onsets - 6 >= 0)
+        assert np.all(onsets + 6 < wave.size)
+
+
+def test_reconstruct_traces_holds_out_every_epoch_exactly_once():
+    """Uniform coverage, or an onset average silently weights some epochs more."""
+    import pandas as pd
+
+    stim, resp = _polarity_dataset(n_epochs=5, n_time=8000)
+    analysis = vmn.ConditionAnalysis(
+        exp_name='synthetic', block_ids=[0], rec_type='extracellular',
+        sample_rate=1000.0, units='firing rate (Hz)', sampling_interval=1e-3,
+        skip_seconds=0.0, frequency_cutoff=60.0)
+    analysis.light_means = [1.0]
+    analysis.n_epochs = {1.0: stim.shape[0]}
+    analysis.stimulus = {1.0: stim}
+    analysis.response = {1.0: resp}
+
+    traces = vmn.reconstruct_traces(analysis, mode='per_window',
+                                    window_seconds=2.0, verbose=False)
+    assert not traces.empty
+    counts = traces.groupby(['window', 'epoch']).size().unstack()
+    assert set(counts.index.size for _ in [0])      # windows exist
+    assert counts.notna().all().all()               # every epoch in every window
+    assert counts.nunique().nunique() == 1          # and the same number of bins
