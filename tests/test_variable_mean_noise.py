@@ -341,60 +341,64 @@ def _polarity_dataset(n_epochs=6, n_time=4000, lag=8, seed=0):
     return stim, resp
 
 
-def test_all_three_decoders_recover_polarity():
-    """Each decoder must beat chance on a cell built to be decodable.
+def test_linear_decoder_reconstructs_the_stimulus_trace():
+    """The decoding filter must recover the trace, not merely its sign."""
+    stim, resp = _polarity_dataset()
+    decoder = vmn.decoding_filter(resp[:-1], stim[:-1])
+    estimate = vmn.apply_decoding_filter(decoder, resp[-1:])
+    estimate = estimate - estimate.mean(axis=1, keepdims=True)
+    truth = stim[-1:] - stim[-1:].mean(axis=1, keepdims=True)
 
-    A decoder that silently returns a constant still scores 0.5 recall on one
-    class and 0.0 on the other, so per-class recall and AUC are both checked --
-    an AUC near 0.5 is the signature of a decoder that learned nothing.
+    metrics = vmn.reconstruction_metrics(vmn._bin_mean(estimate, 10),
+                                         vmn._bin_mean(truth, 10))
+    assert metrics['r_all'] > 0.7
+    assert 0.4 < metrics['gain_all'] < 1.6
+    assert metrics['nrmse_all'] < 1.0          # better than predicting the mean
+
+
+def test_rectified_cell_reconstructs_its_driven_phase_better():
+    """A half-wave rectified cell carries no information below its threshold.
+
+    The response above is a scaled copy of the stimulus and below is noise, so
+    the increment phase must reconstruct better on every measure. This is the
+    signature the phase split exists to detect; if it cannot find it here, a
+    null result on real data would mean nothing.
     """
     stim, resp = _polarity_dataset()
-    for name in vmn.DECODERS:
-        if name == 'reconstruction':
-            model = vmn.decoding_filter(resp[:-1], stim[:-1])
-            estimate = vmn.apply_decoding_filter(model, resp[-1:])
-            estimate = estimate - estimate.mean(axis=1, keepdims=True)
-            metrics = vmn._decode_metrics(
-                vmn._bin_mean(estimate, 10),
-                np.sign(vmn._bin_mean(stim[-1:] - stim[-1:].mean(), 10)))
-        else:
-            binned = vmn._bin_mean(resp, 10)
-            design, _, bin_of = vmn._lagged(binned, 4)
-            truth = np.sign(vmn._bin_mean(stim - stim.mean(axis=1, keepdims=True), 10))
-            labels = truth[:, :int(bin_of.max()) + 1].reshape(-1)
-            keep = labels != 0
-            fit = (vmn._fit_linear_classifier if name == 'linear'
-                   else vmn._fit_naive_bayes)(design[keep], labels[keep])
-            assert fit is not None, name
-            metrics = vmn._decode_metrics(
-                vmn._apply_classifier(fit, design[keep]), labels[keep])
-        assert metrics['auc'] > 0.75, (name, metrics['auc'])
-        assert metrics['acc_increment'] > 0.6, (name, metrics)
-        assert metrics['acc_decrement'] > 0.6, (name, metrics)
+    decoder = vmn.decoding_filter(resp[:-1], stim[:-1])
+    estimate = vmn.apply_decoding_filter(decoder, resp[-1:])
+    estimate = estimate - estimate.mean(axis=1, keepdims=True)
+    truth = stim[-1:] - stim[-1:].mean(axis=1, keepdims=True)
+
+    m = vmn.reconstruction_metrics(vmn._bin_mean(estimate, 10),
+                                   vmn._bin_mean(truth, 10))
+    assert m['r_increment'] > m['r_decrement']
+    assert m['gain_increment'] > m['gain_decrement']
+    assert m['nrmse_increment'] < m['nrmse_decrement']
 
 
-def test_decode_metrics_exposes_a_one_sided_decoder():
-    """Pooled accuracy hides a decoder that always says 'increment'.
+def test_reconstruction_metrics_separate_shape_from_amplitude():
+    """A halved reconstruction keeps r = 1 but must report gain = 0.5.
 
-    This is why increments and decrements are scored separately: the pooled
-    number for a constant decoder looks like chance rather than like failure.
+    Correlation alone would call a systematically compressed reconstruction
+    perfect, which is exactly the failure adaptation would produce.
     """
-    truth = np.array([1, 1, 1, -1, -1, -1])
-    metrics = vmn._decode_metrics(np.ones(6), truth)
-    assert metrics['acc_increment'] == 1.0
-    assert metrics['acc_decrement'] == 0.0
-    assert metrics['bias'] == 1.0
+    rng = np.random.default_rng(3)
+    truth = rng.standard_normal(4000)
+    metrics = vmn.reconstruction_metrics(0.5 * truth, truth)
+    assert metrics['r_all'] == pytest.approx(1.0, abs=1e-9)
+    assert metrics['gain_all'] == pytest.approx(0.5, abs=1e-9)
+    assert metrics['gain_increment'] == pytest.approx(0.5, abs=1e-6)
+    assert metrics['gain_decrement'] == pytest.approx(0.5, abs=1e-6)
 
 
 def test_steady_state_mode_never_scores_its_training_stretch():
-    """The adapted-state decoder must not be tested on what it was fitted on.
+    """The adapted-state decoder must not be scored on what it was fitted on.
 
-    Its whole purpose is to show what a fixed calibration makes of the
+    Its whole purpose is to show what a fixed calibration recovers from the
     *un-adapted* response, which is worthless if the trailing windows it was
     trained on are also scored.
     """
-    import pandas as pd
-
     stim, resp = _polarity_dataset(n_epochs=4, n_time=20_000)
     analysis = vmn.ConditionAnalysis(
         exp_name='synthetic', block_ids=[0], rec_type='extracellular',
@@ -405,11 +409,12 @@ def test_steady_state_mode_never_scores_its_training_stretch():
     analysis.stimulus = {1.0: stim}
     analysis.response = {1.0: resp}
 
-    frame = vmn.decode_windows(analysis, mode='steady_state', decoder='linear',
-                               window_seconds=2.0, steady_state_s=6.0,
-                               verbose=False)
+    frame = vmn.reconstruct_stimulus(analysis, mode='steady_state',
+                                     window_seconds=2.0, steady_state_s=6.0,
+                                     verbose=False)
     assert not frame.empty
     # Epoch is 20 s; the last 6 s are the training stretch, so every scored
     # window must end at or before 14 s.
-    assert frame.window.str.split('-').str[1].str.replace(' s', '', regex=False) \
-        .astype(float).max() <= 14.0 + 1e-6
+    ends = (frame.window.str.split('-').str[1]
+            .str.replace(' s', '', regex=False).astype(float))
+    assert ends.max() <= 14.0 + 1e-6
