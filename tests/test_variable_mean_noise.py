@@ -922,3 +922,56 @@ def test_apparent_nonlinearity_is_analytic_and_signed_correctly():
     summary = vmn.describe_apparent_change(curves)
     assert summary['gain_ratio'] <= 1.0 + 1e-6, summary
     assert abs(summary['shift_generator']) < 0.05, summary
+
+
+def test_two_state_rates_round_trip():
+    """The identifiable pair must map cleanly onto the rate constants.
+
+    `tau_fast` is the relaxation time at full drive, 1/(k_act + k_inact), and
+    `occupancy` is k_act/k_inact. Fitting those instead of the rates is the
+    whole point of the reparameterisation, so the conversion has to be exact.
+    """
+    for tau_fast, occupancy in ((1e-3, 4.0), (0.02, 0.5), (0.2, 20.0)):
+        k_act, k_inact = vmn.two_state_rates(tau_fast, occupancy)
+        assert 1.0 / (k_act + k_inact) == pytest.approx(tau_fast, rel=1e-9)
+        assert k_act / k_inact == pytest.approx(occupancy, rel=1e-9)
+        assert k_act > 0 and k_inact > 0
+
+
+def test_fast_rates_are_unidentifiable_above_the_sampling_rate():
+    """Why the fast state is fitted as (tau, ratio) and not as two rates.
+
+    Past the sampling interval only the *ratio* of the two rates matters: it
+    sets the active state's occupancy, while their sum sets a speed the data
+    can no longer resolve. Scaling both leaves the prediction alone, so an
+    optimiser given the raw rates drifts up that flat direction until one hits
+    a bound -- which is what it did, pinning `k_act` at 2000/s.
+    """
+    from scipy.ndimage import gaussian_filter1d
+
+    rng = np.random.default_rng(0)
+    dt = 1e-3
+    # A *smoothed* drive, as the real one is: it comes through a temporal
+    # filter, so it has no power at the sampling rate. Against white noise the
+    # comparison fails for an uninteresting reason -- with tau far below dt the
+    # per-sample values diverge even though the mean occupancy is preserved --
+    # which says something about white noise rather than about the model.
+    drive = gaussian_filter1d(rng.random(40_000), 8.0)
+    drive = (drive - drive.min()) / np.ptp(drive)
+    reference = None
+    for factor in (1.0, 4.0, 20.0):
+        # tau_fast well below dt for every factor, ratio held at 4.
+        k_act, k_inact = vmn.two_state_rates(1e-3 / factor, 4.0)
+        active, _ = vmn.two_state_kinetics(drive, dt, k_act, k_inact, 3.0, 0.5)
+        if reference is None:
+            reference = active
+        else:
+            assert np.corrcoef(reference, active)[0, 1] > 0.99
+            assert abs(active.mean() - reference.mean()) < 0.02 * reference.mean()
+
+    # The ratio, by contrast, changes the occupancy it is supposed to set.
+    low_act, low_inact = vmn.two_state_rates(1e-3, 0.5)
+    high_act, high_inact = vmn.two_state_rates(1e-3, 8.0)
+    low, _ = vmn.two_state_kinetics(drive, dt, low_act, low_inact, 3.0, 0.5)
+    high, _ = vmn.two_state_kinetics(drive, dt, high_act, high_inact, 3.0, 0.5)
+    assert high.mean() > 1.3 * low.mean()

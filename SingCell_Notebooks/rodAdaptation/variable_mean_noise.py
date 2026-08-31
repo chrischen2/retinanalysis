@@ -4350,8 +4350,30 @@ def fit_lnk(analysis: ConditionAnalysis,
     return model
 
 
+# Fitted in terms of the two quantities that are actually identifiable.
+#
+# `k_act` and `k_inact` are not separately determined. Their *ratio* sets the
+# active state's occupancy and their *sum* sets its speed, and once the speed
+# passes the sampling interval the sum stops mattering: scaling both by 20x,
+# holding the ratio, moves held-out r2 from 0.671 to 0.667 and leaves the
+# occupancy at 0.0555, so the optimiser is free to drift up that flat
+# direction until it hits a bound -- which is exactly what it did. Changing
+# the ratio alone, by contrast, has a sharp optimum: 0.624 at 1, 0.671 at 4,
+# 0.620 at 16.
+#
+# So fit `tau_fast` (the relaxation time at full drive, 1/(k_act + k_inact))
+# and `occupancy` (k_act/k_inact), and convert. `tau_fast` is floored at the
+# sampling interval because nothing below it is resolvable -- and pushing far
+# past it makes the relaxation underflow and return NaN.
 TWO_STATE_NAMES = ('alpha', 'beta', 'gamma', 'epsilon',
-                   'k_act', 'k_inact', 'k_slow_in', 'k_slow_out')
+                   'tau_fast', 'occupancy', 'k_slow_in', 'k_slow_out')
+
+
+def two_state_rates(tau_fast: float, occupancy: float) -> Tuple[float, float]:
+    """``(k_act, k_inact)`` from the identifiable pair."""
+    total = 1.0 / max(float(tau_fast), 1e-9)
+    k_inact = total / (1.0 + float(occupancy))
+    return total - k_inact, k_inact
 
 
 def fit_lnk_two_state(analysis: ConditionAnalysis,
@@ -4383,10 +4405,11 @@ def fit_lnk_two_state(analysis: ConditionAnalysis,
 
     Eight free parameters against the modulated variant's seven:
     ``alpha``/``epsilon`` map occupancy into response units, ``beta``/``gamma``
-    shape the drive ``u = Phi(beta g + gamma)``, and ``k_act``, ``k_inact``,
-    ``k_slow_in``, ``k_slow_out`` are the rate constants. ``k_act`` cannot be
-    folded into ``alpha`` -- see :func:`two_state_kinetics` for why fixing it
-    starves the model of any state to deplete.
+    shape the drive ``u = Phi(beta g + gamma)``, then ``tau_fast`` and
+    ``occupancy`` for the fast state and ``k_slow_in``/``k_slow_out`` for the
+    slow pool. The fast state is fitted as a time constant and a ratio rather
+    than as ``k_act``/``k_inact``, because only those two combinations are
+    identifiable -- see :data:`TWO_STATE_NAMES`.
     """
     from scipy.optimize import least_squares
     from scipy.special import ndtr
@@ -4418,17 +4441,17 @@ def fit_lnk_two_state(analysis: ConditionAnalysis,
     lower_nl = lower_nl.copy(); upper_nl = upper_nl.copy()
     lower_nl[0] *= 5.0; upper_nl[0] *= 5.0
 
-    # Rates in s^-1. Activation and fast inactivation both run on the response
-    # timescale and are both free, since their ratio sets occupancy and their
-    # sum sets speed.
+    # `tau_fast` is floored at the sampling interval: faster than one sample is
+    # not resolvable, and the fit that motivated this reparameterisation landed
+    # at exactly 0.96 ms with dt = 1 ms. `occupancy` is the ratio.
     #
     # The slow pair covers recovery from 50 ms to 200 s. These are the
     # physiological bounds; an earlier version had to box the in/out ratio at
     # 10 to keep the fixed-point solver from oscillating, which constrained the
     # model to protect the integrator. The march does not need that.
-    lower = np.r_[lower_nl, 1.0, 1.0, 0.005, 0.005]
-    upper = np.r_[upper_nl, 2000.0, 2000.0, 20.0, 20.0]
-    guess = np.r_[guess_nl, 60.0, 60.0, 0.5, 0.2]
+    lower = np.r_[lower_nl, dt, 0.05, 0.005, 0.005]
+    upper = np.r_[upper_nl, 1.0, 50.0, 20.0, 20.0]
+    guess = np.r_[guess_nl, max(5e-3, dt), 4.0, 0.5, 0.2]
 
     rng = np.random.default_rng(random_state)
     unique_epochs = np.unique(epochs)
@@ -4444,8 +4467,9 @@ def fit_lnk_two_state(analysis: ConditionAnalysis,
     def predict(vector):
         p = unpack(vector)
         drive = ndtr(p['beta'] * generator + p['gamma'])
+        k_act, k_inact = two_state_rates(p['tau_fast'], p['occupancy'])
         active, inactivated, residual_solver = two_state_kinetics(
-            drive, dt, p['k_act'], p['k_inact'], p['k_slow_in'],
+            drive, dt, k_act, k_inact, p['k_slow_in'],
             p['k_slow_out'], state_step=state_step, n_passes=n_passes,
             return_residual=True)
         return (p['alpha'] * active + p['epsilon'], active, inactivated,
@@ -4462,8 +4486,8 @@ def fit_lnk_two_state(analysis: ConditionAnalysis,
     starts = [np.clip(guess, lower, upper)]
     for _ in range(max(int(n_restarts) - 1, 0)):
         draw = guess.copy()
-        draw[4] = rng.uniform(10.0, 500.0)
-        draw[5] = rng.uniform(10.0, 500.0)
+        draw[4] = rng.uniform(dt, 0.05)
+        draw[5] = rng.uniform(0.5, 20.0)
         draw[6] = rng.uniform(0.02, 5.0)
         draw[7] = rng.uniform(0.02, 5.0)
         starts.append(np.clip(draw, lower, upper))
@@ -4489,10 +4513,10 @@ def fit_lnk_two_state(analysis: ConditionAnalysis,
     # difference is whether depletion is allowed to happen.
     def residual_static(vector):
         flat = dict(zip(TWO_STATE_NAMES[:6], (float(v) for v in vector)))
-        flat.update(k_slow_in=0.0, k_slow_out=1.0)
         drive = ndtr(flat['beta'] * generator + flat['gamma'])
-        act, _ = two_state_kinetics(drive, dt, flat['k_act'], flat['k_inact'],
-                                    0.0, 1.0, state_step=state_step, n_passes=1)
+        ka, kfi = two_state_rates(flat['tau_fast'], flat['occupancy'])
+        act, _ = two_state_kinetics(drive, dt, ka, kfi, 0.0, 1.0,
+                                    state_step=state_step, n_passes=1)
         return score_residual(flat['alpha'] * act + flat['epsilon'], train)
 
     try:
@@ -4504,8 +4528,8 @@ def fit_lnk_two_state(analysis: ConditionAnalysis,
                                bounds=(static_lo, static_hi), max_nfev=max_nfev)
         flat = dict(zip(TWO_STATE_NAMES[:6], (float(v) for v in static.x)))
         drive_flat = ndtr(flat['beta'] * generator + flat['gamma'])
-        act_flat, _ = two_state_kinetics(drive_flat, dt, flat['k_act'],
-                                         flat['k_inact'], 0.0, 1.0,
+        ka, kfi = two_state_rates(flat['tau_fast'], flat['occupancy'])
+        act_flat, _ = two_state_kinetics(drive_flat, dt, ka, kfi, 0.0, 1.0,
                                          state_step=state_step, n_passes=1)
         predicted_static = flat['alpha'] * act_flat + flat['epsilon']
     except Exception:
@@ -4534,10 +4558,11 @@ def fit_lnk_two_state(analysis: ConditionAnalysis,
     model.active = active
     model.solver_residual = solver_residual
     if verbose:
-        tau_fast = 1e3 / max(params['k_act'] + params['k_inact'], 1e-9)
+        tau_fast = params['tau_fast'] * 1e3
         print(f"  {'two-state':>14}: r²={model.r2:.3f} held out "
               f"(no-depletion {model.r2_static:.3f}, gain {model.r2_gain:+.3f}) | "
-              f"tau_fast {tau_fast:.0f} ms, k_in {params['k_slow_in']:.3f}, "
+              f"tau_fast {tau_fast:.2f} ms, occupancy {params['occupancy']:.2f}, "
+              f"k_in {params['k_slow_in']:.3f}, "
               f"k_out {params['k_slow_out']:.3f} /s | I {inactivated.min():.3f}"
               f"-{inactivated.max():.3f}, solver ±{solver_residual:.4f}"
               + (f' | at bound: {", ".join(at_bounds)}' if at_bounds else ''))
@@ -4580,7 +4605,9 @@ def apparent_nonlinearity(analysis: ConditionAnalysis, model: LNKModel,
 
     from scipy.special import ndtr
     drive = ndtr(params['beta'] * grid + params['gamma'])
-    activation = params['k_act'] * drive
+    k_act_value, k_inact_value = two_state_rates(params['tau_fast'],
+                                                 params['occupancy'])
+    activation = k_act_value * drive
 
     measured = np.asarray(analysis.sequence_response, dtype=float)
     edges = np.percentile(generator, np.linspace(1, 99, 26))
@@ -4592,7 +4619,7 @@ def apparent_nonlinearity(analysis: ConditionAnalysis, model: LNKModel,
     rows = []
     for label, occupancy in (('low', low_value), ('high', high_value)):
         steady = (activation * (1.0 - occupancy)
-                  / np.maximum(activation + params['k_inact'], 1e-12))
+                  / np.maximum(activation + k_inact_value, 1e-12))
         response = params['alpha'] * steady + params['epsilon']
         for value, curve in zip(grid, response):
             rows.append({'adaptation': label, 'slow_state': float(occupancy),
