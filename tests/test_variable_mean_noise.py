@@ -691,3 +691,106 @@ def test_sequence_is_in_recorded_order_and_alternates():
     levels = light[boundaries]
     assert levels.size == 6
     assert np.all(np.diff(levels) != 0), levels
+
+
+def test_param_filter_recovers_a_known_shape():
+    """Round-trip through the five-parameter form.
+
+    The shape must come back; the parameters need not. They are partially
+    degenerate -- ``tauP`` runs to its bound meaning "no oscillation over the
+    window" and ``numFilt`` trades against ``tauR`` -- so asserting on them
+    would pin an arbitrary point on a ridge.
+    """
+    dt, n_points = 1e-3, 1000
+    truth = vmn.param_filter(dict(numFilt=3.0, tauR=0.04, tauD=0.08,
+                                  tauP=0.25, phi=20.0), n_points, dt)
+    found, r2 = vmn.fit_param_filter(truth, dt, n_starts=20)
+    assert r2 > 0.99, r2
+    recovered = vmn.param_filter(found, n_points, dt)
+    assert np.corrcoef(recovered, truth)[0, 1] > 0.995
+
+
+def test_param_filter_handles_slow_filters_not_only_fast_ones():
+    """The regression that prompted this work.
+
+    Starting points fixed at fast time constants fit a 30 ms filter at r2 0.99
+    and a 200 ms one at r2 ~= 0 -- worse than a flat line -- which reads as the
+    functional form being incapable when it is only badly started. Both must
+    now come back, since the whole-cell filters in this dataset peak around
+    200 ms and are the ones the LNK work targets.
+    """
+    dt, n_points = 1e-3, 1000
+    for tau_rise, tau_decay, tau_period in ((0.012, 0.03, 0.10),   # fast
+                                            (0.15, 0.30, 1.20)):   # slow
+        truth = vmn.param_filter(dict(numFilt=2.5, tauR=tau_rise, tauD=tau_decay,
+                                      tauP=tau_period, phi=0.0), n_points, dt)
+        time_to_peak = int(np.argmax(np.abs(truth))) * dt
+        _, r2 = vmn.fit_param_filter(truth, dt, n_starts=20)
+        assert r2 > 0.9, (time_to_peak, r2)
+
+
+def test_param_filter_starts_scale_with_time_to_peak():
+    """Starts must be drawn from the filter's own timescale, not a constant.
+
+    This is what makes the previous test pass, so it is worth pinning
+    directly: the same routine applied to a filter ten times slower must
+    explore ten times slower time constants.
+    """
+    dt, n_points = 1e-3, 1000
+    slow = vmn.param_filter(dict(numFilt=2.5, tauR=0.15, tauD=0.30, tauP=1.2,
+                                 phi=0.0), n_points, dt)
+    fast = vmn.param_filter(dict(numFilt=2.5, tauR=0.015, tauD=0.03, tauP=0.12,
+                                 phi=0.0), n_points, dt)
+    slow_params, _ = vmn.fit_param_filter(slow, dt, n_starts=20)
+    fast_params, _ = vmn.fit_param_filter(fast, dt, n_starts=20)
+    # tauR is index 1 in PARAM_FILTER_NAMES; the slow filter's must be larger.
+    assert vmn.PARAM_FILTER_NAMES[1] == 'tauR'
+    assert slow_params[1] > fast_params[1]
+
+
+def test_normalized_residual_matches_the_reference_scheme():
+    """Sections weighted by their own SD, as ``mse_weighted_loss`` does.
+
+    A quiet stretch and a loud one must contribute comparably; unweighted, the
+    loud one dominates, which is the bias the reference metric exists to remove
+    and which our 10x luminance step would otherwise create.
+    """
+    dt = 1e-3
+    quiet = 0.1 * np.sin(2 * np.pi * 3 * np.arange(10_000) * dt)
+    loud = 10.0 * np.sin(2 * np.pi * 3 * np.arange(10_000) * dt)
+    measured = np.concatenate([quiet, loud])
+    # A prediction wrong by the same *relative* amount in both halves.
+    predicted = np.concatenate([quiet * 0.5, loud * 0.5])
+
+    weighted = vmn.normalized_residual(predicted, measured, dt, bin_s=10.0)
+    half = weighted.size // 2
+    quiet_cost = float(np.sum(weighted[:half] ** 2))
+    loud_cost = float(np.sum(weighted[half:] ** 2))
+    assert quiet_cost == pytest.approx(loud_cost, rel=0.05)
+
+    plain = predicted - measured
+    assert np.sum(plain[half:] ** 2) > 100 * np.sum(plain[:half] ** 2)
+
+    # The frequency split stays reachable for reproducing the paper.
+    banded = vmn.normalized_residual(predicted, measured, dt, bin_s=10.0,
+                                     split_hz=4.0)
+    assert banded.size == 2 * weighted.size
+
+
+def test_fit_filter_is_nested_in_the_frozen_fit():
+    """Freeing the filter cannot fit the training data worse.
+
+    Frozen is the fitted model with the filter pinned at its starting point, so
+    a lower in-sample r2 with fit_filter=True would mean the optimiser failed
+    rather than that the extra parameters did not help. Held-out r2 is free to
+    go either way -- and on real data it does.
+    """
+    analysis = _adapting_cell('multiplicative', n_epochs=4, epoch_s=6.0)
+    frozen = vmn.fit_lnk(analysis, fit_filter=False, n_restarts=1, verbose=False)
+    fitted = vmn.fit_lnk(analysis, fit_filter=True, n_restarts=1, verbose=False)
+    assert frozen is not None and fitted is not None
+    assert fitted.r2_train >= frozen.r2_train - 0.02
+    assert len(fitted.params) > len(frozen.params)
+    assert fitted.fit_filter and not frozen.fit_filter
+    for level, r2 in frozen.filter_r2.items():
+        assert r2 > 0.5, (level, r2)

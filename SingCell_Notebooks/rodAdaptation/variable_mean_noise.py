@@ -3379,6 +3379,24 @@ def plot_decoding(analysis: ConditionAnalysis, decoded: pd.DataFrame,
 # sign -- so each level gets its own, and the shared nonlinearity plus one
 # state is what the fit is being asked to explain.
 #
+# ONE ARCHITECTURAL DEPARTURE, STATED PLAINLY. In baccuslab/LNKS the kinetics
+# block *is* the output stage: `v = X[1,:]` is the active-state occupancy,
+# min-max normalised, and the nonlinearity only supplies its drive -- which is
+# why two nonlinearity parameters suffice there and four are needed here. In
+# this reduction the nonlinearity is the output stage and the slow state
+# modulates it. That follows from dropping the fast states: in LNK the block is
+# simultaneously the fast output stage and the slow adaptation mechanism, so
+# keeping only the slow half leaves nothing to generate the response and the
+# nonlinearity has to take over.
+#
+# The consequence is worth being clear about. This is a *phenomenological*
+# model of the observed nonlinearity change -- it imposes a slope change or a
+# shift and asks which fits better -- not a mechanistic one that derives either
+# from depletion. A two-state variant, one fast state as the output stage and
+# one slow state for adaptation, would restore the LNK architecture and let the
+# nonlinearity change emerge rather than be imposed. That is the natural next
+# step and it is not implemented here.
+#
 # The state is driven by the cell's own rectified drive and returns to the
 # nonlinearity by exactly one of two routes, which is the experiment:
 #
@@ -3409,6 +3427,11 @@ class LNKModel:
     # One filter per light mean: they differ enough between levels that a
     # pooled one describes neither. `filter` is the first for convenience.
     filters: Dict[float, np.ndarray] = field(default_factory=dict)
+    # r2 of the 5-parameter form against each level's reverse-correlation
+    # estimate, so a filter the form cannot represent is visible not silent.
+    filter_r2: Dict[float, float] = field(default_factory=dict)
+    filter_params: Dict[float, np.ndarray] = field(default_factory=dict)
+    fit_filter: bool = False
     filter_time_s: np.ndarray = field(default_factory=lambda: np.zeros(0))
     sampling_interval: float = np.nan
     state_dt_s: float = np.nan
@@ -3539,6 +3562,84 @@ def _lnk_predict(generator, params, coupling: str, dt: float,
     raise ValueError(f'coupling must be one of {LNK_COUPLINGS}')
 
 
+PARAM_FILTER_NAMES = ('numFilt', 'tauR', 'tauD', 'tauP', 'phi')
+
+
+def param_filter(params, n_points: int, dt: float) -> np.ndarray:
+    """cascadegraph's five-parameter temporal filter, peak-normalised."""
+    from retinanalysis.utils.cascadegraph import ParamFilterNode
+
+    if not isinstance(params, dict):
+        params = dict(zip(PARAM_FILTER_NAMES,
+                          (float(v) for v in np.asarray(params).ravel())))
+    return ParamFilterNode.get_filter_with_params(params, int(n_points), float(dt))
+
+
+def fit_param_filter(measured, dt: float, n_starts: int = 40,
+                     random_state: Optional[int] = 0) -> Tuple[np.ndarray, float]:
+    """Fit the 5-parameter form to a measured filter. Returns ``(params, r2)``.
+
+    ``ParamFilterNode`` describes a filter with five numbers instead of the
+    thousand samples reverse correlation returns:
+
+        ((t/tauR)^numFilt / (1 + (t/tauR)^numFilt)) * exp(-t/tauD)
+            * cos(2 pi t/tauP + 2 pi phi/360)
+
+    a rising saturation times an exponential decay times a cosine, which covers
+    monophasic and biphasic shapes alike.
+
+    **Starting points are scaled to the measured filter's own time-to-peak, and
+    that is the whole trick.** With time constants fixed at values suited to a
+    fast cell, this form fits a 32 ms filter at r2 0.99 and a 200 ms one at
+    r2 ~= 0.0 -- worse than a flat line -- which reads as the form being
+    incapable when it is only badly started. Scaled starts fit all four filters
+    measured here at r2 0.96-0.99, beating the 8-function orthonormal basis the
+    LNKS code uses with three fewer parameters.
+
+    The parameters are partially degenerate: fits reach ``tauP`` at its bound
+    (meaning "no oscillation across the window") and trade ``numFilt`` against
+    ``tauR``. The *shape* is recovered, the individual values are not
+    identifiable, so use this as a shape basis and never quote ``tauD`` as a
+    cell's decay constant.
+    """
+    from scipy.optimize import least_squares
+
+    measured = np.asarray(measured, dtype=float).ravel()
+    peak = float(np.max(np.abs(measured)))
+    if not np.isfinite(peak) or peak == 0:
+        return np.full(len(PARAM_FILTER_NAMES), np.nan), np.nan
+    target = measured / peak
+    n_points = target.size
+    time_to_peak = max(int(np.argmax(np.abs(target))), 1) * float(dt)
+
+    def residual(vector):
+        return param_filter(vector, n_points, dt) - target
+
+    lower = np.array([0.1, 1e-4, 1e-4, 1e-3, -720.0])
+    upper = np.array([20.0, 5.0, 5.0, 20.0, 720.0])
+    rng = np.random.default_rng(random_state)
+    best, best_cost = None, np.inf
+    for _ in range(max(int(n_starts), 1)):
+        start = np.array([rng.uniform(0.5, 6.0),
+                          time_to_peak * rng.uniform(0.15, 1.5),
+                          time_to_peak * rng.uniform(0.5, 6.0),
+                          time_to_peak * rng.uniform(1.5, 12.0),
+                          rng.uniform(0.0, 360.0)])
+        try:
+            candidate = least_squares(residual, np.clip(start, lower, upper),
+                                      bounds=(lower, upper), max_nfev=3000)
+        except Exception:
+            continue
+        if candidate.cost < best_cost:
+            best, best_cost = candidate, candidate.cost
+    if best is None:
+        return np.full(len(PARAM_FILTER_NAMES), np.nan), np.nan
+    spread = float(np.sum((target - target.mean()) ** 2))
+    r2 = (1.0 - float(np.sum(residual(best.x) ** 2)) / spread
+          if spread > 0 else np.nan)
+    return best.x, r2
+
+
 def _band_split(values, dt: float, split_hz: float):
     """``(low, high)`` halves of a segment either side of ``split_hz``."""
     spectrum = np.fft.rfft(values)
@@ -3549,8 +3650,8 @@ def _band_split(values, dt: float, split_hz: float):
 
 
 def normalized_residual(predicted, measured, dt: float,
-                        bin_s: float = 10.0, split_hz: float = 4.0):
-    """Residual normalised within time and frequency bins (LNK supplement eq 27).
+                        bin_s: float = 10.0, split_hz: Optional[float] = None):
+    """Residual normalised within sections, as ``mse_weighted_loss`` does.
 
     Plain squared error is the wrong metric for this protocol, and the LNK
     supplement says why for its own: *"at different contrasts, the membrane
@@ -3560,12 +3661,17 @@ def normalized_residual(predicted, measured, dt: float,
     times harder, so an unweighted fit is effectively a fit to the bright
     epochs with the dim ones along for the ride.
 
-    Their fix, reproduced here: cut the record into ``bin_s`` time bins, split
-    each into two frequency bands at ``split_hz`` (they note two bands of
-    roughly equal power suffice, and that the low band is needed so slow
-    baseline shifts are not swamped by fast fluctuations), and divide each
-    bin's residual by the standard deviation of the *measured* response in it.
-    Every bin then contributes comparably whatever its amplitude.
+    The default reproduces what the reference implementation actually does,
+    ``mse_weighted_loss(y, v, len_section=10000, weight_type="std")``: cut the
+    record into ``bin_s`` sections and divide each section's residual by the
+    standard deviation of the *measured* response in it, so every section
+    contributes comparably whatever its amplitude.
+
+    ``split_hz`` additionally splits each section into two frequency bands,
+    which is what the published supplement describes (eq 27) and the repo does
+    not do. Kept reachable for anyone reproducing the paper rather than the
+    code; the stated motivation is that slow baseline shifts should not be
+    swamped by fast fluctuations.
     """
     predicted = np.asarray(predicted, dtype=float)
     measured = np.asarray(measured, dtype=float)
@@ -3573,8 +3679,12 @@ def normalized_residual(predicted, measured, dt: float,
     pieces = []
     for start in range(0, measured.size - per_bin + 1, per_bin):
         stop = start + per_bin
-        for band_m, band_p in zip(_band_split(measured[start:stop], dt, split_hz),
-                                  _band_split(predicted[start:stop], dt, split_hz)):
+        if split_hz is None:
+            bands = [(measured[start:stop], predicted[start:stop])]
+        else:
+            bands = list(zip(_band_split(measured[start:stop], dt, split_hz),
+                             _band_split(predicted[start:stop], dt, split_hz)))
+        for band_m, band_p in bands:
             sigma = float(np.std(band_m))
             pieces.append((band_p - band_m) / (sigma if sigma > 1e-12 else 1.0))
     if not pieces:
@@ -3585,6 +3695,7 @@ def normalized_residual(predicted, measured, dt: float,
 def fit_lnk(analysis: ConditionAnalysis,
             coupling: str = 'multiplicative',
             filter_mode: str = 'per_mean',
+            fit_filter: bool = False,
             weighted: bool = False,
             n_restarts: int = 2,
             filter_length_s: Optional[float] = None,
@@ -3641,6 +3752,22 @@ def fit_lnk(analysis: ConditionAnalysis,
     ``r2`` is reported unweighted and mixing the two makes the number hard to
     read, and because our domination problem is milder than theirs -- the
     stimulus differs 10x between light levels but the spike rate only about 2x.
+
+    **The filter is five parameters, and freezing them is the default.** Each
+    level's reverse-correlation estimate is reduced to cascadegraph's
+    ``ParamFilterNode`` form by :func:`fit_param_filter` (r2 0.987-0.993 on
+    2020-06-11_B), which replaces about a thousand samples with five numbers at
+    a cost of 0.005 held-out r2. ``fit_filter=True`` then puts those five per
+    level into the joint search, as LNKS does with its eight basis
+    coefficients, on the grounds that F_LNK is not F_LN.
+
+    Measured, that buys nothing here. Frozen scores 0.761 held out against
+    0.758 fitted, while the in-sample number moves the other way (0.654 to
+    0.663) -- ten extra parameters bought training fit and lost a little
+    generalisation, at five times the runtime (53 s against 281 s). One cell
+    and one split, and the 0.003 margin is inside the noise, so the honest
+    reading is "no measurable benefit", not "freezing is better". Default off
+    on cost; turn it on to check a cell whose filter looks suspect.
 
     Initial values follow the supplement: the filter and nonlinearity come from
     a static LN fit at the brightest mean (their "high contrast period"), and
@@ -3731,25 +3858,54 @@ def fit_lnk(analysis: ConditionAnalysis,
     # fluctuations are largest and whose LN fit is therefore best determined.
     init_level = max(per_mean)
     if filter_mode == 'shared':
-        filters = {level: per_mean[init_level] for level in per_mean}
+        measured_filters = {level: per_mean[init_level] for level in per_mean}
     elif filter_mode == 'per_mean':
-        filters = dict(per_mean)
+        measured_filters = dict(per_mean)
     else:
         raise ValueError("filter_mode must be 'shared' or 'per_mean'")
 
-    # Convolve each epoch with the filter for the light level it was run at.
-    # Per epoch rather than per contiguous run, so the filter never straddles a
-    # step and each epoch's edge effects stay its own.
-    light = np.asarray(analysis.sequence_light_mean, dtype=float)
-    generator = np.zeros_like(stimulus)
-    boundaries = np.r_[0, np.flatnonzero(np.diff(epochs) != 0) + 1, epochs.size]
-    for start, stop in zip(boundaries[:-1], boundaries[1:]):
-        chosen = filters.get(float(light[start]))
-        if chosen is None:
-            chosen = next(iter(filters.values()))
-        generator[start:stop] = convolve_filter_with_stim(
-            chosen, stimulus[start:stop][None, :])[0]
+    # Reduce each measured filter to five parameters. LNKS fits its filter as
+    # 8 orthonormal basis coefficients rather than freezing the reverse-
+    # correlation estimate, because F_LNK is not F_LN; the same is available
+    # here at five parameters per level, and the reverse-correlation fit is
+    # what initialises them.
+    levels = sorted(measured_filters)
+    shape_params: Dict[float, np.ndarray] = {}
+    filter_r2: Dict[float, float] = {}
+    for level in levels:
+        found, r2 = fit_param_filter(measured_filters[level], dt,
+                                     random_state=random_state)
+        if not np.all(np.isfinite(found)):
+            if verbose:
+                print(f'  lightMean {level:g}: filter could not be parameterised')
+            return None
+        shape_params[level] = found
+        filter_r2[level] = r2
+    if verbose:
+        summary = ', '.join(f'{level:g}: r²={filter_r2[level]:.3f}' for level in levels)
+        print(f'  filter shape fit ({len(levels)} level(s)) -- {summary}')
 
+    light = np.asarray(analysis.sequence_light_mean, dtype=float)
+    boundaries = np.r_[0, np.flatnonzero(np.diff(epochs) != 0) + 1, epochs.size]
+
+    def build_generator(by_level: Dict[float, np.ndarray]):
+        """Convolve each epoch with the filter for its own light level.
+
+        Per epoch rather than per contiguous run, so a filter never straddles a
+        luminance step and each epoch's edge effects stay its own.
+        """
+        out = np.zeros_like(stimulus)
+        built = {level: param_filter(vector, filter_pts, dt)
+                 for level, vector in by_level.items()}
+        for start, stop in zip(boundaries[:-1], boundaries[1:]):
+            chosen = built.get(float(light[start]))
+            if chosen is None:
+                chosen = next(iter(built.values()))
+            out[start:stop] = convolve_filter_with_stim(
+                chosen, stimulus[start:stop][None, :])[0]
+        return out, built
+
+    generator, filters = build_generator(shape_params)
     scale = float(np.std(generator))
     if not np.isfinite(scale) or scale == 0:
         if verbose:
@@ -3759,7 +3915,7 @@ def fit_lnk(analysis: ConditionAnalysis,
     # -- the thing that drives the state -- survives it.
     generator = generator / scale
     filters = {level: one / scale for level, one in filters.items()}
-    filter_causal = filters[analysis.light_means[0]]
+    filter_causal = filters[levels[0]]
 
     state_step = max(int(round(state_dt_ms / 1e3 / dt)), 1)
 
@@ -3777,7 +3933,14 @@ def fit_lnk(analysis: ConditionAnalysis,
     if not np.all(np.isfinite(guess_nl)):
         guess_nl, _, _ = sigmoid_start_and_bounds(generator, response,
                                                   rec_type=analysis.rec_type)
-    names = ('alpha', 'beta', 'gamma', 'epsilon', 'tau_on', 'tau_off', 'k')
+    # When `fit_filter` is on, each level's five shape parameters join the
+    # search. LNKS optimises its filter for the same reason: the LNK filter is
+    # not the LN filter, so freezing at the reverse-correlation estimate keeps
+    # a bias that cannot be seen from inside the fit.
+    filter_names = tuple(f'{name}_{level:g}' for level in levels
+                         for name in PARAM_FILTER_NAMES) if fit_filter else ()
+    names = ('alpha', 'beta', 'gamma', 'epsilon', 'tau_on', 'tau_off',
+             'k') + filter_names
     # Same bounds for both couplings, so neither is handicapped in the
     # comparison. `k` is signed: positive suppresses the response as the cell
     # adapts, negative would be facilitation, and the data decides which.
@@ -3792,6 +3955,12 @@ def fit_lnk(analysis: ConditionAnalysis,
     guess = np.r_[guess_nl, 2.0, 5.0, 0.5]
     lower = np.r_[lower_nl, 0.05, 0.05, -k_limit]
     upper = np.r_[upper_nl, 60.0, 60.0, k_limit]
+    if fit_filter:
+        shape_lower = np.array([0.1, 1e-4, 1e-4, 1e-3, -720.0])
+        shape_upper = np.array([20.0, 5.0, 5.0, 20.0, 720.0])
+        guess = np.r_[guess, np.concatenate([shape_params[l] for l in levels])]
+        lower = np.r_[lower, np.tile(shape_lower, len(levels))]
+        upper = np.r_[upper, np.tile(shape_upper, len(levels))]
 
     rng = np.random.default_rng(random_state)
     unique_epochs = np.unique(epochs)
@@ -3801,8 +3970,21 @@ def fit_lnk(analysis: ConditionAnalysis,
     is_test = np.isin(epochs, test_epochs)
     train = ~is_test
 
+    n_core = 7
+
     def unpack(vector):
         return dict(zip(names, (float(v) for v in vector)))
+
+    def generator_for(vector):
+        """Generator for one parameter vector, rebuilt only if the filter moves."""
+        if not fit_filter:
+            return generator
+        by_level = {level: np.asarray(vector[n_core + 5 * index:
+                                             n_core + 5 * (index + 1)], dtype=float)
+                    for index, level in enumerate(levels)}
+        rebuilt, _ = build_generator(by_level)
+        spread = float(np.std(rebuilt))
+        return rebuilt / (spread if spread > 1e-12 else 1.0)
 
     def score_residual(predicted, mask):
         if weighted:
@@ -3810,8 +3992,8 @@ def fit_lnk(analysis: ConditionAnalysis,
         return predicted[mask] - response[mask]
 
     def residual(vector):
-        predicted, _ = _lnk_predict(generator, unpack(vector), coupling, dt,
-                                    state_step)
+        predicted, _ = _lnk_predict(generator_for(vector), unpack(vector),
+                                    coupling, dt, state_step)
         return score_residual(predicted, train)
 
     # "the optimum values obtained are assumed to be non-unique and local. To
@@ -3842,6 +4024,14 @@ def fit_lnk(analysis: ConditionAnalysis,
         return None
 
     params = unpack(result.x)
+    generator = generator_for(result.x)
+    if fit_filter:
+        # Keep the filters the fit actually settled on, not the ones it started
+        # from, so `model.filters` describes the model that was scored.
+        filters = {level: param_filter(
+            result.x[n_core + 5 * index: n_core + 5 * (index + 1)],
+            filter_pts, dt) for index, level in enumerate(levels)}
+        filter_causal = filters[levels[0]]
     predicted, state = _lnk_predict(generator, params, coupling, dt, state_step)
 
     # Nested baseline: same cascade, k = 0, nonlinearity refitted so the
@@ -3850,7 +4040,7 @@ def fit_lnk(analysis: ConditionAnalysis,
         flat = dict(zip(names[:4], (float(v) for v in vector)))
         flat.update(tau_on=1.0, tau_off=1.0, k=0.0)
         predicted_flat, _ = _lnk_predict(generator, flat, coupling, dt,
-                                         state_step, adaptive=False)
+                                         state_step, adaptive=False)  # noqa
         return score_residual(predicted_flat, train)
 
     try:
@@ -3873,6 +4063,11 @@ def fit_lnk(analysis: ConditionAnalysis,
     model = LNKModel(
         coupling=coupling, params=params,
         filter=np.asarray(filter_causal, dtype=float), filters=filters,
+        filter_r2=filter_r2, fit_filter=bool(fit_filter),
+        filter_params={level: (np.asarray(result.x[n_core + 5 * i:
+                                                   n_core + 5 * (i + 1)], float)
+                               if fit_filter else shape_params[level])
+                       for i, level in enumerate(levels)},
         filter_time_s=np.arange(filter_pts) * dt,
         sampling_interval=dt, state_dt_s=state_step * dt,
         r2=_variance_explained(predicted[is_test], response[is_test]),
