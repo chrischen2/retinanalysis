@@ -794,3 +794,131 @@ def test_fit_filter_is_nested_in_the_frozen_fit():
     assert fitted.fit_filter and not frozen.fit_filter
     for level, r2 in frozen.filter_r2.items():
         assert r2 > 0.5, (level, r2)
+
+
+def _two_state_reference(drive, dt, k_act, k_inact, k_slow_in, k_slow_out):
+    """Direct coupled integration of the three-occupancy system, sample by sample."""
+    active = np.empty_like(drive)
+    inactivated = np.empty_like(drive)
+    a = i = 0.0
+    for n in range(drive.size):
+        u = k_act * drive[n]
+        a, i = (a + dt * (u * (1 - a - i) - k_inact * a),
+                i + dt * (k_slow_in * a - k_slow_out * i))
+        active[n], inactivated[n] = a, i
+    return active, inactivated
+
+
+def test_two_state_kinetics_matches_direct_integration():
+    """The split solver must equal the coupled system it stands in for.
+
+    Each block solves `A` exactly with `I` held fixed and then advances `I`
+    across the block from the block's mean `A`. That is an approximation of the
+    coupled system, so it has to be checked against the coupled system rather
+    than assumed -- including at a large slow in/out ratio, since that is the
+    regime the real fits go to and the regime an earlier iterative solver
+    oscillated in.
+
+    The slow state's tolerance is relative to its own range. A marching scheme
+    quantises `I` to the block, so its error scales with how far `I` travels,
+    and an absolute bound would be a bound on the test stimulus rather than on
+    the solver.
+    """
+    rng = np.random.default_rng(0)
+    dt = 1e-3
+    drive = np.concatenate([rng.random(20_000) * 0.2, rng.random(20_000) * 0.9] * 2)
+    for k_act, k_inact, k_in, k_out in ((100.0, 100.0, 0.5, 0.2),
+                                        (300.0, 500.0, 3.0, 0.7),
+                                        (300.0, 500.0, 2.0, 0.1)):   # ratio 20
+        ref_a, ref_i = _two_state_reference(drive, dt, k_act, k_inact, k_in, k_out)
+        got_a, got_i = vmn.two_state_kinetics(drive, dt, k_act, k_inact, k_in, k_out)
+        assert np.corrcoef(ref_a, got_a)[0, 1] > 0.98, (k_in, k_out)
+        span = max(float(np.ptp(ref_i)), 1e-9)
+
+        # The decisive check is convergence, not a tolerance. A marching scheme
+        # quantises the slow state to its block, so the right question is
+        # whether the error goes to zero as the block shrinks -- a fixed
+        # threshold would only pin one arbitrary block size. Refining 5x must
+        # cut the error by at least half; a scheme converging to the wrong
+        # answer, or oscillating as the earlier iterative solver did, would not.
+        errors = []
+        for step in (250, 50):
+            _, fine = vmn.two_state_kinetics(drive, dt, k_act, k_inact, k_in,
+                                             k_out, state_step=step)
+            errors.append(float(np.max(np.abs(ref_i - fine))) / span)
+        assert errors[1] < 0.5 * errors[0] + 1e-3, (k_in, k_out, errors)
+        assert errors[1] < 0.06, (k_in, k_out, errors)
+
+
+def test_two_state_occupancies_stay_physical():
+    """R, A and I are occupancies of one pool; none may go negative."""
+    rng = np.random.default_rng(1)
+    drive = rng.random(40_000)
+    for k_act, k_inact, k_in, k_out in ((500.0, 50.0, 10.0, 0.05),
+                                        (10.0, 1000.0, 0.01, 20.0)):
+        active, inactivated = vmn.two_state_kinetics(drive, 1e-3, k_act, k_inact,
+                                                     k_in, k_out)
+        assert active.min() >= -1e-9 and inactivated.min() >= -1e-9
+        assert (active + inactivated).max() <= 1.0 + 1e-6
+
+
+def test_activation_rate_must_stay_free():
+    """Why `k_act` is fitted rather than folded into the output amplitude.
+
+    The ratio `k_act/k_inact` sets the active state's occupancy while their sum
+    sets its speed. Pinning `k_act` at 1 forces a choice between the two: a
+    fast response needs a large `k_inact`, which leaves `A` near zero and the
+    slow pool with nothing to deplete. That is exactly what went wrong before
+    it was freed, so it is pinned here as a test.
+    """
+    rng = np.random.default_rng(2)
+    drive = rng.random(20_000) * 0.5
+    starved, starved_slow = vmn.two_state_kinetics(drive, 1e-3, 1.0, 200.0, 3.0, 0.7)
+    healthy, healthy_slow = vmn.two_state_kinetics(drive, 1e-3, 200.0, 200.0, 3.0, 0.7)
+    assert starved.mean() < 0.01, starved.mean()
+    assert healthy.mean() > 10 * starved.mean()
+    # And with nothing in the active state, there is nothing to deplete.
+    assert starved_slow.max() < 0.1 * healthy_slow.max()
+
+
+def test_two_state_depletes_under_sustained_drive():
+    """Sustained drive must fill the slow pool and lower the resting fraction.
+
+    This is the mechanism the variant exists for: gain is proportional to
+    resting occupancy, so if drive does not deplete it, nothing adapts.
+    """
+    dt = 1e-3
+    quiet = np.full(20_000, 0.05)
+    loud = np.full(40_000, 0.9)
+    drive = np.concatenate([quiet, loud])
+    active, inactivated = vmn.two_state_kinetics(drive, dt, 200.0, 200.0, 3.0, 0.5)
+    resting = 1.0 - active - inactivated
+    early = slice(20_000, 22_000)          # just after the step
+    late = slice(50_000, 60_000)           # well into it
+    assert inactivated[late].mean() > inactivated[early].mean()
+    assert resting[late].mean() < resting[early].mean()
+
+
+def test_apparent_nonlinearity_is_analytic_and_signed_correctly():
+    """Depletion must lower the gain, and the readout must not be confounded.
+
+    Splitting the record on the state and binning each half is confounded --
+    the state is stimulus-driven, so high-state samples are high-drive samples
+    -- and reported a gain ratio above 1, i.e. more adaptation giving more
+    output. The analytic instantaneous curve holds the stimulus identical on
+    both sides, so a ratio below 1 is the only physical answer.
+    """
+    analysis = _adapting_cell('multiplicative', n_epochs=4, epoch_s=6.0)
+    model = vmn.fit_lnk_two_state(analysis, n_passes=2, n_restarts=1,
+                                  verbose=False)
+    assert model is not None
+    curves = vmn.apparent_nonlinearity(analysis, model)
+    assert set(curves.adaptation) == {'low', 'high'}
+    # Both curves are evaluated on the same generator grid, by construction.
+    low = curves[curves.adaptation.eq('low')].generator.values
+    high = curves[curves.adaptation.eq('high')].generator.values
+    np.testing.assert_allclose(low, high)
+
+    summary = vmn.describe_apparent_change(curves)
+    assert summary['gain_ratio'] <= 1.0 + 1e-6, summary
+    assert abs(summary['shift_generator']) < 0.05, summary

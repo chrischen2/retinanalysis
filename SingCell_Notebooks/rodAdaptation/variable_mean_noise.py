@@ -3459,6 +3459,129 @@ class LNKModel:
                 f'{self.params.get("k", np.nan):.3f}>')
 
 
+def _relax(steady, rate, dt: float, a0: float = 0.0) -> np.ndarray:
+    """Integrate ``x' = rate * (steady - x)`` for time-varying ``steady``/``rate``.
+
+    Exponential Euler, exact for values held constant across a step, so the
+    step size is a speed choice and not a stability one.
+
+    The recurrence ``x[n] = c[n] x[n-1] + d[n]`` has a closed form,
+    ``x[n] = P[n] (x0 + sum_{m<=n} d[m]/P[m])`` with ``P[n] = prod_{j<=n} c[j]``,
+    which turns a per-sample Python loop into two cumulative operations. The
+    catch is that ``P`` underflows -- ``c`` is just under 1 and there are tens
+    of thousands of samples -- so it is applied in blocks short enough that
+    ``P`` cannot fall below about 1e-150, restarting each block from the
+    previous one's last value. Exact, and about 19x faster than the loop.
+    """
+    steady = np.asarray(steady, dtype=float)
+    rate = np.asarray(rate, dtype=float)
+    if steady.size == 0:
+        return np.zeros(0)
+    decay = np.exp(-dt * rate)
+    offsets = steady * (1.0 - decay)
+    worst = float(np.max(dt * rate))
+    block = 4096 if worst <= 0 else int(np.clip(150 * np.log(10) / worst, 8, 4096))
+    out = np.empty_like(steady)
+    previous = float(a0)
+    for start in range(0, steady.size, block):
+        stop = min(start + block, steady.size)
+        products = np.cumprod(decay[start:stop])
+        out[start:stop] = products * (previous
+                                      + np.cumsum(offsets[start:stop] / products))
+        previous = out[stop - 1]
+    return out
+
+
+def two_state_kinetics(drive, dt: float, k_act: float, k_inact: float,
+                       k_slow_in: float, k_slow_out: float,
+                       state_step: int = 250, n_passes: int = 1,
+                       relaxation: float = 1.0, return_residual: bool = False):
+    """The LNK kinetics block reduced to a fast output state and a slow pool.
+
+    Three occupancies summing to one -- resting ``R``, active ``A``,
+    inactivated ``I`` -- with the activation rate driven by ``u(t)``:
+
+        dA/dt = k_act u (1 - A - I) - k_inact A
+        dI/dt = k_slow_in A - k_slow_out I
+
+    ``A`` is the output, exactly as in ``baccuslab/LNKS`` where ``v = X[1,:]``
+    is the active state. That is the point of this variant: adaptation is not
+    imposed on the nonlinearity, it *emerges*, because the instantaneous gain
+    is proportional to the resting occupancy ``R = 1 - A - I`` (supplement
+    eq 18) and sustained drive fills ``I`` at ``R``'s expense.
+
+    ``k_act`` has to stay free even though it looks like it should be absorbed
+    by the output amplitude. It is not: the ratio ``k_act/k_inact`` sets the
+    *occupancy* of the active state while their sum sets its *speed*, so
+    pinning one forces a choice between fast kinetics and a state with any room
+    to deplete. Fixed at 1 with ``k_inact`` free, the fit drove ``k_inact`` to
+    192/s for a 5 ms response, leaving ``A`` at 0.005 and no adaptation to find.
+
+    **Integration marches; it does not iterate.** ``A`` is fast and ``I`` is
+    slow, so each ``state_step`` block solves ``A`` exactly with ``I`` held
+    fixed (a first-order recurrence, hence :func:`_relax`) and then advances
+    ``I`` across that block from the block's mean ``A``. Because ``I`` is
+    carried forward as the march proceeds, this is unconditionally stable.
+
+    An earlier version swept the whole record repeatedly instead, re-solving
+    ``A`` against the previous sweep's ``I``. That converged only where the
+    coupling was weak: at ``k_slow_in/k_slow_out`` above about 10 it
+    oscillated, and since the data wants a slow recovery and a large ratio, it
+    oscillated exactly where the fits wanted to go. Bounds and a penalty were
+    tried to keep the optimiser out of that regime -- the wrong fix, since the
+    regime was numerically bad rather than physically wrong.
+    """
+    drive = np.asarray(drive, dtype=float)
+    step = max(int(state_step), 1)
+    activation = float(k_act) * drive
+    k_inact = float(k_inact)
+    k_in, k_out = float(k_slow_in), max(float(k_slow_out), 1e-12)
+
+    active = np.empty_like(drive)
+    inactivated = np.empty_like(drive)
+    slow = 0.0
+    initial = 0.0
+    decay_slow = np.exp(-k_out * dt * step)
+    for start in range(0, drive.size, step):
+        stop = min(start + step, drive.size)
+        rate = activation[start:stop] + k_inact
+        block = _relax(activation[start:stop] * (1.0 - slow)
+                       / np.maximum(rate, 1e-12), rate, dt, initial)
+        active[start:stop] = block
+        inactivated[start:stop] = slow
+        initial = block[-1]
+        # Advance the slow pool across the block from its mean active value,
+        # then cap it at what the active state leaves free so R stays >= 0.
+        steady = k_in * float(np.mean(block)) / k_out
+        slow = steady + (slow - steady) * decay_slow
+        slow = float(np.clip(slow, 0.0, max(1.0 - initial, 0.0)))
+    if return_residual:
+        # A march has no iteration to converge, so the honest diagnostic is how
+        # much the slow pool moves within one block relative to its own size --
+        # large values mean the block is too coarse for these rate constants.
+        moved = float(np.max(np.abs(np.diff(inactivated[::step])))) if inactivated.size > step else 0.0
+        scale = float(np.max(inactivated)) or 1.0
+        return active, inactivated, moved / scale
+    return active, inactivated
+
+
+def two_state_convergence(drive, dt: float, k_act: float, k_inact: float,
+                          k_slow_in: float, k_slow_out: float,
+                          state_step: int = 25,
+                          max_passes: int = 6) -> List[float]:
+    """Max change in the slow state per fixed-point sweep, for checking."""
+    previous = None
+    deltas = []
+    for passes in range(1, int(max_passes) + 1):
+        _, slow = two_state_kinetics(drive, dt, k_act, k_inact, k_slow_in,
+                                     k_slow_out, state_step=state_step,
+                                     n_passes=passes)
+        if previous is not None:
+            deltas.append(float(np.max(np.abs(slow - previous))))
+        previous = slow
+    return deltas
+
+
 def adaptation_state(drive, dt: float, tau_on: float, tau_off: float,
                      a0: float = 0.0) -> np.ndarray:
     """Integrate ``a' = u(1-a)/tau_on - a/tau_off``.
@@ -3479,26 +3602,7 @@ def adaptation_state(drive, dt: float, tau_on: float, tau_off: float,
     decay = np.exp(-float(dt) * total)
     if drive.size == 0:
         return np.zeros(0)
-
-    # The recurrence a[n] = c[n] a[n-1] + d[n] has a closed form,
-    #   a[n] = P[n] (a0 + sum_{m<=n} d[m]/P[m]),   P[n] = prod_{j<=n} c[j],
-    # which turns a per-sample Python loop into two cumulative operations. The
-    # catch is that P underflows: c is just under 1 and there are tens of
-    # thousands of samples. So it is applied in blocks short enough that P
-    # cannot fall below ~1e-150, restarting from the previous block's last
-    # value -- exact, and the fit spends its time in the optimiser instead.
-    offset = d = steady * (1.0 - decay)
-    worst = float(np.max(float(dt) * total))
-    block = 4096 if worst <= 0 else int(np.clip(150 * np.log(10) / worst, 8, 4096))
-    out = np.empty_like(drive)
-    previous = float(a0)
-    for start in range(0, drive.size, block):
-        stop = min(start + block, drive.size)
-        products = np.cumprod(decay[start:stop])
-        out[start:stop] = products * (previous
-                                      + np.cumsum(d[start:stop] / products))
-        previous = out[stop - 1]
-    return out
+    return _relax(steady, total, float(dt), float(a0))
 
 
 def _lnk_predict(generator, params, coupling: str, dt: float,
@@ -3690,6 +3794,167 @@ def normalized_residual(predicted, measured, dt: float,
     if not pieces:
         return predicted - measured
     return np.concatenate(pieces)
+
+
+@dataclass
+class _LNKSetup:
+    """Everything both LNK variants need before any parameter is fitted."""
+
+    stimulus: np.ndarray
+    response: np.ndarray
+    epochs: np.ndarray
+    generator: np.ndarray
+    dt: float
+    filter_pts: int
+    levels: List[float]
+    filters: Dict[float, np.ndarray]
+    filter_r2: Dict[float, float]
+    shape_params: Dict[float, np.ndarray]
+    init_level: float
+    build_generator: object
+
+
+def _prepare_lnk(analysis, filter_mode: str, filter_length_s, random_state,
+                 verbose: bool):
+    """Filter estimation, parameterisation and the generator, shared by both.
+
+    Split out so the two-state variant cannot drift from the modulated one on
+    any of the choices that took several rounds to settle: one filter per light
+    mean, shape-only normalisation so the generator's amplitude still carries
+    the luminance step, and a single global scaling so the ratio between levels
+    survives it.
+    """
+    from retinanalysis.utils.cascadegraph import (compute_filter,
+                                                  convolve_filter_with_stim)
+
+    stimulus = np.asarray(analysis.sequence_stimulus, dtype=float)
+    response = np.asarray(analysis.sequence_response, dtype=float)
+    epochs = np.asarray(analysis.sequence_epoch, dtype=int)
+    if stimulus.size < 1000 or stimulus.size != response.size:
+        if verbose:
+            print('  no usable sequence: run analyze_condition first')
+        return None
+
+    dt = float(analysis.sampling_interval)
+    filter_length_s = (analysis.filter_length_s if filter_length_s is None
+                       else float(filter_length_s))
+    filter_pts = int(round(filter_length_s / dt))
+    cutoff = (analysis.frequency_cutoff
+              if np.isfinite(analysis.frequency_cutoff) else None)
+    cutoff_kwargs = ({} if cutoff is None
+                     else dict(frequency_cutoff=cutoff, sampling_interval=dt))
+    # --- one filter per light mean, not one for the recording ------------
+    #
+    # The temporal filter is genuinely different at the two light levels --
+    # on 2020-06-11_B time-to-peak is 32 ms dim against 59 ms bright and the
+    # biphasic index changes sign -- and the two shapes correlate only 0.71
+    # with each other. A filter pooled over both is a compromise describing
+    # neither, and it is not even an even-handed one: the bright condition's
+    # stimulus fluctuates 10x harder, so it dominates the regression (the
+    # pooled filter correlates 0.97 with the bright filter and 0.80 with the
+    # dim one). What the slow state is here to explain is the adaptation
+    # *within* a light level, which section 2b shows leaves the filter alone;
+    # the between-level filter change is a separate, faster effect and giving
+    # each level its own filter is how it stays out of the state's way.
+    #
+    # Each filter is normalised to unit norm, so it carries **shape only**.
+    # That is load-bearing: `compute_filter` returns a gain as well, and its
+    # gain is inversely proportional to the stimulus amplitude, so keeping it
+    # would equalise the generator across light levels and leave the state with
+    # no luminance signal to track at all. Stripped to shape, the generator's
+    # amplitude follows the stimulus -- 10x larger when bright, since `stdv`
+    # scales with `lightMean` -- which is exactly the "mean of a rectified
+    # signal" the kinetic block is supposed to adapt to.
+    def shape_filter(block_s, block_r):
+        one, _ = compute_filter(block_s, block_r, filter_pts,
+                                correct_stim_power=True, **cutoff_kwargs)
+        one = np.asarray(one, dtype=float)
+        norm_one = float(np.linalg.norm(one))
+        return None if not np.isfinite(norm_one) or norm_one == 0 else one / norm_one
+
+    per_mean: Dict[float, np.ndarray] = {}
+    for mean_level in analysis.light_means:
+        block_s = analysis.stimulus.get(mean_level)
+        block_r = analysis.response.get(mean_level)
+        if block_s is None or not block_s.size:
+            continue
+        one = shape_filter(block_s, block_r)
+        if one is not None:
+            per_mean[mean_level] = one
+    if not per_mean:
+        if verbose:
+            print('  no filter could be estimated')
+        return None
+
+    # The LNK paper initialises the filter and nonlinearity from an LN model
+    # fitted to the **high contrast period** -- one condition, not the pooled
+    # record. The analogue here is the brightest mean, whose absolute
+    # fluctuations are largest and whose LN fit is therefore best determined.
+    init_level = max(per_mean)
+    if filter_mode == 'shared':
+        measured_filters = {level: per_mean[init_level] for level in per_mean}
+    elif filter_mode == 'per_mean':
+        measured_filters = dict(per_mean)
+    else:
+        raise ValueError("filter_mode must be 'shared' or 'per_mean'")
+
+    # Reduce each measured filter to five parameters. LNKS fits its filter as
+    # 8 orthonormal basis coefficients rather than freezing the reverse-
+    # correlation estimate, because F_LNK is not F_LN; the same is available
+    # here at five parameters per level, and the reverse-correlation fit is
+    # what initialises them.
+    levels = sorted(measured_filters)
+    shape_params: Dict[float, np.ndarray] = {}
+    filter_r2: Dict[float, float] = {}
+    for level in levels:
+        found, r2 = fit_param_filter(measured_filters[level], dt,
+                                     random_state=random_state)
+        if not np.all(np.isfinite(found)):
+            if verbose:
+                print(f'  lightMean {level:g}: filter could not be parameterised')
+            return None
+        shape_params[level] = found
+        filter_r2[level] = r2
+    if verbose:
+        summary = ', '.join(f'{level:g}: r²={filter_r2[level]:.3f}' for level in levels)
+        print(f'  filter shape fit ({len(levels)} level(s)) -- {summary}')
+
+    light = np.asarray(analysis.sequence_light_mean, dtype=float)
+    boundaries = np.r_[0, np.flatnonzero(np.diff(epochs) != 0) + 1, epochs.size]
+
+    def build_generator(by_level: Dict[float, np.ndarray]):
+        """Convolve each epoch with the filter for its own light level.
+
+        Per epoch rather than per contiguous run, so a filter never straddles a
+        luminance step and each epoch's edge effects stay its own.
+        """
+        out = np.zeros_like(stimulus)
+        built = {level: param_filter(vector, filter_pts, dt)
+                 for level, vector in by_level.items()}
+        for start, stop in zip(boundaries[:-1], boundaries[1:]):
+            chosen = built.get(float(light[start]))
+            if chosen is None:
+                chosen = next(iter(built.values()))
+            out[start:stop] = convolve_filter_with_stim(
+                chosen, stimulus[start:stop][None, :])[0]
+        return out, built
+
+    generator, filters = build_generator(shape_params)
+    scale = float(np.std(generator))
+    if not np.isfinite(scale) or scale == 0:
+        if verbose:
+            print('  generator has no variance; filter estimate failed')
+        return None
+    # One global normalisation, so the amplitude *ratio* between light levels
+    # -- the thing that drives the state -- survives it.
+    generator = generator / scale
+    filters = {level: one / scale for level, one in filters.items()}
+    filter_causal = filters[levels[0]]
+    return _LNKSetup(
+        stimulus=stimulus, response=response, epochs=epochs,
+        generator=generator, dt=dt, filter_pts=filter_pts, levels=levels,
+        filters=filters, filter_r2=filter_r2, shape_params=shape_params,
+        init_level=init_level, build_generator=build_generator)
 
 
 def fit_lnk(analysis: ConditionAnalysis,
@@ -4085,6 +4350,390 @@ def fit_lnk(analysis: ConditionAnalysis,
     return model
 
 
+TWO_STATE_NAMES = ('alpha', 'beta', 'gamma', 'epsilon',
+                   'k_act', 'k_inact', 'k_slow_in', 'k_slow_out')
+
+
+def fit_lnk_two_state(analysis: ConditionAnalysis,
+                      filter_mode: str = 'per_mean',
+                      filter_length_s: Optional[float] = None,
+                      state_dt_ms: float = 250.0,
+                      n_passes: int = 8,
+                      solver_tolerance: float = 0.01,
+                      weighted: bool = False,
+                      n_restarts: int = 3,
+                      test_fraction: float = 0.25,
+                      max_nfev: int = 400,
+                      random_state: Optional[int] = 0,
+                      verbose: bool = True) -> Optional[LNKModel]:
+    """LNK with the kinetics block restored as the output stage.
+
+    The other variant (:func:`fit_lnk`) *imposes* the adaptation: a slow state
+    either rescales or shifts the nonlinearity, and the fit reports which fits
+    better. This one imposes nothing. The output is the active-state occupancy
+    ``A(t)`` -- as in ``baccuslab/LNKS``, where ``v = X[1,:]`` -- and any change
+    in the apparent input-output curve has to *emerge* from depletion, because
+    the instantaneous gain is proportional to the resting occupancy
+    ``R = 1 - A - I`` (supplement eq 18) and sustained drive fills ``I``.
+
+    So there is no coupling to choose here, and that is the point: whether the
+    cell's apparent nonlinearity scales or shifts becomes a **prediction** of
+    the model rather than an input to it. :func:`apparent_nonlinearity` reads it
+    back off the fitted model, which is the analogue of the paper's Fig. 3A.
+
+    Eight free parameters against the modulated variant's seven:
+    ``alpha``/``epsilon`` map occupancy into response units, ``beta``/``gamma``
+    shape the drive ``u = Phi(beta g + gamma)``, and ``k_act``, ``k_inact``,
+    ``k_slow_in``, ``k_slow_out`` are the rate constants. ``k_act`` cannot be
+    folded into ``alpha`` -- see :func:`two_state_kinetics` for why fixing it
+    starves the model of any state to deplete.
+    """
+    from scipy.optimize import least_squares
+    from scipy.special import ndtr
+
+    setup = _prepare_lnk(analysis, filter_mode, filter_length_s, random_state,
+                         verbose)
+    if setup is None:
+        return None
+    generator, response = setup.generator, setup.response
+    dt, epochs = setup.dt, setup.epochs
+    state_step = max(int(round(state_dt_ms / 1e3 / dt)), 1)
+
+    _, lower_nl, upper_nl = sigmoid_start_and_bounds(
+        generator, response, rec_type=analysis.rec_type)
+    init_mask = (np.asarray(analysis.sequence_light_mean, dtype=float)
+                 == setup.init_level)
+    static_nl = fit_sigmoid(generator[init_mask], response[init_mask],
+                            rec_type=analysis.rec_type)
+    guess_nl = np.array([static_nl.get(name, np.nan)
+                         for name in ('alpha', 'beta', 'gamma', 'epsilon')])
+    if not np.all(np.isfinite(guess_nl)):
+        guess_nl, _, _ = sigmoid_start_and_bounds(generator, response,
+                                                  rec_type=analysis.rec_type)
+    # `alpha` here is rate (or current) *per unit occupancy*, not a response
+    # range: it multiplies `A`, which peaks near 0.3 rather than 1, so the
+    # physiological ceiling has to be divided by that headroom or it binds for
+    # a reason that has nothing to do with physiology. Five times is generous
+    # and still refuses runaway values.
+    lower_nl = lower_nl.copy(); upper_nl = upper_nl.copy()
+    lower_nl[0] *= 5.0; upper_nl[0] *= 5.0
+
+    # Rates in s^-1. Activation and fast inactivation both run on the response
+    # timescale and are both free, since their ratio sets occupancy and their
+    # sum sets speed.
+    #
+    # The slow pair covers recovery from 50 ms to 200 s. These are the
+    # physiological bounds; an earlier version had to box the in/out ratio at
+    # 10 to keep the fixed-point solver from oscillating, which constrained the
+    # model to protect the integrator. The march does not need that.
+    lower = np.r_[lower_nl, 1.0, 1.0, 0.005, 0.005]
+    upper = np.r_[upper_nl, 2000.0, 2000.0, 20.0, 20.0]
+    guess = np.r_[guess_nl, 60.0, 60.0, 0.5, 0.2]
+
+    rng = np.random.default_rng(random_state)
+    unique_epochs = np.unique(epochs)
+    n_test = min(max(int(round(test_fraction * unique_epochs.size)), 1),
+                 unique_epochs.size - 1)
+    test_epochs = rng.choice(unique_epochs, size=n_test, replace=False)
+    is_test = np.isin(epochs, test_epochs)
+    train = ~is_test
+
+    def unpack(vector):
+        return dict(zip(TWO_STATE_NAMES, (float(v) for v in vector)))
+
+    def predict(vector):
+        p = unpack(vector)
+        drive = ndtr(p['beta'] * generator + p['gamma'])
+        active, inactivated, residual_solver = two_state_kinetics(
+            drive, dt, p['k_act'], p['k_inact'], p['k_slow_in'],
+            p['k_slow_out'], state_step=state_step, n_passes=n_passes,
+            return_residual=True)
+        return (p['alpha'] * active + p['epsilon'], active, inactivated,
+                residual_solver)
+
+    def score_residual(predicted, mask):
+        if weighted:
+            return normalized_residual(predicted[mask], response[mask], dt)
+        return predicted[mask] - response[mask]
+
+    def residual(vector):
+        return score_residual(predict(vector)[0], train)
+
+    starts = [np.clip(guess, lower, upper)]
+    for _ in range(max(int(n_restarts) - 1, 0)):
+        draw = guess.copy()
+        draw[4] = rng.uniform(10.0, 500.0)
+        draw[5] = rng.uniform(10.0, 500.0)
+        draw[6] = rng.uniform(0.02, 5.0)
+        draw[7] = rng.uniform(0.02, 5.0)
+        starts.append(np.clip(draw, lower, upper))
+
+    result = None
+    for start in starts:
+        try:
+            candidate = least_squares(residual, start, bounds=(lower, upper),
+                                      max_nfev=max_nfev)
+        except Exception:
+            continue
+        if result is None or candidate.cost < result.cost:
+            result = candidate
+    if result is None:
+        if verbose:
+            print('  two-state fit failed from every starting point')
+        return None
+
+    params = unpack(result.x)
+    predicted, active, inactivated, solver_residual = predict(result.x)
+
+    # Nested baseline: the same cascade with no slow pool at all, so the only
+    # difference is whether depletion is allowed to happen.
+    def residual_static(vector):
+        flat = dict(zip(TWO_STATE_NAMES[:6], (float(v) for v in vector)))
+        flat.update(k_slow_in=0.0, k_slow_out=1.0)
+        drive = ndtr(flat['beta'] * generator + flat['gamma'])
+        act, _ = two_state_kinetics(drive, dt, flat['k_act'], flat['k_inact'],
+                                    0.0, 1.0, state_step=state_step, n_passes=1)
+        return score_residual(flat['alpha'] * act + flat['epsilon'], train)
+
+    try:
+        static_lo = np.r_[lower_nl, lower[4], lower[5]]
+        static_hi = np.r_[upper_nl, upper[4], upper[5]]
+        static = least_squares(residual_static,
+                               np.clip(np.r_[guess_nl, guess[4], guess[5]],
+                                       static_lo, static_hi),
+                               bounds=(static_lo, static_hi), max_nfev=max_nfev)
+        flat = dict(zip(TWO_STATE_NAMES[:6], (float(v) for v in static.x)))
+        drive_flat = ndtr(flat['beta'] * generator + flat['gamma'])
+        act_flat, _ = two_state_kinetics(drive_flat, dt, flat['k_act'],
+                                         flat['k_inact'], 0.0, 1.0,
+                                         state_step=state_step, n_passes=1)
+        predicted_static = flat['alpha'] * act_flat + flat['epsilon']
+    except Exception:
+        predicted_static = np.full_like(predicted, np.nan)
+
+    span = upper - lower
+    at_bounds = tuple(
+        name for name, value, low, high, width
+        in zip(TWO_STATE_NAMES, result.x, lower, upper, span)
+        if np.isfinite(width) and width > 0
+        and (abs(value - low) <= 1e-6 * width or abs(value - high) <= 1e-6 * width))
+
+    model = LNKModel(
+        coupling='two_state', params=params,
+        filter=np.asarray(setup.filters[setup.levels[0]], dtype=float),
+        filters=setup.filters, filter_r2=setup.filter_r2,
+        filter_params=setup.shape_params, fit_filter=False,
+        filter_time_s=np.arange(setup.filter_pts) * dt,
+        sampling_interval=dt, state_dt_s=state_step * dt,
+        r2=_variance_explained(predicted[is_test], response[is_test]),
+        r2_train=_variance_explained(predicted[train], response[train]),
+        r2_static=_variance_explained(predicted_static[is_test], response[is_test]),
+        n_train_epochs=int(unique_epochs.size - n_test), n_test_epochs=int(n_test),
+        predicted=predicted, predicted_static=predicted_static,
+        state=inactivated, generator=generator, at_bounds=at_bounds)
+    model.active = active
+    model.solver_residual = solver_residual
+    if verbose:
+        tau_fast = 1e3 / max(params['k_act'] + params['k_inact'], 1e-9)
+        print(f"  {'two-state':>14}: r²={model.r2:.3f} held out "
+              f"(no-depletion {model.r2_static:.3f}, gain {model.r2_gain:+.3f}) | "
+              f"tau_fast {tau_fast:.0f} ms, k_in {params['k_slow_in']:.3f}, "
+              f"k_out {params['k_slow_out']:.3f} /s | I {inactivated.min():.3f}"
+              f"-{inactivated.max():.3f}, solver ±{solver_residual:.4f}"
+              + (f' | at bound: {", ".join(at_bounds)}' if at_bounds else ''))
+    return model
+
+
+def apparent_nonlinearity(analysis: ConditionAnalysis, model: LNKModel,
+                          n_points: int = 200, quantiles=(25, 75)) -> pd.DataFrame:
+    """The input-output curve the two-state model *displays* at two adaptation levels.
+
+    The analogue of the paper's Fig. 3A. Nothing in the two-state model was
+    told to rescale or shift the nonlinearity -- its output is the active-state
+    occupancy and adaptation is depletion of the resting pool -- so whichever
+    it displays is a prediction.
+
+    **Computed analytically, not by binning samples on the state.** Splitting
+    the record into low- and high-state halves and binning each against the
+    generator is confounded: the state is driven by the stimulus, so
+    high-state samples are also high-drive samples, and the contrast picks up
+    that selection on top of any gain change. Done that way this cell reported
+    a gain *ratio above 1* -- more adaptation, more output -- which is the
+    opposite of what depletion does and was an artefact of the split.
+
+    Instead the model's own instantaneous map is evaluated with the slow pool
+    held at a low and a high value:
+
+        A_ss(u) = k_act u (1 - I) / (k_act u + k_inact),   r = alpha A_ss + eps
+
+    which is the curve a fast probe would trace at that level of depletion,
+    with the stimulus statistics identical on both. ``data`` is the measured
+    response binned against the generator over the whole record -- one curve,
+    for scale, not split by state.
+    """
+    params = model.params
+    generator = np.asarray(model.generator, dtype=float)
+    slow = np.asarray(model.state, dtype=float)
+    low_value, high_value = np.percentile(slow, quantiles)
+    grid = np.linspace(np.percentile(generator, 1),
+                       np.percentile(generator, 99), int(n_points))
+
+    from scipy.special import ndtr
+    drive = ndtr(params['beta'] * grid + params['gamma'])
+    activation = params['k_act'] * drive
+
+    measured = np.asarray(analysis.sequence_response, dtype=float)
+    edges = np.percentile(generator, np.linspace(1, 99, 26))
+    centres = 0.5 * (edges[:-1] + edges[1:])
+    which = np.digitize(generator, edges) - 1
+    binned = np.array([measured[which == i].mean() if (which == i).sum() >= 20
+                       else np.nan for i in range(centres.size)])
+
+    rows = []
+    for label, occupancy in (('low', low_value), ('high', high_value)):
+        steady = (activation * (1.0 - occupancy)
+                  / np.maximum(activation + params['k_inact'], 1e-12))
+        response = params['alpha'] * steady + params['epsilon']
+        for value, curve in zip(grid, response):
+            rows.append({'adaptation': label, 'slow_state': float(occupancy),
+                         'generator': float(value), 'model': float(curve),
+                         'data': float(np.interp(value, centres, binned))})
+    return pd.DataFrame(rows)
+
+
+def describe_apparent_change(curves: pd.DataFrame) -> Dict[str, float]:
+    """Is the apparent nonlinearity change a scaling or a shift?
+
+    Regresses the high-adaptation curve on the low one over their shared
+    generator range. A pure scaling gives slope != 1 with intercept 0 at the
+    curve's foot; a pure shift gives slope ~ 1 with the curve displaced along
+    the generator axis, which shows up as a horizontal offset. Both are
+    reported so neither has to be assumed.
+    """
+    out = {'gain_ratio': np.nan, 'shift_generator': np.nan, 'n_points': 0}
+    if curves is None or curves.empty:
+        return out
+    low = curves[curves.adaptation.eq('low')].set_index('generator')
+    high = curves[curves.adaptation.eq('high')].set_index('generator')
+    shared = low.index.intersection(high.index)
+    if shared.size < 4:
+        return out
+    y_low = low.loc[shared, 'model'].values
+    y_high = high.loc[shared, 'model'].values
+    x = np.asarray(shared, dtype=float)
+    base = min(y_low.min(), y_high.min())
+    denom = float(np.sum((y_low - base) ** 2))
+    out['gain_ratio'] = (float(np.sum((y_high - base) * (y_low - base)) / denom)
+                         if denom else np.nan)
+    # Horizontal displacement: where each curve reaches its own half height.
+    def half_point(y):
+        target = 0.5 * (y.min() + y.max())
+        order = np.argsort(y)
+        return float(np.interp(target, y[order], x[order]))
+    out['shift_generator'] = half_point(y_high) - half_point(y_low)
+    out['n_points'] = int(shared.size)
+    return out
+
+
+def plot_apparent_nonlinearity(analysis: ConditionAnalysis, model: LNKModel,
+                               curves: Optional[pd.DataFrame] = None,
+                               figsize: Tuple[float, float] = (12.0, 4.4)):
+    """What the two-state model *predicts* the nonlinearity change to be.
+
+    The analogue of the paper's Fig. 3A. Nothing in the two-state model was
+    told to rescale or shift the nonlinearity -- the output is the active-state
+    occupancy and adaptation is depletion of the resting pool -- so whichever
+    the fitted model displays is a prediction, and can be checked against the
+    same curves measured from the data.
+
+    Left: the model's input-output curve at low and high slow-state occupancy,
+    with the data's beside it. Middle: the state and occupancies over a
+    luminance step, which is where depletion is visible. Right: the two
+    summary numbers, gain ratio and horizontal shift.
+    """
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    if model is None:
+        print('no model to plot')
+        return None
+    if curves is None:
+        curves = apparent_nonlinearity(analysis, model)
+    if curves.empty:
+        print('not enough samples to bin the nonlinearity')
+        return None
+    summary = describe_apparent_change(curves)
+
+    fig, axes = plt.subplots(1, 3, figsize=figsize,
+                             gridspec_kw={'width_ratios': [1.1, 1.5, 0.8]})
+    shades = {'low': '#0072B2', 'high': '#D55E00'}
+    ax = axes[0]
+    for label in ('low', 'high'):
+        block = curves[curves.adaptation.eq(label)].sort_values('generator')
+        if block.empty:
+            continue
+        ax.plot(block.generator, block.model, '-', lw=2.0, color=shades[label],
+                label=f'model, {label} adaptation')
+        ax.plot(block.generator, block.data, 'o', ms=3.5, mfc='none',
+                color=shades[label], label=f'data, {label}')
+    ax.set_xlabel('generator (SD units)', fontsize=9)
+    ax.set_ylabel(analysis.units, fontsize=9)
+    ax.set_title('apparent nonlinearity', fontsize=9.5)
+    ax.legend(frameon=False, fontsize=6.8)
+
+    ax = axes[1]
+    dt = model.sampling_interval
+    light = np.asarray(analysis.sequence_light_mean, dtype=float)
+    lo, hi = int(round(25.0 / dt)), int(round(95.0 / dt))
+    hi = min(hi, light.size)
+    time_s = np.arange(lo, hi) * dt
+    active = getattr(model, 'active', None)
+    inactivated = np.asarray(model.state, dtype=float)
+    means = sorted(set(light[lo:hi]))
+    colors = style.colors_for_conditions([f'{m:g}' for m in means])
+    edges = np.r_[0, np.flatnonzero(np.diff(light[lo:hi]) != 0) + 1, hi - lo]
+    for a0, a1 in zip(edges[:-1], edges[1:]):
+        ax.axvspan(time_s[a0], time_s[min(a1, time_s.size - 1)],
+                   color=colors[f'{light[lo + a0]:g}'], alpha=.10, lw=0)
+    step = max(int(round(0.2 / dt)), 1)
+    smooth_t = ((np.arange(_bin_mean(inactivated[None, lo:hi], step).size) + 0.5)
+                * step * dt + lo * dt)
+    if active is not None:
+        resting = 1.0 - np.asarray(active) - inactivated
+        ax.plot(smooth_t, _bin_mean(resting[None, lo:hi], step).ravel(),
+                color='#009E73', lw=1.6, label='resting R  (gain)')
+        ax.plot(smooth_t, _bin_mean(np.asarray(active)[None, lo:hi], step).ravel(),
+                color='#8a6512', lw=1.4, label='active A  (output)')
+    ax.plot(smooth_t, _bin_mean(inactivated[None, lo:hi], step).ravel(),
+            color='#CC79A7', lw=1.6, label='inactivated I  (slow pool)')
+    ax.set_xlabel('time in the concatenated recording (s)', fontsize=9)
+    ax.set_ylabel('state occupancy', fontsize=9)
+    ax.set_title('depletion across a luminance step (200 ms boxcar)', fontsize=9.5)
+    ax.legend(frameon=False, fontsize=7)
+
+    ax = axes[2]
+    ax.axis('off')
+    ax.text(0.0, 0.92, 'predicted change', fontsize=9.5, fontweight='bold',
+            transform=ax.transAxes)
+    lines = [f"gain ratio      {summary['gain_ratio']:.3f}",
+             f"shift (gen SD)  {summary['shift_generator']:+.3f}",
+             '',
+             f"held-out r2     {model.r2:.3f}",
+             f"no depletion    {model.r2_static:.3f}",
+             f"gain            {model.r2_gain:+.3f}"]
+    ax.text(0.0, 0.80, '\n'.join(lines), fontsize=8.5, va='top',
+            family='monospace', transform=ax.transAxes)
+    verdict = ('a scaling' if abs(summary['gain_ratio'] - 1) > 4 * abs(
+        summary['shift_generator']) else 'a shift')
+    ax.text(0.0, 0.24, f'reads as {verdict}', fontsize=9, style='italic',
+            transform=ax.transAxes)
+    fig.suptitle(f'{analysis.exp_name} | {analysis.rec_type} | two-state LNK: '
+                 f'the nonlinearity change is predicted, not imposed', fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    return fig
+
+
 def compare_lnk_couplings(analysis: ConditionAnalysis, verbose: bool = True,
                           **kwargs) -> Dict[str, Optional[LNKModel]]:
     """Fit both couplings on the same data and say which the cell prefers.
@@ -4197,7 +4846,8 @@ def plot_lnk_fit(analysis: ConditionAnalysis,
 
     smooth_t = ((np.arange(smooth(response).size) + 0.5) * step * dt
                 + lo * dt)
-    palette = {'multiplicative': '#D55E00', 'subtractive': '#0072B2'}
+    palette = {'multiplicative': '#D55E00', 'subtractive': '#0072B2',
+               'two_state': '#009E73'}
     ax_trace.plot(smooth_t, smooth(response), color='0.3', lw=1.3,
                   label='response')
     ax_trace.plot(smooth_t, smooth(reference.predicted_static), color='#8c8c8c',
