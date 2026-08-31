@@ -595,6 +595,17 @@ def _adapting_cell(coupling='multiplicative', n_epochs=6, epoch_s=10.0,
     analysis.sequence_response = response
     analysis.sequence_light_mean = light
     analysis.sequence_epoch = epoch_id
+    # `fit_lnk` estimates one filter per light mean, so the grouped arrays have
+    # to be there too -- the sequence alone is not enough.
+    for level in sorted(set(light)):
+        rows = [index for index in range(n_epochs)
+                if light[epoch_id == index][0] == level]
+        analysis.light_means.append(float(level))
+        analysis.n_epochs[float(level)] = len(rows)
+        analysis.stimulus[float(level)] = np.vstack(
+            [stim[epoch_id == index] for index in rows])
+        analysis.response[float(level)] = np.vstack(
+            [response[epoch_id == index] for index in rows])
     return analysis
 
 
@@ -651,6 +662,9 @@ def test_lnk_state_never_sees_the_response():
     scrambled.sequence_response = rng.permutation(analysis.sequence_response)
     scrambled.sequence_light_mean = analysis.sequence_light_mean
     scrambled.sequence_epoch = analysis.sequence_epoch
+    scrambled.light_means = list(analysis.light_means)
+    scrambled.stimulus = dict(analysis.stimulus)
+    scrambled.response = dict(analysis.response)
 
     _, state_a = vmn._lnk_predict(model.generator, model.params, model.coupling,
                                   model.sampling_interval,

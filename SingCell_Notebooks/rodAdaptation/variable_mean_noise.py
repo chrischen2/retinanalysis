@@ -3400,6 +3400,9 @@ class LNKModel:
     coupling: str
     params: Dict[str, float] = field(default_factory=dict)
     filter: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    # One filter per light mean: they differ enough between levels that a
+    # pooled one describes neither. `filter` is the first for convenience.
+    filters: Dict[float, np.ndarray] = field(default_factory=dict)
     filter_time_s: np.ndarray = field(default_factory=lambda: np.zeros(0))
     sampling_interval: float = np.nan
     state_dt_s: float = np.nan
@@ -3526,12 +3529,21 @@ def fit_lnk(analysis: ConditionAnalysis,
     contiguous, so this is one continuous record of the cell stepping between
     light levels, which is the data shape a kinetic model needs.
 
-    **The filter is held fixed.** It is estimated once from the sequence and
-    normalised so the generator has unit standard deviation, which makes
-    ``beta`` and ``gamma`` comparable across cells and lets
-    :func:`sigmoid_start_and_bounds` supply their bounds unchanged. Seven
-    parameters are then free: the four of the nonlinearity plus ``tau_on``,
-    ``tau_off`` and the coupling strength ``k``.
+    **One filter per light mean, held fixed.** The temporal filter is
+    genuinely different at the two light levels -- time-to-peak 32 ms against
+    59 ms on 2020-06-11_B, with the biphasic index changing sign, and the two
+    shapes correlating only 0.71 -- so a pooled filter describes neither, and
+    is dominated by the brighter level whose stimulus fluctuates ten times
+    harder. Each filter is normalised to shape alone and the generator is then
+    normalised once, globally, so the amplitude ratio between light levels
+    survives; that ratio is what the state has to track. Seven parameters are
+    free: the four of the nonlinearity plus ``tau_on``, ``tau_off`` and the
+    coupling strength ``k``.
+
+    The nonlinearity and the state are **shared** across light levels. That is
+    the claim being tested -- that what changes within an epoch is one slow
+    process acting on a fixed nonlinearity -- so letting them vary per level
+    would assume the answer.
 
     **Held-out epochs, and no leakage.** A fraction of whole epochs is held out
     of the residual; the state is still integrated across them, which is sound
@@ -3564,18 +3576,69 @@ def fit_lnk(analysis: ConditionAnalysis,
               if np.isfinite(analysis.frequency_cutoff) else None)
     cutoff_kwargs = ({} if cutoff is None
                      else dict(frequency_cutoff=cutoff, sampling_interval=dt))
-    filter_causal, _ = compute_filter(stimulus[None, :], response[None, :],
-                                      filter_pts, correct_stim_power=True,
-                                      **cutoff_kwargs)
-    generator = convolve_filter_with_stim(np.asarray(filter_causal, float),
-                                          stimulus[None, :])[0]
+    # --- one filter per light mean, not one for the recording ------------
+    #
+    # The temporal filter is genuinely different at the two light levels --
+    # on 2020-06-11_B time-to-peak is 32 ms dim against 59 ms bright and the
+    # biphasic index changes sign -- and the two shapes correlate only 0.71
+    # with each other. A filter pooled over both is a compromise describing
+    # neither, and it is not even an even-handed one: the bright condition's
+    # stimulus fluctuates 10x harder, so it dominates the regression (the
+    # pooled filter correlates 0.97 with the bright filter and 0.80 with the
+    # dim one). What the slow state is here to explain is the adaptation
+    # *within* a light level, which section 2b shows leaves the filter alone;
+    # the between-level filter change is a separate, faster effect and giving
+    # each level its own filter is how it stays out of the state's way.
+    #
+    # Each filter is normalised to unit norm, so it carries **shape only**.
+    # That is load-bearing: `compute_filter` returns a gain as well, and its
+    # gain is inversely proportional to the stimulus amplitude, so keeping it
+    # would equalise the generator across light levels and leave the state with
+    # no luminance signal to track at all. Stripped to shape, the generator's
+    # amplitude follows the stimulus -- 10x larger when bright, since `stdv`
+    # scales with `lightMean` -- which is exactly the "mean of a rectified
+    # signal" the kinetic block is supposed to adapt to.
+    filters: Dict[float, np.ndarray] = {}
+    for mean_level in analysis.light_means:
+        block_s = analysis.stimulus.get(mean_level)
+        block_r = analysis.response.get(mean_level)
+        if block_s is None or not block_s.size:
+            continue
+        one, _ = compute_filter(block_s, block_r, filter_pts,
+                                correct_stim_power=True, **cutoff_kwargs)
+        one = np.asarray(one, dtype=float)
+        norm_one = float(np.linalg.norm(one))
+        if not np.isfinite(norm_one) or norm_one == 0:
+            continue
+        filters[mean_level] = one / norm_one
+    if not filters:
+        if verbose:
+            print('  no filter could be estimated')
+        return None
+
+    # Convolve each epoch with the filter for the light level it was run at.
+    # Per epoch rather than per contiguous run, so the filter never straddles a
+    # step and each epoch's edge effects stay its own.
+    light = np.asarray(analysis.sequence_light_mean, dtype=float)
+    generator = np.zeros_like(stimulus)
+    boundaries = np.r_[0, np.flatnonzero(np.diff(epochs) != 0) + 1, epochs.size]
+    for start, stop in zip(boundaries[:-1], boundaries[1:]):
+        chosen = filters.get(float(light[start]))
+        if chosen is None:
+            chosen = next(iter(filters.values()))
+        generator[start:stop] = convolve_filter_with_stim(
+            chosen, stimulus[start:stop][None, :])[0]
+
     scale = float(np.std(generator))
     if not np.isfinite(scale) or scale == 0:
         if verbose:
             print('  generator has no variance; filter estimate failed')
         return None
+    # One global normalisation, so the amplitude *ratio* between light levels
+    # -- the thing that drives the state -- survives it.
     generator = generator / scale
-    filter_causal = np.asarray(filter_causal, dtype=float) / scale
+    filters = {level: one / scale for level, one in filters.items()}
+    filter_causal = filters[analysis.light_means[0]]
 
     state_step = max(int(round(state_dt_ms / 1e3 / dt)), 1)
 
@@ -3587,7 +3650,14 @@ def fit_lnk(analysis: ConditionAnalysis,
     # Same bounds for both couplings, so neither is handicapped in the
     # comparison. `k` is signed: positive suppresses the response as the cell
     # adapts, negative would be facilitation, and the data decides which.
-    k_limit = 5.0
+    #
+    # 15 rather than something tighter because the two couplings measure `k` in
+    # different units -- log-gain per SD of adaptation against a shift in
+    # nonlinearity-argument units -- and a bound that binds on one is not a
+    # fair comparison. On 2020-06-11_B multiplicative settles at 0.47 and
+    # subtractive at 7.3; at a limit of 5 the subtractive fit pinned and scored
+    # 0.664 instead of 0.672, which would have flattered the winner.
+    k_limit = 15.0
     guess = np.r_[guess_nl, 2.0, 5.0, 0.5]
     lower = np.r_[lower_nl, 0.05, 0.05, -k_limit]
     upper = np.r_[upper_nl, 60.0, 60.0, k_limit]
@@ -3647,7 +3717,7 @@ def fit_lnk(analysis: ConditionAnalysis,
 
     model = LNKModel(
         coupling=coupling, params=params,
-        filter=np.asarray(filter_causal, dtype=float),
+        filter=np.asarray(filter_causal, dtype=float), filters=filters,
         filter_time_s=np.arange(filter_pts) * dt,
         sampling_interval=dt, state_dt_s=state_step * dt,
         r2=_variance_explained(predicted[is_test], response[is_test]),
