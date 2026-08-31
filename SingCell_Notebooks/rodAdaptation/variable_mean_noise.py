@@ -1891,6 +1891,17 @@ class ConditionAnalysis:
     # windowed models reproduce them without being told again.
     filter_length_s: float = 1.0
     n_bins: int = 100
+    # The accepted epochs concatenated in **recorded order**, which is not the
+    # order `stimulus`/`response` hold them in: those are grouped by light
+    # mean, and this protocol alternates means epoch to epoch. Since
+    # `interpulseInterval` is 0 the epochs are contiguous in time, so this is
+    # one continuous record of the cell stepping between light levels -- the
+    # data shape a kinetic model has to be fitted on. Empty until
+    # `analyze_condition` fills it.
+    sequence_stimulus: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    sequence_response: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    sequence_light_mean: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    sequence_epoch: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=int))
     stimulus: Dict[float, np.ndarray] = field(default_factory=dict)
     response: Dict[float, np.ndarray] = field(default_factory=dict)
     # What the whole-cell salvage did: epochs refused on series resistance,
@@ -2030,6 +2041,9 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
     responses: Dict[float, List[np.ndarray]] = {}
     sources: Dict[float, List[dict]] = {}
     dropped: List[dict] = []
+    # (light mean, row within that mean's block) per accepted epoch, in the
+    # order the rig recorded them.
+    recorded_order: List[Tuple[float, int]] = []
     sample_rate = np.nan
     cutoff = frequency_cutoff
     used = 0
@@ -2105,6 +2119,7 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
 
             stimuli.setdefault(mean_level, []).append(stimulus[:width][start:])
             responses.setdefault(mean_level, []).append(trace[:width][start:])
+            recorded_order.append((mean_level, len(stimuli[mean_level]) - 1))
             sources.setdefault(mean_level, []).append(
                 {'block_id': int(block_id), 'epoch': index,
                  'light_mean': mean_level,
@@ -2150,6 +2165,24 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
         analysis.n_epochs[mean_level] = int(stim.shape[0])
         analysis.stimulus[mean_level] = stim
         analysis.response[mean_level] = resp
+
+    # Walk the recorded order and pull each epoch back out of the per-mean
+    # arrays, so the sequence carries the same downsampling and the same
+    # holding-current alignment as everything else.
+    seq_s, seq_r, seq_m, seq_e = [], [], [], []
+    for position, (mean_level, row) in enumerate(recorded_order):
+        block = analysis.stimulus.get(mean_level)
+        if block is None or row >= block.shape[0]:
+            continue
+        seq_s.append(block[row])
+        seq_r.append(analysis.response[mean_level][row])
+        seq_m.append(np.full(block.shape[1], mean_level, dtype=float))
+        seq_e.append(np.full(block.shape[1], position, dtype=int))
+    if seq_s:
+        analysis.sequence_stimulus = np.concatenate(seq_s)
+        analysis.sequence_response = np.concatenate(seq_r)
+        analysis.sequence_light_mean = np.concatenate(seq_m)
+        analysis.sequence_epoch = np.concatenate(seq_e)
 
     analysis.frequency_cutoff = float(cutoff) if cutoff is not None else np.nan
     analysis.filter_length_s = float(filter_length_s)
@@ -3325,6 +3358,484 @@ def plot_decoding(analysis: ConditionAnalysis, decoded: pd.DataFrame,
                  f'reconstruction by phase (solid = increment, dashed = decrement)',
                  fontsize=10)
     fig.tight_layout(rect=(0, 0, 1, 0.955))
+    return fig
+
+
+# --------------------------------------------------------------------------
+# 8. LNK: an LN cascade with one slow adaptive state
+#
+# Ozuysal & Baccus (2012) put all of contrast adaptation in a four-state
+# kinetic block after a fixed filter and nonlinearity. Two of those states
+# exist to reproduce the *fast* change in temporal filtering that follows a
+# contrast step, and our filters do not do that: over nine windows spanning a
+# 30 s epoch, time-to-peak is constant to a millisecond or two. Fitting four
+# fast parameters to a flat line is how identifiability problems start, so this
+# is the reduction the data licenses -- one slow state, seven free parameters
+# against 570 s at 1 kHz rather than 26.
+#
+# The state is driven by the cell's own rectified drive and returns to the
+# nonlinearity by exactly one of two routes, which is the experiment:
+#
+#   multiplicative   r = alpha exp(-k a') Phi(beta g + gamma) + eps  -> SLOPE
+#   subtractive      r = alpha Phi(beta g + gamma - k a') + eps       -> SHIFT
+#
+# where a' is the state standardised to zero mean and unit variance. Neither
+# its mean nor its scale is identifiable -- the mean is absorbed by `alpha`
+# (multiplicatively) or `gamma` (subtractively), and the scale trades off
+# against the time constants -- so `k` is fitted as modulation per standard
+# deviation of adaptation, which is comparable between couplings and cells.
+#
+# A gain-only mechanism cannot produce a shift: scaling a rectifying
+# nonlinearity compresses it toward zero, it does not translate it. So the two
+# couplings are not two settings of one mechanism, and which one a cell needs
+# is a model comparison rather than a parameter readout.
+# --------------------------------------------------------------------------
+LNK_COUPLINGS = ('multiplicative', 'subtractive')
+
+
+@dataclass
+class LNKModel:
+    """One fitted LNK, with the static LN it has to beat."""
+
+    coupling: str
+    params: Dict[str, float] = field(default_factory=dict)
+    filter: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    filter_time_s: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    sampling_interval: float = np.nan
+    state_dt_s: float = np.nan
+    r2: float = np.nan            # held-out epochs, adaptive model
+    r2_train: float = np.nan
+    r2_static: float = np.nan     # held-out epochs, same model with k = 0
+    n_train_epochs: int = 0
+    n_test_epochs: int = 0
+    predicted: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    predicted_static: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    state: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    generator: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    at_bounds: Tuple[str, ...] = ()
+
+    @property
+    def r2_gain(self) -> float:
+        """What the adaptive state buys over the same cascade without it."""
+        return self.r2 - self.r2_static
+
+    def __repr__(self) -> str:
+        return (f'<LNKModel {self.coupling} | r2 {self.r2:.3f} held out '
+                f'(static {self.r2_static:.3f}) | tau_on '
+                f'{self.params.get("tau_on", np.nan):.2f} s, tau_off '
+                f'{self.params.get("tau_off", np.nan):.2f} s, k '
+                f'{self.params.get("k", np.nan):.3f}>')
+
+
+def adaptation_state(drive, dt: float, tau_on: float, tau_off: float,
+                     a0: float = 0.0) -> np.ndarray:
+    """Integrate ``a' = u(1-a)/tau_on - a/tau_off``.
+
+    Exponential Euler, which is exact for a drive held constant across a step
+    and unconditionally stable, so the step size is a speed choice rather than
+    a stability one. Written as a decay toward the instantaneous steady state:
+    with ``rate = u/tau_on + 1/tau_off``, ``a`` relaxes toward
+    ``(u/tau_on)/rate`` with time constant ``1/rate``.
+
+    ``a`` stays in [0, 1] for any non-negative drive, which is what makes the
+    coupling strength ``k`` interpretable as a fraction.
+    """
+    drive = np.asarray(drive, dtype=float)
+    rate_on = drive / float(tau_on)
+    total = rate_on + 1.0 / float(tau_off)
+    steady = rate_on / total
+    decay = np.exp(-float(dt) * total)
+    out = np.empty_like(drive)
+    previous = float(a0)
+    for index in range(drive.size):
+        previous = steady[index] + (previous - steady[index]) * decay[index]
+        out[index] = previous
+    return out
+
+
+def _lnk_predict(generator, params, coupling: str, dt: float,
+                 state_step: int, adaptive: bool = True):
+    """``(prediction, state)`` for one parameter set over the whole sequence.
+
+    The drive is the *unadapted* rectified output ``Phi(beta g + gamma)``, so
+    the state depends only on the stimulus and never on the measured response.
+    That is what makes holding out epochs sound: the state can be integrated
+    across a held-out stretch without having seen its response.
+    """
+    from scipy.stats import norm
+
+    alpha = float(params['alpha']); beta = float(params['beta'])
+    gamma = float(params['gamma']); epsilon = float(params['epsilon'])
+    argument = beta * np.asarray(generator, dtype=float) + gamma
+    drive = norm.cdf(argument)
+    if not adaptive:
+        return alpha * drive + epsilon, np.zeros_like(drive)
+
+    # Integrate the state on a coarser grid: its time constants are seconds, so
+    # 1 ms steps buy nothing and cost 40x the arithmetic. The drive is averaged
+    # into those bins rather than sampled, since the state responds to the mean
+    # drive over the step, not to whichever sample fell on the boundary.
+    coarse = _bin_mean(drive[None, :], state_step).ravel()
+    state_coarse = adaptation_state(coarse, dt * state_step,
+                                    params['tau_on'], params['tau_off'])
+    state = np.repeat(state_coarse, state_step)
+    if state.size < drive.size:
+        state = np.concatenate([state, np.full(drive.size - state.size,
+                                               state[-1] if state.size else 0.0)])
+    state = state[:drive.size]
+
+    # Couple the state's *modulation*, not its level. The mean of `a` is
+    # degenerate with `alpha` (multiplicative) and with `gamma` (subtractive),
+    # so leaving it in makes `k` fight an offset another parameter already
+    # absorbs -- on 2020-06-11_B that pinned `k` at its bound while the state
+    # swung only 0.08 between light means. Centring removes the degeneracy and
+    # leaves `k` as what it is meant to be: how much a unit of adaptation moves
+    # the nonlinearity.
+    # Standardise, not just centre. The mean is degenerate with `alpha` /
+    # `gamma`, and the *scale* is degenerate with the time constants: shrink
+    # the state's swing by moving tau and `k` grows to compensate, so only the
+    # product k*std(a) is identifiable. Dividing it out leaves `k` as
+    # modulation per standard deviation of adaptation -- one number, comparable
+    # between couplings and between cells, which is what a pathway comparison
+    # needs. Without this `k` pinned at its bound even on synthetic data whose
+    # true value was well inside it.
+    spread = float(np.std(state))
+    centred = (state - float(np.mean(state))) / (spread if spread > 1e-9 else 1.0)
+    k = float(params['k'])
+    if coupling == 'multiplicative':
+        # Log-gain, so the gain stays positive for any k and there is no
+        # ceiling to pin against; exp(0) = 1 leaves alpha meaning what it did.
+        return alpha * np.exp(-k * centred) * drive + epsilon, state
+    if coupling == 'subtractive':
+        return alpha * norm.cdf(argument - k * centred) + epsilon, state
+    raise ValueError(f'coupling must be one of {LNK_COUPLINGS}')
+
+
+def fit_lnk(analysis: ConditionAnalysis,
+            coupling: str = 'multiplicative',
+            filter_length_s: Optional[float] = None,
+            state_dt_ms: float = 25.0,
+            test_fraction: float = 0.25,
+            max_nfev: int = 400,
+            random_state: Optional[int] = 0,
+            verbose: bool = True) -> Optional[LNKModel]:
+    """Fit an LN cascade plus one slow adaptive state to the whole recording.
+
+    Fitted on ``analysis.sequence_*`` -- every accepted epoch concatenated in
+    recorded order. Because ``interpulseInterval`` is 0 the epochs are
+    contiguous, so this is one continuous record of the cell stepping between
+    light levels, which is the data shape a kinetic model needs.
+
+    **The filter is held fixed.** It is estimated once from the sequence and
+    normalised so the generator has unit standard deviation, which makes
+    ``beta`` and ``gamma`` comparable across cells and lets
+    :func:`sigmoid_start_and_bounds` supply their bounds unchanged. Seven
+    parameters are then free: the four of the nonlinearity plus ``tau_on``,
+    ``tau_off`` and the coupling strength ``k``.
+
+    **Held-out epochs, and no leakage.** A fraction of whole epochs is held out
+    of the residual; the state is still integrated across them, which is sound
+    because the state is driven by the stimulus alone. ``r2_static`` is the
+    same model with ``k`` forced to zero -- a nested baseline, so
+    ``r2_gain`` is what the adaptive state buys and nothing else.
+
+    Returns ``None`` with a printed reason when the sequence is too short or
+    the fit fails, rather than raising.
+    """
+    from scipy.optimize import least_squares
+    from retinanalysis.utils.cascadegraph import (compute_filter,
+                                                  convolve_filter_with_stim)
+
+    if coupling not in LNK_COUPLINGS:
+        raise ValueError(f'coupling must be one of {LNK_COUPLINGS}')
+    stimulus = np.asarray(analysis.sequence_stimulus, dtype=float)
+    response = np.asarray(analysis.sequence_response, dtype=float)
+    epochs = np.asarray(analysis.sequence_epoch, dtype=int)
+    if stimulus.size < 1000 or stimulus.size != response.size:
+        if verbose:
+            print('  no usable sequence: run analyze_condition first')
+        return None
+
+    dt = float(analysis.sampling_interval)
+    filter_length_s = (analysis.filter_length_s if filter_length_s is None
+                       else float(filter_length_s))
+    filter_pts = int(round(filter_length_s / dt))
+    cutoff = (analysis.frequency_cutoff
+              if np.isfinite(analysis.frequency_cutoff) else None)
+    cutoff_kwargs = ({} if cutoff is None
+                     else dict(frequency_cutoff=cutoff, sampling_interval=dt))
+    filter_causal, _ = compute_filter(stimulus[None, :], response[None, :],
+                                      filter_pts, correct_stim_power=True,
+                                      **cutoff_kwargs)
+    generator = convolve_filter_with_stim(np.asarray(filter_causal, float),
+                                          stimulus[None, :])[0]
+    scale = float(np.std(generator))
+    if not np.isfinite(scale) or scale == 0:
+        if verbose:
+            print('  generator has no variance; filter estimate failed')
+        return None
+    generator = generator / scale
+    filter_causal = np.asarray(filter_causal, dtype=float) / scale
+
+    state_step = max(int(round(state_dt_ms / 1e3 / dt)), 1)
+
+    # Start the nonlinearity from the static fit to the same generator, so the
+    # optimiser begins where the non-adaptive model already is.
+    guess_nl, lower_nl, upper_nl = sigmoid_start_and_bounds(
+        generator, response, rec_type=analysis.rec_type)
+    names = ('alpha', 'beta', 'gamma', 'epsilon', 'tau_on', 'tau_off', 'k')
+    # Same bounds for both couplings, so neither is handicapped in the
+    # comparison. `k` is signed: positive suppresses the response as the cell
+    # adapts, negative would be facilitation, and the data decides which.
+    k_limit = 5.0
+    guess = np.r_[guess_nl, 2.0, 5.0, 0.5]
+    lower = np.r_[lower_nl, 0.05, 0.05, -k_limit]
+    upper = np.r_[upper_nl, 60.0, 60.0, k_limit]
+
+    unique_epochs = np.unique(epochs)
+    rng = np.random.default_rng(random_state)
+    n_test = max(int(round(test_fraction * unique_epochs.size)), 1)
+    n_test = min(n_test, unique_epochs.size - 1)
+    test_epochs = rng.choice(unique_epochs, size=n_test, replace=False)
+    is_test = np.isin(epochs, test_epochs)
+    train = ~is_test
+
+    def unpack(vector):
+        return dict(zip(names, (float(v) for v in vector)))
+
+    def residual(vector):
+        predicted, _ = _lnk_predict(generator, unpack(vector), coupling, dt,
+                                    state_step)
+        return predicted[train] - response[train]
+
+    try:
+        result = least_squares(residual, np.clip(guess, lower, upper),
+                               bounds=(lower, upper), max_nfev=max_nfev)
+    except Exception as exc:
+        if verbose:
+            print(f'  LNK fit failed ({exc})')
+        return None
+
+    params = unpack(result.x)
+    predicted, state = _lnk_predict(generator, params, coupling, dt, state_step)
+
+    # Nested baseline: same cascade, k = 0, nonlinearity refitted so the
+    # comparison is not rigged by leaving it at the adaptive optimum.
+    def residual_static(vector):
+        flat = dict(zip(names[:4], (float(v) for v in vector)))
+        flat.update(tau_on=1.0, tau_off=1.0, k=0.0)
+        predicted_flat, _ = _lnk_predict(generator, flat, coupling, dt,
+                                         state_step, adaptive=False)
+        return predicted_flat[train] - response[train]
+
+    try:
+        static = least_squares(residual_static, np.clip(guess_nl, lower_nl, upper_nl),
+                               bounds=(lower_nl, upper_nl), max_nfev=max_nfev)
+        static_params = dict(zip(names[:4], (float(v) for v in static.x)))
+        static_params.update(tau_on=1.0, tau_off=1.0, k=0.0)
+        predicted_static, _ = _lnk_predict(generator, static_params, coupling,
+                                           dt, state_step, adaptive=False)
+    except Exception:
+        predicted_static = np.full_like(predicted, np.nan)
+
+    span = upper - lower
+    at_bounds = tuple(
+        name for name, value, low, high, width
+        in zip(names, result.x, lower, upper, span)
+        if np.isfinite(width) and width > 0
+        and (abs(value - low) <= 1e-6 * width or abs(value - high) <= 1e-6 * width))
+
+    model = LNKModel(
+        coupling=coupling, params=params,
+        filter=np.asarray(filter_causal, dtype=float),
+        filter_time_s=np.arange(filter_pts) * dt,
+        sampling_interval=dt, state_dt_s=state_step * dt,
+        r2=_variance_explained(predicted[is_test], response[is_test]),
+        r2_train=_variance_explained(predicted[train], response[train]),
+        r2_static=_variance_explained(predicted_static[is_test], response[is_test]),
+        n_train_epochs=int(unique_epochs.size - n_test), n_test_epochs=int(n_test),
+        predicted=predicted, predicted_static=predicted_static, state=state,
+        generator=generator, at_bounds=at_bounds)
+    if verbose:
+        print(f'  {coupling:>14}: r²={model.r2:.3f} held out '
+              f'(static {model.r2_static:.3f}, gain {model.r2_gain:+.3f}) | '
+              f'tau_on {params["tau_on"]:.2f} s, tau_off {params["tau_off"]:.2f} s, '
+              f'k {params["k"]:+.3f}'
+              + (f' | at bound: {", ".join(at_bounds)}' if at_bounds else ''))
+    return model
+
+
+def compare_lnk_couplings(analysis: ConditionAnalysis, verbose: bool = True,
+                          **kwargs) -> Dict[str, Optional[LNKModel]]:
+    """Fit both couplings on the same data and say which the cell prefers.
+
+    The comparison is the experiment: a slope change and a shift are different
+    mechanisms, not two settings of one, so the held-out difference between
+    them is the pathway result rather than a diagnostic.
+    """
+    models = {coupling: fit_lnk(analysis, coupling=coupling, verbose=verbose,
+                                **kwargs)
+              for coupling in LNK_COUPLINGS}
+    fitted = {name: m for name, m in models.items() if m is not None}
+    if verbose and len(fitted) == 2:
+        best = max(fitted, key=lambda n: fitted[n].r2)
+        margin = abs(fitted['multiplicative'].r2 - fitted['subtractive'].r2)
+        print(f'  -> prefers {best} by {margin:.3f} held-out r²'
+              + ('  (margin is small; treat as undecided)' if margin < 0.01 else ''))
+    return models
+
+
+def lnk_summary(models: Dict[str, Optional[LNKModel]]) -> pd.DataFrame:
+    """One row per coupling: fit quality, time constants, coupling strength."""
+    rows = []
+    for coupling, model in models.items():
+        if model is None:
+            continue
+        rows.append({'coupling': coupling, 'r2_heldout': model.r2,
+                     'r2_static': model.r2_static, 'r2_gain': model.r2_gain,
+                     'r2_train': model.r2_train,
+                     'tau_on_s': model.params.get('tau_on', np.nan),
+                     'tau_off_s': model.params.get('tau_off', np.nan),
+                     'k': model.params.get('k', np.nan),
+                     'alpha': model.params.get('alpha', np.nan),
+                     'beta': model.params.get('beta', np.nan),
+                     'gamma': model.params.get('gamma', np.nan),
+                     'n_test_epochs': model.n_test_epochs,
+                     'at_bounds': ','.join(model.at_bounds)})
+    return pd.DataFrame(rows)
+
+
+def plot_lnk_fit(analysis: ConditionAnalysis,
+                 models: Dict[str, Optional[LNKModel]],
+                 seconds: Tuple[float, float] = (25.0, 95.0),
+                 smooth_ms: float = 200.0,
+                 figsize: Tuple[float, float] = (13.0, 9.0)):
+    """What the slow state buys, and which coupling the cell prefers.
+
+    Four panels. The top two share a time axis spanning at least one luminance
+    step, since that is where an adaptive model and a static one part company:
+    the measured response with both predictions over it, and the state ``a(t)``
+    underneath with the light level shaded. The bottom row is the mechanism and
+    the score -- the fitted nonlinearity drawn at a low and a high value of the
+    state, which is where a slope change and a shift look different, and the
+    held-out r2 of each coupling against the nested static baseline.
+
+    The static bar is the number to judge the others against, **not** the
+    per-window LN r2 from earlier sections: those fit a separate filter and
+    nonlinearity per light mean per window, while this fits one of each across
+    the whole 570 s. The comparison that means something is like against like.
+
+    The top panel is smoothed with a ``smooth_ms`` boxcar, and says so on the
+    axis. Seventy seconds at 1 kHz is 70,000 points in a few hundred pixels,
+    where every trace becomes a solid block; what that panel is for is the slow
+    divergence between an adaptive prediction and a static one across the step,
+    which survives smoothing. The r2 values quoted are always from the
+    unsmoothed fit.
+    """
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+    from scipy.stats import norm
+
+    style.apply_publication_style()
+    fitted = {name: m for name, m in models.items() if m is not None}
+    if not fitted:
+        print('no LNK fit to plot')
+        return None
+    reference = fitted.get('multiplicative') or next(iter(fitted.values()))
+    dt = reference.sampling_interval
+    response = np.asarray(analysis.sequence_response, dtype=float)
+    light = np.asarray(analysis.sequence_light_mean, dtype=float)
+    lo = max(int(round(seconds[0] / dt)), 0)
+    hi = min(int(round(seconds[1] / dt)), response.size)
+    if hi - lo < 10:
+        print('requested stretch is outside the recording')
+        return None
+    time_s = np.arange(lo, hi) * dt
+    means = sorted(set(light[lo:hi]))
+    colors = style.colors_for_conditions([f'{m:g}' for m in means])
+
+    fig = plt.figure(figsize=figsize)
+    grid = fig.add_gridspec(3, 2, height_ratios=[1.5, 0.85, 1.25], hspace=.42,
+                            wspace=.26)
+    ax_trace = fig.add_subplot(grid[0, :])
+    ax_state = fig.add_subplot(grid[1, :], sharex=ax_trace)
+    ax_nl = fig.add_subplot(grid[2, 0])
+    ax_bar = fig.add_subplot(grid[2, 1])
+
+    # --- light-level shading, shared by the top two panels -----------------
+    for ax in (ax_trace, ax_state):
+        edges = np.r_[0, np.flatnonzero(np.diff(light[lo:hi]) != 0) + 1, hi - lo]
+        for a0, a1 in zip(edges[:-1], edges[1:]):
+            level = light[lo + a0]
+            ax.axvspan(time_s[a0], time_s[min(a1, time_s.size - 1)],
+                       color=colors[f'{level:g}'], alpha=.10, lw=0)
+
+    step = max(int(round(smooth_ms / 1e3 / dt)), 1)
+
+    def smooth(values):
+        return _bin_mean(np.asarray(values)[None, lo:hi], step).ravel()
+
+    smooth_t = ((np.arange(smooth(response).size) + 0.5) * step * dt
+                + lo * dt)
+    palette = {'multiplicative': '#D55E00', 'subtractive': '#0072B2'}
+    ax_trace.plot(smooth_t, smooth(response), color='0.3', lw=1.3,
+                  label='response')
+    ax_trace.plot(smooth_t, smooth(reference.predicted_static), color='#8c8c8c',
+                  lw=1.3, ls=':', label=f'static LN (r²={reference.r2_static:.3f})')
+    for name, model in fitted.items():
+        ax_trace.plot(smooth_t, smooth(model.predicted), color=palette[name],
+                      lw=1.3, label=f'{name} (r²={model.r2:.3f})')
+    ax_trace.set_ylabel(analysis.units, fontsize=9)
+    ax_trace.legend(frameon=False, fontsize=7.5, ncol=4, loc='upper right')
+    ax_trace.set_title(f'response and prediction across a luminance step '
+                       f'({smooth_ms:g} ms boxcar; r² is from the unsmoothed '
+                       f'fit)', fontsize=10)
+
+    for name, model in fitted.items():
+        ax_state.plot(time_s, model.state[lo:hi], color=palette[name], lw=1.4,
+                      label=f'{name}  τ_on {model.params["tau_on"]:.1f} s, '
+                            f'τ_off {model.params["tau_off"]:.1f} s')
+    ax_state.set_ylabel('adaptive state a(t)', fontsize=9)
+    ax_state.set_xlabel('time in the concatenated recording (s)', fontsize=9)
+    ax_state.legend(frameon=False, fontsize=7.5, loc='upper right')
+
+    # --- the mechanism: nonlinearity at a low and a high state -------------
+    grid_g = np.linspace(-3, 3, 200)
+    for name, model in fitted.items():
+        centred = model.state - float(np.mean(model.state))
+        low, high = np.percentile(centred, [10, 90])
+        p = model.params
+        argument = p['beta'] * grid_g + p['gamma']
+        for value, ls, tag in ((low, '-', 'adapted low'), (high, '--', 'adapted high')):
+            if name == 'multiplicative':
+                curve = p['alpha'] * np.exp(-p['k'] * value) * norm.cdf(argument) + p['epsilon']
+            else:
+                curve = p['alpha'] * norm.cdf(argument - p['k'] * value) + p['epsilon']
+            ax_nl.plot(grid_g, curve, ls=ls, lw=1.6, color=palette[name],
+                       label=f'{name}, {tag}')
+    ax_nl.set_xlabel('generator (SD units)', fontsize=9)
+    ax_nl.set_ylabel(analysis.units, fontsize=9)
+    ax_nl.set_title('nonlinearity at low vs high adaptation', fontsize=9.5)
+    ax_nl.legend(frameon=False, fontsize=6.8)
+
+    # --- the score ---------------------------------------------------------
+    labels = ['static LN'] + list(fitted)
+    values = [reference.r2_static] + [fitted[n].r2 for n in fitted]
+    bar_colors = ['#8c8c8c'] + [palette[n] for n in fitted]
+    ax_bar.bar(range(len(values)), values, color=bar_colors, width=.62)
+    for index, value in enumerate(values):
+        ax_bar.text(index, value, f'{value:.3f}', ha='center', va='bottom',
+                    fontsize=8)
+    ax_bar.set_xticks(range(len(labels)))
+    ax_bar.set_xticklabels(labels, fontsize=8)
+    ax_bar.set_ylabel('held-out r²', fontsize=9)
+    ax_bar.set_title('same filter and nonlinearity throughout;\n'
+                     'only the state differs', fontsize=9.5)
+    ax_bar.set_ylim(0, max(values) * 1.22)
+
+    fig.suptitle(f'{analysis.exp_name} | {analysis.rec_type} | LN cascade with '
+                 f'one slow adaptive state', fontsize=11)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
     return fig
 
 

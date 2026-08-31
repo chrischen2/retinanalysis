@@ -502,3 +502,178 @@ def test_reconstruct_traces_holds_out_every_epoch_exactly_once():
     assert set(counts.index.size for _ in [0])      # windows exist
     assert counts.notna().all().all()               # every epoch in every window
     assert counts.nunique().nunique() == 1          # and the same number of bins
+
+
+def test_adaptation_state_matches_the_analytic_solution():
+    """Constant drive has a closed form; the integrator must reproduce it.
+
+    With ``u`` fixed, ``a' = u(1-a)/tau_on - a/tau_off`` relaxes exponentially
+    toward ``u*tau_off / (u*tau_off + tau_on)`` with time constant
+    ``1/(u/tau_on + 1/tau_off)``. Exponential Euler is exact for a piecewise
+    constant drive, so this should hold to machine precision rather than
+    approximately -- if it does not, the step size is silently mattering.
+    """
+    dt, tau_on, tau_off, u = 0.025, 2.0, 8.0, 0.4
+    drive = np.full(4000, u)
+    state = vmn.adaptation_state(drive, dt, tau_on, tau_off, a0=0.0)
+
+    steady = u * tau_off / (u * tau_off + tau_on)
+    tau_eff = 1.0 / (u / tau_on + 1.0 / tau_off)
+    t = (np.arange(drive.size) + 1) * dt
+    expected = steady * (1.0 - np.exp(-t / tau_eff))
+    np.testing.assert_allclose(state, expected, rtol=1e-10, atol=1e-12)
+    assert state[-1] == pytest.approx(steady, rel=1e-6)
+
+
+def test_adaptation_state_stays_within_zero_and_one():
+    """``a`` is an occupancy, and ``k`` is only interpretable if it stays one.
+
+    Any non-negative drive and any positive time constants must keep the state
+    in [0, 1], including a drive that slams between its extremes.
+    """
+    rng = np.random.default_rng(1)
+    drive = rng.integers(0, 2, size=5000).astype(float)
+    for tau_on, tau_off in ((0.05, 60.0), (60.0, 0.05), (1.0, 1.0)):
+        state = vmn.adaptation_state(drive, 0.025, tau_on, tau_off)
+        assert state.min() >= -1e-12 and state.max() <= 1.0 + 1e-12
+
+
+def _adapting_cell(coupling='multiplicative', n_epochs=6, epoch_s=10.0,
+                   dt=1e-3, k_true=6.0, seed=0):
+    """A synthetic cell whose gain (or threshold) follows a known slow state.
+
+    Amplitude alternates epoch to epoch, standing in for this protocol's
+    luminance step, so there is a real adaptation signal to recover.
+
+    The cell has a genuine biphasic temporal filter rather than responding
+    instantaneously. That matters: ``fit_lnk`` estimates its filter by reverse
+    correlation, and against an instantaneous cell every lag beyond zero is
+    noise, which dilutes the generator (r = 0.50 against the stimulus) and
+    starves the state of signal. A real filter makes the estimation well posed,
+    and is what a real cell does anyway.
+    """
+    from scipy.stats import norm
+
+    rng = np.random.default_rng(seed)
+    n_time = int(epoch_s / dt)
+    stim, light, epoch_id = [], [], []
+    for index in range(n_epochs):
+        amplitude = 1.0 if index % 2 else 0.2
+        stim.append(amplitude * rng.standard_normal(n_time))
+        light.append(np.full(n_time, amplitude))
+        epoch_id.append(np.full(n_time, index, dtype=int))
+    stim = np.concatenate(stim)
+    light = np.concatenate(light)
+    epoch_id = np.concatenate(epoch_id)
+
+    # Biphasic filter: a fast positive lobe followed by a slower negative one.
+    lag = np.arange(0, 0.12, dt)
+    kernel = (np.exp(-lag / 0.012) * lag / 0.012
+              - 0.55 * np.exp(-lag / 0.030) * lag / 0.030)
+    kernel /= np.linalg.norm(kernel)
+    generator = np.convolve(stim, kernel, mode='full')[:stim.size]
+    generator = (generator - generator.mean()) / generator.std()
+
+    drive = norm.cdf(2.0 * generator - 0.5)
+    step = 25
+    coarse = vmn._bin_mean(drive[None, :], step).ravel()
+    state = vmn.adaptation_state(coarse, dt * step, 3.0, 4.0)
+    state = np.repeat(state, step)[:drive.size]
+    centred = state - state.mean()
+
+    if coupling == 'multiplicative':
+        clean = 100.0 * np.exp(-k_true * centred) * drive + 5.0
+    else:
+        clean = 100.0 * norm.cdf(2.0 * generator - 0.5 - k_true * centred) + 5.0
+    response = clean + 3.0 * rng.standard_normal(clean.size)
+
+    analysis = vmn.ConditionAnalysis(
+        exp_name='synthetic', block_ids=[0], rec_type='extracellular',
+        sample_rate=1.0 / dt, units='firing rate (Hz)', sampling_interval=dt,
+        skip_seconds=0.0, frequency_cutoff=100.0, filter_length_s=0.12)
+    analysis.sequence_stimulus = stim
+    analysis.sequence_response = response
+    analysis.sequence_light_mean = light
+    analysis.sequence_epoch = epoch_id
+    return analysis
+
+
+def test_lnk_beats_the_static_baseline_on_an_adapting_cell():
+    """A slow state must earn its parameters where the adaptation is real.
+
+    ``r2_static`` is the same cascade with ``k`` forced to zero and its
+    nonlinearity refitted, so the comparison is nested and the difference is
+    attributable to the state alone.
+    """
+    analysis = _adapting_cell('multiplicative')
+    model = vmn.fit_lnk(analysis, coupling='multiplicative', verbose=False)
+    assert model is not None
+    assert model.r2 > model.r2_static
+    assert model.r2_gain > 0.02
+    assert not model.at_bounds, model.at_bounds
+
+
+def test_lnk_identifies_which_coupling_generated_the_data():
+    """The comparison must pick the mechanism that was actually simulated.
+
+    A slope change and a shift are different mechanisms, not two settings of
+    one, so this is the experiment the model exists to run. If it cannot tell
+    them apart on data it generated itself, a pathway result on real cells
+    would mean nothing.
+    """
+    for truth in vmn.LNK_COUPLINGS:
+        analysis = _adapting_cell(truth)
+        models = vmn.compare_lnk_couplings(analysis, verbose=False)
+        assert all(m is not None for m in models.values())
+        best = max(models, key=lambda name: models[name].r2)
+        assert best == truth, (truth, {n: round(m.r2, 4) for n, m in models.items()})
+
+
+def test_lnk_state_never_sees_the_response():
+    """Held-out scoring is only sound if the state is stimulus-driven.
+
+    The state is integrated across held-out epochs, which would leak if it
+    depended on the measured response. Scrambling the response must leave the
+    state untouched for a fixed parameter set.
+    """
+    analysis = _adapting_cell()
+    model = vmn.fit_lnk(analysis, verbose=False)
+    assert model is not None
+
+    rng = np.random.default_rng(7)
+    scrambled = vmn.ConditionAnalysis(
+        exp_name='synthetic', block_ids=[0], rec_type='extracellular',
+        sample_rate=analysis.sample_rate, units=analysis.units,
+        sampling_interval=analysis.sampling_interval, skip_seconds=0.0,
+        frequency_cutoff=analysis.frequency_cutoff,
+        filter_length_s=analysis.filter_length_s)
+    scrambled.sequence_stimulus = analysis.sequence_stimulus
+    scrambled.sequence_response = rng.permutation(analysis.sequence_response)
+    scrambled.sequence_light_mean = analysis.sequence_light_mean
+    scrambled.sequence_epoch = analysis.sequence_epoch
+
+    _, state_a = vmn._lnk_predict(model.generator, model.params, model.coupling,
+                                  model.sampling_interval,
+                                  int(round(model.state_dt_s / model.sampling_interval)))
+    _, state_b = vmn._lnk_predict(model.generator, model.params, model.coupling,
+                                  model.sampling_interval,
+                                  int(round(model.state_dt_s / model.sampling_interval)))
+    np.testing.assert_array_equal(state_a, state_b)
+    assert 'sequence_response' not in vmn._lnk_predict.__code__.co_names
+
+
+def test_sequence_is_in_recorded_order_and_alternates():
+    """The sequence must preserve the interleaving, not the grouping.
+
+    ``stimulus``/``response`` are keyed by light mean; a kinetic model needs
+    the epochs in the order the rig ran them, which for this protocol
+    alternates. Grouping them would present the model with 300 s of one mean
+    followed by 300 s of the other -- a different experiment entirely.
+    """
+    analysis = _adapting_cell(n_epochs=6, epoch_s=2.0)
+    light = analysis.sequence_light_mean
+    epoch = analysis.sequence_epoch
+    boundaries = np.r_[0, np.flatnonzero(np.diff(epoch) != 0) + 1]
+    levels = light[boundaries]
+    assert levels.size == 6
+    assert np.all(np.diff(levels) != 0), levels
