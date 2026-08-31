@@ -3365,13 +3365,19 @@ def plot_decoding(analysis: ConditionAnalysis, decoded: pd.DataFrame,
 # 8. LNK: an LN cascade with one slow adaptive state
 #
 # Ozuysal & Baccus (2012) put all of contrast adaptation in a four-state
-# kinetic block after a fixed filter and nonlinearity. Two of those states
-# exist to reproduce the *fast* change in temporal filtering that follows a
-# contrast step, and our filters do not do that: over nine windows spanning a
-# 30 s epoch, time-to-peak is constant to a millisecond or two. Fitting four
-# fast parameters to a flat line is how identifiability problems start, so this
-# is the reduction the data licenses -- one slow state, seven free parameters
-# against 570 s at 1 kHz rather than 26.
+# kinetic block after a filter and nonlinearity. Two of those states carry the
+# *fast* dynamics, and our filters show no fast change to explain: over nine
+# windows spanning a 30 s epoch, time-to-peak is constant to a millisecond or
+# two. Fitting four fast parameters to a flat line is how identifiability
+# problems start, so this is the reduction the data licenses -- one slow state,
+# seven free parameters against 570 s at 1 kHz rather than 26.
+#
+# What the kinetics block does to the gain is a scaling (supplement eq 18:
+# gain proportional to resting-state occupancy), so a slow state can rescale
+# the nonlinearity but cannot restructure the filter. The filter *is* different
+# between light levels here -- 32 ms against 59 ms, biphasic index changing
+# sign -- so each level gets its own, and the shared nonlinearity plus one
+# state is what the fit is being asked to explain.
 #
 # The state is driven by the cell's own rectified drive and returns to the
 # nonlinearity by exactly one of two routes, which is the experiment:
@@ -3448,11 +3454,27 @@ def adaptation_state(drive, dt: float, tau_on: float, tau_off: float,
     total = rate_on + 1.0 / float(tau_off)
     steady = rate_on / total
     decay = np.exp(-float(dt) * total)
+    if drive.size == 0:
+        return np.zeros(0)
+
+    # The recurrence a[n] = c[n] a[n-1] + d[n] has a closed form,
+    #   a[n] = P[n] (a0 + sum_{m<=n} d[m]/P[m]),   P[n] = prod_{j<=n} c[j],
+    # which turns a per-sample Python loop into two cumulative operations. The
+    # catch is that P underflows: c is just under 1 and there are tens of
+    # thousands of samples. So it is applied in blocks short enough that P
+    # cannot fall below ~1e-150, restarting from the previous block's last
+    # value -- exact, and the fit spends its time in the optimiser instead.
+    offset = d = steady * (1.0 - decay)
+    worst = float(np.max(float(dt) * total))
+    block = 4096 if worst <= 0 else int(np.clip(150 * np.log(10) / worst, 8, 4096))
     out = np.empty_like(drive)
     previous = float(a0)
-    for index in range(drive.size):
-        previous = steady[index] + (previous - steady[index]) * decay[index]
-        out[index] = previous
+    for start in range(0, drive.size, block):
+        stop = min(start + block, drive.size)
+        products = np.cumprod(decay[start:stop])
+        out[start:stop] = products * (previous
+                                      + np.cumsum(d[start:stop] / products))
+        previous = out[stop - 1]
     return out
 
 
@@ -3465,12 +3487,15 @@ def _lnk_predict(generator, params, coupling: str, dt: float,
     That is what makes holding out epochs sound: the state can be integrated
     across a held-out stretch without having seen its response.
     """
-    from scipy.stats import norm
+    # `ndtr` is the raw normal CDF; `scipy.stats.norm.cdf` is the same function
+    # behind argument validation that costs 2.6x on a 570k array and is paid on
+    # every one of a few thousand residual evaluations. Identical to 1e-15.
+    from scipy.special import ndtr
 
     alpha = float(params['alpha']); beta = float(params['beta'])
     gamma = float(params['gamma']); epsilon = float(params['epsilon'])
     argument = beta * np.asarray(generator, dtype=float) + gamma
-    drive = norm.cdf(argument)
+    drive = ndtr(argument)
     if not adaptive:
         return alpha * drive + epsilon, np.zeros_like(drive)
 
@@ -3510,12 +3535,58 @@ def _lnk_predict(generator, params, coupling: str, dt: float,
         # ceiling to pin against; exp(0) = 1 leaves alpha meaning what it did.
         return alpha * np.exp(-k * centred) * drive + epsilon, state
     if coupling == 'subtractive':
-        return alpha * norm.cdf(argument - k * centred) + epsilon, state
+        return alpha * ndtr(argument - k * centred) + epsilon, state
     raise ValueError(f'coupling must be one of {LNK_COUPLINGS}')
+
+
+def _band_split(values, dt: float, split_hz: float):
+    """``(low, high)`` halves of a segment either side of ``split_hz``."""
+    spectrum = np.fft.rfft(values)
+    freqs = np.fft.rfftfreq(values.size, d=dt)
+    low = spectrum.copy(); low[freqs > split_hz] = 0
+    high = spectrum - low
+    return np.fft.irfft(low, values.size), np.fft.irfft(high, values.size)
+
+
+def normalized_residual(predicted, measured, dt: float,
+                        bin_s: float = 10.0, split_hz: float = 4.0):
+    """Residual normalised within time and frequency bins (LNK supplement eq 27).
+
+    Plain squared error is the wrong metric for this protocol, and the LNK
+    supplement says why for its own: *"at different contrasts, the membrane
+    potential shows substantial variation in its amplitude. Thus, using the
+    mean squared error would bias the model towards fitting the high contrast
+    segment"*. Ours is worse -- the bright epochs' stimulus fluctuates ten
+    times harder, so an unweighted fit is effectively a fit to the bright
+    epochs with the dim ones along for the ride.
+
+    Their fix, reproduced here: cut the record into ``bin_s`` time bins, split
+    each into two frequency bands at ``split_hz`` (they note two bands of
+    roughly equal power suffice, and that the low band is needed so slow
+    baseline shifts are not swamped by fast fluctuations), and divide each
+    bin's residual by the standard deviation of the *measured* response in it.
+    Every bin then contributes comparably whatever its amplitude.
+    """
+    predicted = np.asarray(predicted, dtype=float)
+    measured = np.asarray(measured, dtype=float)
+    per_bin = max(int(round(bin_s / dt)), 8)
+    pieces = []
+    for start in range(0, measured.size - per_bin + 1, per_bin):
+        stop = start + per_bin
+        for band_m, band_p in zip(_band_split(measured[start:stop], dt, split_hz),
+                                  _band_split(predicted[start:stop], dt, split_hz)):
+            sigma = float(np.std(band_m))
+            pieces.append((band_p - band_m) / (sigma if sigma > 1e-12 else 1.0))
+    if not pieces:
+        return predicted - measured
+    return np.concatenate(pieces)
 
 
 def fit_lnk(analysis: ConditionAnalysis,
             coupling: str = 'multiplicative',
+            filter_mode: str = 'per_mean',
+            weighted: bool = False,
+            n_restarts: int = 2,
             filter_length_s: Optional[float] = None,
             state_dt_ms: float = 25.0,
             test_fraction: float = 0.25,
@@ -3529,21 +3600,56 @@ def fit_lnk(analysis: ConditionAnalysis,
     contiguous, so this is one continuous record of the cell stepping between
     light levels, which is the data shape a kinetic model needs.
 
-    **One filter per light mean, held fixed.** The temporal filter is
-    genuinely different at the two light levels -- time-to-peak 32 ms against
-    59 ms on 2020-06-11_B, with the biphasic index changing sign, and the two
-    shapes correlating only 0.71 -- so a pooled filter describes neither, and
-    is dominated by the brighter level whose stimulus fluctuates ten times
-    harder. Each filter is normalised to shape alone and the generator is then
-    normalised once, globally, so the amplitude ratio between light levels
-    survives; that ratio is what the state has to track. Seven parameters are
-    free: the four of the nonlinearity plus ``tau_on``, ``tau_off`` and the
-    coupling strength ``k``.
+    **One filter per light mean.** LNK itself carries a single filter, but what
+    its kinetics block does to the gain is a *scaling*: the supplement's eq 18
+    gives the instantaneous gain as proportional to the resting-state occupancy
+    ``R(t)``, which multiplies the nonlinearity's output and leaves its input
+    untouched. The block does also change its own impulse response ``Fk(t)``
+    with mean drive, but that depends on the **fast** rate constants -- their
+    Fig. 8C-D makes the time-constant change a function of ``kfi/ka`` and
+    ``kfr/ka``, and Fig. 7 measures it on that timescale.
 
-    The nonlinearity and the state are **shared** across light levels. That is
-    the claim being tested -- that what changes within an epoch is one slow
-    process acting on a fixed nonlinearity -- so letting them vary per level
-    would assume the answer.
+    This reduction keeps only the slow state, because our filters are flat
+    within an epoch and fast states would have been four parameters fitted to a
+    flat line. A state with time constants in seconds cannot restructure a
+    filter whose time-to-peak is 32 ms at one light level and 59 ms at the
+    other, whichever way it couples. So the per-level filter difference is not
+    something this model could generate and must be supplied. Measured on
+    2020-06-11_B, held-out r2:
+
+    ==========  ==========  ==========
+    filter      unweighted  weighted
+    ==========  ==========  ==========
+    shared           0.338       0.153
+    per mean         0.766       0.746
+    ==========  ==========  ==========
+
+    A shared filter fails here under either error metric, as it has to: it asks
+    one filter to stand in for two that correlate 0.71 with each other, with
+    nothing in the model able to reconcile them. ``filter_mode='shared'``
+    reproduces the comparison.
+
+    Each filter is normalised to shape alone and the generator normalised once,
+    globally, so the amplitude ratio between light levels survives -- that
+    ratio is what the state tracks. The nonlinearity and the state stay
+    **shared** across levels: that is the claim being tested, so letting them
+    vary per level would assume the answer.
+
+    **``weighted`` reproduces the supplement's error metric** (eq 27):
+    residuals normalised within 10 s time bins and two frequency bands, so a
+    high-amplitude stretch cannot dominate the fit. Off by default here because
+    ``r2`` is reported unweighted and mixing the two makes the number hard to
+    read, and because our domination problem is milder than theirs -- the
+    stimulus differs 10x between light levels but the spike rate only about 2x.
+
+    Initial values follow the supplement: the filter and nonlinearity come from
+    a static LN fit at the brightest mean (their "high contrast period"), and
+    the rate constants are redrawn ``n_restarts`` times, since they note the
+    optimum is "non-unique and local" and take the best of several starts. On
+    2020-06-11_B one start and two reach the same optimum to three decimals, so
+    the LN initialisation is already landing in the right basin and the
+    restarts are insurance; each extra one costs roughly the first, because a
+    random start converges more slowly than the LN one.
 
     **Held-out epochs, and no leakage.** A fraction of whole epochs is held out
     of the residual; the state is still integrated across them, which is sound
@@ -3598,23 +3704,38 @@ def fit_lnk(analysis: ConditionAnalysis,
     # amplitude follows the stimulus -- 10x larger when bright, since `stdv`
     # scales with `lightMean` -- which is exactly the "mean of a rectified
     # signal" the kinetic block is supposed to adapt to.
-    filters: Dict[float, np.ndarray] = {}
+    def shape_filter(block_s, block_r):
+        one, _ = compute_filter(block_s, block_r, filter_pts,
+                                correct_stim_power=True, **cutoff_kwargs)
+        one = np.asarray(one, dtype=float)
+        norm_one = float(np.linalg.norm(one))
+        return None if not np.isfinite(norm_one) or norm_one == 0 else one / norm_one
+
+    per_mean: Dict[float, np.ndarray] = {}
     for mean_level in analysis.light_means:
         block_s = analysis.stimulus.get(mean_level)
         block_r = analysis.response.get(mean_level)
         if block_s is None or not block_s.size:
             continue
-        one, _ = compute_filter(block_s, block_r, filter_pts,
-                                correct_stim_power=True, **cutoff_kwargs)
-        one = np.asarray(one, dtype=float)
-        norm_one = float(np.linalg.norm(one))
-        if not np.isfinite(norm_one) or norm_one == 0:
-            continue
-        filters[mean_level] = one / norm_one
-    if not filters:
+        one = shape_filter(block_s, block_r)
+        if one is not None:
+            per_mean[mean_level] = one
+    if not per_mean:
         if verbose:
             print('  no filter could be estimated')
         return None
+
+    # The LNK paper initialises the filter and nonlinearity from an LN model
+    # fitted to the **high contrast period** -- one condition, not the pooled
+    # record. The analogue here is the brightest mean, whose absolute
+    # fluctuations are largest and whose LN fit is therefore best determined.
+    init_level = max(per_mean)
+    if filter_mode == 'shared':
+        filters = {level: per_mean[init_level] for level in per_mean}
+    elif filter_mode == 'per_mean':
+        filters = dict(per_mean)
+    else:
+        raise ValueError("filter_mode must be 'shared' or 'per_mean'")
 
     # Convolve each epoch with the filter for the light level it was run at.
     # Per epoch rather than per contiguous run, so the filter never straddles a
@@ -3642,10 +3763,20 @@ def fit_lnk(analysis: ConditionAnalysis,
 
     state_step = max(int(round(state_dt_ms / 1e3 / dt)), 1)
 
-    # Start the nonlinearity from the static fit to the same generator, so the
-    # optimiser begins where the non-adaptive model already is.
-    guess_nl, lower_nl, upper_nl = sigmoid_start_and_bounds(
+    # Start the nonlinearity from an actual static LN fit, as the LNK
+    # supplement does, rather than from the bounds helper's opening guess: the
+    # optimiser then begins exactly where the non-adaptive model already sits,
+    # and only has to find what the state adds.
+    _, lower_nl, upper_nl = sigmoid_start_and_bounds(
         generator, response, rec_type=analysis.rec_type)
+    init_mask = np.asarray(analysis.sequence_light_mean, dtype=float) == init_level
+    static_nl = fit_sigmoid(generator[init_mask], response[init_mask],
+                            rec_type=analysis.rec_type)
+    guess_nl = np.array([static_nl.get(name, np.nan)
+                         for name in ('alpha', 'beta', 'gamma', 'epsilon')])
+    if not np.all(np.isfinite(guess_nl)):
+        guess_nl, _, _ = sigmoid_start_and_bounds(generator, response,
+                                                  rec_type=analysis.rec_type)
     names = ('alpha', 'beta', 'gamma', 'epsilon', 'tau_on', 'tau_off', 'k')
     # Same bounds for both couplings, so neither is handicapped in the
     # comparison. `k` is signed: positive suppresses the response as the cell
@@ -3662,8 +3793,8 @@ def fit_lnk(analysis: ConditionAnalysis,
     lower = np.r_[lower_nl, 0.05, 0.05, -k_limit]
     upper = np.r_[upper_nl, 60.0, 60.0, k_limit]
 
-    unique_epochs = np.unique(epochs)
     rng = np.random.default_rng(random_state)
+    unique_epochs = np.unique(epochs)
     n_test = max(int(round(test_fraction * unique_epochs.size)), 1)
     n_test = min(n_test, unique_epochs.size - 1)
     test_epochs = rng.choice(unique_epochs, size=n_test, replace=False)
@@ -3673,17 +3804,41 @@ def fit_lnk(analysis: ConditionAnalysis,
     def unpack(vector):
         return dict(zip(names, (float(v) for v in vector)))
 
+    def score_residual(predicted, mask):
+        if weighted:
+            return normalized_residual(predicted[mask], response[mask], dt)
+        return predicted[mask] - response[mask]
+
     def residual(vector):
         predicted, _ = _lnk_predict(generator, unpack(vector), coupling, dt,
                                     state_step)
-        return predicted[train] - response[train]
+        return score_residual(predicted, train)
 
-    try:
-        result = least_squares(residual, np.clip(guess, lower, upper),
-                               bounds=(lower, upper), max_nfev=max_nfev)
-    except Exception as exc:
+    # "the optimum values obtained are assumed to be non-unique and local. To
+    # address this issue, we used multiple initial points to converge to
+    # different optima and then chose the best solution." The nonlinearity
+    # start is the static LN fit every time; only the rate constants and the
+    # coupling are redrawn, which is what the supplement randomises.
+    starts = [np.clip(guess, lower, upper)]
+    for _ in range(max(int(n_restarts) - 1, 0)):
+        draw = guess.copy()
+        draw[4] = rng.uniform(0.1, 20.0)      # tau_on
+        draw[5] = rng.uniform(0.1, 20.0)      # tau_off
+        draw[6] = rng.uniform(-k_limit, k_limit)
+        starts.append(np.clip(draw, lower, upper))
+
+    result = None
+    for start in starts:
+        try:
+            candidate = least_squares(residual, start, bounds=(lower, upper),
+                                      max_nfev=max_nfev)
+        except Exception:
+            continue
+        if result is None or candidate.cost < result.cost:
+            result = candidate
+    if result is None:
         if verbose:
-            print(f'  LNK fit failed ({exc})')
+            print('  LNK fit failed from every starting point')
         return None
 
     params = unpack(result.x)
@@ -3696,7 +3851,7 @@ def fit_lnk(analysis: ConditionAnalysis,
         flat.update(tau_on=1.0, tau_off=1.0, k=0.0)
         predicted_flat, _ = _lnk_predict(generator, flat, coupling, dt,
                                          state_step, adaptive=False)
-        return predicted_flat[train] - response[train]
+        return score_residual(predicted_flat, train)
 
     try:
         static = least_squares(residual_static, np.clip(guess_nl, lower_nl, upper_nl),
