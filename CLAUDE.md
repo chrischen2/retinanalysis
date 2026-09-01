@@ -560,8 +560,14 @@ to check the grid rather than trust r2. The fit costs the same 21 s either way.
 - `vmn.state_grid_error(...)` — the measurement itself. `refine=4`
   compares a step against its own refinement (right for checking one
   step); `reference_step=` compares against a fixed fine solve (right for
-  a sweep). The two agree on size — 3.15% vs 3.89% at 100 ms on this
-  cell's fitted rates — with `refine` slightly optimistic.
+  a sweep). **The refinement difference under-states the error** — it
+  measures `C·S(1 − 1/refine)` where the error is `C·S` — so
+  `extrapolate=True` (the default) divides that factor out. A guard that
+  reads low passes a grid-limited fit, which is the wrong way round.
+  Checked against a solve at the sampling interval over three rate sets
+  and four steps: extrapolated lands 0.97–1.33x of true where raw ran
+  0.75–0.93x. At this cell's fitted rates, 100 ms reads 4.14% against a
+  true 3.89%, and still passes the 5% default.
 - **`solver_tolerance` now does something.** It was declared and never
   read. `fit_lnk_two_state` re-solves at its own fitted rates after the
   fit, stores `model.solver_error`, sets `model.grid_limited`, and raises
@@ -570,7 +576,7 @@ to check the grid rather than trust r2. The fit costs the same 21 s either way.
 **The scan is conservative by design and the two numbers will disagree.**
 Worst-case over the box wants 50 ms because the box includes a 0.5 s slow
 pool; the two-state fit on 2020-06-11_B actually lands at `k_slow_out`
-0.271/s (a 3.7 s pool) where 100 ms measures 3.2%. Both are right — the
+0.271/s (a 3.7 s pool) where 100 ms measures 4.1%. Both are right — the
 scan does not know the rates, which is what the fit is for, and
 `solver_tolerance` is what confirms after the fact. That is why the
 default stayed 100 and not 50.

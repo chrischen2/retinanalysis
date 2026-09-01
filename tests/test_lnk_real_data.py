@@ -428,27 +428,41 @@ def test_the_grid_error_falls_with_the_step(cell, drive):
                                 tau_off=0.80) == 0.0
 
 
-def test_the_two_metrics_agree_on_size(cell, drive):
-    """The guard's cheap metric has to track the expensive one.
+def test_the_guard_errs_on_the_conservative_side(cell, drive):
+    """The cheap metric must not under-state the error it is guarding against.
 
     `fit_lnk_two_state` checks itself with the `refine` comparison, because a
     fixed fine reference over the whole record is a solve it would rather not
-    pay for on every fit. That is only sound if the two agree about magnitude.
-    At this cell's fitted rates they do -- 3.15% against 3.89% at 100 ms, 9.75%
-    against 11.50% at 250 -- with the cheap one slightly optimistic, which is
-    the direction to know about when reading `solver_tolerance`.
+    pay on every fit. The raw difference under-states the true error by
+    construction -- it measures `C S (1 - 1/refine)` where the error is `C S` --
+    and a guard that reads low is a guard that passes a grid-limited fit. The
+    first-order correction is what makes it read slightly high instead: at this
+    cell's fitted rates, 4.14% against a true 3.89% at 100 ms and 12.86%
+    against 11.50% at 250, where the raw numbers were 3.15% and 9.75%.
     """
     dt = cell.sampling_interval
-    reference = max(int(round(10.0 / 1e3 / dt)), 1)
     k_act, k_inact = vmn.two_state_rates(0.004, 0.184)
     rates = dict(k_act=k_act, k_inact=k_inact, k_slow_in=20.0, k_slow_out=0.271)
-    for ms in (250.0, 100.0):
+    # One reference solve, shared: `state_grid_error(reference_step=...)` would
+    # re-run the expensive one per candidate and this test is in the fast tier.
+    truth = vmn._state_at_step(drive, dt, 1, 'two_state', rates)
+    for ms in (250.0, 100.0, 50.0):
         step = max(int(round(ms / 1e3 / dt)), 1)
-        cheap = vmn.state_grid_error(drive, dt, step, refine=4, **rates)
-        exact = vmn.state_grid_error(drive, dt, step, reference_step=reference,
-                                     **rates)
-        assert cheap <= exact + 1e-9, (ms, cheap, exact)
-        assert cheap > 0.6 * exact, (ms, cheap, exact)
+        guard = vmn.state_grid_error(drive, dt, step, refine=4, **rates)
+        raw = vmn.state_grid_error(drive, dt, step, refine=4, extrapolate=False,
+                                   **rates)
+        true = vmn._relative_deviation(
+            vmn._state_at_step(drive, dt, step, 'two_state', rates), truth)
+        assert raw < true, (ms, raw, true)          # the reason for the fix
+        assert guard >= true * 0.95, (ms, guard, true)
+        assert guard <= true * 1.6, (ms, guard, true)
+
+    # The correction applies to a refinement and not to a fixed reference,
+    # where there is no ratio to correct by.
+    step = max(int(round(100.0 / 1e3 / dt)), 1)
+    assert (vmn.state_grid_error(drive, dt, step, reference_step=2, **rates)
+            == vmn.state_grid_error(drive, dt, step, reference_step=2,
+                                    extrapolate=False, **rates))
 
 
 def test_the_grid_error_needs_the_rates_it_scores(cell, drive):
