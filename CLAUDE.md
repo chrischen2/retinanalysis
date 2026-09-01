@@ -486,6 +486,47 @@ Demoed in `demos/single_cell_main.ipynb` §"Populate the database" →
 that notebook are **deliberately left commented out**; don't uncomment
 them.
 
+## Iterating on the LNK (rodAdaptation)
+
+The single-cell LNK lives in
+`SingCell_Notebooks/rodAdaptation/variable_mean_noise.py` §8, and one
+`fit_lnk` call costs about 20 s. That floor is the optimiser, not the
+data — going from 570k samples to 114k took 51 s to 22 s, and
+`n_restarts=1` / `max_nfev=120` took nothing further off. So the debug
+loop is arranged around *not fitting*:
+
+- **`pytest -m "not slow"`** is the edit loop: ~7 s for 40 tests, of
+  which the real-data ones are ~1 s. The five synthetic fitting tests
+  are marked `slow` and were 95% of the old 160 s suite. Markers are
+  registered in `pyproject.toml`.
+- **`pytest tests/test_lnk_real_data.py`** runs against a *cached real
+  recording*, not a simulation: `fixtures/2020-06-11_B_extracellular.npz`
+  (0.93 MB, 19 epochs at 250 Hz). `vmn.load_fixture(name)` reads it in
+  0.03 s with no DataJoint, no volume mounted and no MATLAB engine.
+  `vmn.build_fixture(exp, block_ids, ...)` is the one step that needs
+  all three; run it once, off-line, `overwrite=True` to replace.
+  Everything skips cleanly if the `.npz` is absent.
+
+`vmn.subset_analysis` is what shrinks a recording, and **the two axes
+are not equivalent**. Decimating time is free — the noise is cut off at
+60 Hz, so 250 Hz reproduces the full-rate fit to three digits
+(r² 0.763 vs 0.761, β 10.24 vs 10.35). Dropping *epochs* is not: each
+epoch is one luminance step, so the epoch count is the sample size for
+`tau_on`/`tau_off`, and cutting 19 to 6 sent `tau_on` to its 60 s bound
+while saving less time than decimating did. `epochs_per_level` defaults
+to keeping every epoch.
+
+**`max_slope_factor` bounds `beta` relative to the sampled range**
+(`beta_max = factor * |beta0|`, `beta0 = sqrt(2π)/x_range`) and is
+opt-in, default `None`. It exists because the flat `SIGMOID_SLOPE_MAX`
+of 100 sits ~550x above `beta0` and so cannot flag a nonlinearity that
+has gone to a step function — on 2020-06-11_B the fit reaches β 10.2
+against a generator-axis β0 of 0.218 with `at_bounds` empty. It is not
+free: at factor 40 the fit trades 0.004 of held-out r² for `r2_gain`
+0.141 → 0.190, but by 16 the bound has pushed `tau_on` onto its own
+floor. The measured table is in the `sigmoid_start_and_bounds`
+docstring; there is no recommended value.
+
 ## Conventions
 
 - **Stick to in-place edits.** Don't create scratch notebooks /

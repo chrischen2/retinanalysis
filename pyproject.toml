@@ -58,3 +58,13 @@ dependencies = [
 Documentation = "https://github.com/DRezeanu/retinanalysis#readme"
 Issues = "https://github.com/DRezeanu/retinanalysis/issues"
 Source = "https://github.com/DRezeanu/retinanalysis"
+
+[tool.pytest.ini_options]
+# `slow` is the debug-loop switch. Fitting the LNK takes tens of seconds a
+# call, and five tests that each fit one are 95% of the suite's runtime, so
+# `pytest -m "not slow"` is what to run while editing and the unmarked run is
+# what to run before committing.
+markers = [
+  "slow: fits a model; tens of seconds. Skip with -m 'not slow'.",
+  "real_data: needs a cached recording under SingCell_Notebooks/rodAdaptation/fixtures/.",
+]

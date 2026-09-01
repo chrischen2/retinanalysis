@@ -609,6 +609,7 @@ def _adapting_cell(coupling='multiplicative', n_epochs=6, epoch_s=10.0,
     return analysis
 
 
+@pytest.mark.slow
 def test_lnk_beats_the_static_baseline_on_an_adapting_cell():
     """A slow state must earn its parameters where the adaptation is real.
 
@@ -624,6 +625,7 @@ def test_lnk_beats_the_static_baseline_on_an_adapting_cell():
     assert not model.at_bounds, model.at_bounds
 
 
+@pytest.mark.slow
 def test_lnk_identifies_which_coupling_generated_the_data():
     """The comparison must pick the mechanism that was actually simulated.
 
@@ -640,6 +642,7 @@ def test_lnk_identifies_which_coupling_generated_the_data():
         assert best == truth, (truth, {n: round(m.r2, 4) for n, m in models.items()})
 
 
+@pytest.mark.slow
 def test_lnk_state_never_sees_the_response():
     """Held-out scoring is only sound if the state is stimulus-driven.
 
@@ -777,6 +780,7 @@ def test_normalized_residual_matches_the_reference_scheme():
     assert banded.size == 2 * weighted.size
 
 
+@pytest.mark.slow
 def test_fit_filter_is_nested_in_the_frozen_fit():
     """Freeing the filter cannot fit the training data worse.
 
@@ -899,6 +903,7 @@ def test_two_state_depletes_under_sustained_drive():
     assert resting[late].mean() < resting[early].mean()
 
 
+@pytest.mark.slow
 def test_apparent_nonlinearity_is_analytic_and_signed_correctly():
     """Depletion must lower the gain, and the readout must not be confounded.
 

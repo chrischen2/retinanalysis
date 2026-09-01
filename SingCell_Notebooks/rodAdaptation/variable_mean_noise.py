@@ -1506,7 +1506,8 @@ SIGMOID_X50_HEADROOM = 1.0
 
 
 def sigmoid_start_and_bounds(x, y, rec_type: Optional[str] = None,
-                             alpha_max_factor: float = 10.0):
+                             alpha_max_factor: float = 10.0,
+                             max_slope_factor: Optional[float] = None):
     """Starting parameters and bounds for ``alpha * Phi(beta*x + gamma) + eps``.
 
     Every start value is read off the sampled nonlinearity, because each
@@ -1558,6 +1559,42 @@ def sigmoid_start_and_bounds(x, y, rec_type: Optional[str] = None,
     asymptote can be from them. Either side, because a falling nonlinearity's
     ``epsilon`` is its *upper* asymptote.
 
+    ``max_slope_factor`` scales the ``beta`` ceiling to the data instead of
+    leaving it at the flat :data:`SIGMOID_SLOPE_MAX`, and exists because that
+    flat number is what lets an LNK fit degenerate. ``beta0`` is
+    ``sqrt(2*pi)/x_range`` -- a transition spanning the sampled range -- so
+    ``max_slope_factor`` is directly "how many times narrower than the sampled
+    range the transition may be". On 2020-06-11_B ``extracellular`` the
+    one-state fit settles at ``beta`` 10.2 against a generator-axis ``beta0``
+    of 0.218: a transition 1/47 of the range, steeper than the ~100-point
+    binned nonlinearity can resolve. ``at_bounds`` stays empty throughout,
+    because 10.2 is nowhere near 100 -- which is the point. A flat ceiling
+    cannot flag a slope that is degenerate *for this axis*.
+
+    **The bound is not free, and the number is not a default.** Measured on
+    that cell, held-out r2 against the fraction the slow state contributes
+    (``r2_gain``):
+
+    ==========  =========  =====  ========  ==========
+    factor      beta       r2     r2_gain   tau_on
+    ==========  =========  =====  ========  ==========
+    none        10.24      0.763  0.141     0.81 s
+    40          8.76 (b)   0.759  0.190     0.54 s
+    24          5.25 (b)   0.725  0.246     0.15 s
+    16          3.50 (b)   0.681  0.289     at bound
+    8           1.75 (b)   0.479  0.212     at bound
+    ==========  =========  =====  ========  ==========
+
+    ``(b)`` marks ``beta`` sitting at its ceiling. Tightening the slope moves
+    explanatory work off the nonlinearity's steepness and onto the state, which
+    is what the bound is for: at 40 the fit gives up 0.004 of held-out r2 and
+    the state's contribution rises by a third. Past about 24 the bound starts
+    taking the fit with it, and by 16 it has pushed ``tau_on`` onto its own
+    floor -- a state made fast enough to stand in for the steepness it is no
+    longer allowed. So the default is ``None``, leaving the flat ceiling and
+    every existing fit unchanged; pass a number only after looking at what it
+    costs on the cell in hand.
+
     The start point matters as much as the box. The old guess fixed ``gamma``
     at 0 and left every bound infinite, and the optimiser drifted along a ridge
     where ``alpha`` and ``epsilon`` grow together and nearly cancel, using a
@@ -1604,6 +1641,8 @@ def sigmoid_start_and_bounds(x, y, rec_type: Optional[str] = None,
     if physiological is not None:
         alpha_max = min(alpha_max, float(physiological))
     beta_max = SIGMOID_SLOPE_MAX
+    if max_slope_factor is not None and np.isfinite(beta0) and beta0 != 0:
+        beta_max = min(beta_max, float(max_slope_factor) * abs(float(beta0)))
     x50_max = float(np.max(np.abs(x))) + SIGMOID_X50_HEADROOM * x_range
     gamma_max = beta_max * x50_max
 
@@ -4208,6 +4247,7 @@ def fit_lnk(analysis: ConditionAnalysis,
             weighted: bool = False,
             n_restarts: int = 2,
             filter_length_s: Optional[float] = None,
+            max_slope_factor: Optional[float] = None,
             state_dt_ms: float = 25.0,
             test_fraction: float = 0.25,
             max_nfev: int = 400,
@@ -4433,15 +4473,17 @@ def fit_lnk(analysis: ConditionAnalysis,
     # optimiser then begins exactly where the non-adaptive model already sits,
     # and only has to find what the state adds.
     _, lower_nl, upper_nl = sigmoid_start_and_bounds(
-        generator, response, rec_type=analysis.rec_type)
+        generator, response, rec_type=analysis.rec_type,
+        max_slope_factor=max_slope_factor)
     init_mask = np.asarray(analysis.sequence_light_mean, dtype=float) == init_level
     static_nl = fit_sigmoid(generator[init_mask], response[init_mask],
                             rec_type=analysis.rec_type)
     guess_nl = np.array([static_nl.get(name, np.nan)
                          for name in ('alpha', 'beta', 'gamma', 'epsilon')])
     if not np.all(np.isfinite(guess_nl)):
-        guess_nl, _, _ = sigmoid_start_and_bounds(generator, response,
-                                                  rec_type=analysis.rec_type)
+        guess_nl, _, _ = sigmoid_start_and_bounds(
+            generator, response, rec_type=analysis.rec_type,
+            max_slope_factor=max_slope_factor)
     # When `fit_filter` is on, each level's five shape parameters join the
     # search. LNKS optimises its filter for the same reason: the LNK filter is
     # not the LN filter, so freezing at the reverse-correlation estimate keeps
@@ -4629,6 +4671,7 @@ def two_state_rates(tau_fast: float, occupancy: float) -> Tuple[float, float]:
 def fit_lnk_two_state(analysis: ConditionAnalysis,
                       filter_mode: str = 'per_mean',
                       filter_length_s: Optional[float] = None,
+                      max_slope_factor: Optional[float] = None,
                       state_dt_ms: float = 250.0,
                       n_passes: int = 8,
                       solver_tolerance: float = 0.01,
@@ -4673,7 +4716,8 @@ def fit_lnk_two_state(analysis: ConditionAnalysis,
     state_step = max(int(round(state_dt_ms / 1e3 / dt)), 1)
 
     _, lower_nl, upper_nl = sigmoid_start_and_bounds(
-        generator, response, rec_type=analysis.rec_type)
+        generator, response, rec_type=analysis.rec_type,
+        max_slope_factor=max_slope_factor)
     init_mask = (np.asarray(analysis.sequence_light_mean, dtype=float)
                  == setup.init_level)
     static_nl = fit_sigmoid(generator[init_mask], response[init_mask],
@@ -4681,8 +4725,9 @@ def fit_lnk_two_state(analysis: ConditionAnalysis,
     guess_nl = np.array([static_nl.get(name, np.nan)
                          for name in ('alpha', 'beta', 'gamma', 'epsilon')])
     if not np.all(np.isfinite(guess_nl)):
-        guess_nl, _, _ = sigmoid_start_and_bounds(generator, response,
-                                                  rec_type=analysis.rec_type)
+        guess_nl, _, _ = sigmoid_start_and_bounds(
+            generator, response, rec_type=analysis.rec_type,
+            max_slope_factor=max_slope_factor)
     # `alpha` here is rate (or current) *per unit occupancy*, not a response
     # range: it multiplies `A`, which peaks near 0.3 rather than 1, so the
     # physiological ceiling has to be divided by that headroom or it binds for
@@ -5527,6 +5572,316 @@ def plot_lnk_fit(analysis: ConditionAnalysis,
                  f'one slow adaptive state', fontsize=11)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     return fig
+
+
+
+# --------------------------------------------------------------------------
+# 9. Cached recordings -- iterating on the model without the rig
+# --------------------------------------------------------------------------
+# Everything in sections 7 and 8 is fitted on a `ConditionAnalysis`, and
+# building one costs a DataJoint query, a read off the SSD, and a MATLAB call
+# for the noise draw. That is the right price to pay once and the wrong price
+# to pay on every edit to `fit_lnk`. The functions below cut the loop: take a
+# real analysis, shrink it, write it to a single `.npz`, and read it back in
+# well under a second with no database, no volume mounted, and no MATLAB
+# engine. A test or a debug session then runs against the cell rather than
+# against a simulation of one.
+#
+# **Only the sequence is stored.** `fit_lnk` reads the four `sequence_*`
+# arrays, the sampling interval, the stimulus cutoff and the units; the
+# grouped `stimulus`/`response` dictionaries are the same samples reorganised
+# by light mean, so they are rebuilt on load instead of doubling the file.
+# `ln_model` is dropped for the same reason -- the LNK estimates its own filter
+# by reverse correlation and never looks at it. Call :func:`fit_condition` on
+# the loaded object if the LN models are wanted.
+#
+# **What may be cut, and what may not**, measured on 2020-06-11_B
+# `extracellular` (19 epochs, 1 kHz, multiplicative coupling):
+#
+# ==========  =========  =========  =====  =======  ======  =====
+# subset      samples    file       r2     tau_on   beta    fit
+# ==========  =========  =========  =====  =======  ======  =====
+# full        570 000    --         0.761  0.88 s   10.35   51 s
+# decimate 2  285 000    1.83 MB    0.762  0.83 s   10.31   35 s
+# decimate 4  142 500    0.93 MB    0.763  0.81 s   10.24   22 s
+# 6 epochs    180 000    --         0.647  60.0 s   9.04    37 s
+# ==========  =========  =========  =====  =======  ======  =====
+#
+# Time is safe to decimate, and by more than caution suggests: the noise is cut
+# off at 60 Hz, so even 250 Hz leaves four samples per stimulus period, and the
+# fit is the same fit to three digits. Hence `decimate=4` as the default.
+#
+# *Epochs are not safe to drop.* The slow state is what the LNK is fitted for
+# and each epoch is one luminance step, so the epoch count is the sample size
+# for `tau_on`/`tau_off`: cutting 19 epochs to 6 sent `tau_on` to its 60 s bound
+# -- a fit reporting no recovery at all -- and cost 0.12 of held-out r2, while
+# saving less time than decimating did. So `epochs_per_level` exists and
+# defaults to keeping every epoch; use it to make a fixture for something that
+# is not the state, and never to make the state fit faster.
+#
+# **A fit still costs about 20 seconds and that floor is the optimiser, not the
+# data.** Going from 570 000 samples to 114 000 -- a factor of five -- took 51 s
+# to 22 s, and `n_restarts=1` with `max_nfev=120` took nothing further off. So
+# the fast loop is the tests that do *not* fit (they run in about a second on
+# the cached recording); the fitting tests are marked `slow` and are what to run
+# before committing.
+LNK_FIXTURE_ROOT = Path(__file__).resolve().parent / 'fixtures'
+FIXTURE_FORMAT_VERSION = 1
+
+
+def _epoch_order(sequence_epoch) -> List[int]:
+    """Epoch ids in the order they were recorded, first appearance winning."""
+    return list(dict.fromkeys(int(e) for e in np.asarray(sequence_epoch)))
+
+
+def _regroup_by_level(stimulus, response, light_mean, epoch):
+    """Rebuild the per-light-mean ``(epoch x time)`` arrays from the sequence.
+
+    The sequence is the same samples as ``analysis.stimulus`` /
+    ``analysis.response``, concatenated in recorded order instead of grouped by
+    light mean, so the grouping is recoverable and does not need storing. Rows
+    stay in recorded order within a level, which is the order
+    :func:`analyze_condition` builds them in.
+    """
+    light_means: List[float] = []
+    counts: Dict[float, int] = {}
+    grouped_s: Dict[float, np.ndarray] = {}
+    grouped_r: Dict[float, np.ndarray] = {}
+    epoch = np.asarray(epoch, dtype=int)
+    light_mean = np.asarray(light_mean, dtype=float)
+    stimulus = np.asarray(stimulus)
+    response = np.asarray(response)
+    by_level: Dict[float, List[int]] = OrderedDict()
+    for index in _epoch_order(epoch):
+        level = float(light_mean[epoch == index][0])
+        by_level.setdefault(level, []).append(index)
+    for level in sorted(by_level):
+        rows_s = [stimulus[epoch == index] for index in by_level[level]]
+        rows_r = [response[epoch == index] for index in by_level[level]]
+        width = min(row.size for row in rows_s)
+        light_means.append(level)
+        counts[level] = len(rows_s)
+        grouped_s[level] = np.vstack([row[:width] for row in rows_s])
+        grouped_r[level] = np.vstack([row[:width] for row in rows_r])
+    return light_means, counts, grouped_s, grouped_r
+
+
+def subset_analysis(analysis: ConditionAnalysis,
+                    epochs_per_level: Optional[int] = None,
+                    decimate: int = 1,
+                    seconds: Optional[float] = None) -> ConditionAnalysis:
+    """A smaller copy of one analysis, cut along whichever axis is asked for.
+
+    Every cut is made **per epoch** and the result reassembled, so epochs come
+    out equal length and a decimation phase never drifts across a boundary --
+    which slicing the concatenated sequence would do as soon as the epoch
+    length was not divisible by ``decimate``.
+
+    ``decimate``
+        keep every n-th sample. The stimulus is cut off at 60 Hz, so 1 kHz down
+        to 500 Hz (``decimate=2``) or 250 Hz (``4``) is still comfortably above
+        the signal. Below that the filter estimate starts to blur.
+    ``epochs_per_level``
+        keep the first n epochs of each light mean, in recorded order, so the
+        alternation is preserved. **Read the section comment before using it**:
+        the epoch count is the sample size for the slow state, and cutting it
+        is how a fit ends up reporting a time constant at its bound.
+    ``seconds``
+        truncate every epoch to its first n seconds. This one is not free
+        either: it keeps each luminance step and the recovery after it but
+        discards the steady state before the next, so the state's trajectory is
+        no longer the one the cell was on. Useful for a fixture about the
+        *nonlinearity*; misleading for one about the kinetics.
+
+    Returns a new object; the arrays are copies, so the original is untouched.
+    """
+    if int(decimate) < 1:
+        raise ValueError('decimate must be >= 1')
+    dt = float(analysis.sampling_interval)
+    epoch = np.asarray(analysis.sequence_epoch, dtype=int)
+    light = np.asarray(analysis.sequence_light_mean, dtype=float)
+    stimulus = np.asarray(analysis.sequence_stimulus, dtype=float)
+    response = np.asarray(analysis.sequence_response, dtype=float)
+    n_keep = (None if seconds is None else max(int(round(float(seconds) / dt)), 1))
+
+    seen: Dict[float, int] = {}
+    pieces = {name: [] for name in ('stimulus', 'response', 'light', 'epoch')}
+    for index in _epoch_order(epoch):
+        mask = epoch == index
+        level = float(light[mask][0])
+        seen[level] = seen.get(level, 0) + 1
+        if epochs_per_level is not None and seen[level] > int(epochs_per_level):
+            continue
+        cut = slice(0, n_keep, int(decimate))
+        pieces['stimulus'].append(stimulus[mask][cut])
+        pieces['response'].append(response[mask][cut])
+        pieces['light'].append(light[mask][cut])
+        pieces['epoch'].append(epoch[mask][cut])
+    if not pieces['stimulus']:
+        raise ValueError('the subset kept no epochs')
+
+    out = ConditionAnalysis(
+        exp_name=analysis.exp_name, block_ids=list(analysis.block_ids),
+        rec_type=analysis.rec_type,
+        sample_rate=float(analysis.sample_rate) / int(decimate),
+        units=analysis.units,
+        sampling_interval=dt * int(decimate),
+        skip_seconds=float(analysis.skip_seconds),
+        frequency_cutoff=float(analysis.frequency_cutoff),
+        filter_length_s=float(analysis.filter_length_s),
+        n_bins=int(analysis.n_bins))
+    out.sequence_stimulus = np.concatenate(pieces['stimulus'])
+    out.sequence_response = np.concatenate(pieces['response'])
+    out.sequence_light_mean = np.concatenate(pieces['light'])
+    out.sequence_epoch = np.concatenate(pieces['epoch'])
+    (out.light_means, out.n_epochs,
+     out.stimulus, out.response) = _regroup_by_level(
+        out.sequence_stimulus, out.sequence_response,
+        out.sequence_light_mean, out.sequence_epoch)
+    out.dropped_epochs = analysis.dropped_epochs.copy()
+    out.epoch_adjustments = analysis.epoch_adjustments.copy()
+    return out
+
+
+def save_analysis(analysis: ConditionAnalysis, path) -> Path:
+    """Write the sequence and its metadata to one compressed ``.npz``.
+
+    Samples are stored as float32 -- these are recorded currents and smoothed
+    rates, not a quantity where the eighth digit means anything, and it halves
+    a file that is meant to live beside the code. :func:`load_analysis` widens
+    them back to float64 so nothing downstream sees a different dtype than it
+    would from a live load.
+    """
+    import json as _json
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    meta = {
+        'format_version': FIXTURE_FORMAT_VERSION,
+        'exp_name': str(analysis.exp_name),
+        'block_ids': [int(b) for b in analysis.block_ids],
+        'rec_type': str(analysis.rec_type),
+        'units': str(analysis.units),
+        'sample_rate': float(analysis.sample_rate),
+        'sampling_interval': float(analysis.sampling_interval),
+        'skip_seconds': float(analysis.skip_seconds),
+        'frequency_cutoff': float(analysis.frequency_cutoff),
+        'filter_length_s': float(analysis.filter_length_s),
+        'n_bins': int(analysis.n_bins),
+        'light_means': [float(m) for m in analysis.light_means],
+        'dropped_epochs': (analysis.dropped_epochs.to_dict('records')
+                           if not analysis.dropped_epochs.empty else []),
+        'epoch_adjustments': (analysis.epoch_adjustments.to_dict('records')
+                              if not analysis.epoch_adjustments.empty else []),
+    }
+    np.savez_compressed(
+        path,
+        meta=np.array(_json.dumps(meta, default=str)),
+        sequence_stimulus=np.asarray(analysis.sequence_stimulus, dtype=np.float32),
+        sequence_response=np.asarray(analysis.sequence_response, dtype=np.float32),
+        sequence_light_mean=np.asarray(analysis.sequence_light_mean, dtype=np.float32),
+        sequence_epoch=np.asarray(analysis.sequence_epoch, dtype=np.int32))
+    return path
+
+
+def load_analysis(path) -> ConditionAnalysis:
+    """Read back what :func:`save_analysis` wrote.
+
+    ``ln_model`` is empty -- the file does not carry the LN fits, because the
+    LNK does not read them. :func:`fit_condition` fills it in if they are
+    wanted.
+    """
+    import json as _json
+
+    path = Path(path)
+    with np.load(path, allow_pickle=False) as data:
+        meta = _json.loads(str(data['meta'].item()))
+        stimulus = data['sequence_stimulus'].astype(float)
+        response = data['sequence_response'].astype(float)
+        light = data['sequence_light_mean'].astype(float)
+        epoch = data['sequence_epoch'].astype(int)
+    version = int(meta.get('format_version', 0))
+    if version != FIXTURE_FORMAT_VERSION:
+        raise ValueError(f'{path.name} is format version {version}; this module '
+                         f'writes and reads {FIXTURE_FORMAT_VERSION}')
+    analysis = ConditionAnalysis(
+        exp_name=meta['exp_name'], block_ids=list(meta['block_ids']),
+        rec_type=meta['rec_type'], sample_rate=meta['sample_rate'],
+        units=meta['units'], sampling_interval=meta['sampling_interval'],
+        skip_seconds=meta['skip_seconds'],
+        frequency_cutoff=meta['frequency_cutoff'],
+        filter_length_s=meta['filter_length_s'], n_bins=meta['n_bins'])
+    analysis.sequence_stimulus = stimulus
+    analysis.sequence_response = response
+    analysis.sequence_light_mean = light
+    analysis.sequence_epoch = epoch
+    (analysis.light_means, analysis.n_epochs,
+     analysis.stimulus, analysis.response) = _regroup_by_level(
+        stimulus, response, light, epoch)
+    analysis.dropped_epochs = pd.DataFrame(meta.get('dropped_epochs') or [])
+    analysis.epoch_adjustments = pd.DataFrame(meta.get('epoch_adjustments') or [])
+    return analysis
+
+
+def fixture_path(name: str, root=None) -> Path:
+    """Where a named fixture lives. ``name`` is a stem, without ``.npz``."""
+    return Path(root if root is not None else LNK_FIXTURE_ROOT) / f'{name}.npz'
+
+
+def load_fixture(name: str, root=None) -> ConditionAnalysis:
+    """Load a cached recording by name. The fast path for a debug loop."""
+    path = fixture_path(name, root=root)
+    if not path.exists():
+        raise FileNotFoundError(
+            f'no fixture {path}. Build one with build_fixture(...) -- see '
+            f'section 9 of {Path(__file__).name}')
+    return load_analysis(path)
+
+
+def build_fixture(exp_name: str, block_ids: Sequence[int],
+                  rec_type: str = 'extracellular',
+                  name: Optional[str] = None,
+                  root=None,
+                  overwrite: bool = False,
+                  epochs_per_level: Optional[int] = None,
+                  decimate: int = 4,
+                  seconds: Optional[float] = None,
+                  skip_seconds: float = 0.0,
+                  downsample: int = 10,
+                  max_epochs: Optional[int] = None,
+                  max_series_resistance: Optional[float] = 30e6,
+                  align_epoch_means: bool = True,
+                  verbose: bool = True) -> Path:
+    """Load one real recording and cache it as a fixture. Run once, off-line.
+
+    This is the only step that needs the database, the volumes and MATLAB.
+    Everything downstream reads the ``.npz`` it writes.
+
+    ``overwrite`` guards a file that already exists, following the same
+    convention as the archive drivers: a re-run has to be asked for. The
+    default ``decimate=4`` takes 1 kHz down to 250 Hz -- four times the
+    stimulus's 60 Hz cutoff, and measurably the same fit -- and keeps every
+    epoch. See the section comment for the comparison, and for why the epoch
+    axis is the one not to cut.
+    """
+    name = name or f'{exp_name}_{rec_type}'
+    path = fixture_path(name, root=root)
+    if path.exists() and not overwrite:
+        raise FileExistsError(f'{path} exists; pass overwrite=True to replace it')
+    analysis = analyze_condition(
+        exp_name, block_ids, rec_type=rec_type, skip_seconds=skip_seconds,
+        downsample=downsample, max_epochs=max_epochs,
+        max_series_resistance=max_series_resistance,
+        align_epoch_means=align_epoch_means, fit=False, verbose=verbose)
+    small = subset_analysis(analysis, epochs_per_level=epochs_per_level,
+                            decimate=decimate, seconds=seconds)
+    save_analysis(small, path)
+    if verbose:
+        n_epochs = len(_epoch_order(small.sequence_epoch))
+        print(f'{path}  {path.stat().st_size / 1e6:.2f} MB  '
+              f'{n_epochs} epochs, {small.sequence_stimulus.size} samples at '
+              f'{1.0 / small.sampling_interval:.0f} Hz')
+    return path
 
 
 def light_level_table(protocol_blocks: pd.DataFrame,
