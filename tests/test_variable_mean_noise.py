@@ -728,6 +728,57 @@ def test_sequence_is_in_recorded_order_and_alternates():
     assert np.all(np.diff(levels) != 0), levels
 
 
+def test_lnk_setup_reuses_static_ln_filter_and_nonlinearity():
+    """The LNK start must be the stored LN model, not a lookalike refit."""
+    analysis = _adapting_cell(n_epochs=4, epoch_s=2.0)
+    n_filter = vmn._even_filter_pts(analysis.filter_length_s,
+                                    analysis.sampling_interval)
+    for level in analysis.light_means:
+        filt = vmn.param_filter(
+            dict(numFilt=3.0, tauR=0.012, tauD=0.03,
+                 tauP=0.10, phi=20.0), n_filter, analysis.sampling_interval)
+        analysis.ln_model[level] = vmn.LNModel(
+            label=f'{level:g}', r2=0.5, filter=filt,
+            filter_time_s=np.arange(n_filter) * analysis.sampling_interval,
+            nl_x=np.array([]), nl_y=np.array([]),
+            params={'alpha': 80.0, 'beta': 2.5, 'gamma': -0.4,
+                    'epsilon': 4.0})
+
+    setup = vmn._prepare_lnk(
+        analysis, 'per_mean', None, 0, False, static_analysis=analysis)
+    assert setup is not None
+    assert setup.filter_source == 'static LN models'
+    assert setup.static_nl_guess is not None
+    source = analysis.ln_model[setup.init_level].filter
+    target = setup.filters[setup.init_level]
+    axis_scale = np.dot(source, target) / np.dot(target, target)
+    np.testing.assert_allclose(
+        setup.static_nl_guess,
+        [80.0, 2.5 * axis_scale, -0.4, 4.0], rtol=1e-10)
+
+
+def test_compare_lnk_couplings_prepares_the_generator_once(monkeypatch):
+    """Both mechanisms must share the expensive, identical filter setup."""
+    sentinel = object()
+    prepared = []
+    fitted = []
+
+    def fake_prepare(*args, **kwargs):
+        prepared.append((args, kwargs))
+        return sentinel
+
+    def fake_fit(*args, **kwargs):
+        fitted.append((kwargs['coupling'], kwargs['_setup']))
+        return None
+
+    monkeypatch.setattr(vmn, '_prepare_lnk', fake_prepare)
+    monkeypatch.setattr(vmn, 'fit_lnk', fake_fit)
+    result = vmn.compare_lnk_couplings(object(), verbose=False)
+    assert len(prepared) == 1
+    assert fitted == [(name, sentinel) for name in vmn.LNK_COUPLINGS]
+    assert result == {name: None for name in vmn.LNK_COUPLINGS}
+
+
 def test_param_filter_recovers_a_known_shape():
     """Round-trip through the five-parameter form.
 

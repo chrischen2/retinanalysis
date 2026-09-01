@@ -4042,6 +4042,7 @@ class LNKModel:
     # estimate, so a filter the form cannot represent is visible not silent.
     filter_r2: Dict[float, float] = field(default_factory=dict)
     filter_params: Dict[float, np.ndarray] = field(default_factory=dict)
+    filter_source: str = 'recomputed'
     fit_filter: bool = False
     filter_time_s: np.ndarray = field(default_factory=lambda: np.zeros(0))
     sampling_interval: float = np.nan
@@ -4051,6 +4052,7 @@ class LNKModel:
     r2_static: float = np.nan     # held-out epochs, same model with k = 0
     n_train_epochs: int = 0
     n_test_epochs: int = 0
+    n_warmup_epochs: int = 0
     predicted: np.ndarray = field(default_factory=lambda: np.zeros(0))
     predicted_static: np.ndarray = field(default_factory=lambda: np.zeros(0))
     state: np.ndarray = field(default_factory=lambda: np.zeros(0))
@@ -4590,7 +4592,7 @@ def _lnk_predict(generator, params, coupling: str, dt: float,
     # that the state has to stand in for it -- was being reported off a grid
     # that cannot represent it. And the arithmetic the coarse grid was buying
     # is 1.4 ms a call against 3.8 at 5 ms, on a fit that takes 20 seconds. So
-    # the default is 5 ms.
+    # the default is therefore the recording's native sampling interval.
     #
     # What that changed is the kinetics, not the fit quality: refitting this
     # cell at 5 ms leaves held-out r2 at 0.7628 and `r2_gain` at 0.1408 to four
@@ -4654,7 +4656,7 @@ def param_filter(params, n_points: int, dt: float) -> np.ndarray:
     return ParamFilterNode.get_filter_with_params(params, int(n_points), float(dt))
 
 
-def fit_param_filter(measured, dt: float, n_starts: int = 40,
+def fit_param_filter(measured, dt: float, n_starts: int = 8,
                      random_state: Optional[int] = 0) -> Tuple[np.ndarray, float]:
     """Fit the 5-parameter form to a measured filter. Returns ``(params, r2)``.
 
@@ -4698,12 +4700,26 @@ def fit_param_filter(measured, dt: float, n_starts: int = 40,
     upper = np.array([20.0, 5.0, 5.0, 20.0, 720.0])
     rng = np.random.default_rng(random_state)
     best, best_cost = None, np.inf
-    for _ in range(max(int(n_starts), 1)):
-        start = np.array([rng.uniform(0.5, 6.0),
-                          time_to_peak * rng.uniform(0.15, 1.5),
-                          time_to_peak * rng.uniform(0.5, 6.0),
-                          time_to_peak * rng.uniform(1.5, 12.0),
-                          rng.uniform(0.0, 360.0)])
+    spread = float(np.sum((target - target.mean()) ** 2))
+    # Two deterministic, data-scaled starts cover the common monophasic and
+    # biphasic cases. Additional seeded starts are attempted only when neither
+    # reaches a high-fidelity shape fit. This replaces forty unconditional
+    # random optimisations with an accuracy-based stopping rule.
+    starts = [
+        np.array([2.0, 0.5 * time_to_peak, 2.0 * time_to_peak,
+                  6.0 * time_to_peak, 180.0]),
+        np.array([4.0, 0.25 * time_to_peak, 4.0 * time_to_peak,
+                  12.0 * time_to_peak, 0.0]),
+    ]
+    for _ in range(max(int(n_starts) - len(starts), 0)):
+        starts.append(np.array([
+            rng.uniform(0.5, 6.0),
+            time_to_peak * rng.uniform(0.15, 1.5),
+            time_to_peak * rng.uniform(0.5, 6.0),
+            time_to_peak * rng.uniform(1.5, 12.0),
+            rng.uniform(0.0, 360.0),
+        ]))
+    for index, start in enumerate(starts[:max(int(n_starts), 2)]):
         try:
             candidate = least_squares(residual, np.clip(start, lower, upper),
                                       bounds=(lower, upper), max_nfev=3000)
@@ -4711,9 +4727,10 @@ def fit_param_filter(measured, dt: float, n_starts: int = 40,
             continue
         if candidate.cost < best_cost:
             best, best_cost = candidate, candidate.cost
+        if index >= 1 and spread > 0 and 1.0 - 2.0 * best_cost / spread >= 0.99:
+            break
     if best is None:
         return np.full(len(PARAM_FILTER_NAMES), np.nan), np.nan
-    spread = float(np.sum((target - target.mean()) ** 2))
     r2 = (1.0 - float(np.sum(residual(best.x) ** 2)) / spread
           if spread > 0 else np.nan)
     return best.x, r2
@@ -4787,10 +4804,13 @@ class _LNKSetup:
     shape_params: Dict[float, np.ndarray]
     init_level: float
     build_generator: object
+    static_nl_guess: Optional[np.ndarray] = None
+    filter_source: str = 'recomputed'
 
 
 def _prepare_lnk(analysis, filter_mode: str, filter_length_s, random_state,
-                 verbose: bool):
+                 verbose: bool, static_analysis: Optional[ConditionAnalysis] = None,
+                 filter_n_starts: int = 8):
     """Filter estimation, parameterisation and the generator, shared by both.
 
     Split out so the two-state variant cannot drift from the modulated one on
@@ -4852,13 +4872,30 @@ def _prepare_lnk(analysis, filter_mode: str, filter_length_s, random_state,
         norm_one = float(np.linalg.norm(one))
         return None if not np.isfinite(norm_one) or norm_one == 0 else one / norm_one
 
+    def static_model_for(level):
+        if static_analysis is None:
+            return None
+        matches = [(saved_level, model)
+                   for saved_level, model in static_analysis.ln_model.items()
+                   if np.isclose(float(saved_level), float(level), rtol=1e-6, atol=1e-9)]
+        return matches[0][1] if len(matches) == 1 else None
+
     per_mean: Dict[float, np.ndarray] = {}
+    used_static = True
     for mean_level in analysis.light_means:
-        block_s = analysis.stimulus.get(mean_level)
-        block_r = analysis.response.get(mean_level)
-        if block_s is None or not block_s.size:
-            continue
-        one = shape_filter(block_s, block_r)
+        static_model = static_model_for(mean_level)
+        one = (np.asarray(static_model.filter, dtype=float)
+               if static_model is not None else None)
+        if one is None or one.size != filter_pts or not np.all(np.isfinite(one)):
+            used_static = False
+            block_s = analysis.stimulus.get(mean_level)
+            block_r = analysis.response.get(mean_level)
+            if block_s is None or not block_s.size:
+                continue
+            one = shape_filter(block_s, block_r)
+        else:
+            norm_one = float(np.linalg.norm(one))
+            one = one / norm_one if norm_one > 0 else None
         if one is not None:
             per_mean[mean_level] = one
     if not per_mean:
@@ -4887,8 +4924,9 @@ def _prepare_lnk(analysis, filter_mode: str, filter_length_s, random_state,
     shape_params: Dict[float, np.ndarray] = {}
     filter_r2: Dict[float, float] = {}
     for level in levels:
-        found, r2 = fit_param_filter(measured_filters[level], dt,
-                                     random_state=random_state)
+        found, r2 = fit_param_filter(
+            measured_filters[level], dt, n_starts=filter_n_starts,
+            random_state=random_state)
         if not np.all(np.isfinite(found)):
             if verbose:
                 print(f'  lightMean {level:g}: filter could not be parameterised')
@@ -4930,11 +4968,42 @@ def _prepare_lnk(analysis, filter_mode: str, filter_length_s, random_state,
     generator = generator / scale
     filters = {level: one / scale for level, one in filters.items()}
     filter_causal = filters[levels[0]]
+
+    # The fitted static LN is the preferred starting model. Its filter shape
+    # transfers directly, but its beta lives on a differently scaled generator
+    # axis. Transform beta by the scalar relating the two filters; alpha,
+    # gamma, and epsilon retain their meanings. The adaptive fit may use a
+    # shared static refit below when that describes the combined levels better.
+    static_nl_guess = None
+    static_model = static_model_for(init_level)
+    if static_model is not None and static_model.params:
+        source_filter = np.asarray(static_model.filter, dtype=float)
+        target_filter = np.asarray(filters[init_level], dtype=float)
+        if source_filter.shape == target_filter.shape:
+            denominator = float(np.dot(target_filter, target_filter))
+            axis_scale = (float(np.dot(source_filter, target_filter)) / denominator
+                          if denominator > 0 else np.nan)
+            values = np.array([
+                static_model.params.get('alpha', np.nan),
+                static_model.params.get('beta', np.nan) * axis_scale,
+                static_model.params.get('gamma', np.nan),
+                static_model.params.get('epsilon', np.nan),
+            ], dtype=float)
+            if np.all(np.isfinite(values)):
+                static_nl_guess = values
+    if verbose:
+        source = 'stored static LN' if used_static else 'reverse correlation fallback'
+        nl_source = ('stored static LN' if static_nl_guess is not None
+                     else 'refit on the LNK generator')
+        print(f'  LNK starts -- filters: {source}; nonlinearity: {nl_source}')
     return _LNKSetup(
         stimulus=stimulus, response=response, epochs=epochs,
         generator=generator, dt=dt, filter_pts=filter_pts, levels=levels,
         filters=filters, filter_r2=filter_r2, shape_params=shape_params,
-        init_level=init_level, build_generator=build_generator)
+        init_level=init_level, build_generator=build_generator,
+        static_nl_guess=static_nl_guess,
+        filter_source=('static LN models' if used_static else 'recomputed'),
+    )
 
 
 def fit_lnk(analysis: ConditionAnalysis,
@@ -4942,14 +5011,18 @@ def fit_lnk(analysis: ConditionAnalysis,
             filter_mode: str = 'per_mean',
             fit_filter: bool = False,
             weighted: bool = False,
-            n_restarts: int = 2,
+            n_restarts: int = 1,
             filter_length_s: Optional[float] = None,
             max_slope_factor: Optional[float] = None,
-            state_dt_ms: float = 5.0,
+            state_dt_ms: Optional[float] = None,
             test_fraction: float = 0.25,
             max_nfev: int = 400,
             random_state: Optional[int] = 0,
-            verbose: bool = True) -> Optional[LNKModel]:
+            verbose: bool = True,
+            static_analysis: Optional[ConditionAnalysis] = None,
+            filter_n_starts: int = 8,
+            warmup_epochs: int = 0,
+            _setup: Optional[_LNKSetup] = None) -> Optional[LNKModel]:
     """Fit an LN cascade plus one slow adaptive state to the whole recording.
 
     Fitted on ``analysis.sequence_*`` -- every accepted epoch concatenated in
@@ -5024,151 +5097,43 @@ def fit_lnk(analysis: ConditionAnalysis,
     restarts are insurance; each extra one costs roughly the first, because a
     random start converges more slowly than the LN one.
 
-    **Held-out epochs, and no leakage.** A fraction of whole epochs is held out
-    of the residual; the state is still integrated across them, which is sound
-    because the state is driven by the stimulus alone. ``r2_static`` is the
-    same model with ``k`` forced to zero -- a nested baseline, so
+    **Held-out epochs, warm-up, and no leakage.** A fraction of whole epochs is
+    held out of the residual; the state is still integrated across them, which
+    is sound because it is driven by the stimulus alone. The first
+    ``warmup_epochs`` are also integrated but not fitted or scored, avoiding a
+    bias from the forced initial state ``a0=0``. ``r2_static`` is the same
+    model with ``k`` forced to zero -- a nested baseline, so
     ``r2_gain`` is what the adaptive state buys and nothing else.
 
     Returns ``None`` with a printed reason when the sequence is too short or
     the fit fails, rather than raising.
     """
     from scipy.optimize import least_squares
-    from retinanalysis.utils.cascadegraph import (compute_filter,
-                                                  convolve_filter_with_stim)
 
     if coupling not in LNK_COUPLINGS:
         raise ValueError(f'coupling must be one of {LNK_COUPLINGS}')
-    stimulus = np.asarray(analysis.sequence_stimulus, dtype=float)
-    response = np.asarray(analysis.sequence_response, dtype=float)
-    epochs = np.asarray(analysis.sequence_epoch, dtype=int)
-    if stimulus.size < 1000 or stimulus.size != response.size:
-        if verbose:
-            print('  no usable sequence: run analyze_condition first')
+    prepared = (_setup if _setup is not None else _prepare_lnk(
+        analysis, filter_mode, filter_length_s, random_state, verbose,
+        static_analysis=static_analysis, filter_n_starts=filter_n_starts))
+    if prepared is None:
         return None
-
-    dt = float(analysis.sampling_interval)
-    filter_length_s = (analysis.filter_length_s if filter_length_s is None
-                       else float(filter_length_s))
-    # Rounded up to even: `convolve_filter_with_stim` refuses an odd-length
-    # filter, and whether `filter_length_s / dt` lands odd is an accident of the
-    # sample rate -- 1.0 s at 125 Hz is 125, which raised "Filter must have an
-    # even number of points" from inside the fit rather than anywhere useful.
-    # One sample of extra filter is not a modelling decision.
-    filter_pts = _even_filter_pts(filter_length_s, dt)
-    cutoff = (analysis.frequency_cutoff
-              if np.isfinite(analysis.frequency_cutoff) else None)
-    cutoff_kwargs = ({} if cutoff is None
-                     else dict(frequency_cutoff=cutoff, sampling_interval=dt))
-    # --- one filter per light mean, not one for the recording ------------
-    #
-    # The temporal filter is genuinely different at the two light levels --
-    # on 2020-06-11_B time-to-peak is 32 ms dim against 59 ms bright and the
-    # biphasic index changes sign -- and the two shapes correlate only 0.71
-    # with each other. A filter pooled over both is a compromise describing
-    # neither, and it is not even an even-handed one: the bright condition's
-    # stimulus fluctuates 10x harder, so it dominates the regression (the
-    # pooled filter correlates 0.97 with the bright filter and 0.80 with the
-    # dim one). What the slow state is here to explain is the adaptation
-    # *within* a light level, which section 2b shows leaves the filter alone;
-    # the between-level filter change is a separate, faster effect and giving
-    # each level its own filter is how it stays out of the state's way.
-    #
-    # Each filter is normalised to unit norm, so it carries **shape only**.
-    # That is load-bearing: `compute_filter` returns a gain as well, and its
-    # gain is inversely proportional to the stimulus amplitude, so keeping it
-    # would equalise the generator across light levels and leave the state with
-    # no luminance signal to track at all. Stripped to shape, the generator's
-    # amplitude follows the stimulus -- 10x larger when bright, since `stdv`
-    # scales with `lightMean` -- which is exactly the "mean of a rectified
-    # signal" the kinetic block is supposed to adapt to.
-    def shape_filter(block_s, block_r):
-        one, _ = compute_filter(block_s, block_r, filter_pts,
-                                correct_stim_power=True, **cutoff_kwargs)
-        one = np.asarray(one, dtype=float)
-        norm_one = float(np.linalg.norm(one))
-        return None if not np.isfinite(norm_one) or norm_one == 0 else one / norm_one
-
-    per_mean: Dict[float, np.ndarray] = {}
-    for mean_level in analysis.light_means:
-        block_s = analysis.stimulus.get(mean_level)
-        block_r = analysis.response.get(mean_level)
-        if block_s is None or not block_s.size:
-            continue
-        one = shape_filter(block_s, block_r)
-        if one is not None:
-            per_mean[mean_level] = one
-    if not per_mean:
-        if verbose:
-            print('  no filter could be estimated')
-        return None
-
-    # The LNK paper initialises the filter and nonlinearity from an LN model
-    # fitted to the **high contrast period** -- one condition, not the pooled
-    # record. The analogue here is the brightest mean, whose absolute
-    # fluctuations are largest and whose LN fit is therefore best determined.
-    init_level = max(per_mean)
-    if filter_mode == 'shared':
-        measured_filters = {level: per_mean[init_level] for level in per_mean}
-    elif filter_mode == 'per_mean':
-        measured_filters = dict(per_mean)
-    else:
-        raise ValueError("filter_mode must be 'shared' or 'per_mean'")
-
-    # Reduce each measured filter to five parameters. LNKS fits its filter as
-    # 8 orthonormal basis coefficients rather than freezing the reverse-
-    # correlation estimate, because F_LNK is not F_LN; the same is available
-    # here at five parameters per level, and the reverse-correlation fit is
-    # what initialises them.
-    levels = sorted(measured_filters)
-    shape_params: Dict[float, np.ndarray] = {}
-    filter_r2: Dict[float, float] = {}
-    for level in levels:
-        found, r2 = fit_param_filter(measured_filters[level], dt,
-                                     random_state=random_state)
-        if not np.all(np.isfinite(found)):
-            if verbose:
-                print(f'  lightMean {level:g}: filter could not be parameterised')
-            return None
-        shape_params[level] = found
-        filter_r2[level] = r2
-    if verbose:
-        summary = ', '.join(f'{level:g}: r²={filter_r2[level]:.3f}' for level in levels)
-        print(f'  filter shape fit ({len(levels)} level(s)) -- {summary}')
-
-    light = np.asarray(analysis.sequence_light_mean, dtype=float)
-    boundaries = np.r_[0, np.flatnonzero(np.diff(epochs) != 0) + 1, epochs.size]
-
-    def build_generator(by_level: Dict[float, np.ndarray]):
-        """Convolve each epoch with the filter for its own light level.
-
-        Per epoch rather than per contiguous run, so a filter never straddles a
-        luminance step and each epoch's edge effects stay its own.
-        """
-        out = np.zeros_like(stimulus)
-        built = {level: param_filter(vector, filter_pts, dt)
-                 for level, vector in by_level.items()}
-        for start, stop in zip(boundaries[:-1], boundaries[1:]):
-            chosen = built.get(float(light[start]))
-            if chosen is None:
-                chosen = next(iter(built.values()))
-            out[start:stop] = convolve_filter_with_stim(
-                chosen, stimulus[start:stop][None, :])[0]
-        return out, built
-
-    generator, filters = build_generator(shape_params)
-    scale = float(np.std(generator))
-    if not np.isfinite(scale) or scale == 0:
-        if verbose:
-            print('  generator has no variance; filter estimate failed')
-        return None
-    # One global normalisation, so the amplitude *ratio* between light levels
-    # -- the thing that drives the state -- survives it.
-    generator = generator / scale
-    filters = {level: one / scale for level, one in filters.items()}
+    response = np.asarray(prepared.response, dtype=float)
+    epochs = np.asarray(prepared.epochs, dtype=int)
+    dt = float(prepared.dt)
+    filter_pts = int(prepared.filter_pts)
+    levels = list(prepared.levels)
+    shape_params = dict(prepared.shape_params)
+    filter_r2 = dict(prepared.filter_r2)
+    generator = np.asarray(prepared.generator, dtype=float)
+    filters = dict(prepared.filters)
+    build_generator = prepared.build_generator
     filter_causal = filters[levels[0]]
 
-    state_step = max(int(round(state_dt_ms / 1e3 / dt)), 1)
+    # Native sampling is the accuracy-preserving default. A coarser grid stays
+    # available for an explicit convergence experiment, but is no longer a
+    # hidden tuning constant that can be absorbed into the fitted time scales.
+    state_step = (1 if state_dt_ms is None else
+                  max(int(round(float(state_dt_ms) / 1e3 / dt)), 1))
 
     # Start the nonlinearity from an actual static LN fit, as the LNK
     # supplement does, rather than from the bounds helper's opening guess: the
@@ -5177,11 +5142,18 @@ def fit_lnk(analysis: ConditionAnalysis,
     _, lower_nl, upper_nl = sigmoid_start_and_bounds(
         generator, response, rec_type=analysis.rec_type,
         max_slope_factor=max_slope_factor)
-    init_mask = np.asarray(analysis.sequence_light_mean, dtype=float) == init_level
-    static_nl = fit_sigmoid(generator[init_mask], response[init_mask],
-                            rec_type=analysis.rec_type)
-    guess_nl = np.array([static_nl.get(name, np.nan)
-                         for name in ('alpha', 'beta', 'gamma', 'epsilon')])
+    # `_prepare_lnk` transforms beta onto this generator's scale, so these are
+    # the stored static-LN parameters rather than a second LN estimate that can
+    # quietly differ from the model shown in the preceding notebook section.
+    guess_nl = (None if prepared.static_nl_guess is None else
+                np.asarray(prepared.static_nl_guess, dtype=float).copy())
+    if guess_nl is None or not np.all(np.isfinite(guess_nl)):
+        init_mask = (np.asarray(analysis.sequence_light_mean, dtype=float)
+                     == prepared.init_level)
+        static_nl = fit_sigmoid(generator[init_mask], response[init_mask],
+                                rec_type=analysis.rec_type)
+        guess_nl = np.array([static_nl.get(name, np.nan)
+                             for name in ('alpha', 'beta', 'gamma', 'epsilon')])
     if not np.all(np.isfinite(guess_nl)):
         guess_nl, _, _ = sigmoid_start_and_bounds(
             generator, response, rec_type=analysis.rec_type,
@@ -5192,7 +5164,7 @@ def fit_lnk(analysis: ConditionAnalysis,
     # a bias that cannot be seen from inside the fit.
     filter_names = tuple(f'{name}_{level:g}' for level in levels
                          for name in PARAM_FILTER_NAMES) if fit_filter else ()
-    names = ('alpha', 'beta', 'gamma', 'epsilon', 'tau_on', 'tau_off',
+    names = ('alpha', 'beta', 'gamma', 'epsilon', 'log_tau_on', 'log_tau_off',
              'k') + filter_names
     # Same bounds for both couplings, so neither is handicapped in the
     # comparison. `k` is signed: positive suppresses the response as the cell
@@ -5205,9 +5177,21 @@ def fit_lnk(analysis: ConditionAnalysis,
     # subtractive at 7.3; at a limit of 5 the subtractive fit pinned and scored
     # 0.664 instead of 0.672, which would have flattered the winner.
     k_limit = 15.0
-    guess = np.r_[guess_nl, 2.0, 5.0, 0.5]
-    lower = np.r_[lower_nl, 0.05, 0.05, -k_limit]
-    upper = np.r_[upper_nl, 60.0, 60.0, k_limit]
+    boundaries = np.r_[0, np.flatnonzero(np.diff(epochs) != 0) + 1, epochs.size]
+    epoch_duration_s = float(np.median(np.diff(boundaries)) * dt)
+    # The shortest resolvable time constant is the integration interval; the
+    # longest is the whole analysed record. Both limits now follow the data
+    # instead of assuming every protocol has the same sample rate or duration.
+    tau_min = max(state_step * dt, dt)
+    tau_max = max(response.size * dt, 10.0 * tau_min)
+    # Start on the timescale over which an epoch can visibly adapt/recover.
+    # These fractions reproduce the former useful 2 s / 5 s start for a 10 s
+    # epoch while scaling automatically for other protocol durations.
+    tau_on_start = np.clip(0.20 * epoch_duration_s, tau_min, tau_max)
+    tau_off_start = np.clip(0.50 * epoch_duration_s, tau_min, tau_max)
+    guess = np.r_[guess_nl, np.log(tau_on_start), np.log(tau_off_start), 0.5]
+    lower = np.r_[lower_nl, np.log(tau_min), np.log(tau_min), -k_limit]
+    upper = np.r_[upper_nl, np.log(tau_max), np.log(tau_max), k_limit]
     if fit_filter:
         shape_lower = np.array([0.1, 1e-4, 1e-4, 1e-3, -720.0])
         shape_upper = np.array([20.0, 5.0, 5.0, 20.0, 720.0])
@@ -5216,17 +5200,40 @@ def fit_lnk(analysis: ConditionAnalysis,
         upper = np.r_[upper, np.tile(shape_upper, len(levels))]
 
     rng = np.random.default_rng(random_state)
-    unique_epochs = np.unique(epochs)
-    n_test = max(int(round(test_fraction * unique_epochs.size)), 1)
-    n_test = min(n_test, unique_epochs.size - 1)
-    test_epochs = rng.choice(unique_epochs, size=n_test, replace=False)
+    unique_epochs = np.asarray(_epoch_order(epochs), dtype=int)
+    n_warmup = min(max(int(warmup_epochs), 0), max(unique_epochs.size - 2, 0))
+    warmup = unique_epochs[:n_warmup]
+    score_epochs = unique_epochs[n_warmup:]
+    # Hold out each light level separately. A single unstratified draw can put
+    # most test epochs at one mean (or change the score sharply when a warm-up
+    # epoch is removed), which measures the random split more than the model.
+    light = np.asarray(analysis.sequence_light_mean, dtype=float)
+    epoch_level = {int(epoch): float(light[np.flatnonzero(epochs == epoch)[0]])
+                   for epoch in score_epochs}
+    test_groups = []
+    for level in sorted(set(epoch_level.values())):
+        candidates = np.asarray([epoch for epoch in score_epochs
+                                 if np.isclose(epoch_level[int(epoch)], level)],
+                                dtype=int)
+        if candidates.size < 2:
+            continue
+        count = min(max(int(round(test_fraction * candidates.size)), 1),
+                    candidates.size - 1)
+        test_groups.append(rng.choice(candidates, size=count, replace=False))
+    test_epochs = (np.concatenate(test_groups) if test_groups else
+                   np.asarray([], dtype=int))
+    n_test = int(test_epochs.size)
     is_test = np.isin(epochs, test_epochs)
-    train = ~is_test
+    is_warmup = np.isin(epochs, warmup)
+    train = ~is_test & ~is_warmup
 
     n_core = 7
 
     def unpack(vector):
-        return dict(zip(names, (float(v) for v in vector)))
+        raw = dict(zip(names, (float(v) for v in vector)))
+        raw['tau_on'] = float(np.exp(raw.pop('log_tau_on')))
+        raw['tau_off'] = float(np.exp(raw.pop('log_tau_off')))
+        return raw
 
     def generator_for(vector):
         """Generator for one parameter vector, rebuilt only if the filter moves."""
@@ -5263,8 +5270,8 @@ def fit_lnk(analysis: ConditionAnalysis,
     starts = [np.clip(guess, lower, upper)]
     for _ in range(max(int(n_restarts) - 1, 0)):
         draw = guess.copy()
-        draw[4] = rng.uniform(0.1, 20.0)      # tau_on
-        draw[5] = rng.uniform(0.1, 20.0)      # tau_off
+        draw[4] = rng.uniform(np.log(tau_min), np.log(tau_max))
+        draw[5] = rng.uniform(np.log(tau_min), np.log(tau_max))
         draw[6] = rng.uniform(-k_limit, k_limit)
         starts.append(np.clip(draw, lower, upper))
 
@@ -5314,7 +5321,7 @@ def fit_lnk(analysis: ConditionAnalysis,
 
     span = upper - lower
     at_bounds = tuple(
-        name for name, value, low, high, width
+        name.replace('log_tau_', 'tau_') for name, value, low, high, width
         in zip(names, result.x, lower, upper, span)
         if np.isfinite(width) and width > 0
         and (abs(value - low) <= 1e-6 * width or abs(value - high) <= 1e-6 * width))
@@ -5322,7 +5329,8 @@ def fit_lnk(analysis: ConditionAnalysis,
     model = LNKModel(
         coupling=coupling, params=params,
         filter=np.asarray(filter_causal, dtype=float), filters=filters,
-        filter_r2=filter_r2, fit_filter=bool(fit_filter),
+        filter_r2=filter_r2, filter_source=prepared.filter_source,
+        fit_filter=bool(fit_filter),
         filter_params={level: (np.asarray(result.x[n_core + 5 * i:
                                                    n_core + 5 * (i + 1)], float)
                                if fit_filter else shape_params[level])
@@ -5332,7 +5340,8 @@ def fit_lnk(analysis: ConditionAnalysis,
         r2=_variance_explained(predicted[is_test], response[is_test]),
         r2_train=_variance_explained(predicted[train], response[train]),
         r2_static=_variance_explained(predicted_static[is_test], response[is_test]),
-        n_train_epochs=int(unique_epochs.size - n_test), n_test_epochs=int(n_test),
+        n_train_epochs=int(score_epochs.size - n_test), n_test_epochs=int(n_test),
+        n_warmup_epochs=int(n_warmup),
         predicted=predicted, predicted_static=predicted_static, state=state,
         generator=generator, at_bounds=at_bounds)
     if verbose:
@@ -6162,8 +6171,17 @@ def compare_lnk_couplings(analysis: ConditionAnalysis, verbose: bool = True,
     mechanisms, not two settings of one, so the held-out difference between
     them is the pathway result rather than a diagnostic.
     """
+    setup = kwargs.pop('_setup', None)
+    if setup is None:
+        setup = _prepare_lnk(
+            analysis, kwargs.get('filter_mode', 'per_mean'),
+            kwargs.get('filter_length_s'), kwargs.get('random_state', 0), verbose,
+            static_analysis=kwargs.get('static_analysis'),
+            filter_n_starts=kwargs.get('filter_n_starts', 8))
+    if setup is None:
+        return {coupling: None for coupling in LNK_COUPLINGS}
     models = {coupling: fit_lnk(analysis, coupling=coupling, verbose=verbose,
-                                **kwargs)
+                                _setup=setup, **kwargs)
               for coupling in LNK_COUPLINGS}
     fitted = {name: m for name, m in models.items() if m is not None}
     if verbose and len(fitted) == 2:
@@ -6189,6 +6207,8 @@ def lnk_summary(models: Dict[str, Optional[LNKModel]]) -> pd.DataFrame:
                      'alpha': model.params.get('alpha', np.nan),
                      'beta': model.params.get('beta', np.nan),
                      'gamma': model.params.get('gamma', np.nan),
+                     'filter_source': model.filter_source,
+                     'n_warmup_epochs': model.n_warmup_epochs,
                      'n_test_epochs': model.n_test_epochs,
                      'at_bounds': ','.join(model.at_bounds)})
     return pd.DataFrame(rows)
