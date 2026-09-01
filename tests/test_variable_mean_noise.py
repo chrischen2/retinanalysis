@@ -233,7 +233,7 @@ def test_amplitude_ceiling_follows_the_recording_units():
 
     _, low_wc, high_wc = vmn.sigmoid_start_and_bounds(x, y, rec_type='exc')
     _, low_ex, high_ex = vmn.sigmoid_start_and_bounds(x, y, rec_type='extracellular')
-    assert high_wc[0] == vmn.SIGMOID_AMPLITUDE_MAX['exc'] == 5000.0
+    assert high_wc[0] == vmn.SIGMOID_AMPLITUDE_MAX['exc'] == 8000.0
     assert high_ex[0] == vmn.SIGMOID_AMPLITUDE_MAX['extracellular'] == 1000.0
     assert low_wc[0] == -high_wc[0] and low_ex[0] == -high_ex[0]
 
@@ -241,8 +241,8 @@ def test_amplitude_ceiling_follows_the_recording_units():
     # data-relative cap alone rather than silently applying a wrong unit.
     _, _, high_inh = vmn.sigmoid_start_and_bounds(x, y, rec_type='inh')
     _, _, high_none = vmn.sigmoid_start_and_bounds(x, y, rec_type=None)
-    assert high_inh[0] == 5000.0
-    assert high_none[0] > 5000.0
+    assert high_inh[0] == vmn.SIGMOID_AMPLITUDE_MAX['inh'] == 8000.0
+    assert high_none[0] > vmn.SIGMOID_AMPLITUDE_MAX['inh']
 
 
 def test_epsilon_is_not_capped_at_an_absolute_current():

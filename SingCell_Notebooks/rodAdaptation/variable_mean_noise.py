@@ -640,10 +640,29 @@ def cell_blocks(cells: pd.DataFrame, cell_index: int,
     subset = modes[modes.block_id.isin(block_ids)]
     if rec_type is None:
         counts = subset.groupby('rec_type').n_epochs.sum().sort_values(ascending=False)
-        counts = counts[counts.index.astype(str).ne('')]
+        # `Index.astype(str)` has no `.ne`; comparing gives the mask directly.
+        # This path had never run -- the notebook always passes rec_type
+        # explicitly -- so the documented rec_type=None default raised
+        # AttributeError on any call that reached it.
+        counts = counts[counts.index.astype(str) != '']
         rec_type = counts.index[0] if len(counts) else 'extracellular'
     chosen = [int(b) for b in subset.loc[subset.rec_type.eq(rec_type), 'block_id']]
-    return row.exp_name, (chosen or block_ids), rec_type
+    if not chosen:
+        # Refuse rather than fall back to every block the cell has. The old
+        # `chosen or block_ids` returned all of them *labelled with the type
+        # that was asked for*, so a request for `extracellular` on a cell that
+        # only ran `exc` handed back a synaptic current in pA to be fitted as a
+        # spike rate in Hz -- against the 1000 Hz amplitude ceiling instead of
+        # the 8000 pA one -- and, on a cell with both, concatenated a current
+        # and a rate into one "continuous record". Nothing downstream could
+        # detect it, because the returned rec_type looked like the answer.
+        available = sorted(str(one) for one in subset.rec_type.unique() if str(one))
+        raise ValueError(
+            f'cell_index {cell_index} has no {rec_type!r} blocks'
+            + (f'; it has {", ".join(available)}' if available else
+               ' and no typed blocks at all')
+            + '. Pass rec_type=None to take whichever it has most of.')
+    return row.exp_name, chosen, rec_type
 
 
 def _spike_rate(spike_samples, n_samples: int, sample_rate: float,
@@ -1466,8 +1485,15 @@ def epoch_stimulus(params, sample_rate: Optional[float] = None,
 # 3742 pA whole cell and 492 Hz extracellular, `beta` 32, `gamma` -14.3, and
 # the generator spanned -3.0 to +2.6.
 SIGMOID_AMPLITUDE_MAX = {
-    'exc': 5_000.0,            # pA -- a few nA of synaptic current
-    'inh': 5_000.0,            # pA
+    # 8 nA rather than 5. The ceiling should sit the same distance above what
+    # the mode actually produces in both cases, and it did not: an
+    # extracellular trace spanning ~500 Hz has 2x headroom under 1000 Hz, while
+    # 2020-06-11_B `exc` spans 3866 pA peak to peak and had only 1.29x under
+    # 5000. Whole-cell excitatory currents here run from a few thousand pA
+    # negative to a few hundred or thousand positive, so a 4-5 nA span is
+    # ordinary rather than exceptional and 5 nA was inside the working range.
+    'exc': 8_000.0,            # pA -- a few nA of synaptic current
+    'inh': 8_000.0,            # pA
     'extracellular': 1_000.0,  # Hz -- above any primate RGC's maintained rate
 }
 # 1 / generator unit. The transition of `alpha*Phi(beta*x + gamma)` takes about
