@@ -277,3 +277,110 @@ def test_the_slope_bound_moves_work_onto_the_state(cell, free_fit):
     assert bounded.r2_gain > free_fit.r2_gain, (bounded.r2_gain, free_fit.r2_gain)
     # The default has to leave the fit alone -- that is what makes it opt-in.
     assert not free_fit.at_bounds
+
+
+# --------------------------------------------------------------------------
+# The state's integration grid, on the real drive it has to integrate
+# --------------------------------------------------------------------------
+
+@pytest.fixture(scope='module')
+def drive(cell):
+    """A realistic rectified drive: the recorded stimulus through the sigmoid.
+
+    The grid error depends on what the state is integrating, so a synthetic
+    drive would be measuring the wrong thing -- this protocol's drive steps
+    between light levels and that step is what a coarse grid smears.
+
+    **Two epochs, not the whole record.** The reference these tests compare
+    against integrates at one sample per block, which is a Python loop over
+    every block: 570 s of it costs 25 s and puts these tests outside the fast
+    tier they belong in. Two epochs is 60 s spanning one luminance step -- the
+    feature under test -- and gives 3.0% at 100 ms against the full record's
+    3.6%, the same conclusion for a fortieth of the wait.
+    """
+    from scipy.stats import norm
+    order = vmn._epoch_order(cell.sequence_epoch)
+    width = int((cell.sequence_epoch == order[0]).sum())
+    g = np.asarray(cell.sequence_stimulus[:2 * width], dtype=float)
+    return norm.cdf(2.0 * (g - g.mean()) / g.std() - 0.5)
+
+
+def test_the_one_state_grid_resolves_the_taus_it_allows(cell, drive):
+    """`state_dt_ms` has to resolve the fastest `tau_on` the bounds permit.
+
+    `adaptation_state` is exponential Euler, so the step is a speed choice and
+    not a stability one -- which is exactly why it can be wrong quietly. At the
+    old 25 ms default the state was 5% of its own range off at this cell's
+    fitted taus and 57% off at the 0.05 s bound, and fits do reach that bound.
+    At 5 ms it is under 1% and 14%.
+    """
+    dt = cell.sampling_interval
+
+    def state_at(step, tau_on, tau_off):
+        coarse = vmn._bin_mean(drive[None, :], step).ravel()
+        fine = vmn.adaptation_state(coarse, dt * step, tau_on, tau_off)
+        return np.repeat(fine, step)[:drive.size]
+
+    default_step = max(int(round(5.0 / 1e3 / dt)), 1)
+    for tau_on, tau_off, tolerance in ((0.81, 1.09, 0.02), (0.15, 0.80, 0.05)):
+        reference = state_at(1, tau_on, tau_off)
+        error = (np.max(np.abs(state_at(default_step, tau_on, tau_off) - reference))
+                 / np.ptp(reference))
+        assert error < tolerance, (tau_on, tau_off, error)
+
+    # And the error has to fall with the step, or the grid is not the thing
+    # being measured.
+    reference = state_at(1, 0.15, 0.80)
+    errors = [np.max(np.abs(state_at(max(int(round(ms / 1e3 / dt)), 1), 0.15, 0.80)
+                            - reference)) / np.ptp(reference)
+              for ms in (40.0, 20.0, 10.0)]
+    assert errors[0] > errors[1] > errors[2], errors
+
+
+def test_the_slow_pool_ramps_across_the_block(cell, drive):
+    """Holding `I` fixed puts a staircase straight onto the model's output.
+
+    The gain is proportional to `R = 1 - A - I`, so quantising `I` at the block
+    rate quantises `A`. Measured on this recording, holding was 30% of `A`'s
+    range off at 250 ms and about the same at 10 s as at 1.4 s -- the signature
+    of a quantisation artefact, not of unresolved dynamics. The ramp costs a
+    second `_relax` per block and takes 100 ms to 3.6%.
+    """
+    dt = cell.sampling_interval
+    k_act, k_inact = vmn.two_state_rates(1e-3, 4.0)
+    step = max(int(round(100.0 / 1e3 / dt)), 1)
+    for k_in, k_out in ((3.0, 0.7), (3.0, 0.1)):
+        reference, _ = vmn.two_state_kinetics(
+            drive, dt, k_act, k_inact, k_in, k_out,
+            state_step=max(int(round(8.0 / 1e3 / dt)), 1))
+        active, inactivated = vmn.two_state_kinetics(drive, dt, k_act, k_inact,
+                                                     k_in, k_out, state_step=step)
+        error = np.max(np.abs(active - reference)) / np.ptp(reference)
+        assert error < 0.06, (k_out, error)
+        # `I` moves within a block rather than jumping between them.
+        inside = np.abs(np.diff(inactivated[:step]))
+        assert np.any(inside > 0), 'I is constant across the block -- not ramped'
+        # Occupancies stay physical, which the ramp must not break.
+        resting = 1.0 - active - inactivated
+        assert active.min() >= -1e-9 and inactivated.min() >= -1e-9
+        assert resting.min() >= -1e-9, resting.min()
+
+
+def test_the_solver_residual_tracks_the_grid_error(cell, drive):
+    """`return_residual` is the diagnostic to trust when the rates move.
+
+    100 ms is right for the regime these fits go to (a slow recovery, a large
+    in/out ratio) and *not* universally: at `k_slow_out` 2/s -- a 0.5 s pool --
+    it is still 25% off. The residual is what says so, so it has to rise with
+    the error rather than merely being printed.
+    """
+    dt = cell.sampling_interval
+    k_act, k_inact = vmn.two_state_rates(1e-3, 4.0)
+    residuals = []
+    for ms in (250.0, 100.0, 50.0):
+        step = max(int(round(ms / 1e3 / dt)), 1)
+        _, _, residual = vmn.two_state_kinetics(drive, dt, k_act, k_inact,
+                                                3.0, 0.7, state_step=step,
+                                                return_residual=True)
+        residuals.append(residual)
+    assert residuals[0] > residuals[1] > residuals[2], residuals

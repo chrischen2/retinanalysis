@@ -3771,10 +3771,37 @@ def two_state_kinetics(drive, dt: float, k_act: float, k_inact: float,
     192/s for a 5 ms response, leaving ``A`` at 0.005 and no adaptation to find.
 
     **Integration marches; it does not iterate.** ``A`` is fast and ``I`` is
-    slow, so each ``state_step`` block solves ``A`` exactly with ``I`` held
-    fixed (a first-order recurrence, hence :func:`_relax`) and then advances
-    ``I`` across that block from the block's mean ``A``. Because ``I`` is
-    carried forward as the march proceeds, this is unconditionally stable.
+    slow, so the record is walked in ``state_step`` blocks, each solving ``A``
+    with :func:`_relax` and advancing ``I`` across the block from the block's
+    mean ``A``. Because ``I`` is carried forward as the march proceeds, this is
+    unconditionally stable.
+
+    **``I`` ramps across the block; it is not held.** Predictor-corrector: the
+    block solves ``A`` once with ``I`` held at its starting value, uses that
+    mean to advance ``I``, then re-solves ``A`` against a linear ramp between
+    the two. This matters more than the block size does. Holding ``I`` fixed
+    makes it a staircase at the block rate, and since the gain is proportional
+    to ``R = 1 - A - I``, that staircase lands directly on the model's output:
+    measured on 2020-06-11_B, ``A`` came out 30% of its own range away from a
+    fine-grid reference at 250 ms -- and by about the same 30% whether the slow
+    time constant was 1.4 s or 10 s, which is the signature of a quantisation
+    artefact rather than of unresolved dynamics. The two solves cost 2x per
+    block and buy far more than 2x the accuracy:
+
+    ==========  =======  =======  ==========
+    state_step  hold     ramp     ramp cost
+    ==========  =======  =======  ==========
+    250 ms      30.5%    13.0%    254 ms
+    100 ms      17.6%     3.6%    546 ms
+    50 ms        8.4%     1.9%    1112 ms
+    ==========  =======  =======  ==========
+
+    Error is max ``|A - A_ref|`` over the 570 s record as a fraction of ``A``'s
+    range. Ramping at 100 ms beats holding at 25 ms on both axes -- 3.6%
+    against 4.0%, at 546 ms a call against 1299 -- which is why
+    :func:`fit_lnk_two_state` defaults to 100 and not to a smaller block.
+    ``return_residual=True`` reports how far ``I`` moves per block, and is the
+    number to watch if the fitted rates go somewhere these figures do not cover.
 
     An earlier version swept the whole record repeatedly instead, re-solving
     ``A`` against the previous sweep's ``I``. That converged only where the
@@ -3794,20 +3821,29 @@ def two_state_kinetics(drive, dt: float, k_act: float, k_inact: float,
     inactivated = np.empty_like(drive)
     slow = 0.0
     initial = 0.0
-    decay_slow = np.exp(-k_out * dt * step)
     for start in range(0, drive.size, step):
         stop = min(start + step, drive.size)
+        width = stop - start
         rate = activation[start:stop] + k_inact
-        block = _relax(activation[start:stop] * (1.0 - slow)
-                       / np.maximum(rate, 1e-12), rate, dt, initial)
+        inverse_rate = 1.0 / np.maximum(rate, 1e-12)
+        # Predictor: solve `A` with `I` held at the block's starting value,
+        # which is only needed for the block mean that advances `I`.
+        predicted = _relax(activation[start:stop] * (1.0 - slow) * inverse_rate,
+                           rate, dt, initial)
+        # Advance the slow pool across the block from that mean, then cap it at
+        # what the active state leaves free so R stays >= 0. The decay uses the
+        # block's own width, so a short final block is not over-decayed.
+        steady = k_in * float(np.mean(predicted)) / k_out
+        slow_end = steady + (slow - steady) * np.exp(-k_out * dt * width)
+        slow_end = float(np.clip(slow_end, 0.0, max(1.0 - predicted[-1], 0.0)))
+        # Corrector: re-solve `A` against `I` ramping linearly to that value.
+        ramp = np.linspace(slow, slow_end, width, endpoint=False)
+        block = _relax(activation[start:stop] * (1.0 - ramp) * inverse_rate,
+                       rate, dt, initial)
         active[start:stop] = block
-        inactivated[start:stop] = slow
+        inactivated[start:stop] = ramp
         initial = block[-1]
-        # Advance the slow pool across the block from its mean active value,
-        # then cap it at what the active state leaves free so R stays >= 0.
-        steady = k_in * float(np.mean(block)) / k_out
-        slow = steady + (slow - steady) * decay_slow
-        slow = float(np.clip(slow, 0.0, max(1.0 - initial, 0.0)))
+        slow = slow_end
     if return_residual:
         # A march has no iteration to converge, so the honest diagnostic is how
         # much the slow pool moves within one block relative to its own size --
@@ -3901,10 +3937,32 @@ def _lnk_predict(generator, params, coupling: str, dt: float,
     if not adaptive:
         return alpha * drive + epsilon, np.zeros_like(drive)
 
-    # Integrate the state on a coarser grid: its time constants are seconds, so
-    # 1 ms steps buy nothing and cost 40x the arithmetic. The drive is averaged
-    # into those bins rather than sampled, since the state responds to the mean
-    # drive over the step, not to whichever sample fell on the boundary.
+    # Integrate the state on a coarser grid, with the drive averaged into the
+    # bins rather than sampled -- the state responds to the mean drive over the
+    # step, not to whichever sample fell on the boundary.
+    #
+    # `state_step` is a speed choice, not a stability one (`adaptation_state`
+    # is exponential Euler), but it is not free, and the old 25 ms default was
+    # chosen on the assumption that it was. Measured on 2020-06-11_B as max
+    # |a - a(1 ms)| over the state's own range:
+    #
+    #   tau_on/tau_off     50 ms   25 ms   10 ms   5 ms
+    #   0.81 / 1.09         9.9%    5.2%    2.0%   0.9%     <- the fitted values
+    #   0.15 / 0.80        26.9%   15.0%    6.0%   2.7%
+    #   0.05 / 0.05        77.3%   56.9%   28.0%  13.7%     <- the tau floor
+    #
+    # The bottom row is not hypothetical: a fit that hits the 0.05 s bound on
+    # `tau_on` -- which happens whenever the nonlinearity is constrained enough
+    # that the state has to stand in for it -- was being reported off a grid
+    # that cannot represent it. And the arithmetic the coarse grid was buying
+    # is 1.4 ms a call against 3.8 at 5 ms, on a fit that takes 20 seconds. So
+    # the default is 5 ms.
+    #
+    # What that changed is the kinetics, not the fit quality: refitting this
+    # cell at 5 ms leaves held-out r2 at 0.7628 and `r2_gain` at 0.1408 to four
+    # digits, while `tau_on` goes 0.809 -> 0.572 s and `tau_off` 1.079 ->
+    # 0.866. The grid was being absorbed into the time constants and r2 gave no
+    # sign of it, which is why the check is on the state and not on the score.
     tau_on = float(params['tau_on']); tau_off = float(params['tau_off'])
     state = centred = None
     if cache is not None and cache.get('state_key') == (beta, gamma, tau_on,
@@ -4248,7 +4306,7 @@ def fit_lnk(analysis: ConditionAnalysis,
             n_restarts: int = 2,
             filter_length_s: Optional[float] = None,
             max_slope_factor: Optional[float] = None,
-            state_dt_ms: float = 25.0,
+            state_dt_ms: float = 5.0,
             test_fraction: float = 0.25,
             max_nfev: int = 400,
             random_state: Optional[int] = 0,
@@ -4672,7 +4730,7 @@ def fit_lnk_two_state(analysis: ConditionAnalysis,
                       filter_mode: str = 'per_mean',
                       filter_length_s: Optional[float] = None,
                       max_slope_factor: Optional[float] = None,
-                      state_dt_ms: float = 250.0,
+                      state_dt_ms: float = 100.0,
                       n_passes: int = 8,
                       solver_tolerance: float = 0.01,
                       weighted: bool = False,

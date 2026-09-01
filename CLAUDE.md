@@ -516,6 +516,41 @@ epoch is one luminance step, so the epoch count is the sample size for
 while saving less time than decimating did. `epochs_per_level` defaults
 to keeping every epoch.
 
+**The state's integration grid is a speed choice, and both defaults were
+set as if it were free.** Changed 2026-09-01 after measuring on
+2020-06-11_B; both integrators are exponential-Euler and unconditionally
+stable, so a grid that is too coarse is wrong *quietly*.
+
+- One-state `state_dt_ms` **25 → 5 ms**. At 25 ms the state was 5.2% of
+  its own range off at this cell's fitted taus and 56.9% off at the
+  0.05 s `tau_on` bound — and fits reach that bound whenever the
+  nonlinearity is constrained enough that the state has to stand in for
+  it. 5 ms is 0.9% / 13.7%, and costs 3.8 ms a call against 1.4 on a fit
+  that takes 20 s.
+- Two-state `state_dt_ms` **250 → 100 ms**, *and* `I` now ramps linearly
+  across each block instead of being held (predictor-corrector, two
+  `_relax` solves). Holding made `I` a staircase at the block rate, and
+  since gain ∝ `R = 1 - A - I` that lands on the output: `A` was 30% of
+  its range off at 250 ms, and by the same 30% whether the slow pool was
+  1.4 s or 10 s — a quantisation artefact, not unresolved dynamics.
+  Ramping at 100 ms gives 3.6% for 546 ms a call, beating holding at
+  25 ms (4.0%, 1299 ms) on both axes.
+
+**Any `tau_on`/`tau_off` reported before 2026-09-01 is ~20-30% too slow.**
+Refitting 2020-06-11_B at 5 ms against 25 ms leaves held-out r2 bit-identical
+at 0.7628 and `r2_gain` at 0.1408, while `tau_on` moves 0.809 -> 0.572 s and
+`tau_off` 1.079 -> 0.866. The coarse grid was being absorbed into the time
+constants, and the fit quality gave no sign of it -- which is the whole reason
+to check the grid rather than trust r2. The fit costs the same 21 s either way.
+
+**100 ms is right for the regime these fits go to, not universally.** At
+`k_slow_out` ≈ 2/s (a 0.5 s pool) it is still 25% off. `two_state_kinetics(
+..., return_residual=True)` is the number that says so and it tracks the
+error; `fit_lnk_two_state` prints it as `solver ±`. Note that
+`solver_tolerance` on that function is **dead** — declared, never read, and
+calibrated for the old iterating scheme's convergence residual rather than
+the march's per-block diagnostic. Don't compare the two.
+
 **`max_slope_factor` bounds `beta` relative to the sampled range**
 (`beta_max = factor * |beta0|`, `beta0 = sqrt(2π)/x_range`) and is
 opt-in, default `None`. It exists because the flat `SIGMOID_SLOPE_MAX`

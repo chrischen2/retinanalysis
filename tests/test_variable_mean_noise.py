@@ -816,12 +816,22 @@ def _two_state_reference(drive, dt, k_act, k_inact, k_slow_in, k_slow_out):
 def test_two_state_kinetics_matches_direct_integration():
     """The split solver must equal the coupled system it stands in for.
 
-    Each block solves `A` exactly with `I` held fixed and then advances `I`
-    across the block from the block's mean `A`. That is an approximation of the
-    coupled system, so it has to be checked against the coupled system rather
-    than assumed -- including at a large slow in/out ratio, since that is the
-    regime the real fits go to and the regime an earlier iterative solver
-    oscillated in.
+    Each block solves `A` with `_relax`, advances `I` across the block from the
+    block's mean `A`, and re-solves `A` against `I` ramping linearly to that
+    value. That is an approximation of the coupled system, so it has to be
+    checked against the coupled system rather than assumed -- including at a
+    large slow in/out ratio, since that is the regime the real fits go to and
+    the regime an earlier iterative solver oscillated in.
+
+    **The step pair has to straddle the solver's error, not the reference's.**
+    `_two_state_reference` is a direct forward-Euler integration at `dt`, so it
+    carries its own O(dt) error -- about 0.3% of `I`'s range here -- which no
+    refinement of `state_step` can remove. Measured: the error falls 4.2% to
+    0.42% between steps 2000 and 250, then sits flat at 0.3-0.4% all the way
+    down to step 1. Once the ramp made 250 ms accurate enough to reach that
+    floor, the old (250, 50) pair was comparing two numbers that were both the
+    reference's error and the ratio stopped meaning anything. Hence (2000,
+    500), where the solver is still what is being measured.
 
     The slow state's tolerance is relative to its own range. A marching scheme
     quantises `I` to the block, so its error scales with how far `I` travels,
@@ -846,12 +856,18 @@ def test_two_state_kinetics_matches_direct_integration():
         # cut the error by at least half; a scheme converging to the wrong
         # answer, or oscillating as the earlier iterative solver did, would not.
         errors = []
-        for step in (250, 50):
+        for step in (2000, 500):
             _, fine = vmn.two_state_kinetics(drive, dt, k_act, k_inact, k_in,
                                              k_out, state_step=step)
             errors.append(float(np.max(np.abs(ref_i - fine))) / span)
         assert errors[1] < 0.5 * errors[0] + 1e-3, (k_in, k_out, errors)
         assert errors[1] < 0.06, (k_in, k_out, errors)
+        # And it converges *onto* the reference rather than beside it: at the
+        # block size the fits actually use, all that is left is the
+        # reference's own floor.
+        _, settled = vmn.two_state_kinetics(drive, dt, k_act, k_inact, k_in,
+                                            k_out, state_step=100)
+        assert float(np.max(np.abs(ref_i - settled))) / span < 0.02, (k_in, k_out)
 
 
 def test_two_state_occupancies_stay_physical():
