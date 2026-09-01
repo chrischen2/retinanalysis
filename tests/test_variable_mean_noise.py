@@ -252,7 +252,7 @@ def test_sigmoid_start_handles_a_falling_curve():
 def test_amplitude_ceiling_follows_the_recording_units():
     """``alpha`` is a response amplitude, so its bound is in the response's units.
 
-    5 nA means nothing to an extracellular recording and 1000 Hz means nothing
+    8 nA means nothing to an extracellular recording and 1000 Hz means nothing
     to a voltage clamp, so the ceiling has to come from ``rec_type`` rather than
     from one constant.
     """
@@ -297,6 +297,23 @@ def test_epsilon_is_not_capped_at_an_absolute_current():
     fitted = vmn.fit_sigmoid(x, y, rec_type='exc')
     assert fitted['r2'] > 0.999
     assert abs(fitted['epsilon'] + 14_357.0) < 200.0
+    assert not fitted['at_bounds'], fitted['at_bounds']
+
+
+def test_whole_cell_nonlinearity_can_span_minus_10na_to_plus_1na():
+    """A recording-mode guard must never clip the response actually observed."""
+    from scipy.stats import norm
+
+    x = np.linspace(-2.5, 2.5, 200)
+    y = 1_000.0 - 11_000.0 * norm.cdf(1.7 * x - 0.3)
+    guess, lower, upper = vmn.sigmoid_start_and_bounds(x, y, rec_type='exc')
+    assert upper[0] >= 2.0 * np.ptp(y)
+    assert lower[0] <= -2.0 * np.ptp(y)
+    assert np.all(lower <= guess) and np.all(guess <= upper)
+
+    fitted = vmn.fit_sigmoid(x, y, rec_type='exc')
+    assert fitted['r2'] > 0.999
+    assert fitted['alpha'] < -10_000.0
     assert not fitted['at_bounds'], fitted['at_bounds']
 
 
@@ -658,6 +675,37 @@ def test_lnk_beats_the_static_baseline_on_an_adapting_cell():
 
 
 @pytest.mark.slow
+def test_ln_and_lnk_fit_a_large_negative_whole_cell_response():
+    """Parameter scaling and bounds must work in pA as well as spikes/s."""
+    analysis = _adapting_cell('multiplicative')
+    source = analysis.sequence_response.copy()
+    source_lo, source_span = float(source.min()), float(np.ptp(source))
+
+    def to_current(values):
+        # Same adapting response, expressed as a falling whole-cell current
+        # spanning +1 nA to -10 nA.
+        return 1_000.0 - 11_000.0 * (np.asarray(values) - source_lo) / source_span
+
+    analysis.sequence_response = to_current(analysis.sequence_response)
+    analysis.response = {level: to_current(values)
+                         for level, values in analysis.response.items()}
+    analysis.rec_type = 'exc'
+    analysis.units = 'current (pA)'
+
+    vmn.fit_condition(analysis, verbose=False)
+    assert all(np.isfinite(model.r2_train) for model in analysis.ln_model.values())
+    assert all(not model.params['at_bounds'] for model in analysis.ln_model.values())
+
+    model = vmn.fit_lnk(
+        analysis, coupling='multiplicative', static_analysis=analysis,
+        n_restarts=1, verbose=False)
+    assert model is not None
+    assert np.isfinite(model.r2) and np.isfinite(model.r2_static)
+    assert 'alpha' not in model.at_bounds and 'epsilon' not in model.at_bounds
+    assert np.ptp(model.predicted) > 1_000.0
+
+
+@pytest.mark.slow
 def test_lnk_identifies_which_coupling_generated_the_data():
     """The comparison must pick the mechanism that was actually simulated.
 
@@ -709,6 +757,60 @@ def test_lnk_state_never_sees_the_response():
                                   int(round(model.state_dt_s / model.sampling_interval)))
     np.testing.assert_array_equal(state_a, state_b)
     assert 'sequence_response' not in vmn._lnk_predict.__code__.co_names
+
+
+def test_nonlinearity_timelapse_is_one_basis_transformed_by_each_motif():
+    """Display windows sample kinetics; they must not become separate LN fits."""
+    from scipy.special import ndtr
+    import matplotlib.pyplot as plt
+
+    dt, epoch_pts, n_epochs = 0.01, 100, 3
+    generator = np.tile(np.linspace(-2.0, 2.0, epoch_pts), n_epochs)
+    epochs = np.repeat(np.arange(n_epochs), epoch_pts)
+    raw_state = np.tile(np.linspace(0.15, 0.85, epoch_pts), n_epochs)
+    analysis = vmn.ConditionAnalysis(
+        exp_name='whole-cell-timelapse', block_ids=[0], rec_type='exc',
+        sample_rate=1.0 / dt, units='current (pA)', sampling_interval=dt,
+        skip_seconds=0.0, frequency_cutoff=20.0, filter_length_s=0.1)
+    analysis.light_means = [1.0]
+    analysis.sequence_light_mean = np.ones(generator.size)
+    analysis.sequence_epoch = epochs
+    analysis.sequence_response = np.zeros(generator.size)
+
+    for coupling in vmn.LNK_COUPLINGS:
+        params = {'alpha': -11_000.0, 'beta': 1.8, 'gamma': -0.2,
+                  'epsilon': 1_000.0, 'tau_on': 1.0, 'tau_off': 2.0,
+                  'k': 0.7}
+        model = vmn.LNKModel(
+            coupling=coupling, params=params, generator=generator,
+            state=raw_state, sampling_interval=dt, state_dt_s=dt,
+            filter=np.ones(10), filters={1.0: np.ones(10)},
+            filter_time_s=np.arange(10) * dt)
+        curves = vmn.nonlinearity_timelapse(
+            analysis, model, windows_s=[(0.0, 0.5), (0.5, 1.0)],
+            n_points=25, min_bin_samples=5, warmup_epochs=0)
+        assert set(curves.columns) >= {'basis', 'model', 'state', 'generator'}
+        for _, piece in curves.groupby('order'):
+            x = piece.generator.to_numpy()
+            state = float(piece.state.iloc[0])
+            basis = (params['alpha'] * ndtr(params['beta'] * x + params['gamma'])
+                     + params['epsilon'])
+            np.testing.assert_allclose(piece.basis, basis)
+            if coupling == 'multiplicative':
+                expected = (params['alpha'] * np.exp(-params['k'] * state)
+                            * ndtr(params['beta'] * x + params['gamma'])
+                            + params['epsilon'])
+            else:
+                expected = (params['alpha'] * ndtr(
+                    params['beta'] * x + params['gamma'] - params['k'] * state)
+                    + params['epsilon'])
+            np.testing.assert_allclose(piece.model, expected)
+
+        figure = vmn.plot_nonlinearity_timelapse(analysis, model, curves,
+                                                  warmup_epochs=0)
+        assert figure is not None and len(figure.axes) == 4
+        assert figure.axes[2].get_ylabel() == 'current (pA)'
+        plt.close(figure)
 
 
 def test_sequence_is_in_recorded_order_and_alternates():

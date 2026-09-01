@@ -1492,10 +1492,12 @@ def epoch_stimulus(params, sample_rate: Optional[float] = None,
 # `alpha` is a response amplitude, so its ceiling depends on what the response
 # is measured in; `beta` and `gamma` live on the generator axis, which is in
 # contrast units whatever the amplifier was doing, so one number covers both
-# recording modes. Every value below is a ceiling no real cell reaches, not a
-# typical value -- the point is to cut off the degenerate ridge where `alpha`
-# and `epsilon` grow together and cancel, without touching any shape the data
-# can actually show. Measured over 57 fits from 24 cells: `alpha` reached
+# recording modes. Every value below is a nominal guard for an ordinary cell,
+# not a hard physiological maximum for whole-cell data -- that bound expands
+# with an unusually wide observed current range. The point is to cut off the
+# degenerate ridge where
+# `alpha` and `epsilon` grow together and cancel without rejecting unusually
+# large real data. Measured over 57 fits from 24 cells: `alpha` reached
 # 3742 pA whole cell and 492 Hz extracellular, `beta` 32, `gamma` -14.3, and
 # the generator spanned -3.0 to +2.6.
 SIGMOID_AMPLITUDE_MAX = {
@@ -1551,11 +1553,16 @@ def sigmoid_start_and_bounds(x, y, rec_type: Optional[str] = None,
     because they mean different things.
 
     ``alpha`` is a response amplitude, so its ceiling is in the units of the
-    recording: :data:`SIGMOID_AMPLITUDE_MAX` gives 5 nA for ``exc``/``inh`` and
-    1000 Hz for ``extracellular``, passed in through ``rec_type``. It is also
-    held within ``alpha_max_factor`` times the observed range, since a curve
-    cannot rise by much more than the data it was sampled from; the tighter of
-    the two applies. With ``rec_type=None`` only the data-relative cap does.
+    recording: :data:`SIGMOID_AMPLITUDE_MAX` gives a nominal 8 nA for
+    ``exc``/``inh`` and 1000 Hz for ``extracellular``, passed in through
+    ``rec_type``. It is also held within ``alpha_max_factor`` times the
+    observed range. For whole-cell data the final ceiling is never below two
+    observed response ranges, so a trace spanning -10 nA to +1 nA remains
+    inside the model rather than being clipped by its recording-mode label;
+    once that span exceeds the nominal guard, the full data-relative ceiling
+    applies. The 1000 Hz extracellular guard remains hard because these cells
+    occupy roughly 0--500 Hz and a larger span indicates a units or data
+    problem. With ``rec_type=None`` only the data-relative cap applies.
 
     ``beta`` and ``gamma`` live on the *generator* axis, which is in contrast
     units whatever the amplifier was doing, so one pair of numbers serves every
@@ -1653,7 +1660,23 @@ def sigmoid_start_and_bounds(x, y, rec_type: Optional[str] = None,
     alpha_max = float(alpha_max_factor) * y_range
     physiological = SIGMOID_AMPLITUDE_MAX.get(str(rec_type))
     if physiological is not None:
-        alpha_max = min(alpha_max, float(physiological))
+        # The mode value is a nominal guard against the alpha/epsilon ridge,
+        # never a claim that the data cannot be larger. Whole-cell recordings
+        # can span roughly -10 nA to +1 nA, already wider than the historical
+        # 8 nA guard. Keep at least two observed ranges so the fitted
+        # asymptotes can lie beyond the sampled response while retaining the
+        # tighter mode-specific guard for ordinary cells.
+        if str(rec_type) == 'extracellular':
+            # Spike rates in this dataset are 0--500 Hz; 1000 Hz is a true
+            # physiological guard, and a larger observed span is more likely
+            # a units/error problem than a valid firing-rate nonlinearity.
+            alpha_max = min(alpha_max, float(physiological))
+        elif y_range <= float(physiological):
+            alpha_max = max(2.0 * y_range,
+                            min(alpha_max, float(physiological)))
+        # Once the observations themselves exceed the nominal guard, the
+        # recording supplies the only defensible scale. Retain the full
+        # data-relative headroom for a partially sampled sigmoid.
     beta_max = SIGMOID_SLOPE_MAX
     if max_slope_factor is not None and np.isfinite(beta0) and beta0 != 0:
         beta_max = min(beta_max, float(max_slope_factor) * abs(float(beta0)))
@@ -5279,7 +5302,7 @@ def fit_lnk(analysis: ConditionAnalysis,
     for start in starts:
         try:
             candidate = least_squares(residual, start, bounds=(lower, upper),
-                                      max_nfev=max_nfev)
+                                      max_nfev=max_nfev, x_scale='jac')
         except Exception:
             continue
         if result is None or candidate.cost < result.cost:
@@ -5311,7 +5334,8 @@ def fit_lnk(analysis: ConditionAnalysis,
 
     try:
         static = least_squares(residual_static, np.clip(guess_nl, lower_nl, upper_nl),
-                               bounds=(lower_nl, upper_nl), max_nfev=max_nfev)
+                               bounds=(lower_nl, upper_nl), max_nfev=max_nfev,
+                               x_scale='jac')
         static_params = dict(zip(names[:4], (float(v) for v in static.x)))
         static_params.update(tau_on=1.0, tau_off=1.0, k=0.0)
         predicted_static, _ = _lnk_predict(generator, static_params, coupling,
@@ -5884,7 +5908,8 @@ def nonlinearity_timelapse(analysis: ConditionAnalysis, model: LNKModel,
 
     Columns: ``lightMean``, ``window``, ``order``, ``t_mid_s``, ``state``
     (mean standardised state in that window), ``n_samples``, ``generator``,
-    ``model``, ``data``.
+    ``basis`` (the fixed ``a'=0`` LNK nonlinearity), ``model`` (that basis
+    transformed by the kinetic motif), and ``data``.
     """
     from scipy.special import ndtr
 
@@ -5935,6 +5960,7 @@ def nonlinearity_timelapse(analysis: ConditionAnalysis, model: LNKModel,
         # This level's own generator range; the two differ by about 10x.
         lo, hi = np.percentile(generator[level_mask], [1, 99])
         grid = np.linspace(lo, hi, int(n_points))
+        basis = alpha * ndtr(beta * grid + gamma) + epsilon
         edges = np.percentile(generator[level_mask], np.linspace(1, 99, 26))
         centres = 0.5 * (edges[:-1] + edges[1:])
         for order, (start_s, stop_s) in enumerate(windows_s):
@@ -5956,12 +5982,13 @@ def nonlinearity_timelapse(analysis: ConditionAnalysis, model: LNKModel,
                                if (which == i).sum() >= min_bin_samples else np.nan
                                for i in range(centres.size)])
             label = f'{start_s:.1f}-{stop_s:.1f} s'
-            for value, curve_value in zip(grid, curve):
+            for value, basis_value, curve_value in zip(grid, basis, curve):
                 rows.append({'lightMean': mean_level, 'window': label,
                              'order': order,
                              't_mid_s': 0.5 * (start_s + stop_s),
                              'state': a_bar, 'n_samples': n,
                              'generator': float(value),
+                             'basis': float(basis_value),
                              'model': float(curve_value),
                              'data': float(np.interp(value, centres, binned))})
     return pd.DataFrame(rows)
@@ -6021,14 +6048,15 @@ def plot_nonlinearity_timelapse(analysis: ConditionAnalysis, model: LNKModel,
                                 figsize: Optional[Tuple[float, float]] = None):
     """The state, the nonlinearity it implies, and the filter, over one epoch.
 
-    Three columns per light mean, left to right: **the state** running from the
-    luminance step with the window edges marked, so the sampling of the
-    adaptation is visible rather than assumed; **the nonlinearity** at each of
-    those windows, model as a line and the measured response binned on the
-    generator as dots; and **the temporal filter** over the same windows, taken
-    from the windowed LN fits of §2b when they are passed in.
+    Four columns per light mean, left to right: **the state** running from the
+    luminance step; **the kinetic conversion**, either the multiplicative gain
+    factor or the subtractive generator-axis shift; **the nonlinearity** at
+    each window, with the fixed ``a'=0`` LNK basis shown explicitly; and **the
+    temporal filter** over the same windows, taken from the windowed LN fits of
+    §2b when they are passed in. The windows sample the state for display only;
+    no LN component is refitted in a window.
 
-    **The third column is the model's central assumption, drawn.** This
+    **The fourth column is the model's central assumption, drawn.** This
     reduction keeps only a slow state, which cannot restructure a filter -- so
     the filter is frozen per light mean and every change within a level is
     charged to the nonlinearity. If the windowed filters in the right-hand
@@ -6039,7 +6067,6 @@ def plot_nonlinearity_timelapse(analysis: ConditionAnalysis, model: LNKModel,
     filter the LNK used.
     """
     import matplotlib.pyplot as plt
-    from matplotlib import cm
 
     from retinanalysis.utils import style
 
@@ -6060,7 +6087,8 @@ def plot_nonlinearity_timelapse(analysis: ConditionAnalysis, model: LNKModel,
         return None
 
     orders = sorted(curves.order.unique())
-    shades = cm.get_cmap('viridis')(np.linspace(0.08, 0.92, len(orders)))
+    cmap = plt.get_cmap('viridis')
+    shades = cmap(np.linspace(0.08, 0.92, len(orders)))
     colors = dict(zip(orders, shades))
 
     dt = float(analysis.sampling_interval)
@@ -6073,8 +6101,8 @@ def plot_nonlinearity_timelapse(analysis: ConditionAnalysis, model: LNKModel,
     stops = np.r_[starts[1:], epochs.size]
 
     if figsize is None:
-        figsize = (13.5, 3.6 * len(means) + 0.8)
-    fig, axes = plt.subplots(len(means), 3, figsize=figsize, squeeze=False)
+        figsize = (16.5, 3.6 * len(means) + 0.8)
+    fig, axes = plt.subplots(len(means), 4, figsize=figsize, squeeze=False)
 
     for row, mean_level in enumerate(means):
         block = curves[curves.lightMean.eq(mean_level)]
@@ -6084,13 +6112,15 @@ def plot_nonlinearity_timelapse(analysis: ConditionAnalysis, model: LNKModel,
         warm = set(np.unique(epochs)[:int(warmup_epochs)]) if warmup_epochs > 0 else set()
         cuts = [state[start:stop] for start, stop in zip(starts, stops)
                 if light[start] == mean_level and epochs[start] not in warm]
+        state_time = mean_state = None
         if cuts:
             width = min(piece.size for piece in cuts)
             stack = np.vstack([piece[:width] for piece in cuts])
-            t = np.arange(width) * dt
-            ax.plot(t, stack.mean(axis=0), color='0.25', lw=1.6)
-            ax.fill_between(t, stack.mean(axis=0) - stack.std(axis=0),
-                            stack.mean(axis=0) + stack.std(axis=0),
+            state_time = np.arange(width) * dt
+            mean_state = stack.mean(axis=0)
+            ax.plot(state_time, mean_state, color='0.25', lw=1.6)
+            ax.fill_between(state_time, mean_state - stack.std(axis=0),
+                            mean_state + stack.std(axis=0),
                             color='0.5', alpha=.2, lw=0)
         for order in orders:
             piece = block[block.order.eq(order)]
@@ -6104,8 +6134,44 @@ def plot_nonlinearity_timelapse(analysis: ConditionAnalysis, model: LNKModel,
         if row == len(means) - 1:
             ax.set_xlabel('time since the step (s)', fontsize=9)
 
-        # --- the nonlinearity at each window -------------------------------
+        # --- the kinetic motif converts state into scale or shift ----------
         ax = axes[row][1]
+        trajectory = (block[['order', 't_mid_s', 'state']]
+                      .drop_duplicates('order').sort_values('order'))
+        if model.coupling == 'multiplicative':
+            converted = np.exp(-float(model.params['k']) * trajectory.state)
+            continuous = (np.exp(-float(model.params['k']) * mean_state)
+                          if mean_state is not None else None)
+            reference = 1.0
+            ylabel = 'gain factor exp(-k a′)'
+        else:
+            beta = float(model.params['beta'])
+            converted = (float(model.params['k']) * trajectory.state / beta
+                         if abs(beta) > 1e-12 else
+                         np.full(len(trajectory), np.nan))
+            continuous = (float(model.params['k']) * mean_state / beta
+                          if mean_state is not None and abs(beta) > 1e-12
+                          else None)
+            reference = 0.0
+            ylabel = 'generator shift k a′ / beta'
+        ax.axhline(reference, color='0.55', lw=1.0, ls='--')
+        if continuous is not None:
+            ax.plot(state_time, continuous, color='#7B3294', lw=1.4,
+                    alpha=.75)
+        ax.plot(trajectory.t_mid_s, converted, 'o-', color='#7B3294',
+                lw=1.6, ms=4)
+        ax.set_ylabel(ylabel, fontsize=9)
+        if row == 0:
+            ax.set_title(f'kinetic conversion ({model.coupling})', fontsize=10)
+        if row == len(means) - 1:
+            ax.set_xlabel('time since the step (s)', fontsize=9)
+
+        # --- one fixed basis transformed at each sampled state -------------
+        ax = axes[row][2]
+        basis_piece = block[block.order.eq(orders[0])].sort_values('generator')
+        if not basis_piece.empty and 'basis' in basis_piece:
+            ax.plot(basis_piece.generator, basis_piece.basis, '--', lw=2.0,
+                    color='0.15', label="fixed LNK basis (a'=0)")
         for order in orders:
             piece = block[block.order.eq(order)].sort_values('generator')
             if piece.empty:
@@ -6117,7 +6183,7 @@ def plot_nonlinearity_timelapse(analysis: ConditionAnalysis, model: LNKModel,
                     color=colors[order], alpha=.75, mew=0)
         ax.legend(frameon=False, fontsize=7.5, title='time since step',
                   title_fontsize=7.5, loc='upper left')
-        ax.set_ylabel('response', fontsize=9)
+        ax.set_ylabel(analysis.units, fontsize=9)
         if row == 0:
             ax.set_title(f'nonlinearity ({model.coupling}; '
                          f'lines model, dots measured)', fontsize=10)
@@ -6125,13 +6191,13 @@ def plot_nonlinearity_timelapse(analysis: ConditionAnalysis, model: LNKModel,
             ax.set_xlabel('generator (SD)', fontsize=9)
 
         # --- the filter over the same windows ------------------------------
-        ax = axes[row][2]
+        ax = axes[row][3]
         frozen = model.filters.get(mean_level)
         drawn = 0
         if temporal_models:
             windowed = temporal_models.get(mean_level) or []
             for index, one in enumerate(windowed):
-                shade = cm.get_cmap('viridis')(
+                shade = cmap(
                     0.08 + 0.84 * index / max(len(windowed) - 1, 1))
                 vector = np.asarray(one.filter, dtype=float)
                 norm = float(np.linalg.norm(vector))
@@ -6312,10 +6378,15 @@ def plot_lnk_fit(analysis: ConditionAnalysis,
     # --- the mechanism: nonlinearity at a low and a high state -------------
     grid_g = np.linspace(-3, 3, 200)
     for name, model in fitted.items():
-        centred = model.state - float(np.mean(model.state))
+        spread = float(np.std(model.state))
+        centred = ((model.state - float(np.mean(model.state))) /
+                   (spread if spread > 1e-9 else 1.0))
         low, high = np.percentile(centred, [10, 90])
         p = model.params
         argument = p['beta'] * grid_g + p['gamma']
+        ax_nl.plot(grid_g, p['alpha'] * norm.cdf(argument) + p['epsilon'],
+                   color=palette[name], lw=1.0, ls=':', alpha=.8,
+                   label=f'{name}, fixed basis')
         for value, ls, tag in ((low, '-', 'adapted low'), (high, '--', 'adapted high')):
             if name == 'multiplicative':
                 curve = p['alpha'] * np.exp(-p['k'] * value) * norm.cdf(argument) + p['epsilon']
