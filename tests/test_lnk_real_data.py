@@ -22,6 +22,7 @@ If the file is missing every test here skips rather than failing, since it is
 data and not code.
 """
 import sys
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -384,3 +385,204 @@ def test_the_solver_residual_tracks_the_grid_error(cell, drive):
                                                 return_residual=True)
         residuals.append(residual)
     assert residuals[0] > residuals[1] > residuals[2], residuals
+
+
+def test_the_grid_error_falls_with_the_step(cell, drive):
+    """Against a fixed reference the sequence must be a convergence curve.
+
+    This is the property a sweep needs and the reason `reference_step` exists.
+    With each candidate refined against *itself* the sequence is not monotone --
+    measured on this cell, 200 ms scored 5.8% and 100 ms scored 8.4%, because
+    the two were compared against different references -- so a scan built on
+    that could not justify picking anything. Both numbers are individually
+    meaningful; only the fixed reference makes them comparable.
+
+    **Monotone where the scheme is asymptotic, which is not everywhere.** At
+    the coarse end it still is not: 400 ms scores 6.3% against 200 ms at 7.3%
+    for these rates, because a block that long is not resolving anything and
+    the max-abs error over the record stops behaving like a truncation term.
+    That is why `scan_state_dt` requires two consecutive passing candidates
+    rather than trusting one -- and why this test asserts the curve only from
+    200 ms down, where the recommendation actually lives.
+    """
+    dt = cell.sampling_interval
+    reference = max(int(round(10.0 / 1e3 / dt)), 1)
+    k_act, k_inact = vmn.two_state_rates(1e-3, 4.0)
+    rates = dict(k_act=k_act, k_inact=k_inact, k_slow_in=3.0, k_slow_out=0.7)
+    errors = [vmn.state_grid_error(drive, dt, max(int(round(ms / 1e3 / dt)), 1),
+                                   reference_step=reference,
+                                   variant='two_state', **rates)
+              for ms in (200.0, 100.0, 50.0, 25.0)]
+    assert errors == sorted(errors, reverse=True), errors
+    assert errors[-1] > 0, errors
+
+    one = [vmn.state_grid_error(drive, dt, max(int(round(ms / 1e3 / dt)), 1),
+                                reference_step=reference, variant='one_state',
+                                tau_on=0.15, tau_off=0.80)
+           for ms in (100.0, 50.0, 25.0)]
+    assert one == sorted(one, reverse=True) and one[-1] > 0, one
+
+    # A step at or below the reference has nothing finer to be compared with.
+    assert vmn.state_grid_error(drive, dt, reference, reference_step=reference,
+                                variant='one_state', tau_on=0.15,
+                                tau_off=0.80) == 0.0
+
+
+def test_the_two_metrics_agree_on_size(cell, drive):
+    """The guard's cheap metric has to track the expensive one.
+
+    `fit_lnk_two_state` checks itself with the `refine` comparison, because a
+    fixed fine reference over the whole record is a solve it would rather not
+    pay for on every fit. That is only sound if the two agree about magnitude.
+    At this cell's fitted rates they do -- 3.15% against 3.89% at 100 ms, 9.75%
+    against 11.50% at 250 -- with the cheap one slightly optimistic, which is
+    the direction to know about when reading `solver_tolerance`.
+    """
+    dt = cell.sampling_interval
+    reference = max(int(round(10.0 / 1e3 / dt)), 1)
+    k_act, k_inact = vmn.two_state_rates(0.004, 0.184)
+    rates = dict(k_act=k_act, k_inact=k_inact, k_slow_in=20.0, k_slow_out=0.271)
+    for ms in (250.0, 100.0):
+        step = max(int(round(ms / 1e3 / dt)), 1)
+        cheap = vmn.state_grid_error(drive, dt, step, refine=4, **rates)
+        exact = vmn.state_grid_error(drive, dt, step, reference_step=reference,
+                                     **rates)
+        assert cheap <= exact + 1e-9, (ms, cheap, exact)
+        assert cheap > 0.6 * exact, (ms, cheap, exact)
+
+
+def test_the_grid_error_needs_the_rates_it_scores(cell, drive):
+    """A missing rate must be an error, not a silent default.
+
+    Scoring the grid against the wrong rate constants would produce a number
+    that looks fine and means nothing, which is worse than a traceback.
+    """
+    dt = cell.sampling_interval
+    with pytest.raises(TypeError):
+        vmn.state_grid_error(drive, dt, 25, variant='two_state', k_act=1.0)
+    with pytest.raises(ValueError):
+        vmn.state_grid_error(drive, dt, 25, variant='nonsense', tau_on=0.1,
+                             tau_off=0.1)
+
+
+def test_the_scan_recommends_a_step_that_meets_its_tolerance(cell):
+    """`scan_state_dt` picks the largest step it measured under tolerance.
+
+    Largest, because the step is pure cost: the only reason to go finer is
+    accuracy, and this is what measures it. The scan works coarse to fine and
+    stops at the first pass, so the recommendation is the last row it ran.
+    """
+    for variant, tolerance in (('two_state', 0.05), ('one_state', 0.02)):
+        table = vmn.scan_state_dt(cell, variant=variant, tolerance=tolerance,
+                                  candidates_ms=(200.0, 100.0, 50.0, 25.0),
+                                  show=False)
+        assert not table.empty
+        best = table.attrs['recommended_state_dt_ms']
+        worst = table.groupby('state_dt_ms').error.max()
+        assert worst[best] <= tolerance, (variant, best, worst[best])
+        # Everything coarser than the pick was tried and failed, or the scan
+        # would have stopped there instead.
+        for ms, value in worst.items():
+            if ms > best:
+                assert value > tolerance, (variant, ms, value)
+
+
+def test_the_scan_is_conservative_against_the_fitted_rates(cell):
+    """The pre-flight scan may ask for a smaller step than the cell needs.
+
+    It takes the worst case over a box of plausible rate constants, because the
+    rates are what the fit is for and are not known beforehand. On this cell the
+    box's worst corner is a 0.5 s slow pool, which wants 50 ms; the two-state
+    fit actually lands at `k_slow_out` 0.271/s -- a 3.7 s pool -- where 100 ms
+    measures 3.2% and is fine. Both numbers are right, which is why
+    `fit_lnk_two_state` re-checks at its own fitted rates through
+    `solver_tolerance` rather than trusting the scan.
+    """
+    dt = cell.sampling_interval
+    drive = vmn.probe_drive(cell)
+    step = max(int(round(100.0 / 1e3 / dt)), 1)
+    reference = max(int(round(10.0 / 1e3 / dt)), 1)
+    k_act, k_inact = vmn.two_state_rates(0.004, 0.184)   # the fitted fast state
+    # Scored the same way the scan scores, or the two are not comparable.
+    fitted = vmn.state_grid_error(drive, dt, step, reference_step=reference,
+                                  variant='two_state', k_act=k_act,
+                                  k_inact=k_inact, k_slow_in=20.0,
+                                  k_slow_out=0.271)
+    box = vmn.scan_state_dt(cell, variant='two_state', tolerance=0.05,
+                            candidates_ms=(200.0, 100.0, 50.0),
+                            show=False).groupby('state_dt_ms').error.max()
+    assert fitted < 0.05, fitted
+    assert box[100.0] > 0.05 > fitted, (box[100.0], fitted)
+
+
+def test_probe_drive_spans_a_luminance_step(cell):
+    """The probe has to contain the feature whose smearing is being measured.
+
+    A drive taken from one epoch has no step in it, and a grid coarse enough to
+    smear the step would score clean. Two epochs of an alternating protocol is
+    one dim and one bright by construction.
+    """
+    drive = vmn.probe_drive(cell, n_epochs=2)
+    order = vmn._epoch_order(cell.sequence_epoch)
+    width = int((cell.sequence_epoch == order[0]).sum())
+    assert drive.size == 2 * width
+    levels = [float(cell.sequence_light_mean[cell.sequence_epoch == e][0])
+              for e in order[:2]]
+    assert levels[0] != levels[1], levels
+    assert np.all((drive >= 0) & (drive <= 1)), 'a drive is an occupancy'
+
+
+@pytest.mark.slow
+def test_a_grid_limited_fit_says_so(cell, monkeypatch):
+    """`solver_tolerance` has to reach the caller, not just a printed number.
+
+    Before this it was a parameter `fit_lnk_two_state` declared and never read.
+    The guard is only worth anything if exceeding it is visible, so this forces
+    the measurement high and checks all three ways it surfaces: the warning, the
+    flag, and the recorded error. The error is forced rather than provoked with
+    real rates because whether a given cell lands in the grid-limited regime is
+    a property of that cell -- on this subset it does not, which is the right
+    outcome and the wrong test.
+    """
+    small = vmn.subset_analysis(cell, epochs_per_level=2, decimate=2)
+    monkeypatch.setattr(vmn, 'state_grid_error', lambda *a, **k: 0.9)
+    with pytest.warns(RuntimeWarning, match='grid-limited'):
+        model = vmn.fit_lnk_two_state(small, n_restarts=1, state_dt_ms=400.0,
+                                      solver_tolerance=0.05, verbose=False)
+    assert model is not None
+    assert model.grid_limited is True
+    assert model.solver_error == pytest.approx(0.9)
+    assert model.solver_tolerance == pytest.approx(0.05)
+
+
+@pytest.mark.slow
+def test_a_converged_fit_is_left_alone(cell):
+    """The guard must stay quiet when the grid is fine, or it will be ignored.
+
+    Same subset, measured rather than forced: the fit lands somewhere 400 ms
+    resolves, `solver_error` comes out near 0.005, and nothing is raised.
+    """
+    small = vmn.subset_analysis(cell, epochs_per_level=2, decimate=2)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', RuntimeWarning)
+        model = vmn.fit_lnk_two_state(small, n_restarts=1, state_dt_ms=400.0,
+                                      solver_tolerance=0.05, verbose=False)
+    assert model is not None
+    assert model.grid_limited is False
+    assert 0.0 <= model.solver_error < 0.05, model.solver_error
+
+
+def test_a_decimated_analysis_can_still_be_fitted(cell):
+    """Any sample rate has to give an even filter, since decimation is a knob.
+
+    `convolve_filter_with_stim` refuses an odd-length filter, and whether
+    `filter_length_s / dt` lands odd is an accident of the rate: 1.0 s at
+    125 Hz is 125, which raised "Filter must have an even number of points"
+    from inside the fit. `subset_analysis(decimate=...)` makes that reachable
+    by ordinary use, so it is guarded at the source.
+    """
+    for decimate in (1, 2, 3, 4, 5, 7):
+        small = vmn.subset_analysis(cell, epochs_per_level=1, decimate=decimate)
+        points = vmn._even_filter_pts(small.filter_length_s,
+                                      small.sampling_interval)
+        assert points % 2 == 0 and points >= 2, (decimate, points)

@@ -543,13 +543,43 @@ at 0.7628 and `r2_gain` at 0.1408, while `tau_on` moves 0.809 -> 0.572 s and
 constants, and the fit quality gave no sign of it -- which is the whole reason
 to check the grid rather than trust r2. The fit costs the same 21 s either way.
 
-**100 ms is right for the regime these fits go to, not universally.** At
-`k_slow_out` ≈ 2/s (a 0.5 s pool) it is still 25% off. `two_state_kinetics(
-..., return_residual=True)` is the number that says so and it tracks the
-error; `fit_lnk_two_state` prints it as `solver ±`. Note that
-`solver_tolerance` on that function is **dead** — declared, never read, and
-calibrated for the old iterating scheme's convergence residual rather than
-the march's per-block diagnostic. Don't compare the two.
+**Choosing the step for new data: `ra`-style helpers, both measured.**
+
+- `vmn.scan_state_dt(analysis, variant='one_state'|'two_state')` — the
+  pre-flight sweep. Runs on `probe_drive` (two epochs of the real
+  stimulus, so it contains one luminance step) and reports the worst
+  case over a box of plausible rate constants, recommending the largest
+  step under `tolerance`. **6.5 s** for the two-state, instant for the
+  one-state. Two implementation points that were not optional: every
+  candidate is scored against **one fixed reference** solve (per-candidate
+  refinement is not comparable between candidates — it put 200 ms at 5.8%
+  and 100 ms at 8.4%), and that reference is solved once per rate set
+  rather than once per comparison (which was the difference between 18 s
+  and 6.5 s). It stops after **two consecutive** passing candidates,
+  because the curve is not monotone at the coarse end.
+- `vmn.state_grid_error(...)` — the measurement itself. `refine=4`
+  compares a step against its own refinement (right for checking one
+  step); `reference_step=` compares against a fixed fine solve (right for
+  a sweep). The two agree on size — 3.15% vs 3.89% at 100 ms on this
+  cell's fitted rates — with `refine` slightly optimistic.
+- **`solver_tolerance` now does something.** It was declared and never
+  read. `fit_lnk_two_state` re-solves at its own fitted rates after the
+  fit, stores `model.solver_error`, sets `model.grid_limited`, and raises
+  a `RuntimeWarning` naming the step to refit at. Default 0.05.
+
+**The scan is conservative by design and the two numbers will disagree.**
+Worst-case over the box wants 50 ms because the box includes a 0.5 s slow
+pool; the two-state fit on 2020-06-11_B actually lands at `k_slow_out`
+0.271/s (a 3.7 s pool) where 100 ms measures 3.2%. Both are right — the
+scan does not know the rates, which is what the fit is for, and
+`solver_tolerance` is what confirms after the fact. That is why the
+default stayed 100 and not 50.
+
+**`filter_pts` is now forced even** (`_even_filter_pts`, used at all three
+sites). `convolve_filter_with_stim` refuses an odd-length filter and
+whether `filter_length_s / dt` lands odd is an accident of the sample
+rate — 1.0 s at 125 Hz is 125 — which `subset_analysis(decimate=...)`
+makes reachable by ordinary use.
 
 **`max_slope_factor` bounds `beta` relative to the sampled range**
 (`beta_max = factor * |beta0|`, `beta0 = sqrt(2π)/x_range`) and is

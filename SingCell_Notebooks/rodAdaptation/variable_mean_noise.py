@@ -56,6 +56,7 @@ returning a stimulus that silently is not the one presented.
 """
 from __future__ import annotations
 
+import warnings
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -1859,7 +1860,7 @@ def fit_ln_model(stimulus, response, sampling_interval: float,
     if stimulus.shape != response.shape:
         raise ValueError(f'stimulus {stimulus.shape} and response '
                          f'{response.shape} must have the same shape')
-    filter_pts = int(round(filter_length_s / sampling_interval))
+    filter_pts = _even_filter_pts(filter_length_s, sampling_interval)
 
     # computeLNmodel.m low-passes the response at the same cutoff before
     # fitting, so the model is not asked to explain noise the stimulus could
@@ -3712,6 +3713,18 @@ class LNKModel:
                 f'{self.params.get("k", np.nan):.3f}>')
 
 
+def _even_filter_pts(filter_length_s: float, dt: float) -> int:
+    """Filter length in samples, rounded up to even and at least 2.
+
+    ``convolve_filter_with_stim`` requires an even length. Whether
+    ``filter_length_s / dt`` lands odd is an accident of the sample rate, so
+    the constraint is enforced here rather than surfacing from inside a fit.
+    """
+    points = int(round(float(filter_length_s) / float(dt)))
+    points = max(points, 2)
+    return points + (points % 2)
+
+
 def _relax(steady, rate, dt: float, a0: float = 0.0) -> np.ndarray:
     """Integrate ``x' = rate * (steady - x)`` for time-varying ``steady``/``rate``.
 
@@ -3852,6 +3865,253 @@ def two_state_kinetics(drive, dt: float, k_act: float, k_inact: float,
         scale = float(np.max(inactivated)) or 1.0
         return active, inactivated, moved / scale
     return active, inactivated
+
+
+def state_grid_error(drive, dt: float, state_step: int, refine: int = 4,
+                     reference_step: Optional[int] = None,
+                     variant: str = 'two_state', **rates) -> float:
+    """How much of the state is the integration grid rather than the model.
+
+    Solves the kinetics twice and returns ``max|x - x_fine|`` over the fine
+    solve's own range. There is no analytic solution to compare against, so the
+    reference is another solve, and **which one matters**:
+
+    ``refine`` (the default, ``reference_step=None``)
+        compares ``state_step`` against ``state_step / refine`` -- a Richardson
+        comparison, reporting the change still happening under refinement, which
+        for a first-order scheme is the same order as what remains. Right for
+        checking *one* step size, which is what :func:`fit_lnk_two_state` does
+        after a fit. **Not comparable between step sizes**: each candidate gets
+        a different reference, so the sequence is not monotone and 100 ms can
+        score worse than 200 ms without either number being wrong.
+    ``reference_step``
+        compares against one fixed fine solve. Right for a sweep, because every
+        candidate is then measured against the same thing and the curve falls
+        the way a convergence curve should. This is what :func:`scan_state_dt`
+        uses, and it is also cheaper: the expensive fine solve happens once
+        rather than once per candidate.
+
+    Prefer either to ``two_state_kinetics(..., return_residual=True)`` when the
+    question is "is my answer grid-limited". The residual reports how far the
+    slow pool travels within one block, which is a proxy that has to be
+    calibrated; this measures the thing itself.
+
+    ``variant='two_state'`` takes ``k_act``, ``k_inact``, ``k_slow_in``,
+    ``k_slow_out`` and scores the **active** state, since that is the model's
+    output. ``variant='one_state'`` takes ``tau_on``/``tau_off`` and scores the
+    adaptation state. A step at or below the reference scores 0.0, exactly
+    because there is nothing finer to compare it with.
+    """
+    step = max(int(state_step), 1)
+    fine = (max(int(reference_step), 1) if reference_step is not None
+            else max(step // max(int(refine), 2), 1))
+    if fine >= step:
+        return 0.0
+    coarse_x = _state_at_step(drive, dt, step, variant, rates)
+    fine_x = _state_at_step(drive, dt, fine, variant, rates)
+    return _relative_deviation(coarse_x, fine_x)
+
+
+def _state_at_step(drive, dt: float, step: int, variant: str, rates: dict):
+    """The state one variant produces on one integration grid."""
+    drive = np.asarray(drive, dtype=float)
+    step = max(int(step), 1)
+    if variant == 'two_state':
+        needed = ('k_act', 'k_inact', 'k_slow_in', 'k_slow_out')
+        missing = [name for name in needed if name not in rates]
+        if missing:
+            raise TypeError(f'two_state needs {missing}')
+        args = tuple(float(rates[name]) for name in needed)
+        # The active state, because that is what the model emits.
+        return two_state_kinetics(drive, dt, *args, state_step=step)[0]
+    if variant == 'one_state':
+        tau_on, tau_off = float(rates['tau_on']), float(rates['tau_off'])
+        # `_bin_mean` drops a trailing partial bin, so the repeat can come back
+        # short of the record; hold the last value across it, exactly as
+        # `_lnk_predict` does, or two solves cannot be subtracted.
+        coarse = _bin_mean(drive[None, :], step).ravel()
+        out = np.repeat(adaptation_state(coarse, dt * step, tau_on, tau_off), step)
+        if out.size < drive.size:
+            out = np.concatenate([out, np.full(drive.size - out.size,
+                                               out[-1] if out.size else 0.0)])
+        return out[:drive.size]
+    raise ValueError("variant must be 'one_state' or 'two_state'")
+
+
+def _relative_deviation(coarse_x, fine_x) -> float:
+    """``max|coarse - fine|`` over the fine solve's own range."""
+    span = float(np.ptp(fine_x))
+    if not np.isfinite(span) or span <= 0:
+        return 0.0
+    return float(np.max(np.abs(np.asarray(coarse_x) - np.asarray(fine_x)))) / span
+
+
+def probe_drive(analysis: ConditionAnalysis, n_epochs: int = 2,
+                gain: float = 2.0, offset: float = -0.5) -> np.ndarray:
+    """A stand-in for the model's drive, without having to fit the model first.
+
+    The real drive is ``Phi(beta g + gamma)`` and needs the filter and the
+    nonlinearity, i.e. the fit you are trying to configure. This substitutes the
+    z-scored stimulus for the generator, which is the same signal minus the
+    filter's shaping -- and the grid error depends on how fast the state moves
+    relative to the block, which is set by the rate constants and by the
+    luminance step, not by the filter's lobes.
+
+    ``n_epochs`` is 2 because that is the smallest slice containing a step: this
+    protocol alternates, so two consecutive epochs are one dim and one bright.
+    Two epochs give 3.0% at 100 ms where the whole 570 s record gives 3.6%, for
+    a fortieth of the wait.
+    """
+    from scipy.stats import norm
+
+    epochs = np.asarray(analysis.sequence_epoch, dtype=int)
+    order = _epoch_order(epochs)[:max(int(n_epochs), 1)]
+    mask = np.isin(epochs, order)
+    stimulus = np.asarray(analysis.sequence_stimulus, dtype=float)[mask]
+    spread = float(np.std(stimulus)) or 1.0
+    return norm.cdf(gain * (stimulus - float(np.mean(stimulus))) / spread + offset)
+
+
+def scan_state_dt(analysis: ConditionAnalysis,
+                  variant: str = 'two_state',
+                  candidates_ms=(250.0, 100.0, 50.0, 25.0, 10.0, 5.0),
+                  tolerance: float = 0.05,
+                  rates=None,
+                  n_epochs: int = 2,
+                  stop_early: bool = True,
+                  show: bool = True) -> pd.DataFrame:
+    """Pick ``state_dt_ms`` for a dataset by measuring, in a few seconds.
+
+    The right block size depends on the rate constants, which is precisely what
+    you do not know before fitting, so the scan spans a **grid of plausible
+    rates** rather than one guess, and reports the worst case at each candidate
+    step. The recommendation is the largest step whose worst case is under
+    ``tolerance`` -- largest, because the step is pure cost and the only reason
+    to go finer is accuracy you can measure.
+
+    Pass ``rates`` to narrow it: a fitted ``LNKModel``'s ``params``, or an
+    explicit list of dicts. Given a fitted model this stops being a pre-flight
+    check and becomes the post-hoc one -- the same question
+    :func:`fit_lnk_two_state` answers itself through ``solver_tolerance``.
+
+    Runs on :func:`probe_drive`, two epochs of the real stimulus. Returns one
+    row per (candidate, rate set) plus the worst case, and prints the
+    recommendation when ``show``.
+
+    The defaults it produced on 2020-06-11_B extracellular: 100 ms for the
+    two-state at 5% and 5 ms for the one-state, which is where those defaults
+    come from. A whole-cell ``exc`` block or a different protocol has no
+    obligation to agree -- that is what this is for.
+    """
+    import time
+
+    drive = probe_drive(analysis, n_epochs=n_epochs)
+    dt = float(analysis.sampling_interval)
+
+    if rates is None:
+        if variant == 'two_state':
+            # `tau_fast` is held at the sampling interval because that is the
+            # worst corner and not because it is uninteresting: measured on this
+            # cell at 100 ms, tau_fast = dt gives 2.3-26% across the slow pairs
+            # while 20 ms gives 0.8-2.4% and 200 ms gives 0.9-2.0%. A fast
+            # active state tracks the block's ramp less smoothly, so scanning
+            # the other values only dilutes the maximum. The slow pair is what
+            # varies: half a second to ten.
+            k_act, k_inact = two_state_rates(max(dt, 1e-3), 4.0)
+            grid = [dict(k_act=k_act, k_inact=k_inact,
+                         k_slow_in=k_slow_in, k_slow_out=k_slow_out)
+                    for k_slow_in, k_slow_out in ((3.0, 0.7), (3.0, 0.1), (10.0, 2.0))]
+        else:
+            # tau_on/tau_off run 0.05 to 60 s in the fit; the floor is what
+            # sets the step, so the grid is weighted to the fast end.
+            grid = [dict(tau_on=0.05, tau_off=0.05), dict(tau_on=0.15, tau_off=0.80),
+                    dict(tau_on=0.81, tau_off=1.09)]
+    elif isinstance(rates, dict):
+        if variant == 'two_state' and 'tau_fast' in rates:
+            k_act, k_inact = two_state_rates(rates['tau_fast'], rates['occupancy'])
+            grid = [dict(k_act=k_act, k_inact=k_inact,
+                         k_slow_in=rates['k_slow_in'],
+                         k_slow_out=rates['k_slow_out'])]
+        else:
+            grid = [dict(rates)]
+    else:
+        grid = [dict(one) for one in rates]
+
+    # Every candidate is measured against **one** fixed reference -- the finest
+    # candidate -- rather than against its own refinement. A per-candidate
+    # reference is not comparable across candidates: on this cell it put 100 ms
+    # at 8.4% and 200 ms at 5.8%, so the sequence was not monotone and there
+    # was no sound way to pick from it. Against a fixed reference the curve
+    # falls the way a convergence curve should, which is also what makes the
+    # early stop below legitimate.
+    ordered = sorted((float(m) for m in candidates_ms), reverse=True)
+    reference_step = max(int(round(min(ordered) / 1e3 / dt)), 1)
+
+    # Coarsest first, stopping once **two consecutive** candidates pass. One
+    # would be enough if the curve were monotone, and mostly it is -- but not
+    # at the coarse end, where the scheme is not yet in its asymptotic regime:
+    # on this cell at k_slow_out 0.7, 400 ms scored 6.3% against 200 ms at
+    # 7.3%. A single pass there could be a blip rather than convergence. Two in
+    # a row costs one extra candidate and turns the monotonicity assumption
+    # into something checked. `stop_early=False` fills the whole table when the
+    # curve, rather than the recommendation, is what is wanted.
+    # One reference solve per rate set, reused by every candidate. Calling
+    # `state_grid_error` per (candidate, rate set) re-ran the fine solve each
+    # time -- twelve of the expensive one instead of three, which was 18 s of a
+    # scan that should be seconds.
+    references = {index: _state_at_step(drive, dt, reference_step, variant, one)
+                  for index, one in enumerate(grid)}
+
+    rows = []
+    consecutive = 0
+    for ms in ordered:
+        step = max(int(round(ms / 1e3 / dt)), 1)
+        worst_here = 0.0
+        for index, one in enumerate(grid):
+            started = time.perf_counter()
+            error = (0.0 if step <= reference_step else _relative_deviation(
+                _state_at_step(drive, dt, step, variant, one), references[index]))
+            worst_here = max(worst_here, error)
+            rows.append({'state_dt_ms': ms, 'state_step': step,
+                         'rate_set': index, 'error': error,
+                         'seconds': round(time.perf_counter() - started, 3),
+                         **{k: round(float(v), 4) for k, v in one.items()}})
+        consecutive = consecutive + 1 if worst_here <= float(tolerance) else 0
+        if stop_early and consecutive >= 2:
+            break
+    table = pd.DataFrame(rows)
+    table.attrs['reference_state_dt_ms'] = float(min(ordered))
+    worst = table.groupby('state_dt_ms').error.max()
+    passing = worst[worst <= float(tolerance)]
+    # The coarsest candidate that passes *and* whose next-finer neighbour also
+    # passes, for the same reason the scan does not stop on a single pass.
+    best = float(worst.idxmin())
+    order_fine = sorted(worst.index)
+    for position, ms in enumerate(sorted(worst.index, reverse=True)):
+        finer = [m for m in order_fine if m < ms]
+        if worst[ms] <= float(tolerance) and (
+                not finer or worst[max(finer)] <= float(tolerance)):
+            best = float(ms)
+            break
+    table.attrs['recommended_state_dt_ms'] = best
+    if show:
+        print(f'{analysis.exp_name} {analysis.rec_type} | {variant} | '
+              f'{drive.size} samples at {1.0 / dt:.0f} Hz')
+        for ms, value in sorted(worst.items(), reverse=True):
+            mark = 'ok ' if value <= tolerance else '   '
+            note = ('  (the reference itself -- zero by construction)'
+                    if ms <= min(float(m) for m in candidates_ms) else '')
+            print(f'  {mark}{ms:6.1f} ms  worst error {value * 100:6.2f}%{note}')
+        skipped = [m for m in candidates_ms if float(m) not in set(worst.index)]
+        if skipped:
+            print(f'  (finer candidates not tried: '
+                  f'{", ".join(f"{float(m):g}" for m in sorted(skipped, reverse=True))} ms)')
+        if passing.empty:
+            print(f'  -> nothing meets {tolerance:.0%}; finest tried is '
+                  f'{best:g} ms at {worst.min() * 100:.2f}%')
+        else:
+            print(f'  -> state_dt_ms={best:g} (largest under {tolerance:.0%})')
+    return table
 
 
 def two_state_convergence(drive, dt: float, k_act: float, k_inact: float,
@@ -4179,7 +4439,12 @@ def _prepare_lnk(analysis, filter_mode: str, filter_length_s, random_state,
     dt = float(analysis.sampling_interval)
     filter_length_s = (analysis.filter_length_s if filter_length_s is None
                        else float(filter_length_s))
-    filter_pts = int(round(filter_length_s / dt))
+    # Rounded up to even: `convolve_filter_with_stim` refuses an odd-length
+    # filter, and whether `filter_length_s / dt` lands odd is an accident of the
+    # sample rate -- 1.0 s at 125 Hz is 125, which raised "Filter must have an
+    # even number of points" from inside the fit rather than anywhere useful.
+    # One sample of extra filter is not a modelling decision.
+    filter_pts = _even_filter_pts(filter_length_s, dt)
     cutoff = (analysis.frequency_cutoff
               if np.isfinite(analysis.frequency_cutoff) else None)
     cutoff_kwargs = ({} if cutoff is None
@@ -4411,7 +4676,12 @@ def fit_lnk(analysis: ConditionAnalysis,
     dt = float(analysis.sampling_interval)
     filter_length_s = (analysis.filter_length_s if filter_length_s is None
                        else float(filter_length_s))
-    filter_pts = int(round(filter_length_s / dt))
+    # Rounded up to even: `convolve_filter_with_stim` refuses an odd-length
+    # filter, and whether `filter_length_s / dt` lands odd is an accident of the
+    # sample rate -- 1.0 s at 125 Hz is 125, which raised "Filter must have an
+    # even number of points" from inside the fit rather than anywhere useful.
+    # One sample of extra filter is not a modelling decision.
+    filter_pts = _even_filter_pts(filter_length_s, dt)
     cutoff = (analysis.frequency_cutoff
               if np.isfinite(analysis.frequency_cutoff) else None)
     cutoff_kwargs = ({} if cutoff is None
@@ -4732,7 +5002,7 @@ def fit_lnk_two_state(analysis: ConditionAnalysis,
                       max_slope_factor: Optional[float] = None,
                       state_dt_ms: float = 100.0,
                       n_passes: int = 8,
-                      solver_tolerance: float = 0.01,
+                      solver_tolerance: float = 0.05,
                       weighted: bool = False,
                       n_restarts: int = 3,
                       test_fraction: float = 0.25,
@@ -4761,6 +5031,23 @@ def fit_lnk_two_state(analysis: ConditionAnalysis,
     slow pool. The fast state is fitted as a time constant and a ratio rather
     than as ``k_act``/``k_inact``, because only those two combinations are
     identifiable -- see :data:`TWO_STATE_NAMES`.
+
+    **``solver_tolerance`` is a guard on the integration grid, checked after
+    the fit.** ``state_dt_ms`` has to be small enough for the rate constants the
+    fit lands on, and those are not known when it is chosen; so the fit
+    finishes, re-solves the kinetics at its own fitted rates on a quarter of the
+    block, and measures how far the active state moves. That number lands on
+    ``model.solver_error``, and exceeding ``solver_tolerance`` sets
+    ``model.grid_limited`` and raises a ``RuntimeWarning`` naming the step to
+    refit at. A grid-limited fit is not wrong so much as unfalsifiable: its
+    kinetics are partly the block size, and its held-out r2 will not say so --
+    on 2020-06-11_B the one-state fit at 25 ms scored identically to the same
+    fit at 5 ms while reporting time constants 30% slower.
+
+    Use :func:`scan_state_dt` to choose the step *before* fitting. It is the
+    conservative counterpart: it takes the worst case over a box of plausible
+    rate constants, so it can ask for a smaller step than the cell turns out to
+    need, and ``solver_tolerance`` is what confirms after the fact.
     """
     from scipy.optimize import least_squares
     from scipy.special import ndtr
@@ -4910,6 +5197,38 @@ def fit_lnk_two_state(analysis: ConditionAnalysis,
         state=inactivated, generator=generator, at_bounds=at_bounds)
     model.active = active
     model.solver_residual = solver_residual
+
+    # Is the answer grid-limited? `solver_residual` is a proxy -- how far the
+    # slow pool travels within a block -- and until now nothing compared it to
+    # anything, so `solver_tolerance` was a parameter the function declared and
+    # never read. Measure the thing itself instead: re-solve at the *fitted*
+    # rates on a quarter of the block and see how much the active state moves.
+    #
+    # This has to happen after the fit rather than before, because the step that
+    # is fine enough depends on the rate constants the fit lands on, which is
+    # what the fit is for. `scan_state_dt` is the pre-flight version, and is
+    # necessarily conservative: it takes the worst case over a box of plausible
+    # rates, so it can ask for a smaller step than the cell turns out to need.
+    # One extra solve on the whole record, against a fit that takes minutes.
+    k_act_fit, k_inact_fit = two_state_rates(params['tau_fast'],
+                                             params['occupancy'])
+    drive_fit = ndtr(params['beta'] * generator + params['gamma'])
+    model.solver_error = state_grid_error(
+        drive_fit, dt, state_step, refine=4, variant='two_state',
+        k_act=k_act_fit, k_inact=k_inact_fit,
+        k_slow_in=params['k_slow_in'], k_slow_out=params['k_slow_out'])
+    model.solver_tolerance = float(solver_tolerance)
+    model.grid_limited = bool(model.solver_error > float(solver_tolerance))
+    if model.grid_limited:
+        warnings.warn(
+            f'two-state fit is grid-limited: at the fitted rates '
+            f'(k_slow_out {params["k_slow_out"]:.3g}/s) the active state moves '
+            f'{model.solver_error:.1%} of its range when state_dt_ms is '
+            f'refined from {state_step * dt * 1e3:.0f} to '
+            f'{max(state_step // 4, 1) * dt * 1e3:.0f}, above solver_tolerance '
+            f'{solver_tolerance:.1%}. Refit with a smaller state_dt_ms, or use '
+            f'scan_state_dt(analysis, "two_state") to choose one.',
+            RuntimeWarning, stacklevel=2)
     if verbose:
         tau_fast = params['tau_fast'] * 1e3
         print(f"  {'two-state':>14}: r²={model.r2:.3f} held out "
@@ -4917,7 +5236,8 @@ def fit_lnk_two_state(analysis: ConditionAnalysis,
               f"tau_fast {tau_fast:.2f} ms, occupancy {params['occupancy']:.2f}, "
               f"k_in {params['k_slow_in']:.3f}, "
               f"k_out {params['k_slow_out']:.3f} /s | I {inactivated.min():.3f}"
-              f"-{inactivated.max():.3f}, solver ±{solver_residual:.4f}"
+              f"-{inactivated.max():.3f}, grid {model.solver_error:.1%}"
+              + (' GRID-LIMITED' if model.grid_limited else '')
               + (f' | at bound: {", ".join(at_bounds)}' if at_bounds else ''))
     return model
 
