@@ -603,9 +603,26 @@ docstring; there is no recommended value.
 - **Stick to in-place edits.** Don't create scratch notebooks /
   scripts unless explicitly asked. Use `NotebookEdit` for notebook
   cells.
-- **Commits**: only when explicitly asked. Follow the existing
-  short-message style ("Fix cell 7 EI panel: …", "Resolve MEA chip
-  rotation from rig config", …).
+- **Commit and push automatically** (standing instruction, 2026-09-01).
+  When a piece of work is complete *and verified*, commit it and push to
+  `chris-dev` without asking. No separate confirmation, no "want me to
+  commit?" at the end of a turn.
+  - **`chris-dev` only. Never `main`.** And no PRs without an explicit
+    ask.
+  - **Verified means the tests ran.** `pytest -m "not slow"` at minimum;
+    the full suite when the change touches a model or a default. Pushing
+    unverified work is the failure mode this convention creates, so the
+    run is part of the commit, not a follow-up.
+  - Commit only the files the work touched. If the tree carries
+    unrelated edits — a notebook the IDE reopened and re-executed, say —
+    stage explicitly rather than `git add -A`, and say what was left out.
+  - Follow the existing short-message style for the subject ("Fix cell 7
+    EI panel: …", "Resolve MEA chip rotation from rig config", …), with
+    the body carrying the measurements behind the change.
+  - `git push` is sometimes refused by the permission classifier even
+    though it is allow-listed. If that happens, say so plainly and leave
+    the commit local — the user can run `! git push origin chris-dev`.
+    Don't silently drop it.
 - **Background long jobs.** The per-cell archive over ~18 dates takes
   10–15 min. Run via `Bash(run_in_background=true)` and report
   filesystem-level progress (counts of `mosaic.png`, PNGs in last N
