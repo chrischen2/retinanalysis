@@ -3179,6 +3179,194 @@ def plot_reconstruction_transfer(analysis: ConditionAnalysis,
     return fig
 
 
+
+# The two halves of the epoch, for the time-split transfer function. Okabe-Ito
+# vermillion and blue: the contrast that carries this figure is early against
+# late, not one light mean against the other, which is already the row.
+EARLY_LATE_COLORS = {'early': '#D55E00', 'late': '#0072B2'}
+
+
+def label_early_late(traces: pd.DataFrame, early_s: float = 3.0,
+                     late_s: float = 3.0) -> pd.DataFrame:
+    """Tag every reconstructed bin ``early``, ``late``, or neither.
+
+    :func:`plot_reconstruction_transfer` pools every window, so the curve it
+    draws is a mixture of the un-adapted and adapted response. This splits the
+    same traces by time since the step so the two can be drawn against each
+    other.
+
+    **The cut points are taken per (mode, light mean), not globally.** The two
+    decoding regimes do not cover the same windows: the steady-state decoder
+    refuses every window it was fitted on, so its last window ends
+    ``steady_state_s`` before the end of the epoch. One global cut would
+    compare that regime's *middle* against the other's end and call the
+    difference adaptation.
+
+    Bins in neither half get ``half = None``; callers drop them. Raises if the
+    two halves would overlap, rather than quietly double-counting bins.
+    """
+    if traces is None or traces.empty:
+        return traces
+    frame = traces.copy()
+    frame['half'] = None
+    for (mode, mean_level), block in frame.groupby(['mode', 'lightMean'], sort=False):
+        t = block.time_s.values
+        lo, hi = float(np.min(t)), float(np.max(t))
+        if lo + float(early_s) > hi - float(late_s):
+            raise ValueError(
+                f'early_s={early_s} and late_s={late_s} overlap for {mode} '
+                f'lightMean {mean_level:g}, which spans only {hi - lo:.1f} s '
+                f'({lo:.1f}-{hi:.1f} s). Shorten them.')
+        index = block.index
+        frame.loc[index[t < lo + float(early_s)], 'half'] = 'early'
+        frame.loc[index[t > hi - float(late_s)], 'half'] = 'late'
+    return frame
+
+
+def transfer_early_late(traces: pd.DataFrame, early_s: float = 3.0,
+                        late_s: float = 3.0) -> pd.DataFrame:
+    """Per-phase reconstruction scores, early against late, as a table.
+
+    One row per (mode, light mean, half). The numbers come from
+    :func:`reconstruction_metrics` -- the same function behind the pooled
+    summary -- so ``gain_increment`` here is the pooled ``gain_inc`` restricted
+    in time, and the figure's slope annotations cannot drift from it.
+
+    ``span_s`` records the seconds each half actually covers, since the halves
+    are cut per regime and the steady-state one ends early.
+    """
+    labelled = label_early_late(traces, early_s=early_s, late_s=late_s)
+    if labelled is None or labelled.empty:
+        return pd.DataFrame()
+    rows = []
+    for (mode, mean_level, half), block in labelled.dropna(subset=['half']).groupby(
+            ['mode', 'lightMean', 'half'], sort=False):
+        metrics = reconstruction_metrics(block.reconstruction.values,
+                                         block.stimulus.values)
+        rows.append({'mode': mode, 'lightMean': mean_level, 'half': half,
+                     'span_s': float(block.time_s.max() - block.time_s.min()),
+                     't_start_s': float(block.time_s.min()),
+                     'n_bins': int(len(block)),
+                     **metrics,
+                     'gain_asymmetry': metrics['gain_increment'] - metrics['gain_decrement'],
+                     'r_asymmetry': metrics['r_increment'] - metrics['r_decrement']})
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+    order = pd.Categorical(frame['half'], categories=['early', 'late'], ordered=True)
+    return frame.assign(half=order).sort_values(['mode', 'lightMean', 'half'],
+                                                ignore_index=True)
+
+
+def plot_transfer_early_late(analysis: ConditionAnalysis,
+                             traces: pd.DataFrame,
+                             early_s: float = 3.0,
+                             late_s: float = 3.0,
+                             n_bins: int = 15,
+                             min_count: int = 12,
+                             figsize: Optional[Tuple[float, float]] = None):
+    """The decoding transfer function, early against late in one panel.
+
+    :func:`plot_reconstruction_transfer` marginalises over time, so a curve
+    that bends could be bending because the cell saturates or because the first
+    second after the step is mixed in with the tenth. This overlays the two
+    halves on shared axes: a **shift in slope** between them is a gain change,
+    a **change in where the curve leaves the straight part** is a change in the
+    saturating range, and curves that lie on top of each other say the
+    compression was there all along and is not the adaptation.
+
+    Both halves are binned on one x grid -- the limit is taken over the whole
+    panel, not per half -- so the curves are comparable point for point. The
+    raw density is deliberately not drawn; two overlaid hexbins are unreadable,
+    and the scatter is in :func:`plot_reconstruction_transfer`.
+
+    **Read the earliest window knowing what is in it.** Each decoding window is
+    mean-subtracted, which removes the step's sustained offset but not the
+    transient inside the first window, and that transient is response the
+    stimulus in that window did not cause. It inflates the apparent noise
+    early; it is not a reason for a *slope* to differ.
+    """
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    if traces is None or traces.empty:
+        print('nothing to plot')
+        return None
+    labelled = label_early_late(traces, early_s=early_s, late_s=late_s)
+    labelled = labelled.dropna(subset=['half'])
+    modes = [m for m in ('per_window', 'steady_state') if m in set(labelled['mode'])]
+    means = [m for m in analysis.light_means if m in set(labelled.lightMean)]
+    if not means or not modes:
+        print('nothing to plot')
+        return None
+    if figsize is None:
+        figsize = (4.6 * len(modes) + 0.8, 4.3 * len(means))
+
+    fig, axes = plt.subplots(len(means), len(modes), figsize=figsize, squeeze=False)
+    for row, mean_level in enumerate(means):
+        for col, mode in enumerate(modes):
+            ax = axes[row][col]
+            panel = labelled[labelled.lightMean.eq(mean_level)
+                             & labelled['mode'].eq(mode)]
+            if panel.empty:
+                ax.axis('off')
+                continue
+            # One grid for both halves, from the whole panel.
+            limit = float(np.nanpercentile(np.abs(panel.stimulus.values), 99.5)) or 1.0
+            edges = np.linspace(-limit, limit, n_bins + 1)
+            centres = 0.5 * (edges[:-1] + edges[1:])
+            ax.plot([-limit, limit], [-limit, limit], ls='--', lw=1.1,
+                    color='0.45', zorder=2)
+
+            for half in ('early', 'late'):
+                block = panel[panel['half'].eq(half)]
+                if block.empty:
+                    continue
+                x = block.stimulus.values
+                y = block.reconstruction.values
+                color = EARLY_LATE_COLORS[half]
+                which = np.digitize(x, edges) - 1
+                mid, low, high = [], [], []
+                for b in range(centres.size):
+                    vals = y[which == b]
+                    if vals.size < min_count:
+                        mid.append(np.nan); low.append(np.nan); high.append(np.nan)
+                    else:
+                        mid.append(np.mean(vals))
+                        low.append(np.percentile(vals, 25))
+                        high.append(np.percentile(vals, 75))
+                slopes = phase_slopes(x, y)
+                span = (block.time_s.min(), block.time_s.max())
+                ax.fill_between(centres, low, high, color=color, alpha=.16,
+                                lw=0, zorder=3)
+                ax.plot(centres, mid, '-', lw=2.1, color=color, zorder=5,
+                        label=f'{half} ({span[0]:.1f}-{span[1]:.1f} s)  '
+                              f'inc {slopes["increment"]:.2f} / '
+                              f'dec {slopes["decrement"]:.2f}')
+                for name, side in (('decrement', np.array([-limit, 0.0])),
+                                   ('increment', np.array([0.0, limit]))):
+                    if np.isfinite(slopes[name]):
+                        ax.plot(side, slopes[name] * side, ':', lw=1.3,
+                                color=color, zorder=4)
+            ax.axvline(0, color='0.5', lw=0.9)
+            ax.axhline(0, color='0.5', lw=0.9)
+            ax.set_xlim(-limit, limit); ax.set_ylim(-limit, limit)
+            ax.set_aspect('equal', adjustable='box')
+            ax.legend(frameon=False, fontsize=7.5, loc='upper left')
+            if row == 0:
+                ax.set_title(titles_mode(mode), fontsize=10)
+            if col == 0:
+                ax.set_ylabel(f'lightMean {mean_level:g}\nreconstruction', fontsize=9)
+            if row == len(means) - 1:
+                ax.set_xlabel('true stimulus (about its mean)', fontsize=9)
+    fig.suptitle(f'{analysis.exp_name} | {analysis.rec_type} | decoding transfer '
+                 f'function, first {early_s:g} s vs last {late_s:g} s '
+                 f'(dashed grey = identity, dotted = per-phase slope)', fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.955))
+    return fig
+
+
 def plot_phase_triggered(analysis: ConditionAnalysis, traces: pd.DataFrame,
                          pre_ms: float = 100.0, post_ms: float = 300.0,
                          min_phase_ms: float = 100.0,
