@@ -79,6 +79,19 @@ SUMMARY_DIR = Path(__file__).resolve().parent / 'matlabSummary'
 DEFAULT_SUMMARY_PATH = SUMMARY_DIR / 'rodVariableMeanNoise.mat'
 SUMMARY_VARIABLE = 'rodNoiseLNModelSummary'
 
+# Compact per-cell outputs used by the notebook's population section.  Raw
+# recordings and the slow LNK fits deliberately stay out of this directory;
+# the saved tables are the inexpensive, reproducible outputs of sections
+# 2a--2c.
+CONDITION_OUTPUT_VERSION = 1
+CONDITION_OUTPUT_DIR = Path(__file__).resolve().parent / 'condition_outputs'
+CONDITION_TABLES = (
+    'light_settings', 'mean_response', 'condition_summary',
+    'temporal_summary', 'ln_curves', 'temporal_ln_curves',
+    'decoding_windows', 'reconstruction_summary', 'early_late',
+    'dropped_epochs', 'epoch_adjustments',
+)
+
 STEP_DIRECTIONS = ('low', 'high')
 STEP_LABELS = {'low': 'high → low', 'high': 'low → high'}
 
@@ -3616,7 +3629,351 @@ def plot_decoding(analysis: ConditionAnalysis, decoded: pd.DataFrame,
 
 
 # --------------------------------------------------------------------------
-# 8. LNK: an LN cascade with one slow adaptive state
+# 8. compact per-cell output and population analysis (LN/decoding only)
+# --------------------------------------------------------------------------
+def condition_output_dir(output_dir=None) -> Path:
+    """Directory holding compact VariableMeanNoise population records."""
+    return Path(output_dir) if output_dir is not None else CONDITION_OUTPUT_DIR
+
+
+def condition_light_settings(protocol_blocks: pd.DataFrame,
+                             analysis: ConditionAnalysis) -> pd.DataFrame:
+    """LED/NDF provenance for exactly the blocks in ``analysis``.
+
+    This intentionally records only the LED named by VariableMeanNoise and its
+    own NDF stack. The rig FilterWheel is retained as ignored provenance, but
+    never added to ``optical_density`` because the LED bypasses that wheel.
+    """
+    expected = {int(value) for value in analysis.block_ids}
+    if protocol_blocks is None or protocol_blocks.empty:
+        raise ValueError('protocol_blocks is empty; selected LED/NDF metadata is required')
+    selected = protocol_blocks[
+        pd.to_numeric(protocol_blocks['block_id'], errors='coerce').isin(expected)
+    ].copy()
+    found = {int(value) for value in selected.block_id}
+    if found != expected:
+        raise ValueError(f'protocol_blocks is missing selected block(s) {sorted(expected - found)}')
+
+    rows = []
+    for _, series in selected.sort_values('block_id').iterrows():
+        light = led_attenuation(series)
+        rows.append({
+            'block_id': int(series['block_id']),
+            'protocol_name': str(series.get('protocol_name', '')),
+            'rig': light['rig'], 'led': light['led'],
+            'led_color': light['led_color'], 'led_ndfs': light['led_ndfs'],
+            'optical_density': light['optical_density'],
+            'attenuation': light['attenuation'],
+            'unknown_tokens': light['unknown_tokens'],
+            'filter_wheel_ndf_ignored': light['filter_wheel_ndf'],
+            'wheel_tokens_ignored': light['wheel_tokens_ignored'],
+            'wheel_ignored': light['wheel_ignored'],
+        })
+    return pd.DataFrame(rows)
+
+
+def _ln_curve_table(analysis: ConditionAnalysis,
+                    temporal_models: Optional[Dict[float, List[LNModel]]] = None
+                    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Long-form full-condition and temporal filter/nonlinearity samples."""
+    full_rows, temporal_rows = [], []
+
+    def append_model(rows, mean_level, model, order=-1, window='full'):
+        for curve, x_values, y_values in (
+                ('filter', model.filter_time_s, model.filter),
+                ('nonlinearity', model.nl_x, model.nl_y)):
+            for point, (x_value, y_value) in enumerate(zip(x_values, y_values)):
+                rows.append({
+                    'lightMean': float(mean_level), 'order': int(order),
+                    'window': str(window), 'curve': curve, 'point': int(point),
+                    'x': float(x_value), 'y': float(y_value),
+                })
+
+    for mean_level in analysis.light_means:
+        model = analysis.ln_model.get(mean_level)
+        if model is not None:
+            append_model(full_rows, mean_level, model)
+    for mean_level, models in (temporal_models or {}).items():
+        for order, model in enumerate(models):
+            append_model(temporal_rows, mean_level, model, order, model.label)
+    columns = ['lightMean', 'order', 'window', 'curve', 'point', 'x', 'y']
+    return (pd.DataFrame(full_rows, columns=columns),
+            pd.DataFrame(temporal_rows, columns=columns))
+
+
+def _write_output_frame(group, frame: pd.DataFrame):
+    """Write a DataFrame as compressed typed HDF5 column arrays."""
+    import h5py
+
+    group.attrs['columns'] = '\n'.join(frame.columns)
+    for column in frame.columns:
+        values = frame[column]
+        if pd.api.types.is_bool_dtype(values.dtype):
+            array = values.to_numpy(dtype=np.bool_)
+        elif pd.api.types.is_numeric_dtype(values.dtype):
+            array = values.to_numpy()
+        else:
+            array = np.asarray([
+                '' if value is None or (isinstance(value, float) and np.isnan(value))
+                else str(value) for value in values
+            ], dtype=object)
+        options = dict(compression='gzip', shuffle=True) if len(array) else {}
+        if array.dtype.kind in 'OUS':
+            group.create_dataset(column, data=array,
+                                 dtype=h5py.string_dtype(encoding='utf-8'), **options)
+        else:
+            group.create_dataset(column, data=array, **options)
+
+
+def _read_output_frame(group) -> pd.DataFrame:
+    """Read a DataFrame written by :func:`_write_output_frame`."""
+    columns = group.attrs.get('columns', '')
+    if isinstance(columns, bytes):
+        columns = columns.decode()
+    columns = str(columns).split('\n') if columns else []
+    data = {}
+    for column in columns:
+        values = group[column][()]
+        if getattr(values, 'dtype', None) is not None and values.dtype.kind in 'SO':
+            values = np.asarray([
+                value.decode() if isinstance(value, bytes) else str(value)
+                for value in values
+            ], dtype=object)
+        data[column] = values
+    return pd.DataFrame(data, columns=columns)
+
+
+def _safe_output_token(value) -> str:
+    import re
+    token = re.sub(r'[^A-Za-z0-9_.-]+', '-', str(value).strip())
+    return token.strip('-') or 'unknown'
+
+
+def _condition_output_name(exp_name: str, cell_label: str, rec_type: str,
+                           block_ids: Sequence[int]) -> str:
+    import hashlib
+    blocks = ','.join(str(int(value)) for value in sorted(set(block_ids)))
+    digest = hashlib.sha1(blocks.encode()).hexdigest()[:10]
+    return ('__'.join(_safe_output_token(value) for value in
+                     (exp_name, cell_label, rec_type))
+            + f'__blocks-{digest}.h5')
+
+
+def save_condition_output(
+        analysis: ConditionAnalysis,
+        protocol_blocks: pd.DataFrame,
+        temporal_models: Optional[Dict[float, List[LNModel]]] = None,
+        decoded: Optional[pd.DataFrame] = None,
+        early_late: Optional[pd.DataFrame] = None,
+        mean_window_s: float = 1.0,
+        output_dir=None,
+        verbose: bool = True) -> Path:
+    """Save one selected cell condition for later population analysis.
+
+    Stored outputs cover sections 2a--2c: mean response, static and temporal
+    LN summaries/curves, decoding windows and summaries, and the early/late
+    transfer metrics. One- and two-state LNK results are intentionally absent.
+    """
+    import h5py
+
+    lights = condition_light_settings(protocol_blocks, analysis)
+    selected = protocol_blocks[
+        pd.to_numeric(protocol_blocks.block_id, errors='coerce').isin(analysis.block_ids)
+    ]
+
+    def one_text(column, fallback=''):
+        if column not in selected:
+            return fallback
+        values = [str(value) for value in selected[column].dropna().unique()
+                  if str(value) not in ('', 'nan')]
+        if len(values) > 1:
+            raise ValueError(f'selected blocks disagree on {column}: {values}')
+        return values[0] if values else fallback
+
+    cell_label = one_text('cell_label')
+    cell_type = one_text('cell_type_short', one_text('cell_type'))
+    if not cell_label:
+        raise ValueError('selected blocks do not contain a cell_label')
+    protocols = sorted(str(value) for value in selected.protocol_name.dropna().unique())
+    rigs = sorted(str(value) for value in lights.rig.dropna().unique())
+    leds = sorted(str(value) for value in lights.led.dropna().unique())
+    led_ndfs = sorted(str(value) for value in lights.led_ndfs.dropna().unique())
+    ods = pd.to_numeric(lights.optical_density, errors='coerce').dropna().unique()
+
+    full_curves, temporal_curves = _ln_curve_table(analysis, temporal_models)
+    frames = {
+        'light_settings': lights,
+        'mean_response': mean_response(analysis, window_s=mean_window_s),
+        'condition_summary': condition_summary(analysis),
+        'temporal_summary': temporal_summary(temporal_models or {}),
+        'ln_curves': full_curves,
+        'temporal_ln_curves': temporal_curves,
+        'decoding_windows': decoded.copy() if decoded is not None else pd.DataFrame(),
+        'reconstruction_summary': reconstruction_summary(decoded),
+        'early_late': early_late.copy() if early_late is not None else pd.DataFrame(),
+        'dropped_epochs': analysis.dropped_epochs.copy(),
+        'epoch_adjustments': analysis.epoch_adjustments.copy(),
+    }
+
+    directory = condition_output_dir(output_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / _condition_output_name(
+        analysis.exp_name, cell_label, analysis.rec_type, analysis.block_ids)
+    existed = path.exists()
+    temporary = path.with_suffix('.h5.tmp')
+    with h5py.File(temporary, 'w') as h5:
+        h5.attrs['output_version'] = CONDITION_OUTPUT_VERSION
+        h5.attrs['exp_name'] = analysis.exp_name
+        h5.attrs['cell_label'] = cell_label
+        h5.attrs['cell_type'] = cell_type
+        h5.attrs['rec_type'] = analysis.rec_type
+        h5.attrs['units'] = analysis.units
+        h5.attrs['rig'] = ', '.join(rigs)
+        h5.attrs['led'] = ', '.join(leds)
+        h5.attrs['led_ndfs'] = ' | '.join(led_ndfs)
+        h5.attrs['optical_density'] = float(ods[0]) if len(ods) == 1 else np.nan
+        h5.attrs['protocols'] = '\n'.join(protocols)
+        h5.attrs['mean_window_s'] = float(mean_window_s)
+        h5.attrs['sample_rate'] = float(analysis.sample_rate)
+        h5.attrs['sampling_interval'] = float(analysis.sampling_interval)
+        h5.attrs['skip_seconds'] = float(analysis.skip_seconds)
+        h5.attrs['frequency_cutoff'] = float(analysis.frequency_cutoff)
+        h5.attrs['light_means'] = np.asarray(analysis.light_means, dtype=float)
+        h5.attrs['contains_lnk'] = False
+        h5.create_dataset('block_ids', data=np.asarray(analysis.block_ids, dtype=np.int64))
+        tables = h5.create_group('tables')
+        for name in CONDITION_TABLES:
+            _write_output_frame(tables.create_group(name), frames[name])
+    temporary.replace(path)
+    if verbose:
+        print(f'{"replaced" if existed else "saved"} {cell_label} '
+              f'({cell_type}, {analysis.rec_type}) | rig {", ".join(rigs)} | '
+              f'{", ".join(leds)} | LED NDF {" | ".join(led_ndfs)}')
+        print(f'{path} | LNK outputs excluded')
+    return path
+
+
+def _output_metadata(path) -> dict:
+    import h5py
+
+    def text(value):
+        return value.decode() if isinstance(value, bytes) else str(value)
+
+    with h5py.File(path, 'r') as h5:
+        if int(h5.attrs.get('output_version', -1)) != CONDITION_OUTPUT_VERSION:
+            raise ValueError(f'{path}: unsupported output version')
+        return {
+            'condition_id': path.stem,
+            'cell_id': (f'{text(h5.attrs["exp_name"])}/'
+                        f'{text(h5.attrs["cell_label"])}/'
+                        f'{text(h5.attrs["rec_type"])}'),
+            'date': text(h5.attrs['exp_name']),
+            'cell_label': text(h5.attrs['cell_label']),
+            'cell_type': text(h5.attrs['cell_type']),
+            'rec_type': text(h5.attrs['rec_type']),
+            'rig': text(h5.attrs.get('rig', '')),
+            'led': text(h5.attrs.get('led', '')),
+            'led_ndfs': text(h5.attrs.get('led_ndfs', '')),
+            'optical_density': float(h5.attrs.get('optical_density', np.nan)),
+            'protocols': text(h5.attrs.get('protocols', '')).replace('\n', ', '),
+            'n_blocks': int(len(h5['block_ids'])),
+            'output_path': str(path),
+        }
+
+
+def load_condition_index(output_dir=None) -> pd.DataFrame:
+    """List saved cells from HDF5 attributes without loading result arrays."""
+    directory = condition_output_dir(output_dir)
+    columns = ['condition_id', 'cell_id', 'date', 'cell_label', 'cell_type',
+               'rec_type', 'rig', 'led', 'led_ndfs', 'optical_density',
+               'protocols', 'n_blocks', 'output_path']
+    rows = [_output_metadata(path) for path in sorted(directory.glob('*.h5'))]
+    return (pd.DataFrame(rows, columns=columns)
+            .sort_values(['date', 'cell_label', 'rec_type'], ignore_index=True))
+
+
+def load_population_table(table: str, output_dir=None) -> pd.DataFrame:
+    """Load one named result table from every saved cell condition."""
+    import h5py
+
+    if table not in CONDITION_TABLES:
+        raise ValueError(f'table must be one of {CONDITION_TABLES}')
+    directory = condition_output_dir(output_dir)
+    frames = []
+    for path in sorted(directory.glob('*.h5')):
+        metadata = _output_metadata(path)
+        with h5py.File(path, 'r') as h5:
+            frame = _read_output_frame(h5[f'tables/{table}'])
+        if frame.empty:
+            continue
+        for column, value in reversed(list(metadata.items())):
+            frame.insert(0, column, value)
+        frames.append(frame)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def population_mean_sem(frame: pd.DataFrame, group_by: Sequence[str],
+                        metrics: Sequence[str]) -> pd.DataFrame:
+    """Population mean/SEM with each cell weighted once per coordinate."""
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    group_by, metrics = list(group_by), list(metrics)
+    required = {'cell_id', *group_by, *metrics}
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise ValueError(f'population table is missing {missing}')
+    numeric = frame.copy()
+    for metric in metrics:
+        numeric[metric] = pd.to_numeric(numeric[metric], errors='coerce')
+    # First collapse repeated rows/saved conditions within a physical cell.
+    per_cell = (numeric.groupby(['cell_id', *group_by], dropna=False,
+                                as_index=False)[metrics].mean())
+    rows = []
+    for key, block in per_cell.groupby(group_by, dropna=False, sort=True):
+        key = key if isinstance(key, tuple) else (key,)
+        row = dict(zip(group_by, key))
+        for metric in metrics:
+            values = block[metric].dropna()
+            row[f'{metric}_mean'] = float(values.mean()) if len(values) else np.nan
+            row[f'{metric}_sem'] = (float(values.std(ddof=1) / np.sqrt(len(values)))
+                                    if len(values) > 1 else np.nan)
+            row[f'{metric}_n_cells'] = int(len(values))
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def plot_population_metrics(summary: pd.DataFrame, x: str,
+                            metrics: Sequence[str], hue: Optional[str] = None,
+                            figsize: Optional[Tuple[float, float]] = None):
+    """Plot population means with SEM for one or more saved metrics."""
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    if summary is None or summary.empty:
+        print('no saved population rows to plot')
+        return None
+    metrics = list(metrics)
+    if figsize is None:
+        figsize = (4.3 * len(metrics), 3.8)
+    style.apply_publication_style()
+    fig, axes = plt.subplots(1, len(metrics), figsize=figsize, squeeze=False)
+    groups = [(None, summary)] if hue is None else list(summary.groupby(hue, dropna=False))
+    for ax, metric in zip(axes.ravel(), metrics):
+        for label, block in groups:
+            block = block.sort_values(x)
+            ax.errorbar(block[x], block[f'{metric}_mean'],
+                        yerr=block[f'{metric}_sem'].fillna(0), marker='o',
+                        capsize=3, label=None if label is None else str(label))
+        ax.set_xlabel(x)
+        ax.set_ylabel(f'{metric} (population mean ± SEM)')
+        if hue is not None:
+            ax.legend(frameon=False, fontsize=8, title=hue)
+    fig.tight_layout()
+    return fig
+
+
+# --------------------------------------------------------------------------
+# 9. LNK: an LN cascade with one slow adaptive state
 #
 # Ozuysal & Baccus (2012) put all of contrast adaptation in a four-state
 # kinetic block after a filter and nonlinearity. Two of those states carry the

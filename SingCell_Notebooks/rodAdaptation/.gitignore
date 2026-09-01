@@ -5,3 +5,6 @@
 # and is copied (or symlinked) into matlabSummary/ to run the notebook.
 matlabSummary/
 refs/
+
+# Generated per-cell HDF5 records for the notebook population workflow.
+condition_outputs/

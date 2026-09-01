@@ -50,6 +50,38 @@ MATLAB_STIMULUS_HEAD = np.array([
     1.0529432372854, 1.10333798944662, 1.14697357984573, 1.18271589004235])
 
 
+def _population_analysis():
+    """Small fitted condition for persistence tests; no raw-data access."""
+    import pandas as pd
+
+    def model(label, scale=1.0):
+        return vmn.LNModel(
+            label=label, r2=.5 * scale,
+            filter=np.array([0.0, 1.0, -0.25]) * scale,
+            filter_time_s=np.array([0.0, .01, .02]),
+            nl_x=np.array([-1.0, 0.0, 1.0]),
+            nl_y=np.array([0.0, 1.0, 2.0]) * scale,
+            params={'alpha': 2.0, 'beta': 1.0, 'gamma': 0.0,
+                    'epsilon': 0.0, 'r2': .9, 'at_bounds': ()},
+            source='python', r2_train=.6, nl_r2=.9, n_train=2, n_test=1)
+
+    analysis = vmn.ConditionAnalysis(
+        exp_name='2020-06-11_B', block_ids=[11, 12],
+        rec_type='extracellular', sample_rate=1000.0, units='spikes/s',
+        light_means=[.1, 1.0], n_epochs={.1: 2, 1.0: 2},
+        sampling_interval=.1, skip_seconds=1.0, frequency_cutoff=60.0,
+        stimulus={.1: np.ones((2, 20)), 1.0: np.ones((2, 20))},
+        response={.1: np.arange(40).reshape(2, 20),
+                  1.0: np.arange(40, 80).reshape(2, 20)},
+        ln_model={.1: model('lightMean 0.1'), 1.0: model('lightMean 1', 1.2)},
+        dropped_epochs=pd.DataFrame(), epoch_adjustments=pd.DataFrame())
+    temporal = {
+        .1: [model('1.0-2.0 s')],
+        1.0: [model('1.0-2.0 s', 1.2)],
+    }
+    return analysis, temporal
+
+
 def test_numpy_does_not_reproduce_matlab_randn():
     """The reason the engine is required, stated as a test.
 
@@ -996,3 +1028,81 @@ def test_fast_rates_are_unidentifiable_above_the_sampling_rate():
     low, _ = vmn.two_state_kinetics(drive, dt, low_act, low_inact, 3.0, 0.5)
     high, _ = vmn.two_state_kinetics(drive, dt, high_act, high_inact, 3.0, 0.5)
     assert high.mean() > 1.3 * low.mean()
+
+
+def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
+        tmp_path, monkeypatch):
+    import h5py
+    import pandas as pd
+
+    analysis, temporal = _population_analysis()
+    blocks = pd.DataFrame({
+        'block_id': [11, 12], 'exp_name': ['2020-06-11_B'] * 2,
+        'cell_label': ['Cell3'] * 2, 'cell_type_short': ['OFF-parasol'] * 2,
+        'protocol_name': [vmn.PROTOCOLS[0]] * 2, 'led': ['Blue LED'] * 2,
+    })
+    monkeypatch.setattr(vmn, 'led_attenuation', lambda row: {
+        'rig': 'B', 'led': 'Blue LED', 'led_color': 'blue',
+        'led_ndfs': 'B1, B12', 'optical_density': 2.0,
+        'attenuation': .01, 'unknown_tokens': '',
+        'filter_wheel_ndf': 3.0, 'wheel_tokens_ignored': 'FW3',
+        'wheel_ignored': True,
+    })
+    decoded = pd.DataFrame({
+        'mode': ['per_window'] * 2, 'lightMean': [.1, 1.0],
+        'centre_s': [.5, .5], 'r_all': [.3, .4],
+        'r_increment': [.2, .3], 'r_decrement': [.1, .2],
+        'gain_increment': [.8, .9], 'gain_decrement': [.7, .8],
+        'nrmse_increment': [1.0, .9], 'nrmse_decrement': [1.1, 1.0],
+        'r_asymmetry': [.1, .1], 'gain_asymmetry': [.1, .1],
+    })
+    early_late = pd.DataFrame({
+        'mode': ['per_window'], 'lightMean': [.1], 'half': ['early'],
+        'gain_increment': [.8], 'gain_decrement': [.7],
+    })
+
+    path = vmn.save_condition_output(
+        analysis, blocks, temporal_models=temporal, decoded=decoded,
+        early_late=early_late, mean_window_s=1.0,
+        output_dir=tmp_path, verbose=False)
+    second = vmn.save_condition_output(
+        analysis, blocks, temporal_models=temporal, decoded=decoded,
+        early_late=early_late, output_dir=tmp_path, verbose=False)
+
+    assert path == second and len(list(tmp_path.glob('*.h5'))) == 1
+    with h5py.File(path, 'r') as stored:
+        assert stored.attrs['rig'] == 'B'
+        assert stored.attrs['led_ndfs'] == 'B1, B12'
+        assert stored.attrs['optical_density'] == 2.0
+        assert not bool(stored.attrs['contains_lnk'])
+        assert set(stored['tables']) == set(vmn.CONDITION_TABLES)
+        assert not any('lnk' in name.lower() for name in stored['tables'])
+        assert stored['tables/ln_curves/y'].compression == 'gzip'
+
+    index = vmn.load_condition_index(tmp_path)
+    assert index[['date', 'cell_label', 'cell_type', 'rec_type', 'rig',
+                  'led', 'led_ndfs']].iloc[0].to_dict() == {
+        'date': '2020-06-11_B', 'cell_label': 'Cell3',
+        'cell_type': 'OFF-parasol', 'rec_type': 'extracellular',
+        'rig': 'B', 'led': 'Blue LED', 'led_ndfs': 'B1, B12'}
+    loaded = vmn.load_population_table('condition_summary', tmp_path)
+    assert len(loaded) == 2
+    assert loaded.cell_id.unique().tolist() == ['2020-06-11_B/Cell3/extracellular']
+
+
+def test_population_mean_sem_weights_each_cell_once():
+    import pandas as pd
+
+    # Cell A has two repeated saved rows; it must contribute their mean (2),
+    # once, alongside cell B (6): population mean 4, SEM 2.
+    frame = pd.DataFrame({
+        'cell_id': ['A', 'A', 'B'], 'cell_type': ['OFF'] * 3,
+        'rec_type': ['extracellular'] * 3, 'lightMean': [.1] * 3,
+        'r2': [1.0, 3.0, 6.0],
+    })
+    summary = vmn.population_mean_sem(
+        frame, group_by=['cell_type', 'rec_type', 'lightMean'], metrics=['r2'])
+
+    assert summary.r2_mean.iloc[0] == pytest.approx(4.0)
+    assert summary.r2_sem.iloc[0] == pytest.approx(2.0)
+    assert summary.r2_n_cells.iloc[0] == 2
