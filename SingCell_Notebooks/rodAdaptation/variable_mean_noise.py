@@ -3794,13 +3794,26 @@ def adaptation_state(drive, dt: float, tau_on: float, tau_off: float,
 
 
 def _lnk_predict(generator, params, coupling: str, dt: float,
-                 state_step: int, adaptive: bool = True):
+                 state_step: int, adaptive: bool = True,
+                 cache: Optional[dict] = None):
     """``(prediction, state)`` for one parameter set over the whole sequence.
 
     The drive is the *unadapted* rectified output ``Phi(beta g + gamma)``, so
     the state depends only on the stimulus and never on the measured response.
     That is what makes holding out epochs sound: the state can be integrated
     across a held-out stretch without having seen its response.
+
+    **``cache`` stages the computation by what each part depends on**, which is
+    where the fit's time goes. Measured on a 570k-sample sequence, essentially
+    100% of ``fit_lnk``'s wall time is inside this function and 413 of its 481
+    calls exist only to finite-difference the Jacobian. But ``drive`` depends
+    on ``beta`` and ``gamma`` alone and the state on those plus the two time
+    constants -- so perturbing ``alpha``, ``epsilon`` or ``k`` recomputes a
+    570k-sample normal CDF that cannot have changed. Passing a dict lets
+    consecutive calls reuse both: 1.50x end to end, and bit-identical, since
+    nothing is approximated. Keyed on the generator *object* as well as the
+    parameters, so ``fit_filter=True`` -- which rebuilds the generator every
+    evaluation -- correctly misses rather than returning a stale drive.
     """
     # `ndtr` is the raw normal CDF; `scipy.stats.norm.cdf` is the same function
     # behind argument validation that costs 2.6x on a 570k array and is paid on
@@ -3809,8 +3822,17 @@ def _lnk_predict(generator, params, coupling: str, dt: float,
 
     alpha = float(params['alpha']); beta = float(params['beta'])
     gamma = float(params['gamma']); epsilon = float(params['epsilon'])
-    argument = beta * np.asarray(generator, dtype=float) + gamma
-    drive = ndtr(argument)
+    generator = np.asarray(generator, dtype=float)
+    argument = drive = None
+    if cache is not None and (cache.get('generator') is generator
+                              and cache.get('drive_key') == (beta, gamma)):
+        argument, drive = cache['argument'], cache['drive']
+    if drive is None:
+        argument = beta * generator + gamma
+        drive = ndtr(argument)
+        if cache is not None:
+            cache.update(generator=generator, drive_key=(beta, gamma),
+                         argument=argument, drive=drive, state_key=None)
     if not adaptive:
         return alpha * drive + epsilon, np.zeros_like(drive)
 
@@ -3818,14 +3840,19 @@ def _lnk_predict(generator, params, coupling: str, dt: float,
     # 1 ms steps buy nothing and cost 40x the arithmetic. The drive is averaged
     # into those bins rather than sampled, since the state responds to the mean
     # drive over the step, not to whichever sample fell on the boundary.
-    coarse = _bin_mean(drive[None, :], state_step).ravel()
-    state_coarse = adaptation_state(coarse, dt * state_step,
-                                    params['tau_on'], params['tau_off'])
-    state = np.repeat(state_coarse, state_step)
-    if state.size < drive.size:
-        state = np.concatenate([state, np.full(drive.size - state.size,
-                                               state[-1] if state.size else 0.0)])
-    state = state[:drive.size]
+    tau_on = float(params['tau_on']); tau_off = float(params['tau_off'])
+    state = centred = None
+    if cache is not None and cache.get('state_key') == (beta, gamma, tau_on,
+                                                        tau_off, state_step):
+        state, centred = cache['state'], cache['centred']
+    if state is None:
+        coarse = _bin_mean(drive[None, :], state_step).ravel()
+        state_coarse = adaptation_state(coarse, dt * state_step, tau_on, tau_off)
+        state = np.repeat(state_coarse, state_step)
+        if state.size < drive.size:
+            state = np.concatenate([state, np.full(drive.size - state.size,
+                                                   state[-1] if state.size else 0.0)])
+        state = state[:drive.size]
 
     # Couple the state's *modulation*, not its level. The mean of `a` is
     # degenerate with `alpha` (multiplicative) and with `gamma` (subtractive),
@@ -3842,8 +3869,11 @@ def _lnk_predict(generator, params, coupling: str, dt: float,
     # between couplings and between cells, which is what a pathway comparison
     # needs. Without this `k` pinned at its bound even on synthetic data whose
     # true value was well inside it.
-    spread = float(np.std(state))
-    centred = (state - float(np.mean(state))) / (spread if spread > 1e-9 else 1.0)
+        spread = float(np.std(state))
+        centred = (state - float(np.mean(state))) / (spread if spread > 1e-9 else 1.0)
+        if cache is not None:
+            cache.update(state_key=(beta, gamma, tau_on, tau_off, state_step),
+                         state=state, centred=centred)
     k = float(params['k'])
     if coupling == 'multiplicative':
         # Log-gain, so the gain stays positive for any k and there is no
@@ -4444,9 +4474,15 @@ def fit_lnk(analysis: ConditionAnalysis,
             return normalized_residual(predicted[mask], response[mask], dt)
         return predicted[mask] - response[mask]
 
+    # One cache for the whole fit: consecutive residual evaluations differ in
+    # one parameter at a time (that is what a finite-difference Jacobian is),
+    # so most of them reuse the drive, and many reuse the state as well.
+    predict_cache: dict = {}
+
     def residual(vector):
         predicted, _ = _lnk_predict(generator_for(vector), unpack(vector),
-                                    coupling, dt, state_step)
+                                    coupling, dt, state_step,
+                                    cache=predict_cache)
         return score_residual(predicted, train)
 
     # "the optimum values obtained are assumed to be non-unique and local. To
@@ -4946,6 +4982,349 @@ def plot_apparent_nonlinearity(analysis: ConditionAnalysis, model: LNKModel,
     fig.suptitle(f'{analysis.exp_name} | {analysis.rec_type} | two-state LNK: '
                  f'the nonlinearity change is predicted, not imposed', fontsize=10)
     fig.tight_layout(rect=(0, 0, 1, 0.93))
+    return fig
+
+
+
+def timelapse_windows(epoch_s: float, n_windows: int = 5,
+                      first_edge_s: float = 1.0) -> List[Tuple[float, float]]:
+    """Window edges that get wider with time, for watching an adaptation.
+
+    Geometric rather than even. The state moves fastest just after the step and
+    barely at all by the end, so even windows spend most of their resolution
+    where nothing is happening and blur the part that is. Five windows over a
+    30 s epoch come out roughly 0-1, 1-2.3, 2.3-5.4, 5.4-12.7, 12.7-30 s.
+    """
+    epoch_s = float(epoch_s)
+    if epoch_s <= first_edge_s or n_windows < 2:
+        return [(0.0, epoch_s)]
+    inner = np.geomspace(first_edge_s, epoch_s, int(n_windows))
+    edges = np.r_[0.0, inner]
+    return [(float(a), float(b)) for a, b in zip(edges[:-1], edges[1:])]
+
+
+def nonlinearity_timelapse(analysis: ConditionAnalysis, model: LNKModel,
+                           windows_s: Optional[List[Tuple[float, float]]] = None,
+                           n_windows: int = 5, n_points: int = 200,
+                           min_bin_samples: int = 20,
+                           warmup_epochs: int = 1) -> pd.DataFrame:
+    """The input-output curve the one-state LNK displays at successive times.
+
+    The point of the model is that one slow state moves one fixed nonlinearity,
+    so "how the nonlinearity changes" is not a separate fit per window -- it is
+    the same four parameters evaluated at the state the cell has reached by
+    that time. This walks the state forward and draws the curve it implies:
+
+    ``multiplicative``  ``r(g) = alpha exp(-k a') Phi(beta g + gamma) + eps``
+    ``subtractive``     ``r(g) = alpha Phi(beta g + gamma - k a') + eps``
+
+    with ``a'`` the standardised state averaged over the window -- the same
+    standardisation :func:`_lnk_predict` applies, so these curves are the ones
+    the fitted model actually used.
+
+    **Binned by time, which is why the empirical curve is safe here.**
+    :func:`apparent_nonlinearity` has to compute its two curves analytically
+    because splitting the record *on the state* is confounded: the state is
+    driven by the stimulus, so high-state samples are also high-drive samples
+    and the split selects on the very axis being plotted. Time since the step
+    is imposed by the protocol and is not selected by the stimulus, so binning
+    the measured response against the generator within a time window is an
+    honest comparison rather than a circular one. That is what ``data`` is.
+
+    **Per light mean, and on that level's own generator range.** The filters
+    are normalised to shape and the generator globally, so the bright level's
+    generator swings about 10x wider; one shared grid would draw the dim level
+    as a dot at the origin.
+
+    **``warmup_epochs`` drops the start of the record, and it is not optional
+    in practice.** :func:`adaptation_state` integrates from ``a0 = 0``, but the
+    state is standardised before it is coupled, so a zero start is not a small
+    perturbation -- it is zero against a record whose mean state is far from
+    zero and whose spread can be small. On a synthetic record with mean state
+    0.46 and SD 0.038 the first samples sit at **-12 standardised units** and
+    ``exp(-k a')`` reaches 1530 against 46 for the rest of the record. That
+    lands in the earliest window, which is exactly the one this function
+    exists to show, so the first epoch is dropped by default. It is an
+    artefact of the initial condition, not the cell's history.
+
+    Columns: ``lightMean``, ``window``, ``order``, ``t_mid_s``, ``state``
+    (mean standardised state in that window), ``n_samples``, ``generator``,
+    ``model``, ``data``.
+    """
+    from scipy.special import ndtr
+
+    if model is None:
+        return pd.DataFrame()
+    params = model.params
+    generator = np.asarray(model.generator, dtype=float)
+    raw_state = np.asarray(model.state, dtype=float)
+    response = np.asarray(analysis.sequence_response, dtype=float)
+    light = np.asarray(analysis.sequence_light_mean, dtype=float)
+    epochs = np.asarray(analysis.sequence_epoch, dtype=int)
+    if generator.size == 0 or raw_state.size != generator.size:
+        return pd.DataFrame()
+
+    # Standardised exactly as the fit did: only k * a' is identifiable.
+    spread = float(np.std(raw_state))
+    state = (raw_state - float(np.mean(raw_state))) / (spread if spread > 1e-9 else 1.0)
+
+    # Time since the luminance step = time within the epoch, because the mean
+    # is constant within an epoch and changes between them.
+    dt = float(analysis.sampling_interval)
+    starts = np.r_[0, np.flatnonzero(np.diff(epochs) != 0) + 1]
+    since_step = np.arange(generator.size, dtype=float)
+    for start, stop in zip(starts, np.r_[starts[1:], generator.size]):
+        since_step[start:stop] -= start
+    since_step *= dt
+
+    if windows_s is None:
+        epoch_s = float(np.median([stop - start for start, stop
+                                   in zip(starts, np.r_[starts[1:], generator.size])])) * dt
+        windows_s = timelapse_windows(epoch_s, n_windows=n_windows)
+
+    alpha = float(params['alpha']); beta = float(params['beta'])
+    gamma = float(params['gamma']); epsilon = float(params['epsilon'])
+    k = float(params['k'])
+
+    # Drop the warm-up epochs before anything is measured off the state.
+    keep = np.ones(generator.size, dtype=bool)
+    if int(warmup_epochs) > 0:
+        first = np.unique(epochs)[:int(warmup_epochs)]
+        keep &= ~np.isin(epochs, first)
+
+    rows = []
+    for mean_level in analysis.light_means:
+        level_mask = (light == mean_level) & keep
+        if not level_mask.any():
+            continue
+        # This level's own generator range; the two differ by about 10x.
+        lo, hi = np.percentile(generator[level_mask], [1, 99])
+        grid = np.linspace(lo, hi, int(n_points))
+        edges = np.percentile(generator[level_mask], np.linspace(1, 99, 26))
+        centres = 0.5 * (edges[:-1] + edges[1:])
+        for order, (start_s, stop_s) in enumerate(windows_s):
+            mask = level_mask & (since_step >= start_s) & (since_step < stop_s)
+            n = int(mask.sum())
+            if n < min_bin_samples:
+                continue
+            a_bar = float(np.mean(state[mask]))
+            if model.coupling == 'multiplicative':
+                curve = alpha * np.exp(-k * a_bar) * ndtr(beta * grid + gamma) + epsilon
+            elif model.coupling == 'subtractive':
+                curve = alpha * ndtr(beta * grid + gamma - k * a_bar) + epsilon
+            else:
+                raise ValueError(f'unknown coupling {model.coupling!r}')
+            # Measured response over the same samples, binned on the generator.
+            which = np.digitize(generator[mask], edges) - 1
+            block = response[mask]
+            binned = np.array([block[which == i].mean()
+                               if (which == i).sum() >= min_bin_samples else np.nan
+                               for i in range(centres.size)])
+            label = f'{start_s:.1f}-{stop_s:.1f} s'
+            for value, curve_value in zip(grid, curve):
+                rows.append({'lightMean': mean_level, 'window': label,
+                             'order': order,
+                             't_mid_s': 0.5 * (start_s + stop_s),
+                             'state': a_bar, 'n_samples': n,
+                             'generator': float(value),
+                             'model': float(curve_value),
+                             'data': float(np.interp(value, centres, binned))})
+    return pd.DataFrame(rows)
+
+
+def describe_timelapse(curves: pd.DataFrame) -> pd.DataFrame:
+    """Is the nonlinearity's change over time a scaling or a shift?
+
+    Each window's curve is compared with the **first** window's, per light
+    mean, by the same two measures :func:`describe_apparent_change` uses on the
+    two-state model: a through-foot slope (a pure scaling moves this away from
+    1) and the displacement of the half-height point along the generator axis
+    (a pure shift moves this away from 0).
+
+    For the one-state model the answer is not in doubt -- the coupling was
+    imposed, so ``multiplicative`` scales and ``subtractive`` shifts by
+    construction -- and that is the use of this table: it puts the *size* of
+    the imposed change on the same two axes the two-state model's emergent
+    prediction is reported on, so the two variants can be read side by side.
+    """
+    if curves is None or curves.empty:
+        return pd.DataFrame()
+    rows = []
+    for mean_level, block in curves.groupby('lightMean', sort=True):
+        first = block[block.order.eq(block.order.min())]
+        x = first.generator.values
+        y_first = first.model.values
+        base = float(np.min(y_first))
+        for order, window in block.groupby('order', sort=True):
+            y = window.model.values
+            if y.size != y_first.size:
+                continue
+            denom = float(np.sum((y_first - base) ** 2))
+
+            def half_point(values):
+                target = 0.5 * (values.min() + values.max())
+                order_by = np.argsort(values)
+                return float(np.interp(target, values[order_by], x[order_by]))
+
+            rows.append({
+                'lightMean': mean_level, 'order': int(order),
+                'window': window.window.iloc[0],
+                't_mid_s': float(window.t_mid_s.iloc[0]),
+                'state': float(window.state.iloc[0]),
+                'gain_ratio': (float(np.sum((y - base) * (y_first - base)) / denom)
+                               if denom else np.nan),
+                'shift_generator': half_point(y) - half_point(y_first),
+                'max_rate': float(np.max(y))})
+    return pd.DataFrame(rows)
+
+
+def plot_nonlinearity_timelapse(analysis: ConditionAnalysis, model: LNKModel,
+                                curves: Optional[pd.DataFrame] = None,
+                                temporal_models: Optional[Dict] = None,
+                                windows_s=None, n_windows: int = 5,
+                                warmup_epochs: int = 1,
+                                figsize: Optional[Tuple[float, float]] = None):
+    """The state, the nonlinearity it implies, and the filter, over one epoch.
+
+    Three columns per light mean, left to right: **the state** running from the
+    luminance step with the window edges marked, so the sampling of the
+    adaptation is visible rather than assumed; **the nonlinearity** at each of
+    those windows, model as a line and the measured response binned on the
+    generator as dots; and **the temporal filter** over the same windows, taken
+    from the windowed LN fits of §2b when they are passed in.
+
+    **The third column is the model's central assumption, drawn.** This
+    reduction keeps only a slow state, which cannot restructure a filter -- so
+    the filter is frozen per light mean and every change within a level is
+    charged to the nonlinearity. If the windowed filters in the right-hand
+    column move over the epoch, that assumption is wrong for this cell and the
+    nonlinearity change in the middle column is partly absorbing a filter
+    change. Passing ``temporal_models`` from :func:`temporal_ln_model` is
+    therefore worth the extra fit; without it the column shows only the frozen
+    filter the LNK used.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib import cm
+
+    from retinanalysis.utils import style
+
+    style.apply_publication_style()
+    if model is None:
+        print('no model to plot')
+        return None
+    if curves is None:
+        curves = nonlinearity_timelapse(analysis, model, windows_s=windows_s,
+                                        n_windows=n_windows,
+                                        warmup_epochs=warmup_epochs)
+    if curves is None or curves.empty:
+        print('nothing to plot')
+        return None
+    means = [m for m in analysis.light_means if m in set(curves.lightMean)]
+    if not means:
+        print('nothing to plot')
+        return None
+
+    orders = sorted(curves.order.unique())
+    shades = cm.get_cmap('viridis')(np.linspace(0.08, 0.92, len(orders)))
+    colors = dict(zip(orders, shades))
+
+    dt = float(analysis.sampling_interval)
+    raw_state = np.asarray(model.state, dtype=float)
+    spread = float(np.std(raw_state))
+    state = (raw_state - float(np.mean(raw_state))) / (spread if spread > 1e-9 else 1.0)
+    light = np.asarray(analysis.sequence_light_mean, dtype=float)
+    epochs = np.asarray(analysis.sequence_epoch, dtype=int)
+    starts = np.r_[0, np.flatnonzero(np.diff(epochs) != 0) + 1]
+    stops = np.r_[starts[1:], epochs.size]
+
+    if figsize is None:
+        figsize = (13.5, 3.6 * len(means) + 0.8)
+    fig, axes = plt.subplots(len(means), 3, figsize=figsize, squeeze=False)
+
+    for row, mean_level in enumerate(means):
+        block = curves[curves.lightMean.eq(mean_level)]
+
+        # --- the state, averaged over the epochs of this light mean --------
+        ax = axes[row][0]
+        warm = set(np.unique(epochs)[:int(warmup_epochs)]) if warmup_epochs > 0 else set()
+        cuts = [state[start:stop] for start, stop in zip(starts, stops)
+                if light[start] == mean_level and epochs[start] not in warm]
+        if cuts:
+            width = min(piece.size for piece in cuts)
+            stack = np.vstack([piece[:width] for piece in cuts])
+            t = np.arange(width) * dt
+            ax.plot(t, stack.mean(axis=0), color='0.25', lw=1.6)
+            ax.fill_between(t, stack.mean(axis=0) - stack.std(axis=0),
+                            stack.mean(axis=0) + stack.std(axis=0),
+                            color='0.5', alpha=.2, lw=0)
+        for order in orders:
+            piece = block[block.order.eq(order)]
+            if piece.empty:
+                continue
+            ax.axvline(float(piece.t_mid_s.iloc[0]), color=colors[order],
+                       lw=1.4, alpha=.85)
+        ax.set_ylabel(f'lightMean {mean_level:g}\nstate a′ (SD)', fontsize=9)
+        if row == 0:
+            ax.set_title('adaptation state', fontsize=10)
+        if row == len(means) - 1:
+            ax.set_xlabel('time since the step (s)', fontsize=9)
+
+        # --- the nonlinearity at each window -------------------------------
+        ax = axes[row][1]
+        for order in orders:
+            piece = block[block.order.eq(order)].sort_values('generator')
+            if piece.empty:
+                continue
+            ax.plot(piece.generator, piece['model'], '-', lw=1.9,
+                    color=colors[order], label=piece.window.iloc[0])
+            thinned = piece.iloc[::12]
+            ax.plot(thinned.generator, thinned['data'], 'o', ms=3.0,
+                    color=colors[order], alpha=.75, mew=0)
+        ax.legend(frameon=False, fontsize=7.5, title='time since step',
+                  title_fontsize=7.5, loc='upper left')
+        ax.set_ylabel('response', fontsize=9)
+        if row == 0:
+            ax.set_title(f'nonlinearity ({model.coupling}; '
+                         f'lines model, dots measured)', fontsize=10)
+        if row == len(means) - 1:
+            ax.set_xlabel('generator (SD)', fontsize=9)
+
+        # --- the filter over the same windows ------------------------------
+        ax = axes[row][2]
+        frozen = model.filters.get(mean_level)
+        drawn = 0
+        if temporal_models:
+            windowed = temporal_models.get(mean_level) or []
+            for index, one in enumerate(windowed):
+                shade = cm.get_cmap('viridis')(
+                    0.08 + 0.84 * index / max(len(windowed) - 1, 1))
+                vector = np.asarray(one.filter, dtype=float)
+                norm = float(np.linalg.norm(vector))
+                ax.plot(np.asarray(one.filter_time_s) * 1e3,
+                        vector / (norm if norm else 1.0),
+                        '-', lw=1.3, color=shade, alpha=.9,
+                        label=one.label if index in (0, len(windowed) - 1) else None)
+                drawn += 1
+        if frozen is not None and np.size(frozen):
+            vector = np.asarray(frozen, dtype=float)
+            norm = float(np.linalg.norm(vector))
+            ax.plot(np.asarray(model.filter_time_s) * 1e3,
+                    vector / (norm if norm else 1.0), '--', lw=2.0,
+                    color='#D55E00', label='LNK (frozen)')
+        ax.axhline(0, color='0.6', lw=0.8)
+        ax.legend(frameon=False, fontsize=7.5, loc='lower right')
+        ax.set_ylabel('filter (unit norm)', fontsize=9)
+        if row == 0:
+            ax.set_title('temporal filter'
+                         + ('' if drawn else ' — pass temporal_models for windows'),
+                         fontsize=10)
+        if row == len(means) - 1:
+            ax.set_xlabel('time (ms)', fontsize=9)
+
+    fig.suptitle(f'{analysis.exp_name} | {analysis.rec_type} | one-state LNK '
+                 f'({model.coupling}) — the nonlinearity over time, and whether '
+                 f'the filter stayed put', fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.955))
     return fig
 
 
