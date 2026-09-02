@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from retinanalysis.utils import database_pop
 
 
@@ -53,3 +55,93 @@ def test_mea_json_still_requires_sorted_data(tmp_path, monkeypatch, capsys):
 
     assert rows == []
     assert exp_name in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('exp_name', ['20260804C', '20260728H'])
+def test_missing_rig_type_defaults_to_mea_for_c_and_h(exp_name):
+    assert database_pop.resolve_rig_type({}, exp_name) == 'MEA'
+
+
+def test_explicit_rig_type_is_preserved():
+    assert database_pop.resolve_rig_type(
+        {'rig_type': 'PATCH'}, '20260804C') == 'PATCH'
+
+
+def test_missing_rig_type_is_not_guessed_for_other_rigs():
+    with pytest.raises(KeyError, match='limited.*rig C or H'):
+        database_pop.resolve_rig_type({}, '20260804A')
+
+
+def _source(label, uuid, properties=None, sources=None):
+    return {
+        'attributes': {'label': label, 'uuid': uuid},
+        'label': label,
+        'properties': properties or {},
+        'notes': [],
+        'sources': sources or [],
+    }
+
+
+def test_analysis_mea_json_is_expanded_for_database_ingest():
+    cell = _source('20260804Cm1', 'cell-uuid', {'type': 'RGC'})
+    preparation = _source(
+        'Mount1', 'prep-uuid', {'preparation': 'wholemount'}, [cell])
+    animal = _source(
+        '20260804C', 'animal-uuid', {'species': 'mouse'}, [preparation])
+    epoch = {
+        'attributes': {'uuid': 'epoch-uuid'},
+        'properties': {},
+        'parameters': {},
+        'responses': {},
+        'stimuli': {},
+    }
+    block = {
+        'uuid': 'block-uuid',
+        'protocolID': 'example.Protocol',
+        'attributes': {'uuid': 'block-uuid', 'protocolID': 'example.Protocol'},
+        'properties': {},
+        'parameters': {},
+        'arrayPitch': '60um',
+        'dataFile': '/data000/',
+        'epoch': [epoch],
+    }
+    group = {
+        'attributes': {'label': 'group', 'uuid': 'group-uuid'},
+        'label': 'group',
+        'properties': {},
+        'source': {'uuid': 'cell-uuid'},
+        'block': [block],
+    }
+    second_block = {
+        **block,
+        'uuid': 'second-block-uuid',
+        'attributes': {
+            'uuid': 'second-block-uuid',
+            'protocolID': 'second.Protocol',
+        },
+        'protocolID': 'second.Protocol',
+        'epoch': [],
+    }
+    second_group_piece = {**group, 'block': [second_block]}
+    metadata = {
+        'protocol': [
+            {'label': 'example.Protocol', 'group': [group]},
+            {'label': 'second.Protocol', 'group': [second_group_piece]},
+        ],
+        'sources': [animal],
+    }
+
+    normalized = database_pop.prepare_experiment_for_ingest(
+        metadata, '20260804C')
+
+    assert normalized['rig_type'] == 'MEA'
+    assert normalized['animals'][0]['species'] == 'mouse'
+    normalized_preparation = normalized['animals'][0]['preparations'][0]
+    assert normalized_preparation['arrayPitch'] == '60um'
+    normalized_cell = normalized_preparation['cells'][0]
+    assert normalized_cell['type'] == 'RGC'
+    assert len(normalized_cell['epoch_groups']) == 1
+    normalized_blocks = normalized_cell['epoch_groups'][0]['epoch_blocks']
+    assert len(normalized_blocks) == 2
+    assert normalized_blocks[0]['epochs'] == [epoch]
+    assert 'epoch' in metadata['protocol'][0]['group'][0]['block'][0]

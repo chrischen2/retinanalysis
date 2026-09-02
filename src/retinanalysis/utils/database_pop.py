@@ -9,6 +9,8 @@ import datajoint as dj
 import json
 import os
 import datetime
+import re
+import copy
 from tqdm.auto import tqdm
 
 
@@ -506,14 +508,123 @@ def exp_name_from_data(data: str) -> str:
     return base[:-3] if base.lower().endswith('.h5') else base
 
 
+def resolve_rig_type(experiment: dict, exp_name: str) -> str:
+    """Return the recorded rig type, with a narrow MEA-name fallback.
+
+    Newer compact MEA exports sometimes contain only the analysis-oriented
+    ``protocol`` / ``sources`` JSON and therefore omit ``rig_type``. Rigs C
+    and H are MEA rigs, so their compact experiment names are authoritative
+    enough to fill that one missing field. Other missing rig types remain an
+    error rather than being silently misclassified.
+    """
+    rig_type = experiment.get('rig_type')
+    if rig_type is not None and str(rig_type).strip():
+        return str(rig_type).strip().upper()
+
+    match = re.fullmatch(r'\d{8}([A-Za-z])(?:[_-].*)?', exp_name)
+    if match and match.group(1).upper() in {'C', 'H'}:
+        return 'MEA'
+
+    raise KeyError(
+        f"rig_type is missing for {exp_name}; automatic MEA fallback is "
+        "limited to compact experiment names ending in rig C or H")
+
+
+def prepare_experiment_for_ingest(experiment: dict, exp_name: str) -> dict:
+    """Normalize supported metadata JSON layouts for database insertion.
+
+    DataJoint originally consumed the expanded ``*_dj.json`` representation.
+    Current MEA exports on the shared volume use the analysis representation
+    (``protocol`` plus nested ``sources``). Reconstruct the same expanded
+    hierarchy in memory so both representations remain ingestible.
+    """
+    rig_type = resolve_rig_type(experiment, exp_name)
+    if 'animals' in experiment:
+        normalized = dict(experiment)
+        normalized['rig_type'] = rig_type
+        return normalized
+
+    if not ('protocol' in experiment and 'sources' in experiment):
+        raise KeyError(
+            f"animals is missing for {exp_name}, and metadata is not a "
+            "protocol/sources MEA export")
+    if not experiment['sources']:
+        raise ValueError(f"No animal sources found for {exp_name}")
+
+    # Import lazily: parse_data loads optional MEA binary-reading dependencies
+    # that are unnecessary for the normal expanded-JSON ingestion path.
+    from retinanalysis.utils.parse_data import (
+        AnimalObj, CellObj, EpochGroupObj, ExperimentObj, PreparationObj,
+        clean_epoch_group_for_json)
+
+    normalized = ExperimentObj(
+        d=experiment['sources'][0], rig_type=rig_type).__dict__
+
+    groups_by_cell = {}
+    group_lookup = {}
+    for protocol in experiment['protocol']:
+        for group in protocol.get('group', []):
+            source_uuid = group.get('source', {}).get('uuid')
+            if source_uuid:
+                # The analysis JSON splits one Symphony epoch group across
+                # protocols. Merge those pieces back into one group before
+                # constructing the DataJoint hierarchy.
+                group_uuid = group.get('attributes', {}).get('uuid')
+                group_key = (source_uuid, group_uuid)
+                if group_key not in group_lookup:
+                    merged_group = {
+                        key: value for key, value in group.items()
+                        if key != 'block'
+                    }
+                    merged_group['block'] = []
+                    group_lookup[group_key] = merged_group
+                    groups_by_cell.setdefault(source_uuid, []).append(
+                        merged_group)
+                group_lookup[group_key]['block'].extend(group.get('block', []))
+
+    animals = []
+    for animal_source in experiment['sources']:
+        animal = AnimalObj(d=animal_source).__dict__
+        preparations = []
+        for preparation_source in animal_source.get('sources', []):
+            preparation = PreparationObj(d=preparation_source).__dict__
+            cells = []
+            preparation_pitches = set()
+            for cell_source in preparation_source.get('sources', []):
+                cell = CellObj(d=cell_source).__dict__
+                epoch_groups = []
+                for group in groups_by_cell.get(cell['uuid'], []):
+                    for block in group.get('block', []):
+                        pitch = block.get('arrayPitch')
+                        if pitch is not None:
+                            preparation_pitches.add(str(pitch))
+                    # EpochGroupObj standardizes ``epoch`` to ``epochs`` in
+                    # place, so isolate it from the caller's loaded JSON.
+                    epoch_group = EpochGroupObj(d=copy.deepcopy(group)).__dict__
+                    epoch_groups.append(
+                        clean_epoch_group_for_json(epoch_group))
+                cell['epoch_groups'] = epoch_groups
+                cells.append(cell)
+            if len(preparation_pitches) == 1:
+                preparation['arrayPitch'] = next(iter(preparation_pitches))
+            preparation['cells'] = cells
+            preparations.append(preparation)
+        animal['preparations'] = preparations
+        animals.append(animal)
+    normalized['animals'] = animals
+    return normalized
+
+
 def append_experiment(meta: str, data: str, tags: str, experiment: dict, user: str, tags_dict: dict):
     exp_name = exp_name_from_data(data)
+    experiment = prepare_experiment_for_ingest(experiment, exp_name)
+    is_mea = experiment['rig_type'] == 'MEA'
     base_tuple = {
         'exp_name': exp_name,
         'meta_file': meta,
         'data_file': data,
         'tags_file': tags,
-        'is_mea': 1 if experiment['rig_type'] == 'MEA' else 0,
+        'is_mea': 1 if is_mea else 0,
         'date_added': datetime.datetime.now(),
     }
     Experiment.insert1(build_tuple(base_tuple, 'experiment', experiment))
@@ -523,7 +634,7 @@ def append_experiment(meta: str, data: str, tags: str, experiment: dict, user: s
     #     'properties': experiment['properties']
     # })
     experiment_id = max_id(Experiment)
-    if experiment['rig_type'] == 'MEA':
+    if is_mea:
         try:
             append_experiment_analysis(experiment_id, exp_name)
         except Exception as e:
@@ -531,7 +642,7 @@ def append_experiment(meta: str, data: str, tags: str, experiment: dict, user: s
     tags_dict = append_tags(experiment['uuid'], experiment_id, 'experiment', experiment_id, None, tags_dict)
     for animal in experiment['animals']:
         append_animal(experiment_id, experiment_id, animal, user, tags_dict,
-                           experiment['rig_type'] == 'MEA')
+                      is_mea)
 
 # dummy method for now, will implement later.
 # If there are files to parse, throws error for now.
