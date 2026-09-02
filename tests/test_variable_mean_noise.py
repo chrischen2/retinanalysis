@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-NOTEBOOK_DIR = Path(__file__).resolve().parents[1] / 'SingCell_Notebooks' / 'rodAdaptation'
+NOTEBOOK_DIR = Path(__file__).resolve().parents[1] / 'SingCellNotebooks' / 'rodAdaptation'
 if str(NOTEBOOK_DIR) not in sys.path:
     sys.path.insert(0, str(NOTEBOOK_DIR))
 
@@ -551,6 +551,36 @@ def test_reconstruct_traces_holds_out_every_epoch_exactly_once():
     assert set(counts.index.size for _ in [0])      # windows exist
     assert counts.notna().all().all()               # every epoch in every window
     assert counts.nunique().nunique() == 1          # and the same number of bins
+
+
+def test_early_late_defaults_to_each_available_interval_midpoint():
+    """The split follows usable data, including a shorter leakage-free mode."""
+    import pandas as pd
+
+    pieces = []
+    for mode, times in (
+            ('per_window', np.arange(2.125, 30.0, 0.25)),
+            ('steady_state', np.arange(2.125, 20.0, 0.25))):
+        stimulus = np.where(np.arange(times.size) % 2, 1.0, -1.0)
+        pieces.append(pd.DataFrame({
+            'mode': mode, 'lightMean': 3.0, 'time_s': times,
+            'stimulus': stimulus, 'reconstruction': 0.5 * stimulus,
+        }))
+    traces = pd.concat(pieces, ignore_index=True)
+
+    labelled = vmn.label_early_late(traces)
+    expected = {'per_window': 16.0, 'steady_state': 11.0}
+    for mode, split_s in expected.items():
+        block = labelled[labelled['mode'].eq(mode)]
+        assert block.split_s.nunique() == 1
+        assert block.split_s.iloc[0] == pytest.approx(split_s)
+        assert block[block.half.eq('early')].time_s.max() <= split_s
+        assert block[block.half.eq('late')].time_s.min() > split_s
+        assert block.groupby('half').size().nunique() == 1
+
+    summary = vmn.transfer_early_late(traces)
+    assert {'split_s', 't_start_s', 't_end_s', 'span_s'} <= set(summary.columns)
+    assert set(summary.groupby('mode').split_s.first()) == set(expected.values())
 
 
 def test_adaptation_state_matches_the_analytic_solution():

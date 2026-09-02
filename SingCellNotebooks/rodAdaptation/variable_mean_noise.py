@@ -3288,8 +3288,9 @@ def plot_reconstruction_transfer(analysis: ConditionAnalysis,
 EARLY_LATE_COLORS = {'early': '#D55E00', 'late': '#0072B2'}
 
 
-def label_early_late(traces: pd.DataFrame, early_s: float = 3.0,
-                     late_s: float = 3.0) -> pd.DataFrame:
+def label_early_late(traces: pd.DataFrame,
+                     early_s: Optional[float] = None,
+                     late_s: Optional[float] = None) -> pd.DataFrame:
     """Tag every reconstructed bin ``early``, ``late``, or neither.
 
     :func:`plot_reconstruction_transfer` pools every window, so the curve it
@@ -3304,29 +3305,49 @@ def label_early_late(traces: pd.DataFrame, early_s: float = 3.0,
     compare that regime's *middle* against the other's end and call the
     difference adaptation.
 
-    Bins in neither half get ``half = None``; callers drop them. Raises if the
-    two halves would overlap, rather than quietly double-counting bins.
+    By default, each available (mode, light mean) interval is split at its
+    midpoint. Thus the full epoch after ``skip_seconds`` is divided evenly for
+    the per-window decoder, while the steady-state decoder independently
+    divides its shorter leakage-free interval. ``split_s`` records the actual
+    midpoint in seconds since the step.
+
+    ``early_s`` and ``late_s`` retain the old fixed-duration behavior for
+    callers that explicitly request both. Bins in neither fixed-duration span
+    get ``half = None``; raises if those spans overlap rather than quietly
+    double-counting bins.
     """
     if traces is None or traces.empty:
         return traces
+    if (early_s is None) != (late_s is None):
+        raise ValueError('early_s and late_s must either both be set or both be None')
     frame = traces.copy()
     frame['half'] = None
+    frame['split_s'] = np.nan
     for (mode, mean_level), block in frame.groupby(['mode', 'lightMean'], sort=False):
         t = block.time_s.values
         lo, hi = float(np.min(t)), float(np.max(t))
+        index = block.index
+        if early_s is None:
+            split_s = 0.5 * (lo + hi)
+            frame.loc[index[t <= split_s], 'half'] = 'early'
+            frame.loc[index[t > split_s], 'half'] = 'late'
+            frame.loc[index, 'split_s'] = split_s
+            continue
         if lo + float(early_s) > hi - float(late_s):
             raise ValueError(
                 f'early_s={early_s} and late_s={late_s} overlap for {mode} '
                 f'lightMean {mean_level:g}, which spans only {hi - lo:.1f} s '
                 f'({lo:.1f}-{hi:.1f} s). Shorten them.')
-        index = block.index
+        split_s = 0.5 * (lo + hi)
         frame.loc[index[t < lo + float(early_s)], 'half'] = 'early'
         frame.loc[index[t > hi - float(late_s)], 'half'] = 'late'
+        frame.loc[index, 'split_s'] = split_s
     return frame
 
 
-def transfer_early_late(traces: pd.DataFrame, early_s: float = 3.0,
-                        late_s: float = 3.0) -> pd.DataFrame:
+def transfer_early_late(traces: pd.DataFrame,
+                        early_s: Optional[float] = None,
+                        late_s: Optional[float] = None) -> pd.DataFrame:
     """Per-phase reconstruction scores, early against late, as a table.
 
     One row per (mode, light mean, half). The numbers come from
@@ -3334,8 +3355,9 @@ def transfer_early_late(traces: pd.DataFrame, early_s: float = 3.0,
     summary -- so ``gain_increment`` here is the pooled ``gain_inc`` restricted
     in time, and the figure's slope annotations cannot drift from it.
 
-    ``span_s`` records the seconds each half actually covers, since the halves
-    are cut per regime and the steady-state one ends early.
+    With the default ``None`` durations, each regime's available interval is
+    divided at its midpoint. ``split_s`` and the interval endpoints make that
+    adaptive definition explicit in the returned table.
     """
     labelled = label_early_late(traces, early_s=early_s, late_s=late_s)
     if labelled is None or labelled.empty:
@@ -3346,8 +3368,10 @@ def transfer_early_late(traces: pd.DataFrame, early_s: float = 3.0,
         metrics = reconstruction_metrics(block.reconstruction.values,
                                          block.stimulus.values)
         rows.append({'mode': mode, 'lightMean': mean_level, 'half': half,
+                     'split_s': float(block.split_s.iloc[0]),
                      'span_s': float(block.time_s.max() - block.time_s.min()),
                      't_start_s': float(block.time_s.min()),
+                     't_end_s': float(block.time_s.max()),
                      'n_bins': int(len(block)),
                      **metrics,
                      'gain_asymmetry': metrics['gain_increment'] - metrics['gain_decrement'],
@@ -3362,8 +3386,8 @@ def transfer_early_late(traces: pd.DataFrame, early_s: float = 3.0,
 
 def plot_transfer_early_late(analysis: ConditionAnalysis,
                              traces: pd.DataFrame,
-                             early_s: float = 3.0,
-                             late_s: float = 3.0,
+                             early_s: Optional[float] = None,
+                             late_s: Optional[float] = None,
                              n_bins: int = 15,
                              min_count: int = 12,
                              figsize: Optional[Tuple[float, float]] = None):
@@ -3387,6 +3411,10 @@ def plot_transfer_early_late(analysis: ConditionAnalysis,
     transient inside the first window, and that transient is response the
     stimulus in that window did not cause. It inflates the apparent noise
     early; it is not a reason for a *slope* to differ.
+
+    By default each (mode, light mean) panel is divided at the midpoint of its
+    available decoded interval. Pass both ``early_s`` and ``late_s`` only to
+    request the legacy fixed-duration selection.
     """
     import matplotlib.pyplot as plt
     from retinanalysis.utils import style
