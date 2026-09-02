@@ -579,9 +579,15 @@ def gen_meta_list(data_dir: str, meta_dir: str, tags_dir: str) -> list:
                         gen_tags(item[:-3] + '.json', tags_dir)
                     meta_list.append([meta_file, full_path, tags_file])
     
-    # that should be all of the single cell. Now for MEA, we want to find dir in NAS_DATA_DIR
+    # That should be all of the single cell. MEA metadata uses the disjoint
+    # compact name ``YYYYMMDDX.json`` and its ingestible data is the sorted
+    # directory, not an H5. Some newer MEA exports also leave a same-stem H5 in
+    # ``data_dir``; that must not suppress the JSON. The old ``if no matching
+    # .h5`` guard made such a pair fall through both branches: the compact H5
+    # is (correctly) not a canonical single-cell file, then its MEA JSON was
+    # skipped merely because the H5 existed.
     #
-    # A date whose metadata json is here but whose sorted-data directory is on
+    # A date whose metadata JSON is here but whose sorted-data directory is on
     # no mounted volume is skipped. That is the normal state of things, not a
     # failure: metadata is small and gets copied around freely, while sorted
     # output is large and lives wherever there was room. Collected and counted
@@ -589,22 +595,22 @@ def gen_meta_list(data_dir: str, meta_dir: str, tags_dir: str) -> list:
     # lines of "Could not find" that read like errors and buried the real ones.
     no_data_dir = []
     for item in os.listdir(meta_dir):
-        # A JSON without its single-cell H5 is considered here only when its
-        # name identifies MEA metadata. Unrelated JSON is not an ingest error.
+        # Compact MEA names cannot collide with the ISO-date single-cell names,
+        # so every recognized MEA JSON is considered regardless of whether a
+        # same-stem auxiliary H5 is also present. Unrelated JSON is ignored.
         if not is_mea_experiment_file(item, suffix='.json'):
             continue
-        if item[:-5] + '.h5' not in os.listdir(data_dir):
-            # check for tags
-            tags_file = os.path.join(tags_dir, item[:-5] + '.json')
-            if not os.path.exists(tags_file):
-                gen_tags(item[:-5] + '.json', tags_dir)
-            # The sorted-data dir may live on a different volume than the meta
-            # json, so search every configured tier rather than just the
-            # top-priority DATA_DIR.
-            if not os.path.isdir(find_path('data', item[:-5])):
-                no_data_dir.append(item[:-5])
-                continue
-            meta_list.append([os.path.join(meta_dir, item), item[:-5], tags_file])
+        # check for tags
+        tags_file = os.path.join(tags_dir, item[:-5] + '.json')
+        if not os.path.exists(tags_file):
+            gen_tags(item[:-5] + '.json', tags_dir)
+        # The sorted-data dir may live on a different volume than the meta
+        # JSON, so search every configured tier rather than just the
+        # top-priority DATA_DIR.
+        if not os.path.isdir(find_path('data', item[:-5])):
+            no_data_dir.append(item[:-5])
+            continue
+        meta_list.append([os.path.join(meta_dir, item), item[:-5], tags_file])
 
     if no_data_dir:
         shown = ', '.join(sorted(no_data_dir)[:6])
