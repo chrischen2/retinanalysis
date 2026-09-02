@@ -81,8 +81,8 @@ SUMMARY_VARIABLE = 'rodNoiseLNModelSummary'
 
 # Compact per-cell outputs used by the notebook's population section.  Raw
 # recordings and the slow LNK fits deliberately stay out of this directory;
-# the saved tables are the inexpensive, reproducible outputs of sections
-# 2a--2c.
+# the saved tables are the inexpensive, reproducible core LN and reconstruction
+# outputs.
 CONDITION_OUTPUT_VERSION = 1
 CONDITION_OUTPUT_DIR = Path(__file__).resolve().parent / 'condition_outputs'
 CONDITION_TABLES = (
@@ -2975,10 +2975,10 @@ def reconstruct_stimulus(analysis: ConditionAnalysis,
     before scoring. At 1 ms the comparison is dominated by the noise in a
     single millisecond of spike rate; 25 ms is near the filter's own width.
 
-    **``skip_seconds`` decides whether the recovery is visible at all.** The
-    step is at t=0 and the transient is over within about 3 s, so an
-    ``analysis`` built with ``skip_seconds=1`` has already thrown away the
-    first third of it. Build the one passed here with ``skip_seconds=0``.
+    **``skip_seconds`` decides which recovery is visible.** The step is at t=0
+    and the transient is over within about 3 s. Use 0 to include the complete
+    onset; use a positive value deliberately to exclude onset/settling, knowing
+    that the omitted interval cannot then support an adaptation claim.
     """
     traces = reconstruct_traces(
         analysis, mode=mode, steady_state_s=steady_state_s,
@@ -3821,9 +3821,10 @@ def save_condition_output(
         verbose: bool = True) -> Path:
     """Save one selected cell condition for later population analysis.
 
-    Stored outputs cover sections 2a--2c: mean response, static and temporal
-    LN summaries/curves, decoding windows and summaries, and the early/late
-    transfer metrics. One- and two-state LNK results are intentionally absent.
+    Stored outputs cover the core response/LN and reconstruction analyses:
+    mean response, static and temporal LN summaries/curves, decoding windows
+    and summaries, and the early/late transfer metrics. One- and two-state LNK
+    results are intentionally absent.
     """
     import h5py
 
@@ -4904,7 +4905,7 @@ def _prepare_lnk(analysis, filter_mode: str, filter_length_s, random_state,
     # stimulus fluctuates 10x harder, so it dominates the regression (the
     # pooled filter correlates 0.97 with the bright filter and 0.80 with the
     # dim one). What the slow state is here to explain is the adaptation
-    # *within* a light level, which section 2b shows leaves the filter alone;
+    # *within* a light level, which the temporal LN analysis tests explicitly;
     # the between-level filter change is a separate, faster effect and giving
     # each level its own filter is how it stays out of the state's way.
     #
@@ -6080,8 +6081,9 @@ def plot_nonlinearity_timelapse(analysis: ConditionAnalysis, model: LNKModel,
     luminance step; **the kinetic conversion**, either the multiplicative gain
     factor or the subtractive generator-axis shift; **the nonlinearity** at
     each window, with the fixed ``a'=0`` LNK basis shown explicitly; and **the
-    temporal filter** over the same windows, taken from the windowed LN fits of
-    §2b when they are passed in. The windows sample the state for display only;
+    temporal filter** over the same windows, taken from
+    :func:`temporal_ln_model` when those fits are passed in. The windows sample
+    the state for display only;
     no LN component is refitted in a window.
 
     **The fourth column is the model's central assumption, drawn.** This
@@ -6928,9 +6930,95 @@ def plot_condition(analysis: ConditionAnalysis, window_seconds: float = 10.0,
     return fig
 
 
+@dataclass
+class CoreLNAnalysis:
+    """Outputs of the routine mean-response, static-LN and temporal-LN run.
+
+    The bundle keeps notebook names explicit while allowing the complete core
+    analysis to run from one cell. Slow reconstruction and LNK models are not
+    included: those remain separate decisions after the raw/core diagnostics.
+    """
+
+    analysis: ConditionAnalysis
+    temporal_models: Dict[float, List[LNModel]]
+    summary: pd.DataFrame
+    mean_response_figure: object = None
+    condition_figure: object = None
+    temporal_figure: object = None
+    kinetics_figure: object = None
+
+
+def run_core_ln_analysis(
+        exp_name: str,
+        block_ids: Sequence[int],
+        rec_type: str = 'extracellular',
+        *,
+        skip_seconds: float = 1.0,
+        downsample: int = 10,
+        max_epochs: Optional[int] = None,
+        max_series_resistance: Optional[float] = 30e6,
+        align_epoch_means: bool = True,
+        subtract_baseline: bool = False,
+        filter_length_s: float = 1.0,
+        frequency_cutoff: Optional[float] = None,
+        n_bins: int = 100,
+        psth_sigma_ms: float = 10.0,
+        mean_window_s: float = 2.0,
+        condition_window_s: float = 6.0,
+        temporal_window_s: Optional[float] = None,
+        verbose: bool = True) -> CoreLNAnalysis:
+    """Run the routine response and LN analyses from one call.
+
+    The order is intentional: load/QC the response, draw its group mean before
+    fitting, fit the static LN model, and finally fit and plot the temporal LN
+    models from those same accepted arrays. This removes notebook state spread
+    across several manually executed cells without hiding any intermediate
+    output. Raw-trace inspection stays outside this function so the user can
+    stop before fitting; reconstruction and one-/two-state LNK fits also stay
+    outside because they answer separate questions and can be slow.
+
+    ``temporal_window_s=None`` uses :func:`temporal_windows` to divide the full
+    usable epoch into equal data-dependent windows without a remainder.
+    """
+    analysis = analyze_condition(
+        exp_name, block_ids, rec_type=rec_type,
+        filter_length_s=filter_length_s, downsample=downsample,
+        psth_sigma_ms=psth_sigma_ms, n_bins=n_bins,
+        frequency_cutoff=frequency_cutoff, skip_seconds=skip_seconds,
+        subtract_baseline=subtract_baseline,
+        max_series_resistance=max_series_resistance,
+        align_epoch_means=align_epoch_means, max_epochs=max_epochs,
+        fit=False, verbose=verbose)
+
+    # This is deliberately created before any model is fitted: it is the QC
+    # view of the exact accepted arrays that every subsequent fit will use.
+    mean_figure = plot_mean_response(analysis, window_s=mean_window_s)
+
+    fit_condition(analysis, verbose=verbose)
+    if verbose:
+        print(f'\n{analysis}')
+    static_figure = plot_condition(analysis, window_seconds=condition_window_s)
+    summary = condition_summary(analysis, show=verbose)
+
+    temporal_models = temporal_ln_model(
+        analysis, window_seconds=temporal_window_s,
+        filter_length_s=filter_length_s,
+        frequency_cutoff=frequency_cutoff, n_bins=n_bins, verbose=verbose)
+    temporal_figure = plot_temporal_ln(analysis, temporal_models)
+    kinetics_figure = plot_temporal_kinetics(analysis, temporal_models)
+
+    return CoreLNAnalysis(
+        analysis=analysis, temporal_models=temporal_models, summary=summary,
+        mean_response_figure=mean_figure,
+        condition_figure=static_figure,
+        temporal_figure=temporal_figure,
+        kinetics_figure=kinetics_figure)
+
+
 __all__ = [
     'PROTOCOLS', 'PROTOCOL_SEARCH', 'DEFAULT_SUMMARY_PATH', 'SUMMARY_DIR',
     'STEP_DIRECTIONS', 'STEP_LABELS', 'LNModel', 'ConditionAnalysis',
+    'CoreLNAnalysis',
     'summary_path', 'load_summary', 'load_cell',
     'DATE_OFFSETS', 'SAVED_DATE_OFFSET_DAYS', 'FALLBACK_OFFSETS',
     'SINGLE_CELL_ROOT', 'metadata_files', 'corrected_dates',
@@ -6943,4 +7031,5 @@ __all__ = [
     'epoch_stimulus', 'fit_sigmoid', 'sigmoid', 'fit_ln_model',
     'analyze_condition', 'plot_condition', 'mean_response',
     'plot_mean_response', 'temporal_ln_model', 'plot_temporal_ln',
+    'run_core_ln_analysis',
 ]

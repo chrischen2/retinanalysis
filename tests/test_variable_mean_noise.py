@@ -583,6 +583,70 @@ def test_early_late_defaults_to_each_available_interval_midpoint():
     assert set(summary.groupby('mode').split_s.first()) == set(expected.values())
 
 
+def test_run_core_ln_analysis_keeps_routine_steps_in_one_order(monkeypatch):
+    """The notebook wrapper must mean-QC before fitting and return every output."""
+    import pandas as pd
+
+    analysis = vmn.ConditionAnalysis(
+        exp_name='synthetic', block_ids=[1, 2], rec_type='exc',
+        sample_rate=1000.0, units='pA')
+    temporal_models = {0.3: []}
+    summary = pd.DataFrame({'lightMean': [0.3], 'r2': [0.5]})
+    figures = {name: object() for name in ('mean', 'condition', 'temporal', 'kinetics')}
+    calls = []
+
+    def fake_analyze(exp_name, block_ids, **kwargs):
+        calls.append(('analyze', exp_name, list(block_ids), kwargs))
+        return analysis
+
+    monkeypatch.setattr(vmn, 'analyze_condition', fake_analyze)
+    monkeypatch.setattr(
+        vmn, 'plot_mean_response',
+        lambda value, window_s: calls.append(('mean', value, window_s)) or figures['mean'])
+    monkeypatch.setattr(
+        vmn, 'fit_condition',
+        lambda value, verbose: calls.append(('fit', value, verbose)) or value)
+    monkeypatch.setattr(
+        vmn, 'plot_condition',
+        lambda value, window_seconds: calls.append(
+            ('condition', value, window_seconds)) or figures['condition'])
+    monkeypatch.setattr(
+        vmn, 'condition_summary',
+        lambda value, show: calls.append(('summary', value, show)) or summary)
+    monkeypatch.setattr(
+        vmn, 'temporal_ln_model',
+        lambda value, **kwargs: calls.append(('temporal_fit', value, kwargs))
+        or temporal_models)
+    monkeypatch.setattr(
+        vmn, 'plot_temporal_ln',
+        lambda value, models: calls.append(('temporal_plot', value, models))
+        or figures['temporal'])
+    monkeypatch.setattr(
+        vmn, 'plot_temporal_kinetics',
+        lambda value, models: calls.append(('kinetics', value, models))
+        or figures['kinetics'])
+
+    result = vmn.run_core_ln_analysis(
+        'synthetic', [1, 2], rec_type='exc', skip_seconds=2.0,
+        mean_window_s=2.5, condition_window_s=4.0,
+        temporal_window_s=None, verbose=False)
+
+    assert [call[0] for call in calls] == [
+        'analyze', 'mean', 'fit', 'condition', 'summary', 'temporal_fit',
+        'temporal_plot', 'kinetics']
+    assert calls[0][3]['fit'] is False
+    assert calls[0][3]['skip_seconds'] == 2.0
+    assert calls[1][2] == 2.5 and calls[3][2] == 4.0
+    assert calls[5][2]['window_seconds'] is None
+    assert result.analysis is analysis
+    assert result.temporal_models is temporal_models
+    assert result.summary is summary
+    assert result.mean_response_figure is figures['mean']
+    assert result.condition_figure is figures['condition']
+    assert result.temporal_figure is figures['temporal']
+    assert result.kinetics_figure is figures['kinetics']
+
+
 def test_adaptation_state_matches_the_analytic_solution():
     """Constant drive has a closed form; the integrator must reproduce it.
 
