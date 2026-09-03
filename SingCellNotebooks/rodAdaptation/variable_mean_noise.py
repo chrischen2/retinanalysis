@@ -2466,6 +2466,7 @@ def check_epoch_response_quality(
         min_whole_cell_modulation_pa: float,
         low_response_epoch_fraction: float,
         condition_label: str = '',
+        raise_on_failure: bool = True,
         verbose: bool = True) -> pd.DataFrame:
     """Apply the Section 2 low-response gate to a per-epoch summary.
 
@@ -2477,10 +2478,10 @@ def check_epoch_response_quality(
     parameters; this module contains no hidden response cutoff.
 
     The returned frame contains the original per-epoch measurements plus the
-    metric, threshold, counts, fraction, and final decision. On failure this
-    function prints ``LOW RESPONSE CELL`` and raises
-    :class:`LowResponseCellError`, allowing the notebook to stop in Section 2
-    before any LN or reconstruction analysis runs.
+    metric, threshold, counts, fraction, and final decision. By default a
+    failure raises :class:`LowResponseCellError` for backwards compatibility.
+    Callers that audit several independent conditions can set
+    ``raise_on_failure=False`` and remove only the failed condition.
     """
     mode = str(rec_type).strip().lower()
     if mode == 'extracellular':
@@ -2522,13 +2523,14 @@ def check_epoch_response_quality(
     frame['low_response_cell'] = low_response
 
     prefix = f'{condition_label} | ' if condition_label else ''
-    status = 'LOW RESPONSE CELL' if low_response else 'response QC passed'
+    status = ('LOW RESPONSE CELL' if low_response and raise_on_failure else
+              'EXCLUDED CONDITION' if low_response else 'response QC passed')
     message = (f'{status}: {prefix}{n_low}/{n_epochs} epochs '
                f'({low_fraction:.1%}) below {minimum:g} {units} | '
                f'failure threshold {fraction_threshold:.1%}')
     if verbose or low_response:
         print(message)
-    if low_response:
+    if low_response and raise_on_failure:
         raise LowResponseCellError(message)
     return frame
 
@@ -2614,6 +2616,7 @@ def check_extracellular_firing_rate(
 def analyze_condition(exp_name: str, block_ids: Sequence[int],
                       rec_type: str = 'extracellular',
                       stim_time_ms: Optional[float] = None,
+                      light_means: Optional[Sequence[float]] = None,
                       filter_length_s: float = 1.0,
                       downsample: int = 10,
                       psth_sigma_ms: float = 10.0,
@@ -2638,6 +2641,8 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
     ``stim_time_ms`` selects one exact recorded epoch duration. When the
     supplied blocks contain more than one duration it is required: mixed
     durations are refused instead of being silently truncated and pooled.
+    ``light_means`` optionally retains only the mean-light conditions that
+    passed the Section 2 activity filter.
 
     Epochs are grouped by their recorded ``lightMean``, since a filter fitted
     across two mean levels would describe neither. ``downsample`` reduces the
@@ -2751,6 +2756,8 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
 
     spiking = rec_type == 'extracellular'
     excluded = _excluded_epoch_set(excluded_epochs)
+    selected_means = (None if light_means is None else
+                      tuple(float(value) for value in light_means))
     # The drift guards below correct a *holding current*, which only a
     # voltage-clamp recording has. An extracellular response is a spike rate
     # built from spike times: nothing to drift, no series resistance to refuse
@@ -2787,20 +2794,24 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
         amp, sample_rate, spike_times = load_block(exp_name, int(block_id),
                                                    spiking)
         for index in range(min(len(params), amp.shape[0])):
-            if (int(block_id), int(index)) in excluded:
-                dropped.append({
-                    'block_id': int(block_id), 'epoch': int(index),
-                    'light_mean': _numeric(params.iloc[index].get(
-                        'lightMean', np.nan)),
-                    'series_resistance_mohm': np.nan,
-                    'reason': 'manually excluded in Section 2'})
-                continue
             if max_epochs is not None and used >= max_epochs:
                 break
             row = params.iloc[index]
             duration = _numeric(row.get('stimTime', np.nan))
             if (stim_time_ms is not None
                     and not np.isclose(duration, float(stim_time_ms))):
+                continue
+            mean_level = float(row['lightMean'])
+            if (selected_means is not None
+                    and not any(np.isclose(mean_level, value)
+                                for value in selected_means)):
+                continue
+            if (int(block_id), int(index)) in excluded:
+                dropped.append({
+                    'block_id': int(block_id), 'epoch': int(index),
+                    'light_mean': mean_level,
+                    'series_resistance_mohm': np.nan,
+                    'reason': 'manually excluded in Section 2'})
                 continue
             if cutoff is None and 'frequencyCutoff' in row:
                 cutoff = float(row['frequencyCutoff'])
@@ -2829,7 +2840,6 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                 if subtract_baseline:
                     baseline = int(min(0.1 * sample_rate, amp.shape[1]))
                     trace = trace - float(np.mean(trace[:baseline]))
-            mean_level = float(row['lightMean'])
             # The stimulus stays in raw intensity units: its contrast is
             # sigma/mean, and fit_ln_model normalises the filter by the ratio
             # of that to the generator signal's own contrast.
@@ -8121,12 +8131,14 @@ class CoreLNAnalysis:
 
 @dataclass
 class ResponseInspection:
-    """Raw-trace and response-QC outputs for every retained condition."""
+    """Raw outputs plus the condition table after per-condition activity QC."""
 
     summaries: Dict[Tuple[str, float], pd.DataFrame]
     figures: Dict[Tuple[str, float], object]
-    qc: Dict[Tuple[str, float], pd.DataFrame]
+    qc: Dict[Tuple[str, float, float], pd.DataFrame]
     signature: tuple
+    conditions: pd.DataFrame = field(default_factory=pd.DataFrame)
+    condition_audit: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def run_core_ln_analysis(
@@ -8135,6 +8147,7 @@ def run_core_ln_analysis(
         rec_type: str = 'extracellular',
         *,
         stim_time_ms: Optional[float] = None,
+        light_means: Optional[Sequence[float]] = None,
         skip_seconds: float = 1.0,
         downsample: int = 10,
         max_epochs: Optional[int] = None,
@@ -8174,6 +8187,7 @@ def run_core_ln_analysis(
     analysis = analyze_condition(
         exp_name, block_ids, rec_type=rec_type,
         stim_time_ms=stim_time_ms,
+        light_means=light_means,
         filter_length_s=filter_length_s, downsample=downsample,
         psth_sigma_ms=psth_sigma_ms, n_bins=n_bins,
         frequency_cutoff=frequency_cutoff, skip_seconds=skip_seconds,
@@ -8230,7 +8244,9 @@ def response_qc_signature(
     """Immutable identity of the selected conditions and response-QC policy."""
     pairs = tuple((
         row.rec_type, float(row.stim_time_ms),
-        tuple(tuple(value) for value in getattr(row, 'excluded_epochs', ())))
+        tuple(tuple(value) for value in getattr(row, 'excluded_epochs', ())),
+        tuple(float(value) for value in getattr(
+            row, 'included_light_means', ())))
         for row in conditions.itertuples())
     return (str(exp_name), tuple(int(value) for value in block_ids), max_epochs,
             pairs, float(min_firing_rate_hz),
@@ -8248,42 +8264,114 @@ def inspect_recording_conditions(
         min_whole_cell_modulation_pa: float,
         low_response_epoch_fraction: float,
         verbose: bool = True) -> ResponseInspection:
-    """Plot and QC every retained recording-mode/duration condition."""
+    """Plot conditions and automatically exclude failed mean-light groups.
+
+    Activity QC is evaluated independently for every recording type, duration,
+    and mean-light combination. A failed mean is removed while other means in
+    the same mode/duration row continue. If every mean fails, the whole row is
+    excluded. The returned condition table is the sole input to later stages.
+    """
     summaries, figures, qc = {}, {}, {}
-    for condition in conditions.itertuples():
-        key = (str(condition.rec_type), float(condition.stim_time_ms))
-        excluded_epochs = getattr(condition, 'excluded_epochs', ())
-        retained_epochs = getattr(condition, 'n_epochs_retained', condition.n_epochs)
+    updated = conditions.copy()
+    if 'included' not in updated:
+        updated['included'] = True
+    if 'reason' not in updated:
+        updated['reason'] = ''
+    updated['included_light_means'] = [[] for _ in range(len(updated))]
+    updated['n_qc_excluded_light_means'] = 0
+    updated['qc_exclusion_reason'] = ''
+    audit_rows = []
+
+    for row_index, condition in updated[updated.included].iterrows():
+        rec_type = str(condition.rec_type)
+        duration = float(condition.stim_time_ms)
+        key = (rec_type, duration)
+        excluded_epochs = condition.get('excluded_epochs', ())
+        retained_epochs = condition.get('n_epochs_retained', condition.n_epochs)
         if verbose:
-            print(f'\nraw inspection: {condition.rec_type} | '
+            print(f'\nraw inspection: {rec_type} | '
                   f'{condition.stim_seconds:g} s | {retained_epochs} retained '
                   f'of {condition.n_epochs} recorded epochs | '
                   f'blocks {condition.block_ids}')
         summary = epoch_response_summary(
-            exp_name, condition.block_ids, condition.rec_type,
+            exp_name, condition.block_ids, rec_type,
             max_epochs=max_epochs, stim_time_ms=condition.stim_time_ms,
             excluded_epochs=excluded_epochs,
             show=verbose)
         summaries[key] = summary
         figures[key] = plot_traces(
-            exp_name, condition.block_ids, condition.rec_type,
+            exp_name, condition.block_ids, rec_type,
             max_epochs=max_epochs, stim_time_ms=condition.stim_time_ms,
             excluded_epochs=excluded_epochs)
-        qc[key] = check_epoch_response_quality(
-            summary, condition.rec_type,
-            min_firing_rate_hz=min_firing_rate_hz,
-            min_whole_cell_modulation_pa=min_whole_cell_modulation_pa,
-            low_response_epoch_fraction=low_response_epoch_fraction,
-            condition_label=(f'{exp_name} | {condition.rec_type} | '
-                             f'{condition.stim_seconds:g} s epochs'),
-            verbose=verbose)
+
+        retained_means, failed_reasons = [], []
+        numeric_means = pd.to_numeric(
+            summary.get('lightMean', pd.Series(dtype=float)), errors='coerce')
+        for mean_level in sorted(numeric_means.dropna().unique()):
+            mean_summary = summary[np.isclose(numeric_means, mean_level)].copy()
+            quality = check_epoch_response_quality(
+                mean_summary, rec_type,
+                min_firing_rate_hz=min_firing_rate_hz,
+                min_whole_cell_modulation_pa=min_whole_cell_modulation_pa,
+                low_response_epoch_fraction=low_response_epoch_fraction,
+                condition_label=(f'{exp_name} | {rec_type} | '
+                                 f'{condition.stim_seconds:g} s | '
+                                 f'lightMean {mean_level:g}'),
+                raise_on_failure=False, verbose=verbose)
+            qc[(rec_type, duration, float(mean_level))] = quality
+            failed = bool(quality.low_response_cell.iloc[0])
+            n_low = int(quality.n_low_response_epochs.iloc[0])
+            n_epochs = int(quality.n_response_epochs.iloc[0])
+            low_fraction = float(quality.low_response_fraction.iloc[0])
+            threshold = float(quality.response_threshold.iloc[0])
+            metric = str(quality.response_metric_name.iloc[0])
+            reason = (f'{n_low}/{n_epochs} epochs ({low_fraction:.1%}) below '
+                      f'{threshold:g} on {metric}' if failed else '')
+            audit_rows.append({
+                'rec_type': rec_type, 'stim_time_ms': duration,
+                'stim_seconds': duration / 1e3,
+                'lightMean': float(mean_level), 'n_epochs': n_epochs,
+                'n_below_threshold': n_low,
+                'below_threshold_fraction': low_fraction,
+                'response_metric': metric, 'response_threshold': threshold,
+                'included': not failed, 'reason': reason,
+            })
+            if failed:
+                failed_reasons.append(f'lightMean {mean_level:g}: {reason}')
+            else:
+                retained_means.append(float(mean_level))
+
+        updated.at[row_index, 'included_light_means'] = retained_means
+        updated.at[row_index, 'n_qc_excluded_light_means'] = len(failed_reasons)
+        no_epochs_reason = ('no epochs available for response QC'
+                            if summary.empty else '')
+        qc_reason = '; '.join(failed_reasons) or no_epochs_reason
+        updated.at[row_index, 'qc_exclusion_reason'] = qc_reason
+        if not retained_means:
+            updated.at[row_index, 'included'] = False
+            existing = str(updated.at[row_index, 'reason']).strip()
+            reason = (no_epochs_reason or
+                      'all mean-light conditions failed response QC')
+            updated.at[row_index, 'reason'] = '; '.join(
+                value for value in (existing, reason) if value and value != 'nan')
+
+    retained = updated[updated.included].copy()
     signature = response_qc_signature(
-        exp_name, block_ids, conditions, max_epochs,
+        exp_name, block_ids, retained, max_epochs,
         min_firing_rate_hz, min_whole_cell_modulation_pa,
         low_response_epoch_fraction)
+    condition_audit = pd.DataFrame(audit_rows)
     if verbose:
-        print('\nSection 2 response QC passed for every retained condition.')
-    return ResponseInspection(summaries, figures, qc, signature)
+        print('\nSection 2 activity-QC condition audit:')
+        if condition_audit.empty:
+            print('no conditions had epochs available for activity QC')
+        else:
+            print(condition_audit.to_string(index=False))
+        print(f'{len(retained)} mode-duration condition(s) retained; '
+              f'{int(condition_audit.included.sum()) if len(condition_audit) else 0} '
+              'mean-light condition(s) retained.')
+    return ResponseInspection(
+        summaries, figures, qc, signature, updated, condition_audit)
 
 
 def run_core_condition_analyses(
@@ -8311,19 +8399,21 @@ def run_core_condition_analyses(
         low_response_epoch_fraction)
     if qc_signature != expected:
         raise RuntimeError(
-            'Section 2 response QC has not passed for the current selection; '
-            'run Section 2 and resolve LOW RESPONSE CELL before Section 3')
+            'Section 2 activity QC has not run for the current retained '
+            'conditions and settings; rerun Section 2 before Section 3')
     results = {}
     for condition in conditions.itertuples():
         rec_type, duration = str(condition.rec_type), float(condition.stim_time_ms)
         excluded_epochs = getattr(condition, 'excluded_epochs', ())
+        included_light_means = getattr(condition, 'included_light_means', None)
         retained_epochs = getattr(condition, 'n_epochs_retained', condition.n_epochs)
         if verbose:
             print(f'\n=== {rec_type} | {condition.stim_seconds:g} s epochs | '
                   f'{retained_epochs} retained of {condition.n_epochs} recorded ===')
         core = run_core_ln_analysis(
             exp_name, condition.block_ids, rec_type=rec_type,
-            stim_time_ms=duration, skip_seconds=skip_seconds,
+            stim_time_ms=duration, light_means=included_light_means,
+            skip_seconds=skip_seconds,
             downsample=downsample, max_epochs=max_epochs,
             max_series_resistance=max_series_resistance,
             align_epoch_means=align_epoch_means,
@@ -8367,7 +8457,8 @@ def run_reconstruction_analyses(
             print(f'\n=== reconstruction | {rec_type} | {duration / 1e3:g} s epochs ===')
         analysis = analyze_condition(
             exp_name, core.analysis.block_ids, rec_type=rec_type,
-            stim_time_ms=duration, skip_seconds=decode_skip_s,
+            stim_time_ms=duration, light_means=core.analysis.light_means,
+            skip_seconds=decode_skip_s,
             downsample=downsample, max_epochs=max_epochs,
             max_series_resistance=max_series_resistance,
             align_epoch_means=align_epoch_means,

@@ -256,6 +256,13 @@ def test_analyze_condition_filters_epochs_to_requested_duration(monkeypatch):
     assert analysis.n_epochs == {.3: 1, 3.0: 1}
     assert {array.shape for array in analysis.stimulus.values()} == {(1, 30)}
 
+    selected = vmn.analyze_condition(
+        'synthetic', [11], rec_type='exc', stim_time_ms=30.0,
+        light_means=[3.0], skip_seconds=0.0, downsample=1,
+        align_epoch_means=False, fit=False, verbose=False)
+    assert selected.light_means == [3.0]
+    assert selected.n_epochs == {3.0: 1}
+
 
 def test_analyze_condition_omits_manually_excluded_epochs(monkeypatch):
     import pandas as pd
@@ -1931,11 +1938,10 @@ def test_condition_batch_helpers_preserve_mode_duration_keys(monkeypatch):
         'excluded_epochs': [[(11, 1)], []],
     })
     monkeypatch.setattr(vmn, 'epoch_response_summary', lambda *a, **k:
-                        pd.DataFrame({'mean_firing_rate_hz': [40.],
+                        pd.DataFrame({'lightMean': [.1],
+                                      'mean_firing_rate_hz': [40.],
                                       'modulation_sd_pA': [200.]}))
     monkeypatch.setattr(vmn, 'plot_traces', lambda *a, **k: 'figure')
-    monkeypatch.setattr(vmn, 'check_epoch_response_quality', lambda *a, **k:
-                        pd.DataFrame({'passed': [True]}))
     inspection = vmn.inspect_recording_conditions(
         'example', [11, 12], conditions, max_epochs=None,
         min_firing_rate_hz=30., min_whole_cell_modulation_pa=100.,
@@ -1948,21 +1954,63 @@ def test_condition_batch_helpers_preserve_mode_duration_keys(monkeypatch):
 
     def fake_core(exp_name, block_ids, rec_type, **kwargs):
         calls.append((rec_type, kwargs['stim_time_ms'],
-                      tuple(kwargs['excluded_epochs'])))
+                      tuple(kwargs['excluded_epochs']),
+                      tuple(kwargs['light_means'])))
         current = analysis
         current.rec_type = rec_type
         current.stim_time_ms = kwargs['stim_time_ms']
         return vmn.CoreLNAnalysis(current, temporal, pd.DataFrame())
 
     monkeypatch.setattr(vmn, 'run_core_ln_analysis', fake_core)
+    retained = inspection.conditions[inspection.conditions.included].copy()
     cores = vmn.run_core_condition_analyses(
-        'example', [11, 12], conditions, qc_signature=inspection.signature,
+        'example', [11, 12], retained, qc_signature=inspection.signature,
         min_firing_rate_hz=30., min_whole_cell_modulation_pa=100.,
         low_response_epoch_fraction=.8, verbose=False)
     assert list(cores) == [('extracellular', 30_000.), ('exc', 60_000.)]
     assert calls == [
-        ('extracellular', 30_000., ((11, 1),)),
-        ('exc', 60_000., ())]
+        ('extracellular', 30_000., ((11, 1),), (.1,)),
+        ('exc', 60_000., (), (.1,))]
+
+
+def test_inspection_excludes_only_failed_activity_conditions(monkeypatch):
+    import pandas as pd
+
+    conditions = pd.DataFrame({
+        'rec_type': ['extracellular', 'exc'],
+        'stim_time_ms': [30_000., 60_000.],
+        'stim_seconds': [30., 60.], 'n_epochs': [4, 2],
+        'block_ids': [[11], [12]], 'included': [True, True],
+        'reason': ['', ''],
+    })
+
+    def fake_summary(_exp, _blocks, rec_type, **_kwargs):
+        if rec_type == 'extracellular':
+            return pd.DataFrame({
+                'lightMean': [.1, .1, 1., 1.],
+                'mean_firing_rate_hz': [40., 45., 0., 0.],
+            })
+        return pd.DataFrame({
+            'lightMean': [.1, .1], 'modulation_sd_pA': [10., 20.],
+        })
+
+    monkeypatch.setattr(vmn, 'epoch_response_summary', fake_summary)
+    monkeypatch.setattr(vmn, 'plot_traces', lambda *a, **k: 'figure')
+
+    inspection = vmn.inspect_recording_conditions(
+        'example', [11, 12], conditions,
+        min_firing_rate_hz=30., min_whole_cell_modulation_pa=100.,
+        low_response_epoch_fraction=.8, verbose=False)
+
+    updated = inspection.conditions.set_index('rec_type')
+    assert updated.loc['extracellular', 'included']
+    assert updated.loc['extracellular', 'included_light_means'] == [.1]
+    assert not updated.loc['exc', 'included']
+    assert 'all mean-light conditions failed' in updated.loc['exc', 'reason']
+    audit = inspection.condition_audit.set_index(['rec_type', 'lightMean'])
+    assert audit.loc[('extracellular', .1), 'included']
+    assert not audit.loc[('extracellular', 1.), 'included']
+    assert not audit.loc[('exc', .1), 'included']
 
 
 def test_population_wrappers_are_safe_before_any_records_exist(tmp_path):
@@ -1987,7 +2035,10 @@ def test_reconstruction_batch_helper_returns_save_ready_bundle(monkeypatch):
 
     analysis, temporal = _population_analysis()
     core = vmn.CoreLNAnalysis(analysis, temporal, pd.DataFrame())
-    monkeypatch.setattr(vmn, 'analyze_condition', lambda *a, **k: analysis)
+    reload_calls = []
+    monkeypatch.setattr(
+        vmn, 'analyze_condition',
+        lambda *a, **k: reload_calls.append(k) or analysis)
     monkeypatch.setattr(vmn, 'select_decode_window', lambda *a, **k:
                         (2.0, pd.DataFrame({'selected': [True]})))
     traces = pd.DataFrame({'mode': ['per_window'], 'lightMean': [.1]})
@@ -2016,6 +2067,7 @@ def test_reconstruction_batch_helper_returns_save_ready_bundle(monkeypatch):
         verbose=False)
 
     bundle = result[('extracellular', 30_000.)]
+    assert reload_calls[0]['light_means'] == analysis.light_means
     assert bundle['decode_window_s'] == 2.0
     assert bundle['directional_decoding'] is directional
     assert bundle['transfer_figure'] == 'figure'
