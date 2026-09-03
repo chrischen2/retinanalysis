@@ -331,6 +331,8 @@ PRIMATE_CELL_TYPES = ('ON-parasol', 'OFF-parasol', 'ON-midget', 'OFF-midget', 'A
 # Where the per-block recording-mode cache lives. Resolving a mode can need the
 # block's raw trace, which is seconds per block, so it is done once and stored.
 MODE_CACHE_PATH = Path(__file__).resolve().parent / 'block_modes.csv'
+MODE_CACHE_VERSION = 2
+RECORDING_TYPES = ('extracellular', 'exc', 'inh')
 
 
 def _match_cell_type(value, allowed=PRIMATE_CELL_TYPES) -> bool:
@@ -346,10 +348,10 @@ def build_mode_cache(protocol_blocks: pd.DataFrame,
                      verbose: bool = True) -> pd.DataFrame:
     """Resolve every block's recording type and write the cache.
 
-    Reading one block's traces to decide whether it is extracellular, exc or
-    inh takes about 5.5 s, so doing it for the whole protocol takes several
-    minutes; the answer never changes, so it is written once to
-    :data:`MODE_CACHE_PATH` and read back by :func:`load_block_modes`.
+    Positive-resistance blocks need their trace loaded to separate exc from
+    inh, so doing it for the whole protocol can take several minutes. Results
+    are written to :data:`MODE_CACHE_PATH` with a rule version; stale caches
+    are rejected and rebuilt by the notebook.
 
     Was a loop in the notebook. Returns the frame it wrote.
     """
@@ -359,7 +361,8 @@ def build_mode_cache(protocol_blocks: pd.DataFrame,
     for n, (_, row) in enumerate(protocol_blocks.iterrows(), 1):
         block_id = int(row['block_id'])
         exp_name = str(row['exp_name'])
-        rows.append(dict(exp_name=exp_name, block_id=block_id,
+        rows.append(dict(cache_version=MODE_CACHE_VERSION,
+                         exp_name=exp_name, block_id=block_id,
                          n_epochs=len(epoch_parameters(block_id)),
                          **resolve_block_mode(exp_name, block_id)))
         if verbose and n % 50 == 0:
@@ -381,9 +384,18 @@ def load_block_modes(path=None) -> pd.DataFrame:
     path = Path(path) if path is not None else MODE_CACHE_PATH
     if not path.exists():
         return pd.DataFrame(columns=['exp_name', 'block_id', 'rec_type',
-                                     'n_epochs', 'series_resistance',
+                                     'n_epochs', 'series_resistance_mohm',
                                      'mean_current_pa', 'rec_note'])
     frame = pd.read_csv(path)
+    if 'cache_version' not in frame:
+        return pd.DataFrame(columns=['exp_name', 'block_id', 'rec_type',
+                                     'n_epochs', 'series_resistance_mohm',
+                                     'mean_current_pa', 'rec_note'])
+    versions = pd.to_numeric(frame['cache_version'], errors='coerce')
+    if versions.isna().any() or not versions.eq(MODE_CACHE_VERSION).all():
+        return pd.DataFrame(columns=['exp_name', 'block_id', 'rec_type',
+                                     'n_epochs', 'series_resistance_mohm',
+                                     'mean_current_pa', 'rec_note'])
     frame['block_id'] = pd.to_numeric(frame['block_id'], errors='coerce').astype('Int64')
     return frame
 
@@ -770,6 +782,81 @@ def duration_conditions(block_ids: Sequence[int],
     return frame
 
 
+def recording_duration_conditions(
+        block_ids: Sequence[int],
+        modes: Optional[pd.DataFrame] = None,
+        min_epochs: int = MIN_EPOCHS_PER_DURATION,
+        min_stim_time_ms: Optional[float] = MIN_STIM_TIME_MS,
+        show: bool = True) -> pd.DataFrame:
+    """Audit/select every ``recording type x stimTime`` condition.
+
+    Recording type is assigned per block by :func:`resolve_block_mode`, then
+    epoch duration is assigned per epoch by :func:`duration_conditions`. The
+    minimum epoch count is applied independently to every paired condition;
+    epochs from another recording type or duration can never help it pass.
+    Unresolved blocks remain visible as excluded audit rows.
+    """
+    modes = load_block_modes() if modes is None else modes.copy()
+    selected_ids = sorted({int(value) for value in block_ids})
+    columns = ['rec_type', 'stim_time_ms', 'stim_seconds', 'n_epochs',
+               'light_means', 'epochs_by_light_mean', 'n_blocks', 'block_ids',
+               'included', 'reason']
+    if not selected_ids:
+        return pd.DataFrame(columns=columns)
+    if modes.empty:
+        raise ValueError('recording-mode cache is empty; build it before selecting a cell')
+
+    subset = modes[modes.block_id.isin(selected_ids)].copy()
+    subset['rec_type'] = subset['rec_type'].fillna('').astype(str).str.strip()
+    typed_ids = {int(value) for value in subset.block_id}
+    missing_ids = sorted(set(selected_ids) - typed_ids)
+    unresolved_ids = sorted(
+        {int(value) for value in subset.loc[
+            ~subset.rec_type.isin(RECORDING_TYPES), 'block_id']} | set(missing_ids))
+
+    frames = []
+    for rec_type in RECORDING_TYPES:
+        ids = sorted(int(value) for value in subset.loc[
+            subset.rec_type.eq(rec_type), 'block_id'].unique())
+        if not ids:
+            continue
+        durations = duration_conditions(
+            ids, min_epochs=min_epochs, min_stim_time_ms=min_stim_time_ms,
+            show=False)
+        if len(durations):
+            durations.insert(0, 'rec_type', rec_type)
+            frames.append(durations)
+
+    if unresolved_ids:
+        unresolved = duration_conditions(
+            unresolved_ids, min_epochs=min_epochs,
+            min_stim_time_ms=min_stim_time_ms, show=False)
+        if len(unresolved):
+            unresolved.insert(0, 'rec_type', 'unresolved')
+            unresolved['included'] = False
+            unresolved['reason'] = unresolved['reason'].map(
+                lambda reason: '; '.join(filter(None, [
+                    str(reason), 'recording mode unresolved'])))
+            frames.append(unresolved)
+
+    frame = (pd.concat(frames, ignore_index=True)[columns]
+             if frames else pd.DataFrame(columns=columns))
+    if len(frame):
+        order = {value: index for index, value in enumerate(
+            (*RECORDING_TYPES, 'unresolved'))}
+        frame['_mode_order'] = frame.rec_type.map(order).fillna(len(order))
+        frame = (frame.sort_values(['_mode_order', 'stim_time_ms'])
+                 .drop(columns='_mode_order').reset_index(drop=True))
+    if show:
+        print(f'{len(frame)} recording-mode x epoch-duration condition(s); '
+              f'{int(frame.included.sum())} meet MIN_EPOCHS={int(min_epochs)}')
+        if len(frame):
+            print(frame.drop(columns='block_ids').to_string(index=False))
+        if unresolved_ids:
+            print(f'unresolved recording mode for blocks {unresolved_ids}; excluded')
+    return frame
+
+
 def _spike_rate(spike_samples, n_samples: int, sample_rate: float,
                 downsample: int, sigma_ms: float) -> np.ndarray:
     """A smoothed PSTH at the *reduced* rate, in Hz.
@@ -942,24 +1029,16 @@ def resolve_block_mode(exp_name: str, block_id: int,
                        sample_rate: float = 1e4) -> Dict[str, object]:
     """Decide how one block was recorded, from the amplifier rather than a label.
 
-    These blocks carry no ``onlineAnalysis`` -- the experimenter's menu choice
-    is simply absent -- so the reading determines the mode rather than
-    overruling it, which is the ``'none'`` path of
-    :func:`SCutils.recording_mode.resolve_recording_mode`:
-
-    * series resistance above zero means the cell was held whole-cell, and the
-      polarity comes from the sign of the current: inward (negative mean) is
-      ``exc``, outward is ``inh``;
-    * a reading of exactly zero is not by itself cell-attached -- it also
-      happens when whole-cell compensation was never run -- so it is confirmed
-      against the trace, and only a trace that really contains spikes is
-      called ``extracellular``.
+    VariableMeanNoise uses the recorded series resistance as the technique:
+    exactly zero is ``extracellular``; a positive value is whole-cell, with a
+    negative mean trace called ``exc`` and a positive mean trace called
+    ``inh``. A missing/non-finite value remains unresolved instead of being
+    guessed.
 
     ``amp_data`` is optional; without it the block is loaded to get it.
     """
     import retinanalysis as ra
-    from retinanalysis.SCutils.recording_mode import (read_series_resistance,
-                                                      resolve_recording_mode)
+    from retinanalysis.SCutils.recording_mode import read_series_resistance
 
     # Symphony writes seriesResistance into the epoch parameters for this
     # protocol, which is both faster and more reliable than re-reading the h5;
@@ -978,19 +1057,32 @@ def resolve_block_mode(exp_name: str, block_id: int,
         except Exception:
             rs_median = np.nan
 
-    if amp_data is None:
+    # Only whole-cell blocks need their trace loaded: its sign separates
+    # excitatory from inhibitory current. Zero/missing resistance already has
+    # a complete (or deliberately unresolved) answer.
+    if amp_data is None and np.isfinite(rs_median) and rs_median > 0:
         block = ra.SCResponseBlock(exp_name, int(block_id), b_spiking=False,
                                    b_LED=True, verbose=False)
         amp_data = np.asarray(block.amp_data, dtype=float)
         sample_rate = float(block.amp_sample_rate)
 
-    mode, note = resolve_recording_mode('none', rs_median, amp_data=amp_data,
-                                        sample_rate=sample_rate)
+    mean_current = (float(np.nanmean(amp_data))
+                    if amp_data is not None else np.nan)
+    if not np.isfinite(rs_median):
+        mode = ''
+        note = 'recording mode unresolved: series resistance is missing'
+    elif rs_median == 0:
+        mode = 'extracellular'
+        note = "resolved to 'extracellular': series resistance is 0"
+    else:
+        mode = 'exc' if mean_current < 0 else 'inh'
+        note = (f"resolved to '{mode}': series resistance is positive, so "
+                'whole-cell; polarity from the sign of the mean trace')
     return {'rec_type': mode, 'rec_note': note,
             'series_resistance_mohm': (rs_median / 1e6
                                        if np.isfinite(rs_median) and rs_median > 1e3
                                        else rs_median),
-            'mean_current_pa': float(np.nanmean(amp_data))}
+            'mean_current_pa': mean_current}
 
 
 def condition_table(exp_names: Optional[Sequence[str]] = None,
@@ -1069,62 +1161,6 @@ def condition_table(exp_names: Optional[Sequence[str]] = None,
                                   'mean_current_pa', 'stimTime_ms', 'n_epochs',
                                   'block_id'))
     return frame
-
-
-def resolve_block_mode(exp_name: str, block_id: int,
-                       amp_data: Optional[np.ndarray] = None,
-                       sample_rate: float = 1e4) -> Dict[str, object]:
-    """Decide how one block was recorded, from the amplifier rather than a label.
-
-    These blocks carry no ``onlineAnalysis`` -- the experimenter's menu choice
-    is simply absent -- so the reading determines the mode rather than
-    overruling it, which is the ``'none'`` path of
-    :func:`SCutils.recording_mode.resolve_recording_mode`:
-
-    * series resistance above zero means the cell was held whole-cell, and the
-      polarity comes from the sign of the current: inward (negative mean) is
-      ``exc``, outward is ``inh``;
-    * a reading of exactly zero is not by itself cell-attached -- it also
-      happens when whole-cell compensation was never run -- so it is confirmed
-      against the trace, and only a trace that really contains spikes is
-      called ``extracellular``.
-
-    ``amp_data`` is optional; without it the block is loaded to get it.
-    """
-    import retinanalysis as ra
-    from retinanalysis.SCutils.recording_mode import (read_series_resistance,
-                                                      resolve_recording_mode)
-
-    # Symphony writes seriesResistance into the epoch parameters for this
-    # protocol, which is both faster and more reliable than re-reading the h5;
-    # fall back to the h5 reader when the parameter is absent.
-    rs_median = np.nan
-    params = epoch_parameters(int(block_id))
-    if 'seriesResistance' in params:
-        values = pd.to_numeric(params['seriesResistance'], errors='coerce').dropna()
-        if len(values):
-            rs_median = float(np.median(values))
-    if not np.isfinite(rs_median):
-        try:
-            rs = np.asarray(read_series_resistance(exp_name, int(block_id)),
-                            dtype=float)
-            rs_median = float(np.nanmedian(rs)) if rs.size else np.nan
-        except Exception:
-            rs_median = np.nan
-
-    if amp_data is None:
-        block = ra.SCResponseBlock(exp_name, int(block_id), b_spiking=False,
-                                   b_LED=True, verbose=False)
-        amp_data = np.asarray(block.amp_data, dtype=float)
-        sample_rate = float(block.amp_sample_rate)
-
-    mode, note = resolve_recording_mode('none', rs_median, amp_data=amp_data,
-                                        sample_rate=sample_rate)
-    return {'rec_type': mode, 'rec_note': note,
-            'series_resistance_mohm': (rs_median / 1e6
-                                       if np.isfinite(rs_median) and rs_median > 1e3
-                                       else rs_median),
-            'mean_current_pa': float(np.nanmean(amp_data))}
 
 
 # --------------------------------------------------------------------------
@@ -4090,6 +4126,47 @@ def save_duration_outputs(
             mean_window_s=mean_window_s, output_dir=output_dir,
             verbose=verbose)
         rows.append({
+            'stim_time_ms': duration,
+            'stim_seconds': duration / 1e3,
+            'n_epochs': int(sum(core.analysis.n_epochs.values())),
+            'output_path': str(path),
+        })
+    return pd.DataFrame(rows)
+
+
+def save_condition_outputs(
+        core_by_condition: Dict[Tuple[str, float], CoreLNAnalysis],
+        protocol_blocks: pd.DataFrame,
+        reconstruction_by_condition: Optional[Dict[Tuple[str, float], dict]] = None,
+        mean_window_s: float = 1.0,
+        output_dir=None,
+        verbose: bool = True) -> pd.DataFrame:
+    """Save all automatically separated recording-type/duration conditions."""
+    reconstruction_by_condition = reconstruction_by_condition or {}
+    rows = []
+    order = {value: index for index, value in enumerate(RECORDING_TYPES)}
+    items = sorted(core_by_condition.items(), key=lambda item: (
+        order.get(str(item[0][0]), len(order)), float(item[0][1])))
+    for (rec_type, duration), core in items:
+        duration = float(duration)
+        if str(rec_type) != core.analysis.rec_type:
+            raise ValueError(
+                f'recording-type key {rec_type!r} does not match analysis '
+                f'{core.analysis.rec_type!r}')
+        if not np.isclose(duration, core.analysis.stim_time_ms):
+            raise ValueError(
+                f'duration key {duration:g} does not match analysis '
+                f'{core.analysis.stim_time_ms:g} ms')
+        reconstruction = reconstruction_by_condition.get((rec_type, duration), {})
+        path = save_condition_output(
+            core.analysis, protocol_blocks,
+            temporal_models=core.temporal_models,
+            decoded=reconstruction.get('decoded'),
+            early_late=reconstruction.get('early_late'),
+            mean_window_s=mean_window_s, output_dir=output_dir,
+            verbose=verbose)
+        rows.append({
+            'rec_type': rec_type,
             'stim_time_ms': duration,
             'stim_seconds': duration / 1e3,
             'n_epochs': int(sum(core.analysis.n_epochs.values())),
@@ -7236,15 +7313,17 @@ __all__ = [
     'SINGLE_CELL_ROOT', 'metadata_files', 'corrected_dates',
     'resolve_roster_files',
     'find_blocks', 'find_protocol_cells', 'cell_blocks', 'duration_conditions',
+    'recording_duration_conditions',
     'plot_traces',
     'epoch_parameters', 'resolve_block_mode', 'load_block_modes',
     'PROTOCOL_PARAMETERS', 'MIN_STIM_TIME_MS', 'MIN_EPOCHS_PER_DURATION',
     'PRIMATE_CELL_TYPES',
-    'MODE_CACHE_PATH',
+    'MODE_CACHE_PATH', 'MODE_CACHE_VERSION', 'RECORDING_TYPES',
     'led_attenuation', 'matlab_randn', 'gaussian_noise_stimulus',
     'epoch_stimulus', 'fit_sigmoid', 'sigmoid', 'fit_ln_model',
     'analyze_condition', 'analysis_label', 'plot_condition', 'mean_response',
     'plot_mean_response', 'temporal_ln_model', 'plot_temporal_ln',
     'run_core_ln_analysis', 'save_condition_output', 'save_duration_outputs',
+    'save_condition_outputs',
     'load_condition_index', 'load_population_table',
 ]

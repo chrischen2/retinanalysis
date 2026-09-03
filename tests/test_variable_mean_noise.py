@@ -106,6 +106,58 @@ def test_duration_conditions_counts_every_epoch_and_keeps_exclusion_audit(monkey
     assert long.reason == 'fewer than 4 epochs'
 
 
+def test_recording_duration_conditions_threshold_is_per_paired_condition(monkeypatch):
+    import pandas as pd
+
+    parameters = {
+        11: pd.DataFrame({'stimTime': [30_000] * 4,
+                          'lightMean': [.3, 3.0, .3, 3.0]}),
+        12: pd.DataFrame({'stimTime': [30_000] * 3 + [60_000] * 4,
+                          'lightMean': [.3, 3.0, .3, .3, 3.0, .3, 3.0]}),
+        13: pd.DataFrame({'stimTime': [30_000] * 2,
+                          'lightMean': [.3, 3.0]}),
+        14: pd.DataFrame({'stimTime': [30_000] * 8,
+                          'lightMean': [.3, 3.0] * 4}),
+    }
+    modes = pd.DataFrame({
+        'block_id': [11, 12, 13, 14],
+        'rec_type': ['extracellular', 'exc', 'inh', ''],
+    })
+    monkeypatch.setattr(vmn, 'epoch_parameters', lambda block: parameters[block])
+
+    conditions = vmn.recording_duration_conditions(
+        [11, 12, 13, 14], modes=modes, min_epochs=4,
+        min_stim_time_ms=None, show=False)
+
+    indexed = conditions.set_index(['rec_type', 'stim_time_ms'])
+    assert indexed.loc[('extracellular', 30_000), 'included']
+    assert not indexed.loc[('exc', 30_000), 'included']
+    assert indexed.loc[('exc', 60_000), 'included']
+    assert not indexed.loc[('inh', 30_000), 'included']
+    assert not indexed.loc[('unresolved', 30_000), 'included']
+    assert indexed.loc[('unresolved', 30_000), 'n_epochs'] == 8
+    assert 'recording mode unresolved' in indexed.loc[
+        ('unresolved', 30_000), 'reason']
+
+
+@pytest.mark.parametrize(
+    ('series_resistance', 'mean_trace', 'expected'),
+    [(0.0, -10.0, 'extracellular'),
+     (20e6, -10.0, 'exc'),
+     (20e6, 10.0, 'inh')])
+def test_resolve_block_mode_uses_resistance_then_trace_sign(
+        monkeypatch, series_resistance, mean_trace, expected):
+    import pandas as pd
+
+    monkeypatch.setattr(
+        vmn, 'epoch_parameters',
+        lambda block: pd.DataFrame({'seriesResistance': [series_resistance]}))
+    result = vmn.resolve_block_mode(
+        'synthetic', 11, amp_data=np.full((2, 20), mean_trace))
+
+    assert result['rec_type'] == expected
+
+
 def test_analyze_condition_refuses_implicit_mixed_durations(monkeypatch):
     import pandas as pd
 
@@ -1465,6 +1517,42 @@ def test_save_duration_outputs_saves_every_duration(monkeypatch):
     assert [call[0] for call in calls] == [30_000.0, 60_000.0]
     assert calls[0][1:] == ('decoded-30', 'halves-30')
     assert saved.stim_seconds.tolist() == [30.0, 60.0]
+
+
+def test_save_condition_outputs_saves_every_mode_duration_pair(monkeypatch):
+    import pandas as pd
+
+    extracellular, temporal = _population_analysis()
+    exc, _ = _population_analysis()
+    exc.rec_type = 'exc'
+    exc.units = 'pA'
+    exc.stim_time_ms = 60_000.0
+    cores = {
+        ('extracellular', 30_000.0): vmn.CoreLNAnalysis(
+            extracellular, temporal, pd.DataFrame()),
+        ('exc', 60_000.0): vmn.CoreLNAnalysis(exc, temporal, pd.DataFrame()),
+    }
+    calls = []
+
+    def fake_save(analysis, blocks, **kwargs):
+        calls.append((analysis.rec_type, analysis.stim_time_ms,
+                      kwargs.get('decoded')))
+        return Path(f'/tmp/{analysis.rec_type}-{analysis.stim_time_ms:g}.h5')
+
+    monkeypatch.setattr(vmn, 'save_condition_output', fake_save)
+    reconstruction = {
+        ('extracellular', 30_000.0): {'decoded': 'spikes'},
+        ('exc', 60_000.0): {'decoded': 'current'},
+    }
+
+    saved = vmn.save_condition_outputs(
+        cores, pd.DataFrame(),
+        reconstruction_by_condition=reconstruction, verbose=False)
+
+    assert calls == [('extracellular', 30_000.0, 'spikes'),
+                     ('exc', 60_000.0, 'current')]
+    assert saved[['rec_type', 'stim_seconds']].values.tolist() == [
+        ['extracellular', 30.0], ['exc', 60.0]]
 
 
 def test_population_mean_sem_weights_each_cell_once():
