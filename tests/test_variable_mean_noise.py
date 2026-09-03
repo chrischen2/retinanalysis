@@ -1672,6 +1672,7 @@ def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
         assert stored.attrs['stim_seconds'] == 30.0
         assert stored.attrs['n_epochs'] == 4
         assert stored.attrs['cell_index'] == 19
+        assert stored.attrs['mean_rate_hz'] == pytest.approx(39.5)
         assert stored.attrs['decode_window_s'] == 2.5
         assert stored.attrs['decode_window_rule'] == 'shortest_within_one_se'
         assert stored.attrs['led_ndfs'] == 'B1, B12'
@@ -1682,15 +1683,19 @@ def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
         assert stored['tables/ln_curves/y'].compression == 'gzip'
 
     index = vmn.load_condition_index(tmp_path)
+    assert 'output_version' not in index
     assert index[['date', 'cell_index', 'cell_label', 'cell_type', 'rec_type',
+                  'mean_rate_hz',
                   'stim_seconds', 'n_epochs_total', 'rig',
                   'led', 'led_ndfs']].iloc[0].to_dict() == {
         'date': '2020-06-11_B', 'cell_index': 19, 'cell_label': 'Cell3',
         'cell_type': 'OFF-parasol', 'rec_type': 'extracellular',
+        'mean_rate_hz': 39.5,
         'stim_seconds': 30.0, 'n_epochs_total': 4,
         'rig': 'B', 'led': 'Blue LED', 'led_ndfs': 'B1, B12'}
     loaded = vmn.load_population_table('condition_summary', tmp_path)
     assert len(loaded) == 2
+    assert loaded.sort_values('lightMean').mean_rate_hz.tolist() == [19.5, 59.5]
     assert loaded.cell_id.unique().tolist() == ['2020-06-11_B/Cell3/extracellular']
     loaded_directional = vmn.load_population_table('directional_decoding', tmp_path)
     assert loaded_directional.gain_delta.tolist() == [.8]
@@ -1704,6 +1709,34 @@ def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
         early_late=early_late, output_dir=tmp_path, verbose=False)
     assert third != path and len(list(tmp_path.glob('*.h5'))) == 2
     assert vmn.load_condition_index(tmp_path).stim_seconds.tolist() == [30.0, 60.0]
+
+
+def test_condition_index_backfills_legacy_cell_index_from_current_cell_table(
+        tmp_path, monkeypatch):
+    import h5py
+    import pandas as pd
+
+    analysis, temporal = _population_analysis()
+    blocks = pd.DataFrame({
+        'block_id': [11, 12], 'cell_label': ['Cell3'] * 2,
+        'cell_type_short': ['OFF-parasol'] * 2,
+        'protocol_name': [vmn.PROTOCOLS[0]] * 2,
+    })
+    monkeypatch.setattr(vmn, 'condition_light_settings', lambda blocks, analysis:
+        pd.DataFrame({'rig': ['B'], 'led': ['UV LED'], 'led_ndfs': ['B1'],
+                      'optical_density': [1.0]}))
+    path = vmn.save_condition_output(
+        analysis, blocks, temporal_models=temporal, output_dir=tmp_path,
+        verbose=False)
+    with h5py.File(path, 'r+') as stored:
+        del stored.attrs['cell_index']
+    current = pd.DataFrame({
+        'exp_name': ['2020-06-11_B'], 'cell_label': ['Cell3'],
+        'cell_index': [27]})
+
+    index = vmn.load_condition_index(tmp_path, protocol_cells=current)
+
+    assert index.cell_index.tolist() == [27]
 
 
 def test_save_duration_outputs_saves_every_duration(monkeypatch):
@@ -1795,3 +1828,113 @@ def test_population_mean_sem_weights_each_cell_once():
     assert summary.r2_mean.iloc[0] == pytest.approx(4.0)
     assert summary.r2_sem.iloc[0] == pytest.approx(2.0)
     assert summary.r2_n_cells.iloc[0] == 2
+
+
+def test_condition_batch_helpers_preserve_mode_duration_keys(monkeypatch):
+    import pandas as pd
+
+    conditions = pd.DataFrame({
+        'rec_type': ['extracellular', 'exc'],
+        'stim_time_ms': [30_000., 60_000.],
+        'stim_seconds': [30., 60.], 'n_epochs': [6, 7],
+        'block_ids': [[11], [12]],
+    })
+    monkeypatch.setattr(vmn, 'epoch_response_summary', lambda *a, **k:
+                        pd.DataFrame({'mean_firing_rate_hz': [40.],
+                                      'modulation_sd_pA': [200.]}))
+    monkeypatch.setattr(vmn, 'plot_traces', lambda *a, **k: 'figure')
+    monkeypatch.setattr(vmn, 'check_epoch_response_quality', lambda *a, **k:
+                        pd.DataFrame({'passed': [True]}))
+    inspection = vmn.inspect_recording_conditions(
+        'example', [11, 12], conditions, max_epochs=None,
+        min_firing_rate_hz=30., min_whole_cell_modulation_pa=100.,
+        low_response_epoch_fraction=.8, verbose=False)
+    assert set(inspection.summaries) == {
+        ('extracellular', 30_000.), ('exc', 60_000.)}
+
+    calls = []
+    analysis, temporal = _population_analysis()
+
+    def fake_core(exp_name, block_ids, rec_type, **kwargs):
+        calls.append((rec_type, kwargs['stim_time_ms']))
+        current = analysis
+        current.rec_type = rec_type
+        current.stim_time_ms = kwargs['stim_time_ms']
+        return vmn.CoreLNAnalysis(current, temporal, pd.DataFrame())
+
+    monkeypatch.setattr(vmn, 'run_core_ln_analysis', fake_core)
+    cores = vmn.run_core_condition_analyses(
+        'example', [11, 12], conditions, qc_signature=inspection.signature,
+        min_firing_rate_hz=30., min_whole_cell_modulation_pa=100.,
+        low_response_epoch_fraction=.8, verbose=False)
+    assert list(cores) == [('extracellular', 30_000.), ('exc', 60_000.)]
+    assert calls == list(cores)
+
+
+def test_population_wrappers_are_safe_before_any_records_exist(tmp_path):
+    overview = vmn.population_overview_analysis(output_dir=tmp_path)
+    temporal = vmn.population_temporal_analysis(output_dir=tmp_path)
+    decoding = vmn.population_decoding_analysis(output_dir=tmp_path)
+
+    assert overview['saved_cells'].empty
+    assert overview['mean_figures'] == {}
+    assert temporal['summary'].empty and temporal['figures'] == {}
+    assert decoding['directional_contrast'].empty
+    assert decoding['directional_contrast_figures'] == {}
+
+
+def test_reconstruction_batch_helper_returns_save_ready_bundle(monkeypatch):
+    import pandas as pd
+
+    analysis, temporal = _population_analysis()
+    core = vmn.CoreLNAnalysis(analysis, temporal, pd.DataFrame())
+    monkeypatch.setattr(vmn, 'analyze_condition', lambda *a, **k: analysis)
+    monkeypatch.setattr(vmn, 'select_decode_window', lambda *a, **k:
+                        (2.0, pd.DataFrame({'selected': [True]})))
+    traces = pd.DataFrame({'mode': ['per_window'], 'lightMean': [.1]})
+    monkeypatch.setattr(vmn, 'reconstruct_traces', lambda *a, **k: traces)
+    directional = pd.DataFrame({
+        'operating_point': ['positive'], 'light_condition': ['bright'],
+        'mode': ['per_window'], 'window': ['0-2 s'],
+        'direction': ['increment'], 'n_changes': [5], 'gain_delta': [.2],
+        'direction_accuracy': [.6], 'nrmse_delta': [1.],
+    })
+    monkeypatch.setattr(vmn, 'generator_direction_decoding',
+                        lambda *a, **k: directional)
+    monkeypatch.setattr(vmn, 'decode_recovery', lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr(vmn, 'reconstruction_summary', lambda *a, **k: pd.DataFrame())
+    for name in ('plot_reconstruction_trace', 'plot_reconstruction_transfer',
+                 'plot_phase_triggered', 'plot_generator_direction_decoding',
+                 'plot_decoding'):
+        monkeypatch.setattr(vmn, name, lambda *a, **k: 'figure')
+
+    result = vmn.run_reconstruction_analyses(
+        analysis.exp_name, {('extracellular', 30_000.): core},
+        decode_skip_s=2., decode_window_s='auto',
+        decode_window_candidates_s=(1., 2.), decode_bin_ms=50.,
+        steady_state_s=10., min_phase_ms=100.,
+        direction_min_change_quantile=.25, trace_seconds=(10., 15.),
+        verbose=False)
+
+    bundle = result[('extracellular', 30_000.)]
+    assert bundle['decode_window_s'] == 2.0
+    assert bundle['directional_decoding'] is directional
+    assert bundle['transfer_figure'] == 'figure'
+
+
+def test_two_state_batch_helper_keeps_condition_key(monkeypatch):
+    analysis, _ = _population_analysis()
+    model = object()
+    curves = object()
+    monkeypatch.setattr(vmn, 'fit_lnk_two_state', lambda *a, **k: model)
+    monkeypatch.setattr(vmn, 'apparent_nonlinearity', lambda *a, **k: curves)
+    monkeypatch.setattr(vmn, 'describe_apparent_change', lambda *a, **k:
+                        {'gain_ratio': .5})
+    monkeypatch.setattr(vmn, 'plot_apparent_nonlinearity', lambda *a, **k: 'figure')
+
+    result = vmn.run_two_state_lnk_conditions(
+        {('extracellular', 30_000.): {'analysis': analysis}}, verbose=False)
+
+    bundle = result[('extracellular', 30_000.)]
+    assert bundle == {'model': model, 'curves': curves, 'figure': 'figure',
+                      'change': {'gain_ratio': .5}}

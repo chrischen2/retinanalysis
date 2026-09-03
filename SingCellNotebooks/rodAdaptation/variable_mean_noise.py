@@ -3037,8 +3037,14 @@ def condition_summary(analysis: ConditionAnalysis,
         model = analysis.ln_model.get(mean_level)
         if model is None:
             continue
+        response = np.asarray(analysis.response.get(mean_level, np.zeros(0)),
+                              dtype=float)
+        mean_rate_hz = (float(np.nanmean(response))
+                        if analysis.rec_type == 'extracellular' and response.size
+                        else np.nan)
         rows.append({
             'lightMean': mean_level,
+            'mean_rate_hz': mean_rate_hz,
             'n_epochs': analysis.n_epochs.get(mean_level, 0),
             'n_train': model.n_train, 'n_test': model.n_test,
             'r2': model.r2, 'r2_train': model.r2_train, 'nl_r2': model.nl_r2,
@@ -4679,6 +4685,12 @@ def save_condition_output(
     ods = pd.to_numeric(lights.optical_density, errors='coerce').dropna().unique()
 
     full_curves, temporal_curves = _ln_curve_table(analysis, temporal_models)
+    response_values = [np.asarray(analysis.response.get(level, np.zeros(0)), dtype=float)
+                       for level in analysis.light_means]
+    response_values = [value.ravel() for value in response_values if value.size]
+    mean_rate_hz = (
+        float(np.nanmean(np.concatenate(response_values)))
+        if analysis.rec_type == 'extracellular' and response_values else np.nan)
     frames = {
         'light_settings': lights,
         'mean_response': mean_response(analysis, window_s=mean_window_s),
@@ -4709,6 +4721,7 @@ def save_condition_output(
         h5.attrs['cell_label'] = cell_label
         h5.attrs['cell_type'] = cell_type
         h5.attrs['cell_index'] = int(cell_index) if cell_index is not None else -1
+        h5.attrs['mean_rate_hz'] = mean_rate_hz
         h5.attrs['rec_type'] = analysis.rec_type
         h5.attrs['units'] = analysis.units
         h5.attrs['rig'] = ', '.join(rigs)
@@ -4858,7 +4871,6 @@ def _output_metadata(path) -> dict:
         if version not in (1, CONDITION_OUTPUT_VERSION):
             raise ValueError(f'{path}: unsupported output version')
         return {
-            'output_version': version,
             'condition_id': path.stem,
             'cell_id': (f'{text(h5.attrs["exp_name"])}/'
                         f'{text(h5.attrs["cell_label"])}/'
@@ -4867,6 +4879,7 @@ def _output_metadata(path) -> dict:
             'cell_index': int(h5.attrs.get('cell_index', -1)),
             'cell_label': text(h5.attrs['cell_label']),
             'cell_type': text(h5.attrs['cell_type']),
+            'mean_rate_hz': float(h5.attrs.get('mean_rate_hz', np.nan)),
             'rec_type': text(h5.attrs['rec_type']),
             'rig': text(h5.attrs.get('rig', '')),
             'led': text(h5.attrs.get('led', '')),
@@ -4883,19 +4896,36 @@ def _output_metadata(path) -> dict:
         }
 
 
-def load_condition_index(output_dir=None) -> pd.DataFrame:
-    """List saved cells from HDF5 attributes without loading result arrays."""
+def load_condition_index(output_dir=None,
+                         protocol_cells: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    """List saved cells from HDF5 attributes without loading result arrays.
+
+    ``output_version`` remains an internal compatibility check and is not part
+    of the user-facing table. If old records predate ``cell_index``, passing
+    the current ``protocol_cells`` table fills the display index by matching
+    experiment and cell label; newly saved records carry it directly.
+    """
     directory = condition_output_dir(output_dir)
-    columns = ['output_version', 'condition_id', 'cell_id', 'date', 'cell_index',
+    columns = ['condition_id', 'cell_id', 'date', 'cell_index',
                'cell_label', 'cell_type',
+               'mean_rate_hz',
                'rec_type', 'rig', 'led', 'led_ndfs', 'optical_density',
                'stim_time_ms', 'stim_seconds', 'n_epochs_total',
                'decode_window_s', 'decode_window_rule', 'protocols',
                'n_blocks', 'output_path']
     rows = [_output_metadata(path) for path in sorted(directory.glob('*.h5'))]
-    return (pd.DataFrame(rows, columns=columns)
-            .sort_values(['date', 'cell_label', 'rec_type', 'stim_time_ms'],
-                         ignore_index=True))
+    frame = pd.DataFrame(rows, columns=columns)
+    if protocol_cells is not None and len(frame) and len(protocol_cells):
+        lookup = (protocol_cells[['exp_name', 'cell_label', 'cell_index']]
+                  .drop_duplicates(['exp_name', 'cell_label']))
+        current = frame.merge(
+            lookup, left_on=['date', 'cell_label'],
+            right_on=['exp_name', 'cell_label'], how='left', suffixes=('', '_current'))
+        missing = current.cell_index.lt(0) & current.cell_index_current.notna()
+        current.loc[missing, 'cell_index'] = current.loc[missing, 'cell_index_current']
+        frame = current[columns]
+    return frame.sort_values(
+        ['date', 'cell_label', 'rec_type', 'stim_time_ms'], ignore_index=True)
 
 
 def load_population_table(table: str, output_dir=None) -> pd.DataFrame:
@@ -4915,7 +4945,8 @@ def load_population_table(table: str, output_dir=None) -> pd.DataFrame:
         if frame.empty:
             continue
         for column, value in reversed(list(metadata.items())):
-            frame.insert(0, column, value)
+            if column not in frame:
+                frame.insert(0, column, value)
         frames.append(frame)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
@@ -7913,6 +7944,16 @@ class CoreLNAnalysis:
     response_qc: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
+@dataclass
+class ResponseInspection:
+    """Raw-trace and response-QC outputs for every retained condition."""
+
+    summaries: Dict[Tuple[str, float], pd.DataFrame]
+    figures: Dict[Tuple[str, float], object]
+    qc: Dict[Tuple[str, float], pd.DataFrame]
+    signature: tuple
+
+
 def run_core_ln_analysis(
         exp_name: str,
         block_ids: Sequence[int],
@@ -8001,10 +8042,433 @@ def run_core_ln_analysis(
         response_qc=response_qc)
 
 
+def response_qc_signature(
+        exp_name: str,
+        block_ids: Sequence[int],
+        conditions: pd.DataFrame,
+        max_epochs: Optional[int],
+        min_firing_rate_hz: float,
+        min_whole_cell_modulation_pa: float,
+        low_response_epoch_fraction: float) -> tuple:
+    """Immutable identity of the selected conditions and response-QC policy."""
+    pairs = tuple((row.rec_type, float(row.stim_time_ms))
+                  for row in conditions.itertuples())
+    return (str(exp_name), tuple(int(value) for value in block_ids), max_epochs,
+            pairs, float(min_firing_rate_hz),
+            float(min_whole_cell_modulation_pa),
+            float(low_response_epoch_fraction))
+
+
+def inspect_recording_conditions(
+        exp_name: str,
+        block_ids: Sequence[int],
+        conditions: pd.DataFrame,
+        *,
+        max_epochs: Optional[int] = None,
+        min_firing_rate_hz: float,
+        min_whole_cell_modulation_pa: float,
+        low_response_epoch_fraction: float,
+        verbose: bool = True) -> ResponseInspection:
+    """Plot and QC every retained recording-mode/duration condition."""
+    summaries, figures, qc = {}, {}, {}
+    for condition in conditions.itertuples():
+        key = (str(condition.rec_type), float(condition.stim_time_ms))
+        if verbose:
+            print(f'\nraw inspection: {condition.rec_type} | '
+                  f'{condition.stim_seconds:g} s | {condition.n_epochs} epochs | '
+                  f'blocks {condition.block_ids}')
+        summary = epoch_response_summary(
+            exp_name, condition.block_ids, condition.rec_type,
+            max_epochs=max_epochs, stim_time_ms=condition.stim_time_ms,
+            show=verbose)
+        summaries[key] = summary
+        figures[key] = plot_traces(
+            exp_name, condition.block_ids, condition.rec_type,
+            max_epochs=max_epochs, stim_time_ms=condition.stim_time_ms)
+        qc[key] = check_epoch_response_quality(
+            summary, condition.rec_type,
+            min_firing_rate_hz=min_firing_rate_hz,
+            min_whole_cell_modulation_pa=min_whole_cell_modulation_pa,
+            low_response_epoch_fraction=low_response_epoch_fraction,
+            condition_label=(f'{exp_name} | {condition.rec_type} | '
+                             f'{condition.stim_seconds:g} s epochs'),
+            verbose=verbose)
+    signature = response_qc_signature(
+        exp_name, block_ids, conditions, max_epochs,
+        min_firing_rate_hz, min_whole_cell_modulation_pa,
+        low_response_epoch_fraction)
+    if verbose:
+        print('\nSection 2 response QC passed for every retained condition.')
+    return ResponseInspection(summaries, figures, qc, signature)
+
+
+def run_core_condition_analyses(
+        exp_name: str,
+        block_ids: Sequence[int],
+        conditions: pd.DataFrame,
+        *,
+        qc_signature: tuple,
+        max_epochs: Optional[int] = None,
+        min_firing_rate_hz: float,
+        min_whole_cell_modulation_pa: float,
+        low_response_epoch_fraction: float,
+        skip_seconds: float = 1.0,
+        downsample: int = 10,
+        max_series_resistance: Optional[float] = 30e6,
+        align_epoch_means: bool = True,
+        mean_window_s: float = 2.0,
+        condition_window_s: float = 6.0,
+        temporal_window_s: Optional[float] = None,
+        verbose: bool = True) -> Dict[Tuple[str, float], CoreLNAnalysis]:
+    """Verify Section 2 QC and run the core analysis for every condition."""
+    expected = response_qc_signature(
+        exp_name, block_ids, conditions, max_epochs,
+        min_firing_rate_hz, min_whole_cell_modulation_pa,
+        low_response_epoch_fraction)
+    if qc_signature != expected:
+        raise RuntimeError(
+            'Section 2 response QC has not passed for the current selection; '
+            'run Section 2 and resolve LOW RESPONSE CELL before Section 3')
+    results = {}
+    for condition in conditions.itertuples():
+        rec_type, duration = str(condition.rec_type), float(condition.stim_time_ms)
+        if verbose:
+            print(f'\n=== {rec_type} | {condition.stim_seconds:g} s epochs | '
+                  f'{condition.n_epochs} recorded ===')
+        core = run_core_ln_analysis(
+            exp_name, condition.block_ids, rec_type=rec_type,
+            stim_time_ms=duration, skip_seconds=skip_seconds,
+            downsample=downsample, max_epochs=max_epochs,
+            max_series_resistance=max_series_resistance,
+            align_epoch_means=align_epoch_means,
+            mean_window_s=mean_window_s,
+            condition_window_s=condition_window_s,
+            temporal_window_s=temporal_window_s, verbose=verbose)
+        results[(rec_type, duration)] = core
+        if verbose and len(core.analysis.dropped_epochs):
+            print(core.analysis.dropped_epochs.to_string(index=False))
+        if verbose and len(core.analysis.epoch_adjustments):
+            print(core.analysis.epoch_adjustments.round(1).to_string(index=False))
+        if verbose:
+            shown = core.summary.copy()
+            shown.insert(0, 'stim_seconds', duration / 1e3)
+            print(shown.round(3).to_string(index=False))
+    return results
+
+
+def run_reconstruction_analyses(
+        exp_name: str,
+        core_by_condition: Dict[Tuple[str, float], CoreLNAnalysis],
+        *,
+        decode_skip_s: float,
+        decode_window_s,
+        decode_window_candidates_s: Sequence[float],
+        decode_bin_ms: float,
+        steady_state_s: float,
+        min_phase_ms: float,
+        direction_min_change_quantile: float,
+        trace_seconds: Tuple[float, float],
+        downsample: int = 10,
+        max_epochs: Optional[int] = None,
+        max_series_resistance: Optional[float] = 30e6,
+        align_epoch_means: bool = True,
+        verbose: bool = True) -> Dict[Tuple[str, float], dict]:
+    """Run all held-out reconstruction analyses for every saved condition."""
+    results = {}
+    for (rec_type, duration), core in core_by_condition.items():
+        if verbose:
+            print(f'\n=== reconstruction | {rec_type} | {duration / 1e3:g} s epochs ===')
+        analysis = analyze_condition(
+            exp_name, core.analysis.block_ids, rec_type=rec_type,
+            stim_time_ms=duration, skip_seconds=decode_skip_s,
+            downsample=downsample, max_epochs=max_epochs,
+            max_series_resistance=max_series_resistance,
+            align_epoch_means=align_epoch_means, fit=False, verbose=False)
+        if decode_window_s == 'auto':
+            selected_window, window_selection = select_decode_window(
+                analysis, candidates_s=decode_window_candidates_s,
+                decode_bin_ms=decode_bin_ms, verbose=verbose)
+        else:
+            selected_window = float(decode_window_s)
+            window_selection = pd.DataFrame()
+        if verbose and not window_selection.empty:
+            print(window_selection.drop(
+                columns='mean_fisher_z', errors='ignore').round(3).to_string(index=False))
+        trace_figure = plot_reconstruction_trace(
+            analysis, seconds=trace_seconds, decode_bin_ms=decode_bin_ms)
+        trace_frames = [reconstruct_traces(
+            analysis, mode=mode, window_seconds=selected_window,
+            decode_bin_ms=decode_bin_ms, steady_state_s=steady_state_s,
+            generator_models=core.analysis.ln_model, verbose=verbose)
+            for mode in ('per_window', 'steady_state')]
+        trace_frames = [frame for frame in trace_frames if not frame.empty]
+        traces = (pd.concat(trace_frames, ignore_index=True)
+                  if trace_frames else pd.DataFrame())
+        directional = generator_direction_decoding(
+            traces, generator_models=core.analysis.ln_model,
+            min_abs_change_quantile=direction_min_change_quantile)
+        decoded = decode_recovery(
+            analysis, window_seconds=selected_window,
+            decode_bin_ms=decode_bin_ms, steady_state_s=steady_state_s,
+            verbose=verbose)
+        results[(rec_type, duration)] = {
+            'analysis': analysis, 'decode_window_s': selected_window,
+            'window_selection': window_selection, 'traces': traces,
+            'decoded': decoded, 'directional_decoding': directional,
+            'trace_figure': trace_figure,
+            'transfer_figure': plot_reconstruction_transfer(analysis, traces),
+            'phase_figure': plot_phase_triggered(
+                analysis, traces, min_phase_ms=min_phase_ms),
+            'directional_figure': plot_generator_direction_decoding(
+                analysis, directional, operating_point='positive'),
+            'decoding_figure': plot_decoding(analysis, decoded),
+        }
+        if verbose:
+            summary = reconstruction_summary(decoded)
+            if len(summary):
+                summary.insert(0, 'stim_seconds', duration / 1e3)
+                print(summary.round(3).to_string(index=False))
+            key_rows = directional[
+                directional.operating_point.eq('positive') &
+                directional.light_condition.eq('bright')]
+            if len(key_rows):
+                print(key_rows[[
+                    'mode', 'window', 'direction', 'n_changes', 'gain_delta',
+                    'direction_accuracy', 'nrmse_delta']].round(3).to_string(index=False))
+    return results
+
+
+def add_early_late_reconstruction(
+        reconstruction_by_condition: Dict[Tuple[str, float], dict],
+        *, verbose: bool = True) -> Dict[Tuple[str, float], dict]:
+    """Add early/late transfer tables and figures to reconstruction bundles."""
+    for (rec_type, duration), result in reconstruction_by_condition.items():
+        if verbose:
+            print(f'\n=== early vs late | {rec_type} | {duration / 1e3:g} s epochs ===')
+        early_late = transfer_early_late(result['traces'])
+        result['early_late'] = early_late
+        result['early_late_figure'] = plot_transfer_early_late(
+            result['analysis'], result['traces'])
+        if verbose and len(early_late):
+            shown = early_late.copy()
+            shown.insert(0, 'stim_seconds', duration / 1e3)
+            columns = [
+                'stim_seconds', 'mode', 'lightMean', 'half', 'split_s',
+                't_start_s', 't_end_s', 'span_s', 'n_bins',
+                'gain_increment', 'gain_decrement', 'gain_asymmetry',
+                'r_increment', 'r_decrement', 'r_all']
+            print(shown[columns].round(3).to_string(index=False))
+    return reconstruction_by_condition
+
+
+def select_population_rows(frame: pd.DataFrame,
+                           rec_types: Optional[Sequence[str]] = None,
+                           cell_types: Optional[Sequence[str]] = None) -> pd.DataFrame:
+    """Apply the notebook's duration/mode/cell-type population selection."""
+    if frame is None or frame.empty:
+        return frame
+    keep = pd.to_numeric(frame.stim_seconds, errors='coerce').notna()
+    if rec_types is not None:
+        keep &= frame.rec_type.isin(rec_types)
+    if cell_types is not None:
+        keep &= frame.cell_type.isin(cell_types)
+    return frame.loc[keep].copy()
+
+
+def population_overview_analysis(
+        *, rec_types: Optional[Sequence[str]] = None,
+        cell_types: Optional[Sequence[str]] = None,
+        output_dir=None) -> dict:
+    """Load and summarize saved-cell metadata, mean response, and static LN."""
+    select = lambda frame: select_population_rows(frame, rec_types, cell_types)
+    saved = select(load_condition_index(output_dir))
+    mean_rows = select(load_population_table('mean_response', output_dir))
+    mean_population = population_mean_sem(
+        mean_rows, ['cell_type', 'rec_type', 'stim_seconds', 'light_mean', 'time_s'],
+        ['mean'])
+    condition_rows = select(load_population_table('condition_summary', output_dir))
+    if 'mean_rate_hz' not in condition_rows:
+        condition_rows = condition_rows.copy()
+        condition_rows['mean_rate_hz'] = np.nan
+    condition_population = population_mean_sem(
+        condition_rows, ['cell_type', 'rec_type', 'stim_seconds', 'lightMean'],
+        ['mean_rate_hz', 'r2', 'time_to_peak_ms', 'biphasic_index'])
+    return {
+        'saved_cells': saved, 'mean_population': mean_population,
+        'condition_population': condition_population,
+        'mean_figures': {
+            duration: plot_population_metrics(
+                block, x='time_s', metrics=['mean'], hue='light_mean')
+            for duration, block in mean_population.groupby('stim_seconds')}
+            if not mean_population.empty else {},
+        'condition_figures': {
+            duration: plot_population_metrics(
+                block, x='lightMean',
+                metrics=['mean_rate_hz', 'r2', 'time_to_peak_ms',
+                         'biphasic_index'], hue='cell_type')
+            for duration, block in condition_population.groupby('stim_seconds')}
+            if not condition_population.empty else {},
+    }
+
+
+def population_temporal_analysis(
+        *, rec_types: Optional[Sequence[str]] = None,
+        cell_types: Optional[Sequence[str]] = None,
+        output_dir=None) -> dict:
+    """Load, aggregate, and plot the saved temporal-LN table."""
+    rows = select_population_rows(
+        load_population_table('temporal_summary', output_dir), rec_types, cell_types)
+    summary = population_mean_sem(
+        rows, ['cell_type', 'rec_type', 'stim_seconds', 'lightMean', 'order'],
+        ['centre_s', 'r2', 'time_to_peak_ms', 'biphasic_index',
+         'alpha', 'beta', 'gamma', 'epsilon'])
+    figures = {
+        duration: plot_population_metrics(
+            block, x='order', metrics=['r2', 'time_to_peak_ms', 'biphasic_index'],
+            hue='lightMean')
+        for duration, block in summary.groupby('stim_seconds')} if not summary.empty else {}
+    return {'rows': rows, 'summary': summary, 'figures': figures}
+
+
+def population_decoding_analysis(
+        *, rec_types: Optional[Sequence[str]] = None,
+        cell_types: Optional[Sequence[str]] = None,
+        key_cell_types: Sequence[str] = ('ON-midget', 'ON-parasol'),
+        output_dir=None) -> dict:
+    """Aggregate conventional decoding and the paired saturation endpoint."""
+    select = lambda frame: select_population_rows(frame, rec_types, cell_types)
+    reconstruction_rows = select(load_population_table(
+        'reconstruction_summary', output_dir))
+    reconstruction = population_mean_sem(
+        reconstruction_rows,
+        ['cell_type', 'rec_type', 'stim_seconds', 'mode', 'lightMean'],
+        ['r_all_first', 'r_all_last', 'r_gain', 'r_asymmetry',
+         'gain_asymmetry', 'nrmse_inc', 'nrmse_dec'])
+    early_late_rows = select(load_population_table('early_late', output_dir))
+    early_late = population_mean_sem(
+        early_late_rows,
+        ['cell_type', 'rec_type', 'stim_seconds', 'mode', 'lightMean', 'half'],
+        ['gain_increment', 'gain_decrement', 'gain_asymmetry',
+         'r_increment', 'r_decrement', 'r_asymmetry'])
+    directional_rows = select(load_population_table('directional_decoding', output_dir))
+    positive_bright = (directional_rows if directional_rows.empty else
+        directional_rows[directional_rows.operating_point.eq('positive') &
+                         directional_rows.light_condition.eq('bright')].copy())
+    directional = population_mean_sem(
+        positive_bright,
+        ['cell_type', 'rec_type', 'stim_seconds', 'mode', 'direction', 'order'],
+        ['gain_delta', 'direction_accuracy', 'nrmse_delta'])
+    paired = directional_saturation_contrast(directional_rows)
+    contrast = population_mean_sem(
+        paired, ['cell_type', 'rec_type', 'stim_seconds', 'mode'],
+        ['gain_dec_minus_inc', 'accuracy_dec_minus_inc', 'error_inc_minus_dec'])
+    key_contrast = (contrast if contrast.empty else
+                    contrast[contrast.cell_type.isin(key_cell_types)])
+    return {
+        'reconstruction': reconstruction, 'early_late': early_late,
+        'directional': directional, 'paired_direction': paired,
+        'directional_contrast': contrast,
+        'reconstruction_figures': {
+            duration: plot_population_metrics(
+                block, x='lightMean',
+                metrics=['r_gain', 'r_asymmetry', 'gain_asymmetry'], hue='mode')
+            for duration, block in reconstruction.groupby('stim_seconds')}
+            if not reconstruction.empty else {},
+        'directional_contrast_figures': {
+            duration: plot_population_metrics(
+                block, x='cell_type',
+                metrics=['gain_dec_minus_inc', 'accuracy_dec_minus_inc',
+                         'error_inc_minus_dec'], hue='mode')
+            for duration, block in key_contrast.groupby('stim_seconds')}
+            if not key_contrast.empty else {},
+    }
+
+
+def run_one_state_lnk_conditions(
+        reconstruction_by_condition: Dict[Tuple[str, float], dict],
+        core_by_condition: Dict[Tuple[str, float], CoreLNAnalysis],
+        *, state_dt_ms: Optional[float] = None,
+        test_fraction: float = 0.2,
+        warmup_epochs: int = 1,
+        n_restarts: int = 1,
+        view_s: Tuple[float, float] = (25.0, 95.0),
+        nl_windows: int = 5,
+        nl_warmup_epochs: int = 1,
+        verbose: bool = True) -> Dict[Tuple[str, float], dict]:
+    """Fit and visualize both one-state LNK couplings for every condition."""
+    results = {}
+    for key, reconstruction in reconstruction_by_condition.items():
+        rec_type, duration = key
+        if verbose:
+            print(f'\n=== one-state LNK | {rec_type} | {duration / 1e3:g} s epochs ===')
+        analysis = reconstruction['analysis']
+        core = core_by_condition[key]
+        models = compare_lnk_couplings(
+            analysis, static_analysis=core.analysis, state_dt_ms=state_dt_ms,
+            warmup_epochs=warmup_epochs, n_restarts=n_restarts,
+            test_fraction=test_fraction, verbose=verbose)
+        figure = plot_lnk_fit(analysis, models, seconds=view_s)
+        if verbose:
+            print(lnk_summary(models).round(3).to_string(index=False))
+        timelapse_by_coupling, timelapse_figures, summaries = {}, {}, []
+        fitted = {name: model for name, model in models.items() if model is not None}
+        for name, model in fitted.items():
+            curves = nonlinearity_timelapse(
+                analysis, model, n_windows=nl_windows,
+                warmup_epochs=nl_warmup_epochs)
+            timelapse_by_coupling[name] = curves
+            summary = describe_timelapse(curves)
+            if len(summary):
+                summary.insert(0, 'coupling', name)
+                summaries.append(summary)
+            timelapse_figures[name] = plot_nonlinearity_timelapse(
+                analysis, model, curves, temporal_models=core.temporal_models,
+                warmup_epochs=nl_warmup_epochs)
+        if verbose and summaries:
+            print(pd.concat(summaries, ignore_index=True).round(3).to_string(index=False))
+        preferred = max(fitted, key=lambda name: fitted[name].r2) if fitted else None
+        if verbose and preferred is not None:
+            print(f'preferred coupling by held-out r2: {preferred}')
+        results[key] = {
+            'models': models, 'figure': figure,
+            'timelapse_by_coupling': timelapse_by_coupling,
+            'timelapse_figures': timelapse_figures, 'preferred': preferred}
+    return results
+
+
+def run_two_state_lnk_conditions(
+        reconstruction_by_condition: Dict[Tuple[str, float], dict],
+        *, state_dt_ms: float = 250.0,
+        n_restarts: int = 2,
+        test_fraction: float = 0.25,
+        verbose: bool = True) -> Dict[Tuple[str, float], dict]:
+    """Fit and visualize the two-state LNK model for every condition."""
+    results = {}
+    for key, reconstruction in reconstruction_by_condition.items():
+        rec_type, duration = key
+        if verbose:
+            print(f'\n=== two-state LNK | {rec_type} | {duration / 1e3:g} s epochs ===')
+        analysis = reconstruction['analysis']
+        model = fit_lnk_two_state(
+            analysis, state_dt_ms=state_dt_ms, n_restarts=n_restarts,
+            test_fraction=test_fraction, verbose=verbose)
+        curves = apparent_nonlinearity(analysis, model)
+        change = describe_apparent_change(curves)
+        if verbose:
+            rounded = {key: (round(value, 4) if isinstance(value, float) else value)
+                       for key, value in change.items()}
+            print(f'\nemergent nonlinearity change: {rounded}')
+        results[key] = {
+            'model': model, 'curves': curves,
+            'figure': plot_apparent_nonlinearity(analysis, model, curves),
+            'change': change}
+    return results
+
+
 __all__ = [
     'PROTOCOLS', 'PROTOCOL_SEARCH', 'DEFAULT_SUMMARY_PATH', 'SUMMARY_DIR',
     'STEP_DIRECTIONS', 'STEP_LABELS', 'LNModel', 'ConditionAnalysis',
-    'CoreLNAnalysis',
+    'CoreLNAnalysis', 'ResponseInspection',
     'summary_path', 'load_summary', 'load_cell',
     'DATE_OFFSETS', 'SAVED_DATE_OFFSET_DAYS', 'FALLBACK_OFFSETS',
     'SINGLE_CELL_ROOT', 'metadata_files', 'corrected_dates',
@@ -8022,7 +8486,13 @@ __all__ = [
     'check_epoch_response_quality', 'check_extracellular_firing_rate',
     'plot_condition', 'mean_response',
     'plot_mean_response', 'temporal_ln_model', 'plot_temporal_ln',
-    'run_core_ln_analysis', 'save_condition_output', 'save_duration_outputs',
+    'run_core_ln_analysis', 'inspect_recording_conditions',
+    'response_qc_signature', 'run_core_condition_analyses',
+    'run_reconstruction_analyses', 'add_early_late_reconstruction',
+    'save_condition_output', 'save_duration_outputs',
     'save_condition_outputs',
-    'load_condition_index', 'load_population_table',
+    'load_condition_index', 'load_population_table', 'select_population_rows',
+    'population_overview_analysis', 'population_temporal_analysis',
+    'population_decoding_analysis', 'run_one_state_lnk_conditions',
+    'run_two_state_lnk_conditions',
 ]
