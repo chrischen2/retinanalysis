@@ -310,6 +310,7 @@ PROTOCOL_PARAMETERS = (
     'sampleRate',
     'useRandomSeed',
     'numberOfAverages',
+    'onlineAnalysis',   # experimenter-selected analysis label (audited below)
 )
 
 # Epochs shorter than this cannot show the adaptation the analysis is after:
@@ -331,7 +332,7 @@ PRIMATE_CELL_TYPES = ('ON-parasol', 'OFF-parasol', 'ON-midget', 'OFF-midget', 'A
 # Where the per-block recording-mode cache lives. Resolving a mode can need the
 # block's raw trace, which is seconds per block, so it is done once and stored.
 MODE_CACHE_PATH = Path(__file__).resolve().parent / 'block_modes.csv'
-MODE_CACHE_VERSION = 2
+MODE_CACHE_VERSION = 3
 RECORDING_TYPES = ('extracellular', 'exc', 'inh')
 
 
@@ -348,26 +349,67 @@ def build_mode_cache(protocol_blocks: pd.DataFrame,
                      verbose: bool = True) -> pd.DataFrame:
     """Resolve every block's recording type and write the cache.
 
-    Positive-resistance blocks need their trace loaded to separate exc from
-    inh, so doing it for the whole protocol can take several minutes. Results
-    are written to :data:`MODE_CACHE_PATH` with a rule version; stale caches
-    are rejected and rebuilt by the notebook.
+    This delegates the actual decision to the shared
+    :func:`retinanalysis.SCutils.recording_mode.check_series_resistance`
+    resolver. It preserves the experimenter's ``onlineAnalysis`` label,
+    incorporates epoch-group ``recordingTechnique`` metadata, reads the raw
+    amplifier series resistance, and samples the trace only where those
+    sources do not settle the mode. Results are written to
+    :data:`MODE_CACHE_PATH` with a rule version; stale caches are rejected and
+    rebuilt by the notebook.
 
     Was a loop in the notebook. Returns the frame it wrote.
     """
+    from retinanalysis.SCutils.recording_mode import check_series_resistance
+
     path = MODE_CACHE_PATH if path is None else Path(path)
-    rows = []
-    total = len(protocol_blocks)
-    for n, (_, row) in enumerate(protocol_blocks.iterrows(), 1):
-        block_id = int(row['block_id'])
-        exp_name = str(row['exp_name'])
-        rows.append(dict(cache_version=MODE_CACHE_VERSION,
-                         exp_name=exp_name, block_id=block_id,
-                         n_epochs=len(epoch_parameters(block_id)),
-                         **resolve_block_mode(exp_name, block_id)))
-        if verbose and n % 50 == 0:
-            print(f'  {n}/{total}')
-    frame = pd.DataFrame(rows)
+    required = {'exp_name', 'block_id', 'onlineAnalysis'}
+    missing = required.difference(protocol_blocks.columns)
+    if missing:
+        raise ValueError('protocol_blocks is missing columns required by the '
+                         f'shared recording-mode resolver: {sorted(missing)}')
+    resolved = check_series_resistance(
+        protocol_blocks, drop=False, show=verbose,
+        sample_series_resistance=False)
+    modes = resolved['onlineAnalysis'].astype(str).str.strip().str.lower()
+    modes = modes.where(modes.isin(RECORDING_TYPES), '')
+    resistance = pd.to_numeric(resolved['series_resistance'], errors='coerce')
+    frame = pd.DataFrame({
+        'cache_version': MODE_CACHE_VERSION,
+        'exp_name': resolved['exp_name'].astype(str),
+        'block_id': pd.to_numeric(resolved['block_id'], errors='coerce'),
+        'n_epochs': pd.to_numeric(resolved.get('n_epochs', np.nan), errors='coerce'),
+        'rec_type': modes,
+        'rec_note': resolved.get('rs_flag', '').fillna(''),
+        'online_analysis_recorded': resolved.get(
+            'onlineAnalysis_recorded', resolved['onlineAnalysis']).astype(str),
+        'recording_technique': resolved.get(
+            'recording_technique', pd.Series('', index=resolved.index)).astype(str),
+        'series_resistance_mohm': resistance / 1e6,
+        # Kept for cache-schema compatibility. The shared resolver samples a
+        # trace only when needed and intentionally does not retain its mean.
+        'mean_current_pa': np.nan,
+    })
+    # Some older VariableMeanNoise files expose seriesResistance through the
+    # DataJoint epoch parameters even though the shared raw-H5 reader cannot
+    # find the corresponding configuration span. Preserve the shared resolver
+    # as the decision maker, but give these still-unresolved blocks that
+    # protocol-specific fallback rather than losing a previously available
+    # measurement.
+    for i in frame.index[frame['rec_type'].eq('')]:
+        block_id = int(frame.loc[i, 'block_id'])
+        params = epoch_parameters(block_id)
+        epoch_rs = pd.to_numeric(
+            params.get('seriesResistance', pd.Series(dtype=float)),
+            errors='coerce').dropna()
+        if epoch_rs.empty:
+            continue
+        decision = resolve_block_mode(str(frame.loc[i, 'exp_name']), block_id)
+        frame.loc[i, 'rec_type'] = decision['rec_type']
+        frame.loc[i, 'rec_note'] = decision['rec_note']
+        frame.loc[i, 'series_resistance_mohm'] = decision[
+            'series_resistance_mohm']
+        frame.loc[i, 'mean_current_pa'] = decision['mean_current_pa']
     frame.to_csv(path, index=False)
     if verbose:
         print(f'wrote {len(frame)} blocks to {path.name}')
@@ -480,14 +522,15 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None,
                    ).to_pandas().reset_index()[['id', 'exp_name']]
     groups = (schema.EpochGroup() & [f'id={int(i)}'
                                      for i in blocks.group_id.unique()]
-              ).to_pandas().reset_index()[['id', 'parent_id']]
+              ).to_pandas().reset_index()[['id', 'parent_id', 'properties']]
     cells = (schema.Cell() & [f'id={int(i)}' for i in groups.parent_id.unique()]
              ).to_pandas().reset_index()[['id', 'label', 'type']]
     frame = (blocks
              .merge(experiments.rename(columns={'id': 'experiment_id'}),
                     on='experiment_id', how='left')
              .merge(groups.rename(columns={'id': 'group_id',
-                                           'parent_id': 'cell_id'}),
+                                           'parent_id': 'cell_id',
+                                           'properties': 'group_properties'}),
                     on='group_id', how='left')
              .merge(cells.rename(columns={'id': 'cell_id', 'label': 'cell_label',
                                           'type': 'cell_type'}),
@@ -502,6 +545,9 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None,
     parameters, counts = _first_epoch_metadata(frame.block_id)
     for name in PROTOCOL_PARAMETERS:
         frame[name] = [parameters.get(int(b), {}).get(name) for b in frame.block_id]
+    frame['recording_technique'] = frame['group_properties'].apply(
+        lambda value: value.get('recordingTechnique', '')
+        if isinstance(value, dict) else '')
     frame['n_epochs'] = [int(counts.get(int(b), 0)) for b in frame.block_id]
 
     # lightMean and stdv are written per epoch, so the first epoch only shows
@@ -1104,40 +1150,48 @@ def block_cells(blocks: pd.DataFrame) -> pd.DataFrame:
 def resolve_block_mode(exp_name: str, block_id: int,
                        amp_data: Optional[np.ndarray] = None,
                        sample_rate: float = 1e4) -> Dict[str, object]:
-    """Decide how one block was recorded, from the amplifier rather than a label.
+    """Resolve one block with the shared SCutils recording-mode policy.
 
-    VariableMeanNoise uses the recorded series resistance as the technique:
-    exactly zero is ``extracellular``; a positive value is whole-cell, with a
-    negative mean trace called ``exc`` and a positive mean trace called
-    ``inh``. A missing/non-finite value remains unresolved instead of being
-    guessed.
+    The experimenter's ``onlineAnalysis`` label is read from the epoch, then
+    cross-checked against the raw amplifier series resistance and trace by
+    :func:`retinanalysis.SCutils.recording_mode.resolve_recording_mode`.
+    In particular, zero resistance does not automatically override a
+    whole-cell label: the shared resolver requires a convincingly spiking
+    trace first. Dataset-wide cache construction uses the companion
+    ``check_series_resistance`` function so epoch-group ``recordingTechnique``
+    metadata is included too.
 
     ``amp_data`` is optional; without it the block is loaded to get it.
     """
     import retinanalysis as ra
-    from retinanalysis.SCutils.recording_mode import read_series_resistance
+    from retinanalysis.SCutils.recording_mode import (
+        read_series_resistance, resolve_recording_mode)
 
-    # Symphony writes seriesResistance into the epoch parameters for this
-    # protocol, which is both faster and more reliable than re-reading the h5;
-    # fall back to the h5 reader when the parameter is absent.
-    rs_median = np.nan
     params = epoch_parameters(int(block_id))
-    if 'seriesResistance' in params:
-        values = pd.to_numeric(params['seriesResistance'], errors='coerce').dropna()
-        if len(values):
-            rs_median = float(np.median(values))
-    if not np.isfinite(rs_median):
-        try:
-            rs = np.asarray(read_series_resistance(exp_name, int(block_id)),
-                            dtype=float)
-            rs_median = float(np.nanmedian(rs)) if rs.size else np.nan
-        except Exception:
-            rs_median = np.nan
+    recorded_mode = 'none'
+    if not params.empty and 'onlineAnalysis' in params:
+        labels = params['onlineAnalysis'].dropna().astype(str).str.strip()
+        if len(labels):
+            recorded_mode = labels.iloc[0]
+    rs_source = 'raw H5'
+    try:
+        rs = np.asarray(read_series_resistance(exp_name, int(block_id)),
+                        dtype=float)
+        rs_median = (float(np.nanmedian(rs))
+                     if rs.size and np.isfinite(rs).any() else np.nan)
+    except Exception:
+        rs_median = np.nan
+    if not np.isfinite(rs_median) and 'seriesResistance' in params:
+        epoch_rs = pd.to_numeric(
+            params['seriesResistance'], errors='coerce').dropna()
+        if len(epoch_rs):
+            rs_median = float(np.median(epoch_rs))
+            rs_source = 'epoch parameters (raw H5 unavailable)'
 
-    # Only whole-cell blocks need their trace loaded: its sign separates
-    # excitatory from inhibitory current. Zero/missing resistance already has
-    # a complete (or deliberately unresolved) answer.
-    if amp_data is None and np.isfinite(rs_median) and rs_median > 0:
+    # The shared policy uses the trace to resolve missing/contested labels and
+    # to infer whole-cell polarity. Load it for this single-block convenience
+    # wrapper; bulk cache construction samples only the blocks that need it.
+    if amp_data is None:
         block = ra.SCResponseBlock(exp_name, int(block_id), b_spiking=False,
                                    b_LED=True, verbose=False)
         amp_data = np.asarray(block.amp_data, dtype=float)
@@ -1145,20 +1199,18 @@ def resolve_block_mode(exp_name: str, block_id: int,
 
     mean_current = (float(np.nanmean(amp_data))
                     if amp_data is not None else np.nan)
-    if not np.isfinite(rs_median):
+    mode, note = resolve_recording_mode(
+        recorded_mode, rs_median, amp_data=amp_data, sample_rate=sample_rate)
+    if note and rs_source != 'raw H5':
+        note = f'{note}; series resistance from {rs_source}'
+    if mode not in RECORDING_TYPES:
         mode = ''
-        note = 'recording mode unresolved: series resistance is missing'
-    elif rs_median == 0:
-        mode = 'extracellular'
-        note = "resolved to 'extracellular': series resistance is 0"
-    else:
-        mode = 'exc' if mean_current < 0 else 'inh'
-        note = (f"resolved to '{mode}': series resistance is positive, so "
-                'whole-cell; polarity from the sign of the mean trace')
+        if not note:
+            note = (f'recording mode unresolved: recorded label '
+                    f'{recorded_mode!r} and amplifier evidence did not settle it')
     return {'rec_type': mode, 'rec_note': note,
             'series_resistance_mohm': (rs_median / 1e6
-                                       if np.isfinite(rs_median) and rs_median > 1e3
-                                       else rs_median),
+                                       if np.isfinite(rs_median) else np.nan),
             'mean_current_pa': mean_current}
 
 
@@ -2244,7 +2296,82 @@ def analysis_label(analysis: ConditionAnalysis) -> str:
 
 
 class LowResponseCellError(RuntimeError):
-    """Raised when an extracellular condition fails its firing-rate QC."""
+    """Raised in Section 2 when a condition has too little response."""
+
+
+def check_epoch_response_quality(
+        response_summary: pd.DataFrame,
+        rec_type: str,
+        *,
+        min_firing_rate_hz: float,
+        min_whole_cell_modulation_pa: float,
+        low_response_epoch_fraction: float,
+        condition_label: str = '',
+        verbose: bool = True) -> pd.DataFrame:
+    """Apply the Section 2 low-response gate to a per-epoch summary.
+
+    Extracellular epochs are judged by ``mean_firing_rate_hz``. Whole-cell
+    (``exc``/``inh``) epochs are judged by ``modulation_sd_pA``, the intuitive
+    RMS modulation about each epoch's own mean. A condition fails when at
+    least ``low_response_epoch_fraction`` of its epochs fall below the
+    recording-specific minimum. All thresholds are required caller-owned
+    parameters; this module contains no hidden response cutoff.
+
+    The returned frame contains the original per-epoch measurements plus the
+    metric, threshold, counts, fraction, and final decision. On failure this
+    function prints ``LOW RESPONSE CELL`` and raises
+    :class:`LowResponseCellError`, allowing the notebook to stop in Section 2
+    before any LN or reconstruction analysis runs.
+    """
+    mode = str(rec_type).strip().lower()
+    if mode == 'extracellular':
+        metric_column = 'mean_firing_rate_hz'
+        minimum = float(min_firing_rate_hz)
+        units = 'Hz'
+    elif mode in ('exc', 'inh'):
+        metric_column = 'modulation_sd_pA'
+        minimum = float(min_whole_cell_modulation_pa)
+        units = 'pA modulation SD'
+    else:
+        raise ValueError(f'unsupported recording type for response QC: {rec_type!r}')
+
+    fraction_threshold = float(low_response_epoch_fraction)
+    if not np.isfinite(minimum) or minimum < 0:
+        raise ValueError('response minimum must be finite and non-negative')
+    if (not np.isfinite(fraction_threshold)
+            or not 0 <= fraction_threshold <= 1):
+        raise ValueError('low_response_epoch_fraction must lie between 0 and 1')
+    if response_summary.empty:
+        raise ValueError('response QC found no epochs to evaluate')
+    if metric_column not in response_summary:
+        raise ValueError(f'response summary is missing {metric_column!r}')
+
+    frame = response_summary.copy()
+    values = pd.to_numeric(frame[metric_column], errors='coerce')
+    frame['response_metric'] = values
+    frame['response_metric_name'] = metric_column
+    frame['response_threshold'] = minimum
+    frame['below_response_threshold'] = ~np.isfinite(values) | values.lt(minimum)
+    n_epochs = int(len(frame))
+    n_low = int(frame['below_response_threshold'].sum())
+    low_fraction = n_low / n_epochs
+    low_response = bool(low_fraction >= fraction_threshold)
+    frame['n_low_response_epochs'] = n_low
+    frame['n_response_epochs'] = n_epochs
+    frame['low_response_fraction'] = low_fraction
+    frame['low_response_epoch_fraction'] = fraction_threshold
+    frame['low_response_cell'] = low_response
+
+    prefix = f'{condition_label} | ' if condition_label else ''
+    status = 'LOW RESPONSE CELL' if low_response else 'response QC passed'
+    message = (f'{status}: {prefix}{n_low}/{n_epochs} epochs '
+               f'({low_fraction:.1%}) below {minimum:g} {units} | '
+               f'failure threshold {fraction_threshold:.1%}')
+    if verbose or low_response:
+        print(message)
+    if low_response:
+        raise LowResponseCellError(message)
+    return frame
 
 
 def check_extracellular_firing_rate(
@@ -7631,7 +7758,8 @@ __all__ = [
     'led_attenuation', 'matlab_randn', 'gaussian_noise_stimulus',
     'epoch_stimulus', 'fit_sigmoid', 'sigmoid', 'fit_ln_model',
     'analyze_condition', 'analysis_label', 'LowResponseCellError',
-    'check_extracellular_firing_rate', 'plot_condition', 'mean_response',
+    'check_epoch_response_quality', 'check_extracellular_firing_rate',
+    'plot_condition', 'mean_response',
     'plot_mean_response', 'temporal_ln_model', 'plot_temporal_ln',
     'run_core_ln_analysis', 'save_condition_output', 'save_duration_outputs',
     'save_condition_outputs',
