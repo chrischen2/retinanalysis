@@ -583,6 +583,27 @@ def test_early_late_defaults_to_each_available_interval_midpoint():
     assert set(summary.groupby('mode').split_s.first()) == set(expected.values())
 
 
+def test_plot_transfer_early_late_default_adaptive_title():
+    """The default adaptive split must not format its None durations."""
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    from types import SimpleNamespace
+
+    times = np.arange(2.0, 10.0, 0.02)
+    stimulus = np.sin(times)
+    traces = pd.DataFrame({
+        'mode': 'per_window', 'lightMean': 3.0, 'time_s': times,
+        'stimulus': stimulus, 'reconstruction': 0.5 * stimulus,
+    })
+    analysis = SimpleNamespace(
+        exp_name='test-cell', rec_type='exc', light_means=np.array([3.0]))
+
+    figure = vmn.plot_transfer_early_late(analysis, traces)
+
+    assert 'adaptive early vs late halves' in figure._suptitle.get_text()
+    plt.close(figure)
+
+
 def test_run_core_ln_analysis_keeps_routine_steps_in_one_order(monkeypatch):
     """The notebook wrapper must mean-QC before fitting and return every output."""
     import pandas as pd

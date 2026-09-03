@@ -3490,8 +3490,12 @@ def plot_transfer_early_late(analysis: ConditionAnalysis,
                 ax.set_ylabel(f'lightMean {mean_level:g}\nreconstruction', fontsize=9)
             if row == len(means) - 1:
                 ax.set_xlabel('true stimulus (about its mean)', fontsize=9)
+    if early_s is None:
+        span_label = 'adaptive early vs late halves'
+    else:
+        span_label = f'first {early_s:g} s vs last {late_s:g} s'
     fig.suptitle(f'{analysis.exp_name} | {analysis.rec_type} | decoding transfer '
-                 f'function, first {early_s:g} s vs last {late_s:g} s '
+                 f'function, {span_label} '
                  f'(dashed grey = identity, dotted = per-phase slope)', fontsize=10)
     fig.tight_layout(rect=(0, 0, 1, 0.955))
     return fig
