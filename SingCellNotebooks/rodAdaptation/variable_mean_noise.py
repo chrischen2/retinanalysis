@@ -905,6 +905,152 @@ def recording_duration_conditions(
     return frame
 
 
+def apply_recording_type_exclusions(
+        conditions: pd.DataFrame,
+        excluded: Sequence[str] = (),
+        show: bool = True) -> pd.DataFrame:
+    """Mark manually rejected recording types as excluded from analysis.
+
+    Rows remain in the returned condition table so the exclusion is visible in
+    the audit. Existing exclusions (for example, too few epochs) are preserved.
+    A single recording-type string is accepted as a convenience.
+    """
+    if isinstance(excluded, str):
+        excluded = (excluded,)
+    excluded = tuple(dict.fromkeys(
+        str(value).strip() for value in excluded if str(value).strip()))
+    invalid = sorted(set(excluded) - set(RECORDING_TYPES))
+    if invalid:
+        raise ValueError(
+            f'Unknown recording type(s) {invalid}; choose from {RECORDING_TYPES}')
+
+    frame = conditions.copy()
+    if len(frame) and excluded:
+        rejected = frame.rec_type.isin(excluded)
+        frame.loc[rejected, 'included'] = False
+
+        def add_reason(reason):
+            reasons = [part.strip() for part in str(reason).split(';')
+                       if part.strip() and part.strip().lower() != 'nan']
+            manual = 'recording type manually excluded'
+            if manual not in reasons:
+                reasons.append(manual)
+            return '; '.join(reasons)
+
+        frame.loc[rejected, 'reason'] = frame.loc[rejected, 'reason'].map(add_reason)
+
+    if show:
+        label = ', '.join(excluded) if excluded else 'none'
+        print(f'manually excluded recording types: {label}')
+        print(f'{len(frame)} recording-mode x epoch-duration condition(s); '
+              f'{int(frame.included.sum())} retained for analysis')
+        if len(frame):
+            print(frame.drop(columns='block_ids').to_string(index=False))
+    return frame
+
+
+def apply_epoch_range_exclusions(
+        conditions: pd.DataFrame,
+        excluded_ranges=None,
+        min_epochs: Optional[int] = None,
+        show: bool = True) -> pd.DataFrame:
+    """Attach manual, inclusive epoch-index exclusions to each condition.
+
+    ``excluded_ranges`` maps a block ID to ``[(first, last), ...]`` using the
+    zero-based epoch indices printed in Section 2. The special key ``'all'``
+    applies ranges to every selected block. Only epochs belonging to a row's
+    exact duration are counted against that condition. Rows remain visible,
+    and a condition is excluded if fewer than ``min_epochs`` remain.
+    """
+    excluded_ranges = {} if excluded_ranges is None else dict(excluded_ranges)
+    frame = conditions.copy()
+    selected_ids = {
+        int(block_id) for block_ids in frame.get('block_ids', [])
+        for block_id in block_ids}
+    unknown = sorted(
+        int(key) for key in excluded_ranges
+        if key != 'all' and int(key) not in selected_ids)
+    if unknown:
+        raise ValueError(f'epoch exclusions reference unselected blocks {unknown}')
+
+    normalized = {}
+    for key, ranges in excluded_ranges.items():
+        normalized_key = key if key == 'all' else int(key)
+        normalized_ranges = []
+        for value in ranges:
+            if len(value) != 2:
+                raise ValueError('each excluded epoch range must be (first, last)')
+            first, last = (int(value[0]), int(value[1]))
+            if first < 0 or last < first:
+                raise ValueError(
+                    f'invalid epoch range {(first, last)}; use 0 <= first <= last')
+            normalized_ranges.append((first, last))
+        normalized[normalized_key] = tuple(normalized_ranges)
+
+    parameter_cache = {}
+    excluded_by_row = []
+    for condition in frame.itertuples():
+        matches = []
+        for block_id in condition.block_ids:
+            block_id = int(block_id)
+            ranges = (*normalized.get('all', ()), *normalized.get(block_id, ()))
+            if not ranges:
+                continue
+            if block_id not in parameter_cache:
+                parameter_cache[block_id] = epoch_parameters(block_id)
+            params = parameter_cache[block_id]
+            for epoch in range(len(params)):
+                duration = _numeric(params.iloc[epoch].get('stimTime', np.nan))
+                if not np.isclose(duration, float(condition.stim_time_ms)):
+                    continue
+                if any(first <= epoch <= last for first, last in ranges):
+                    matches.append((block_id, int(epoch)))
+        excluded_by_row.append(sorted(set(matches)))
+
+    frame['excluded_epochs'] = excluded_by_row
+    frame['n_excluded_epochs'] = [len(value) for value in excluded_by_row]
+    frame['n_epochs_retained'] = (
+        pd.to_numeric(frame['n_epochs'], errors='coerce').fillna(0).astype(int)
+        - frame['n_excluded_epochs'])
+    if min_epochs is not None:
+        minimum = int(min_epochs)
+        too_few = (frame['included'].astype(bool)
+                   & frame.n_excluded_epochs.gt(0)
+                   & frame.n_epochs_retained.lt(minimum))
+        frame.loc[too_few, 'included'] = False
+
+        def add_count_reason(reason):
+            reasons = [part.strip() for part in str(reason).split(';')
+                       if part.strip() and part.strip().lower() != 'nan']
+            manual = f'fewer than {minimum} epochs after manual exclusion'
+            if manual not in reasons:
+                reasons.append(manual)
+            return '; '.join(reasons)
+
+        frame.loc[too_few, 'reason'] = frame.loc[too_few, 'reason'].map(
+            add_count_reason)
+
+    if show:
+        configured = ', '.join(
+            f'{key}: {list(ranges)}' for key, ranges in normalized.items()) or 'none'
+        print(f'manually excluded epoch ranges (inclusive, zero-based): {configured}')
+        if len(frame):
+            print(frame.drop(columns=['block_ids', 'excluded_epochs'])
+                  .to_string(index=False))
+        matched = sorted({pair for values in excluded_by_row for pair in values})
+        if matched:
+            print('excluded epochs: ' + ', '.join(
+                f'block {block} epoch {epoch}' for block, epoch in matched))
+    return frame
+
+
+def _excluded_epoch_set(excluded_epochs) -> set:
+    """Normalize ``(block_id, epoch)`` references for epoch-loading helpers."""
+    if excluded_epochs is None:
+        return set()
+    return {(int(block_id), int(epoch)) for block_id, epoch in excluded_epochs}
+
+
 def _spike_rate(spike_samples, n_samples: int, sample_rate: float,
                 downsample: int, sigma_ms: float) -> np.ndarray:
     """A smoothed PSTH at the *reduced* rate, in Hz.
@@ -946,6 +1092,7 @@ def epoch_response_summary(
         max_epochs: Optional[int] = None,
         subtract_baseline: bool = False,
         stim_time_ms: Optional[float] = None,
+        excluded_epochs=(),
         show: bool = True) -> pd.DataFrame:
     """One intuitive response-size measurement for every recorded epoch.
 
@@ -960,6 +1107,7 @@ def epoch_response_summary(
     the table and raw figure to describe exactly the same selected epochs.
     """
     spiking = rec_type == 'extracellular'
+    excluded = _excluded_epoch_set(excluded_epochs)
     rows = []
     for block_id in block_ids:
         params = epoch_parameters(int(block_id))
@@ -968,6 +1116,8 @@ def epoch_response_summary(
         amp, sample_rate, spike_times = load_block(
             exp_name, int(block_id), spiking)
         for epoch in range(min(len(params), amp.shape[0])):
+            if (int(block_id), int(epoch)) in excluded:
+                continue
             duration = _numeric(params.iloc[epoch].get('stimTime', np.nan))
             if (stim_time_ms is not None
                     and not np.isclose(duration, float(stim_time_ms))):
@@ -1020,6 +1170,7 @@ def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
                 max_epochs: Optional[int] = 12, downsample: int = 50,
                 subtract_baseline: bool = False,
                 stim_time_ms: Optional[float] = None,
+                excluded_epochs=(),
                 figsize: Tuple[float, float] = (12.0, 5.0)):
     """Every epoch's response, coloured by the light mean it was recorded at.
 
@@ -1036,6 +1187,7 @@ def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
 
     style.apply_publication_style()
     spiking = rec_type == 'extracellular'
+    excluded = _excluded_epoch_set(excluded_epochs)
     traces, labels = [], []
     for block_id in block_ids:
         params = epoch_parameters(int(block_id))
@@ -1043,6 +1195,8 @@ def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
             continue
         amp, rate, spike_times = load_block(exp_name, int(block_id), spiking)
         for index in range(min(len(params), amp.shape[0])):
+            if (int(block_id), int(index)) in excluded:
+                continue
             duration = _numeric(params.iloc[index].get('stimTime', np.nan))
             if (stim_time_ms is not None
                     and not np.isclose(duration, float(stim_time_ms))):
@@ -2275,6 +2429,9 @@ class ConditionAnalysis:
     sequence_epoch: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=int))
     stimulus: Dict[float, np.ndarray] = field(default_factory=dict)
     response: Dict[float, np.ndarray] = field(default_factory=dict)
+    # Manual Section 2 exclusions, as zero-based ``(block_id, epoch)`` pairs.
+    # Retained so any later reload (notably reconstruction) uses identical data.
+    excluded_epochs: List[Tuple[int, int]] = field(default_factory=list)
     # What the whole-cell salvage did: epochs refused on series resistance,
     # and the per-epoch offsets removed to bring their holding currents onto a
     # common level. Both are kept so a fit can be traced back to the traces.
@@ -2467,6 +2624,7 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                       max_series_resistance: Optional[float] = 30e6,
                       align_epoch_means: bool = True,
                       max_epochs: Optional[int] = None,
+                      excluded_epochs=(),
                       fit: bool = True,
                       verbose: bool = True) -> ConditionAnalysis:
     """Load epochs, regenerate their stimuli, and fit one LN model per light mean.
@@ -2592,6 +2750,7 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
             + ', '.join(f'{value:g}' for value in available_durations))
 
     spiking = rec_type == 'extracellular'
+    excluded = _excluded_epoch_set(excluded_epochs)
     # The drift guards below correct a *holding current*, which only a
     # voltage-clamp recording has. An extracellular response is a spike rate
     # built from spike times: nothing to drift, no series resistance to refuse
@@ -2628,6 +2787,14 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
         amp, sample_rate, spike_times = load_block(exp_name, int(block_id),
                                                    spiking)
         for index in range(min(len(params), amp.shape[0])):
+            if (int(block_id), int(index)) in excluded:
+                dropped.append({
+                    'block_id': int(block_id), 'epoch': int(index),
+                    'light_mean': _numeric(params.iloc[index].get(
+                        'lightMean', np.nan)),
+                    'series_resistance_mohm': np.nan,
+                    'reason': 'manually excluded in Section 2'})
+                continue
             if max_epochs is not None and used >= max_epochs:
                 break
             row = params.iloc[index]
@@ -2702,7 +2869,8 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
         rec_type=rec_type, sample_rate=sample_rate,
         sampling_interval=interval, skip_seconds=float(skip_seconds),
         stim_time_ms=(float(stim_time_ms) if stim_time_ms is not None else np.nan),
-        units='firing rate (Hz)' if spiking else 'current (pA)')
+        units='firing rate (Hz)' if spiking else 'current (pA)',
+        excluded_epochs=sorted(excluded))
     for mean_level in sorted(stimuli):
         width = min(min(s.size for s in stimuli[mean_level]),
                     min(r.size for r in responses[mean_level]))
@@ -2758,12 +2926,13 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
     analysis.epoch_adjustments = pd.DataFrame(adjustments)
     if verbose:
         if dropped:
-            print(f'\n  dropped {len(dropped)} epoch(s) on series resistance '
-                  f'> {max_series_resistance / 1e6:g} MOhm:')
+            print(f'\n  dropped {len(dropped)} epoch(s):')
             for record in dropped:
+                detail = (f'{record["series_resistance_mohm"]:.1f} MOhm'
+                          if np.isfinite(record['series_resistance_mohm'])
+                          else record['reason'])
                 print(f'    block {record["block_id"]} epoch {record["epoch"]} '
-                      f'(lightMean {record["light_mean"]:g}): '
-                      f'{record["series_resistance_mohm"]:.1f} MOhm')
+                      f'(lightMean {record["light_mean"]:g}): {detail}')
         if adjustments:
             frame = analysis.epoch_adjustments
             print(f'\n  aligned {len(frame)} epoch(s) to the median holding '
@@ -4744,6 +4913,11 @@ def save_condition_output(
         h5.attrs['light_means'] = np.asarray(analysis.light_means, dtype=float)
         h5.attrs['contains_lnk'] = False
         h5.create_dataset('block_ids', data=np.asarray(analysis.block_ids, dtype=np.int64))
+        excluded_array = np.asarray(analysis.excluded_epochs, dtype=np.int64)
+        h5.create_dataset(
+            'excluded_epochs',
+            data=excluded_array.reshape((-1, 2)) if excluded_array.size
+            else np.empty((0, 2), dtype=np.int64))
         tables = h5.create_group('tables')
         for name in CONDITION_TABLES:
             _write_output_frame(tables.create_group(name), frames[name])
@@ -7966,6 +8140,7 @@ def run_core_ln_analysis(
         max_epochs: Optional[int] = None,
         max_series_resistance: Optional[float] = 30e6,
         align_epoch_means: bool = True,
+        excluded_epochs=(),
         min_firing_rate_hz: Optional[float] = None,
         low_rate_epoch_fraction: Optional[float] = None,
         subtract_baseline: bool = False,
@@ -8005,6 +8180,7 @@ def run_core_ln_analysis(
         subtract_baseline=subtract_baseline,
         max_series_resistance=max_series_resistance,
         align_epoch_means=align_epoch_means, max_epochs=max_epochs,
+        excluded_epochs=excluded_epochs,
         fit=False, verbose=verbose)
 
     if (min_firing_rate_hz is None) != (low_rate_epoch_fraction is None):
@@ -8052,8 +8228,10 @@ def response_qc_signature(
         min_whole_cell_modulation_pa: float,
         low_response_epoch_fraction: float) -> tuple:
     """Immutable identity of the selected conditions and response-QC policy."""
-    pairs = tuple((row.rec_type, float(row.stim_time_ms))
-                  for row in conditions.itertuples())
+    pairs = tuple((
+        row.rec_type, float(row.stim_time_ms),
+        tuple(tuple(value) for value in getattr(row, 'excluded_epochs', ())))
+        for row in conditions.itertuples())
     return (str(exp_name), tuple(int(value) for value in block_ids), max_epochs,
             pairs, float(min_firing_rate_hz),
             float(min_whole_cell_modulation_pa),
@@ -8074,18 +8252,23 @@ def inspect_recording_conditions(
     summaries, figures, qc = {}, {}, {}
     for condition in conditions.itertuples():
         key = (str(condition.rec_type), float(condition.stim_time_ms))
+        excluded_epochs = getattr(condition, 'excluded_epochs', ())
+        retained_epochs = getattr(condition, 'n_epochs_retained', condition.n_epochs)
         if verbose:
             print(f'\nraw inspection: {condition.rec_type} | '
-                  f'{condition.stim_seconds:g} s | {condition.n_epochs} epochs | '
+                  f'{condition.stim_seconds:g} s | {retained_epochs} retained '
+                  f'of {condition.n_epochs} recorded epochs | '
                   f'blocks {condition.block_ids}')
         summary = epoch_response_summary(
             exp_name, condition.block_ids, condition.rec_type,
             max_epochs=max_epochs, stim_time_ms=condition.stim_time_ms,
+            excluded_epochs=excluded_epochs,
             show=verbose)
         summaries[key] = summary
         figures[key] = plot_traces(
             exp_name, condition.block_ids, condition.rec_type,
-            max_epochs=max_epochs, stim_time_ms=condition.stim_time_ms)
+            max_epochs=max_epochs, stim_time_ms=condition.stim_time_ms,
+            excluded_epochs=excluded_epochs)
         qc[key] = check_epoch_response_quality(
             summary, condition.rec_type,
             min_firing_rate_hz=min_firing_rate_hz,
@@ -8133,15 +8316,18 @@ def run_core_condition_analyses(
     results = {}
     for condition in conditions.itertuples():
         rec_type, duration = str(condition.rec_type), float(condition.stim_time_ms)
+        excluded_epochs = getattr(condition, 'excluded_epochs', ())
+        retained_epochs = getattr(condition, 'n_epochs_retained', condition.n_epochs)
         if verbose:
             print(f'\n=== {rec_type} | {condition.stim_seconds:g} s epochs | '
-                  f'{condition.n_epochs} recorded ===')
+                  f'{retained_epochs} retained of {condition.n_epochs} recorded ===')
         core = run_core_ln_analysis(
             exp_name, condition.block_ids, rec_type=rec_type,
             stim_time_ms=duration, skip_seconds=skip_seconds,
             downsample=downsample, max_epochs=max_epochs,
             max_series_resistance=max_series_resistance,
             align_epoch_means=align_epoch_means,
+            excluded_epochs=excluded_epochs,
             mean_window_s=mean_window_s,
             condition_window_s=condition_window_s,
             temporal_window_s=temporal_window_s, verbose=verbose)
@@ -8184,7 +8370,9 @@ def run_reconstruction_analyses(
             stim_time_ms=duration, skip_seconds=decode_skip_s,
             downsample=downsample, max_epochs=max_epochs,
             max_series_resistance=max_series_resistance,
-            align_epoch_means=align_epoch_means, fit=False, verbose=False)
+            align_epoch_means=align_epoch_means,
+            excluded_epochs=core.analysis.excluded_epochs,
+            fit=False, verbose=False)
         if decode_window_s == 'auto':
             selected_window, window_selection = select_decode_window(
                 analysis, candidates_s=decode_window_candidates_s,
@@ -8475,7 +8663,8 @@ __all__ = [
     'SINGLE_CELL_ROOT', 'metadata_files', 'corrected_dates',
     'resolve_roster_files',
     'find_blocks', 'find_protocol_cells', 'cell_blocks', 'duration_conditions',
-    'recording_duration_conditions',
+    'recording_duration_conditions', 'apply_recording_type_exclusions',
+    'apply_epoch_range_exclusions',
     'epoch_response_summary', 'plot_traces',
     'epoch_parameters', 'resolve_block_mode', 'load_block_modes',
     'PROTOCOL_PARAMETERS', 'MIN_STIM_TIME_MS', 'MIN_EPOCHS_PER_DURATION',

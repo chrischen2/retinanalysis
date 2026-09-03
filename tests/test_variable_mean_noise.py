@@ -140,6 +140,66 @@ def test_recording_duration_conditions_threshold_is_per_paired_condition(monkeyp
         ('unresolved', 30_000), 'reason']
 
 
+def test_apply_recording_type_exclusions_preserves_condition_audit():
+    import pandas as pd
+
+    conditions = pd.DataFrame({
+        'rec_type': ['extracellular', 'exc', 'inh'],
+        'included': [True, True, False],
+        'reason': ['', '', 'fewer than 6 epochs'],
+        'block_ids': [[11], [12], [13]],
+    })
+
+    filtered = vmn.apply_recording_type_exclusions(
+        conditions, excluded='exc', show=False)
+
+    indexed = filtered.set_index('rec_type')
+    assert indexed.loc['extracellular', 'included']
+    assert not indexed.loc['exc', 'included']
+    assert indexed.loc['exc', 'reason'] == 'recording type manually excluded'
+    assert not indexed.loc['inh', 'included']
+    assert indexed.loc['inh', 'reason'] == 'fewer than 6 epochs'
+
+
+def test_apply_recording_type_exclusions_rejects_unknown_type():
+    import pandas as pd
+
+    with pytest.raises(ValueError, match='Unknown recording type'):
+        vmn.apply_recording_type_exclusions(
+            pd.DataFrame(columns=['rec_type', 'included', 'reason']),
+            excluded=('bad-mode',), show=False)
+
+
+def test_apply_epoch_range_exclusions_is_duration_specific(monkeypatch):
+    import pandas as pd
+
+    conditions = pd.DataFrame({
+        'rec_type': ['exc', 'exc'],
+        'stim_time_ms': [30_000.0, 60_000.0],
+        'n_epochs': [4, 2],
+        'block_ids': [[11], [11]],
+        'included': [True, True],
+        'reason': ['', ''],
+    })
+    params = pd.DataFrame({
+        'stimTime': [30_000.0, 60_000.0, 30_000.0, 60_000.0,
+                     30_000.0, 30_000.0],
+    })
+    monkeypatch.setattr(vmn, 'epoch_parameters', lambda _block: params)
+
+    filtered = vmn.apply_epoch_range_exclusions(
+        conditions, {11: [(0, 2)]}, min_epochs=3, show=False)
+
+    short, long = filtered.itertuples(index=False)
+    assert short.excluded_epochs == [(11, 0), (11, 2)]
+    assert short.n_epochs_retained == 2
+    assert not short.included
+    assert 'after manual exclusion' in short.reason
+    assert long.excluded_epochs == [(11, 1)]
+    assert long.n_epochs_retained == 1
+    assert not long.included
+
+
 @pytest.mark.parametrize(
     ('series_resistance', 'mean_trace', 'expected'),
     [(0.0, -10.0, 'extracellular'),
@@ -195,6 +255,34 @@ def test_analyze_condition_filters_epochs_to_requested_duration(monkeypatch):
     assert analysis.stim_time_ms == 30.0
     assert analysis.n_epochs == {.3: 1, 3.0: 1}
     assert {array.shape for array in analysis.stimulus.values()} == {(1, 30)}
+
+
+def test_analyze_condition_omits_manually_excluded_epochs(monkeypatch):
+    import pandas as pd
+
+    params = pd.DataFrame({
+        'stimTime': [30.0, 30.0, 30.0],
+        'lightMean': [.3, .3, .3],
+        'frequencyCutoff': [20.0] * 3,
+    })
+    monkeypatch.setattr(vmn, 'epoch_parameters', lambda _block: params)
+    monkeypatch.setattr(
+        vmn, 'load_block',
+        lambda _exp, _block, _spiking: (
+            np.arange(90).reshape(3, 30), 1000.0, None))
+    monkeypatch.setattr(
+        vmn, 'epoch_stimulus',
+        lambda row, sample_rate: np.ones(int(row.stimTime)))
+
+    analysis = vmn.analyze_condition(
+        'synthetic', [11], rec_type='exc', stim_time_ms=30.0,
+        skip_seconds=0.0, downsample=1, align_epoch_means=False,
+        excluded_epochs=[(11, 1)], fit=False, verbose=False)
+
+    assert analysis.n_epochs == {.3: 2}
+    assert analysis.excluded_epochs == [(11, 1)]
+    assert analysis.dropped_epochs[['block_id', 'epoch']].values.tolist() == [[11, 1]]
+    assert analysis.dropped_epochs.reason.tolist() == ['manually excluded in Section 2']
 
 
 def test_numpy_does_not_reproduce_matlab_randn():
@@ -1622,6 +1710,7 @@ def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
     import pandas as pd
 
     analysis, temporal = _population_analysis()
+    analysis.excluded_epochs = [(11, 1)]
     blocks = pd.DataFrame({
         'block_id': [11, 12], 'exp_name': ['2020-06-11_B'] * 2,
         'cell_label': ['Cell3'] * 2, 'cell_type_short': ['OFF-parasol'] * 2,
@@ -1673,6 +1762,7 @@ def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
         assert stored.attrs['n_epochs'] == 4
         assert stored.attrs['cell_index'] == 19
         assert stored.attrs['mean_rate_hz'] == pytest.approx(39.5)
+        assert stored['excluded_epochs'][:].tolist() == [[11, 1]]
         assert stored.attrs['decode_window_s'] == 2.5
         assert stored.attrs['decode_window_rule'] == 'shortest_within_one_se'
         assert stored.attrs['led_ndfs'] == 'B1, B12'
@@ -1838,6 +1928,7 @@ def test_condition_batch_helpers_preserve_mode_duration_keys(monkeypatch):
         'stim_time_ms': [30_000., 60_000.],
         'stim_seconds': [30., 60.], 'n_epochs': [6, 7],
         'block_ids': [[11], [12]],
+        'excluded_epochs': [[(11, 1)], []],
     })
     monkeypatch.setattr(vmn, 'epoch_response_summary', lambda *a, **k:
                         pd.DataFrame({'mean_firing_rate_hz': [40.],
@@ -1856,7 +1947,8 @@ def test_condition_batch_helpers_preserve_mode_duration_keys(monkeypatch):
     analysis, temporal = _population_analysis()
 
     def fake_core(exp_name, block_ids, rec_type, **kwargs):
-        calls.append((rec_type, kwargs['stim_time_ms']))
+        calls.append((rec_type, kwargs['stim_time_ms'],
+                      tuple(kwargs['excluded_epochs'])))
         current = analysis
         current.rec_type = rec_type
         current.stim_time_ms = kwargs['stim_time_ms']
@@ -1868,7 +1960,9 @@ def test_condition_batch_helpers_preserve_mode_duration_keys(monkeypatch):
         min_firing_rate_hz=30., min_whole_cell_modulation_pa=100.,
         low_response_epoch_fraction=.8, verbose=False)
     assert list(cores) == [('extracellular', 30_000.), ('exc', 60_000.)]
-    assert calls == list(cores)
+    assert calls == [
+        ('extracellular', 30_000., ((11, 1),)),
+        ('exc', 60_000., ())]
 
 
 def test_population_wrappers_are_safe_before_any_records_exist(tmp_path):
