@@ -668,6 +668,45 @@ def test_reconstruct_traces_holds_out_every_epoch_exactly_once():
     assert counts.nunique().nunique() == 1          # and the same number of bins
 
 
+def test_select_decode_window_uses_shortest_candidate_within_one_se(monkeypatch):
+    """Automatic selection preserves resolution among equivalent fits."""
+    import pandas as pd
+
+    analysis = vmn.ConditionAnalysis(
+        exp_name='synthetic', block_ids=[0], rec_type='extracellular',
+        sample_rate=1000.0, units='firing rate (Hz)', sampling_interval=1e-3)
+    analysis.light_means = [1.0, 2.0]
+    analysis.stimulus = {mean: np.zeros((2, 8000))
+                         for mean in analysis.light_means}
+
+    def fake_traces(_analysis, window_seconds, **_kwargs):
+        return pd.DataFrame([
+            {'lightMean': mean, 'epoch': epoch, 'stimulus': 0.0,
+             'reconstruction': window_seconds + epoch / 10}
+            for mean in analysis.light_means for epoch in range(2)])
+
+    # Four seconds has the highest mean, but its uncertainty makes two seconds
+    # statistically equivalent. One second is clearly worse.
+    def fake_metrics(estimate, _truth):
+        code = float(np.asarray(estimate)[0])
+        window = int(np.floor(code))
+        epoch = int(round((code - window) * 10))
+        values = {1: (0.50, 0.50), 2: (0.80, 0.82), 4: (0.70, 0.95)}
+        return {'r_all': values[window][epoch]}
+
+    monkeypatch.setattr(vmn, 'reconstruct_traces', fake_traces)
+    monkeypatch.setattr(vmn, 'reconstruction_metrics', fake_metrics)
+
+    selected, diagnostics = vmn.select_decode_window(
+        analysis, candidates_s=(0.5, 1.0, 2.0, 4.0), verbose=False)
+
+    assert selected == pytest.approx(2.0)
+    assert diagnostics.loc[diagnostics.selected, 'window_s'].item() == 2.0
+    assert diagnostics.loc[diagnostics.window_s.eq(1.0),
+                           'within_one_se'].item() == np.bool_(False)
+    assert 0.5 not in diagnostics.requested_s.values  # below the enforced floor
+
+
 def test_early_late_defaults_to_each_available_interval_midpoint():
     """The split follows usable data, including a shorter leakage-free mode."""
     import pandas as pd
@@ -1446,11 +1485,14 @@ def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
 
     path = vmn.save_condition_output(
         analysis, blocks, temporal_models=temporal, decoded=decoded,
-        early_late=early_late, mean_window_s=1.0,
+        early_late=early_late, decode_window_s=2.5,
+        decode_window_rule='shortest_within_one_se', mean_window_s=1.0,
         output_dir=tmp_path, verbose=False)
     second = vmn.save_condition_output(
         analysis, blocks, temporal_models=temporal, decoded=decoded,
-        early_late=early_late, output_dir=tmp_path, verbose=False)
+        early_late=early_late, decode_window_s=2.5,
+        decode_window_rule='shortest_within_one_se',
+        output_dir=tmp_path, verbose=False)
 
     assert path == second and len(list(tmp_path.glob('*.h5'))) == 1
     with h5py.File(path, 'r') as stored:
@@ -1458,6 +1500,8 @@ def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
         assert stored.attrs['stim_time_ms'] == 30_000.0
         assert stored.attrs['stim_seconds'] == 30.0
         assert stored.attrs['n_epochs'] == 4
+        assert stored.attrs['decode_window_s'] == 2.5
+        assert stored.attrs['decode_window_rule'] == 'shortest_within_one_se'
         assert stored.attrs['led_ndfs'] == 'B1, B12'
         assert stored.attrs['optical_density'] == 2.0
         assert not bool(stored.attrs['contains_lnk'])

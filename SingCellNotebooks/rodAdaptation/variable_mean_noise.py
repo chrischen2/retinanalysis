@@ -3009,6 +3009,114 @@ def reconstruction_metrics(estimate, truth) -> dict:
 MIN_DECODE_WINDOW_S = 1.0
 
 
+def select_decode_window(
+        analysis: ConditionAnalysis,
+        candidates_s: Sequence[float] = (1.0, 1.5, 2.0, 2.5, 3.0,
+                                         3.5, 4.0, 4.5, 5.0),
+        decode_bin_ms: float = 25.0,
+        noise_ratio: float = 0.1,
+        min_window_s: float = MIN_DECODE_WINDOW_S,
+        verbose: bool = True) -> Tuple[float, pd.DataFrame]:
+    """Choose the shortest reliable decoding window from held-out epochs.
+
+    Every candidate is evaluated with the same leave-one-epoch-out
+    reconstructions used by :func:`reconstruct_traces`.  Correlations are
+    Fisher transformed before averaging so values near one do not have a
+    compressed scale.  The selected candidate is the *shortest* realized
+    window whose mean held-out score lies within one standard error of the
+    best-scoring candidate (the usual one-standard-error rule).  This retains
+    temporal resolution unless a longer fit produces a meaningful gain.
+
+    The score is first averaged across epochs within each light mean and then
+    across light means, so a level with more recorded epochs cannot determine
+    the condition-wide time scale by itself.  ``diagnostics`` reports the
+    realized rather than nominal width because windows tile the usable epoch
+    exactly.  ``selected`` marks the returned row and ``within_one_se`` shows
+    every statistically equivalent candidate.
+
+    This only selects the decoder fitting/scoring interval.  Onset skip,
+    steady-state training duration, comparison-bin width and phase-duration
+    threshold express separate experimental or display choices and are not
+    optimized here.
+    """
+    widths = [analysis.stimulus[m].shape[1] for m in analysis.light_means
+              if analysis.stimulus.get(m) is not None
+              and analysis.stimulus[m].size]
+    if not widths:
+        raise ValueError('cannot select a decoding window without stimulus data')
+    usable_s = min(widths) * analysis.sampling_interval
+
+    requested = np.asarray(tuple(candidates_s), dtype=float)
+    requested = requested[np.isfinite(requested)]
+    requested = requested[(requested >= float(min_window_s)) &
+                          (requested <= usable_s)]
+    if requested.size == 0:
+        raise ValueError(
+            f'no candidate decoding window lies between {min_window_s:g} s '
+            f'and the {usable_s:g} s usable epoch')
+
+    # Different nominal requests can round to the same number of exactly
+    # tiled windows. Evaluate each realized partition only once.
+    partitions: Dict[int, float] = {}
+    for candidate in np.sort(np.unique(requested)):
+        n_windows = max(int(round(usable_s / float(candidate))), 1)
+        partitions.setdefault(n_windows, float(candidate))
+
+    rows: List[dict] = []
+    for n_windows, nominal_s in partitions.items():
+        realized_s = usable_s / n_windows
+        traces = reconstruct_traces(
+            analysis, mode='per_window', window_seconds=realized_s,
+            decode_bin_ms=decode_bin_ms, noise_ratio=noise_ratio,
+            verbose=False)
+        scores = []
+        if not traces.empty:
+            for (mean_level, epoch), block in traces.groupby(
+                    ['lightMean', 'epoch'], sort=True):
+                metrics = reconstruction_metrics(
+                    block.reconstruction.values, block.stimulus.values)
+                r = metrics['r_all']
+                if np.isfinite(r):
+                    scores.append((float(mean_level), int(epoch),
+                                   float(np.arctanh(np.clip(r, -0.999999,
+                                                           0.999999)))))
+        score_frame = pd.DataFrame(scores, columns=['lightMean', 'epoch', 'z'])
+        by_mean = (score_frame.groupby('lightMean').z.mean()
+                   if not score_frame.empty else pd.Series(dtype=float))
+        mean_z = float(by_mean.mean()) if len(by_mean) else np.nan
+        # Epoch x light-mean reconstructions are the held-out observations.
+        # This SE is deliberately conservative about choosing a longer window.
+        sem_z = (float(score_frame.z.std(ddof=1) / np.sqrt(len(score_frame)))
+                 if len(score_frame) > 1 else 0.0)
+        rows.append({
+            'requested_s': nominal_s, 'window_s': realized_s,
+            'n_windows': n_windows, 'n_light_means': int(len(by_mean)),
+            'n_held_out': int(len(score_frame)), 'mean_r': np.tanh(mean_z),
+            'mean_fisher_z': mean_z, 'sem_fisher_z': sem_z,
+        })
+
+    diagnostics = (pd.DataFrame(rows).sort_values('window_s')
+                   .reset_index(drop=True))
+    valid = diagnostics[np.isfinite(diagnostics.mean_fisher_z)]
+    if valid.empty:
+        raise ValueError('no candidate decoding window produced a finite score')
+    best = valid.loc[valid.mean_fisher_z.idxmax()]
+    threshold = float(best.mean_fisher_z - best.sem_fisher_z)
+    diagnostics['within_one_se'] = (
+        np.isfinite(diagnostics.mean_fisher_z) &
+        diagnostics.mean_fisher_z.ge(threshold))
+    eligible = diagnostics[diagnostics.within_one_se]
+    chosen_index = eligible.window_s.idxmin()
+    diagnostics['selected'] = False
+    diagnostics.loc[chosen_index, 'selected'] = True
+    selected = float(diagnostics.loc[chosen_index, 'window_s'])
+    if verbose:
+        print(f'  automatic decoder window: {selected:.3g} s '
+              f'({int(diagnostics.loc[chosen_index, "n_windows"])} windows; '
+              f'best held-out mean r={float(best.mean_r):.3f})')
+    return selected, diagnostics
+
+
 def reconstruct_traces(analysis: ConditionAnalysis,
                        mode: str = 'per_window',
                        steady_state_s: float = 10.0,
@@ -3998,6 +4106,8 @@ def save_condition_output(
         temporal_models: Optional[Dict[float, List[LNModel]]] = None,
         decoded: Optional[pd.DataFrame] = None,
         early_late: Optional[pd.DataFrame] = None,
+        decode_window_s: Optional[float] = None,
+        decode_window_rule: str = '',
         mean_window_s: float = 1.0,
         output_dir=None,
         verbose: bool = True) -> Path:
@@ -4072,6 +4182,9 @@ def save_condition_output(
         h5.attrs['optical_density'] = float(ods[0]) if len(ods) == 1 else np.nan
         h5.attrs['protocols'] = '\n'.join(protocols)
         h5.attrs['mean_window_s'] = float(mean_window_s)
+        h5.attrs['decode_window_s'] = (
+            float(decode_window_s) if decode_window_s is not None else np.nan)
+        h5.attrs['decode_window_rule'] = str(decode_window_rule)
         h5.attrs['sample_rate'] = float(analysis.sample_rate)
         h5.attrs['sampling_interval'] = float(analysis.sampling_interval)
         h5.attrs['skip_seconds'] = float(analysis.skip_seconds)
@@ -4118,11 +4231,19 @@ def save_duration_outputs(
                 f'duration key {duration:g} does not match analysis '
                 f'{core.analysis.stim_time_ms:g} ms')
         reconstruction = reconstruction_by_duration.get(duration, {})
+        selection = reconstruction.get('window_selection')
+        decode_rule = (
+            'shortest_within_one_se'
+            if isinstance(selection, pd.DataFrame) and not selection.empty
+            else ('manual' if reconstruction.get('decode_window_s') is not None
+                  else ''))
         path = save_condition_output(
             core.analysis, protocol_blocks,
             temporal_models=core.temporal_models,
             decoded=reconstruction.get('decoded'),
             early_late=reconstruction.get('early_late'),
+            decode_window_s=reconstruction.get('decode_window_s'),
+            decode_window_rule=decode_rule,
             mean_window_s=mean_window_s, output_dir=output_dir,
             verbose=verbose)
         rows.append({
@@ -4158,11 +4279,19 @@ def save_condition_outputs(
                 f'duration key {duration:g} does not match analysis '
                 f'{core.analysis.stim_time_ms:g} ms')
         reconstruction = reconstruction_by_condition.get((rec_type, duration), {})
+        selection = reconstruction.get('window_selection')
+        decode_rule = (
+            'shortest_within_one_se'
+            if isinstance(selection, pd.DataFrame) and not selection.empty
+            else ('manual' if reconstruction.get('decode_window_s') is not None
+                  else ''))
         path = save_condition_output(
             core.analysis, protocol_blocks,
             temporal_models=core.temporal_models,
             decoded=reconstruction.get('decoded'),
             early_late=reconstruction.get('early_late'),
+            decode_window_s=reconstruction.get('decode_window_s'),
+            decode_window_rule=decode_rule,
             mean_window_s=mean_window_s, output_dir=output_dir,
             verbose=verbose)
         rows.append({
@@ -4202,6 +4331,8 @@ def _output_metadata(path) -> dict:
             'stim_time_ms': float(h5.attrs.get('stim_time_ms', np.nan)),
             'stim_seconds': float(h5.attrs.get('stim_seconds', np.nan)),
             'n_epochs_total': int(h5.attrs.get('n_epochs', 0)),
+            'decode_window_s': float(h5.attrs.get('decode_window_s', np.nan)),
+            'decode_window_rule': text(h5.attrs.get('decode_window_rule', '')),
             'protocols': text(h5.attrs.get('protocols', '')).replace('\n', ', '),
             'n_blocks': int(len(h5['block_ids'])),
             'output_path': str(path),
@@ -4213,7 +4344,8 @@ def load_condition_index(output_dir=None) -> pd.DataFrame:
     directory = condition_output_dir(output_dir)
     columns = ['output_version', 'condition_id', 'cell_id', 'date', 'cell_label', 'cell_type',
                'rec_type', 'rig', 'led', 'led_ndfs', 'optical_density',
-               'stim_time_ms', 'stim_seconds', 'n_epochs_total', 'protocols',
+               'stim_time_ms', 'stim_seconds', 'n_epochs_total',
+               'decode_window_s', 'decode_window_rule', 'protocols',
                'n_blocks', 'output_path']
     rows = [_output_metadata(path) for path in sorted(directory.glob('*.h5'))]
     return (pd.DataFrame(rows, columns=columns)
