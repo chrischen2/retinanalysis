@@ -83,7 +83,7 @@ SUMMARY_VARIABLE = 'rodNoiseLNModelSummary'
 # recordings and the slow LNK fits deliberately stay out of this directory;
 # the saved tables are the inexpensive, reproducible core LN and reconstruction
 # outputs.
-CONDITION_OUTPUT_VERSION = 1
+CONDITION_OUTPUT_VERSION = 2
 CONDITION_OUTPUT_DIR = Path(__file__).resolve().parent / 'condition_outputs'
 CONDITION_TABLES = (
     'light_settings', 'mean_response', 'condition_summary',
@@ -317,6 +317,12 @@ PROTOCOL_PARAMETERS = (
 # to fit a filter on. The recordings that matter here run 30-60 s.
 MIN_STIM_TIME_MS = 30_000
 
+# Duration groups smaller than this are listed during selection but excluded
+# from the automatic per-duration analysis. The notebook exposes the value as
+# an explicit control; this module-level default keeps programmatic callers
+# safe without silently demanding a large dataset.
+MIN_EPOCHS_PER_DURATION = 4
+
 # The primate ganglion-cell types this analysis is about. Everything else the
 # rigs recorded -- cones, horizontals, unlabelled cells -- is a different
 # experiment and is dropped rather than silently averaged in.
@@ -428,8 +434,10 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None,
     EpochBlock -> EpochGroup -> Cell, and the protocol settings from the
     block's first epoch, both in batched queries rather than per block.
 
-    ``min_stim_time_ms`` keeps only blocks whose noise ran at least that long
-    (30 s by default). The protocol's own default is 600 ms, and a large share
+    ``min_stim_time_ms`` keeps blocks having at least one epoch whose noise ran
+    that long (30 s by default). Every duration is read from every epoch rather
+    than inferred from the block's first epoch. The protocol's own default is
+    600 ms, and a large share
     of the recorded blocks are short runs that cannot show adaptation to a mean
     step; what is dropped is always reported.
 
@@ -487,7 +495,7 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None,
     # lightMean and stdv are written per epoch, so the first epoch only shows
     # one of them. Read every epoch's to see what the block actually stepped
     # between; contrast is stdv / lightMean and should be constant by design.
-    means, contrasts = [], []
+    means, contrasts, durations = [], [], []
     for block_id in frame.block_id:
         params = epoch_parameters(int(block_id))
         light = pd.to_numeric(params.get('lightMean', pd.Series(dtype=float)),
@@ -497,16 +505,22 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None,
         means.append(sorted(light.unique()))
         ratio = (stdv / light).round(4) if len(light) == len(stdv) else pd.Series(dtype=float)
         contrasts.append(sorted(ratio.dropna().unique()))
+        stim_times = pd.to_numeric(
+            params.get('stimTime', pd.Series(dtype=float)), errors='coerce').dropna()
+        durations.append(sorted(float(value) for value in stim_times.unique()))
     frame['light_means'] = means
     frame['light_contrasts'] = contrasts
-    frame['stimTime'] = pd.to_numeric(frame['stimTime'], errors='coerce')
-    frame['stim_seconds'] = frame['stimTime'] / 1e3
+    frame['stim_times_ms'] = durations
+    frame['stim_seconds'] = [
+        ', '.join(f'{value / 1e3:g}' for value in values) for values in durations]
     frame['led_color'] = (frame['led'].astype(str).str.split().str[0]
                           .str.lower().replace('none', ''))
 
     dropped = dropped_type = 0
     if min_stim_time_ms is not None:
-        keep = frame.stimTime.ge(float(min_stim_time_ms))
+        keep = frame.stim_times_ms.map(
+            lambda values: any(value >= float(min_stim_time_ms)
+                               for value in values))
         dropped = int((~keep).sum())
         frame = frame[keep]
     if cell_types is not None:
@@ -531,7 +545,7 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None,
                                'frequencyCutoff', 'numberOfFilters', 'Contrast',
                                'n_epochs', 'protocol_name') if c in frame]
         sc.scroll_table(frame[columns], height=height,
-                        num_cols=('block_id', 'stim_seconds', 'frequencyCutoff',
+                        num_cols=('block_id', 'frequencyCutoff',
                                   'numberOfFilters', 'n_epochs'))
     return frame
 
@@ -592,7 +606,8 @@ def find_protocol_cells(blocks: Optional[pd.DataFrame] = None,
             'light_contrast': ', '.join(f'{c:g}' for c in contrasts),
             'n_contrasts': len(contrasts),
             'stim_seconds': ', '.join(
-                f'{v:g}' for v in sorted(group.stim_seconds.dropna().unique())),
+                f'{value / 1e3:g}' for value in sorted({
+                    duration for values in group.stim_times_ms for duration in values})),
             'led': ', '.join(sorted({str(v) for v in group.led.dropna()})),
             '_block_ids': [int(b) for b in sorted(group.block_id)],
         })
@@ -679,6 +694,82 @@ def cell_blocks(cells: pd.DataFrame, cell_index: int,
     return row.exp_name, chosen, rec_type
 
 
+def duration_conditions(block_ids: Sequence[int],
+                        min_epochs: int = MIN_EPOCHS_PER_DURATION,
+                        min_stim_time_ms: Optional[float] = MIN_STIM_TIME_MS,
+                        show: bool = True) -> pd.DataFrame:
+    """Audit and select the recorded ``stimTime`` groups in some blocks.
+
+    One row is returned per exact epoch duration. Counts come from every
+    epoch's parameters, not the first epoch in a block. ``included`` applies
+    the caller's total-epoch threshold and optional minimum duration; excluded
+    rows remain in the table so no duration disappears without an explanation.
+    ``block_ids`` contains
+    only blocks that actually contribute epochs of that duration, including
+    the case where multiple durations occur inside one block.
+    """
+    minimum = int(min_epochs)
+    if minimum < 1:
+        raise ValueError('min_epochs must be at least 1')
+
+    rows = []
+    for block_id in sorted({int(value) for value in block_ids}):
+        params = epoch_parameters(block_id)
+        if params.empty or 'stimTime' not in params:
+            continue
+        durations = pd.to_numeric(params['stimTime'], errors='coerce')
+        means = pd.to_numeric(
+            params.get('lightMean', pd.Series(np.nan, index=params.index)),
+            errors='coerce')
+        for duration, mean_level in zip(durations, means):
+            if np.isfinite(duration) and duration > 0:
+                rows.append({'stim_time_ms': float(duration),
+                             'lightMean': float(mean_level),
+                             'block_id': block_id})
+
+    columns = ['stim_time_ms', 'stim_seconds', 'n_epochs', 'light_means',
+               'epochs_by_light_mean', 'n_blocks', 'block_ids', 'included',
+               'reason']
+    if not rows:
+        return pd.DataFrame(columns=columns)
+
+    epochs = pd.DataFrame(rows)
+    out = []
+    for duration, group in epochs.groupby('stim_time_ms', sort=True):
+        counts = (group.dropna(subset=['lightMean']).groupby('lightMean').size()
+                  .sort_index())
+        n_epochs = int(len(group))
+        reasons = []
+        if min_stim_time_ms is not None and duration < float(min_stim_time_ms):
+            reasons.append(f'shorter than {float(min_stim_time_ms) / 1e3:g} s')
+        if n_epochs < minimum:
+            reasons.append(f'fewer than {minimum} epochs')
+        included = not reasons
+        out.append({
+            'stim_time_ms': float(duration),
+            'stim_seconds': float(duration) / 1e3,
+            'n_epochs': n_epochs,
+            'light_means': ', '.join(f'{value:g}' for value in counts.index),
+            'epochs_by_light_mean': ', '.join(
+                f'{value:g}: {int(count)}' for value, count in counts.items()),
+            'n_blocks': int(group.block_id.nunique()),
+            'block_ids': sorted(int(value) for value in group.block_id.unique()),
+            'included': bool(included),
+            'reason': '; '.join(reasons),
+        })
+    frame = pd.DataFrame(out, columns=columns)
+    if show:
+        print(f'{len(frame)} epoch-duration condition(s); '
+              f'{int(frame.included.sum())} meet MIN_EPOCHS_PER_DURATION={minimum}')
+        print(frame.drop(columns='block_ids').to_string(index=False))
+        dropped = frame[~frame.included]
+        if len(dropped):
+            print('excluded durations: ' + ', '.join(
+                f'{row.stim_seconds:g} s ({row.n_epochs} epochs)'
+                for row in dropped.itertuples()))
+    return frame
+
+
 def _spike_rate(spike_samples, n_samples: int, sample_rate: float,
                 downsample: int, sigma_ms: float) -> np.ndarray:
     """A smoothed PSTH at the *reduced* rate, in Hz.
@@ -716,6 +807,7 @@ def _spike_rate(spike_samples, n_samples: int, sample_rate: float,
 def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
                 max_epochs: Optional[int] = 12, downsample: int = 50,
                 subtract_baseline: bool = False,
+                stim_time_ms: Optional[float] = None,
                 figsize: Tuple[float, float] = (12.0, 5.0)):
     """Every epoch's response, coloured by the light mean it was recorded at.
 
@@ -739,6 +831,10 @@ def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
             continue
         amp, rate, spike_times = load_block(exp_name, int(block_id), spiking)
         for index in range(min(len(params), amp.shape[0])):
+            duration = _numeric(params.iloc[index].get('stimTime', np.nan))
+            if (stim_time_ms is not None
+                    and not np.isclose(duration, float(stim_time_ms))):
+                continue
             if max_epochs is not None and len(traces) >= max_epochs:
                 break
             factor = max(int(downsample), 1)
@@ -775,7 +871,10 @@ def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
     ax.set_ylabel('firing rate (Hz)' if spiking else 'current (pA)')
     ax.set_yticks([])
     ax.legend(frameon=False, fontsize=7)
-    ax.set_title(f'{exp_name} | blocks {list(block_ids)} | {rec_type} | '
+    duration_label = ('' if stim_time_ms is None else
+                      f' | {float(stim_time_ms) / 1e3:g} s epochs')
+    ax.set_title(f'{exp_name} | blocks {list(block_ids)} | {rec_type}'
+                 f'{duration_label} | '
                  f'{len(traces)} epochs, offset vertically', fontsize=10)
     fig.tight_layout()
     return fig
@@ -1985,6 +2084,9 @@ class ConditionAnalysis:
     # data rather than reloaded and re-reduced.
     sampling_interval: float = np.nan
     skip_seconds: float = 0.0
+    # Exact recorded protocol duration for this condition. Duration is a
+    # condition dimension, never an array-truncation detail.
+    stim_time_ms: float = np.nan
     # The stimulus's own ``frequencyCutoff``, as resolved from the epochs. Kept
     # so anything fitted downstream (the windowed models in particular) cuts
     # off where the stimulus does instead of guessing a number.
@@ -2014,12 +2116,23 @@ class ConditionAnalysis:
 
     def __repr__(self) -> str:
         means = ', '.join(f'{m:g}' for m in self.light_means)
+        duration = (f' | {self.stim_time_ms / 1e3:g} s epochs'
+                    if np.isfinite(self.stim_time_ms) else '')
         return (f'<ConditionAnalysis {self.exp_name} blocks={self.block_ids} '
-                f'| {self.rec_type} | lightMean {means}>')
+                f'| {self.rec_type}{duration} | lightMean {means}>')
+
+
+def analysis_label(analysis: ConditionAnalysis) -> str:
+    """Compact condition identity used on every duration-specific figure."""
+    stim_time_ms = float(getattr(analysis, 'stim_time_ms', np.nan))
+    duration = (f' | {stim_time_ms / 1e3:g} s epochs'
+                if np.isfinite(stim_time_ms) else '')
+    return f'{analysis.exp_name} | {analysis.rec_type}{duration}'
 
 
 def analyze_condition(exp_name: str, block_ids: Sequence[int],
                       rec_type: str = 'extracellular',
+                      stim_time_ms: Optional[float] = None,
                       filter_length_s: float = 1.0,
                       downsample: int = 10,
                       psth_sigma_ms: float = 10.0,
@@ -2039,6 +2152,10 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
     worth looking at -- it is the data the models will be fitted to, and seeing
     it first is what tells you whether a fit is worth trusting.
     :func:`fit_condition` finishes the job on the same object.
+
+    ``stim_time_ms`` selects one exact recorded epoch duration. When the
+    supplied blocks contain more than one duration it is required: mixed
+    durations are refused instead of being silently truncated and pooled.
 
     Epochs are grouped by their recorded ``lightMean``, since a filter fitted
     across two mean levels would describe neither. ``downsample`` reduces the
@@ -2131,6 +2248,25 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
     """
     from scipy.ndimage import gaussian_filter1d
 
+    duration_table = duration_conditions(
+        block_ids, min_epochs=1, min_stim_time_ms=None, show=False)
+    available_durations = duration_table.stim_time_ms.tolist()
+    if stim_time_ms is None:
+        if len(available_durations) > 1:
+            choices = ', '.join(f'{value / 1e3:g} s'
+                                for value in available_durations)
+            raise ValueError(
+                f'selected blocks contain multiple epoch durations ({choices}); '
+                'analyze them separately with stim_time_ms=...')
+        if available_durations:
+            stim_time_ms = float(available_durations[0])
+    elif (available_durations
+          and not any(np.isclose(float(stim_time_ms), value)
+                      for value in available_durations)):
+        raise ValueError(
+            f'stim_time_ms={stim_time_ms:g} is not present; available values are '
+            + ', '.join(f'{value:g}' for value in available_durations))
+
     spiking = rec_type == 'extracellular'
     # The drift guards below correct a *holding current*, which only a
     # voltage-clamp recording has. An extracellular response is a spike rate
@@ -2171,6 +2307,10 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
             if max_epochs is not None and used >= max_epochs:
                 break
             row = params.iloc[index]
+            duration = _numeric(row.get('stimTime', np.nan))
+            if (stim_time_ms is not None
+                    and not np.isclose(duration, float(stim_time_ms))):
+                continue
             if cutoff is None and 'frequencyCutoff' in row:
                 cutoff = float(row['frequencyCutoff'])
             try:
@@ -2237,6 +2377,7 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
         exp_name=exp_name, block_ids=[int(b) for b in block_ids],
         rec_type=rec_type, sample_rate=sample_rate,
         sampling_interval=interval, skip_seconds=float(skip_seconds),
+        stim_time_ms=(float(stim_time_ms) if stim_time_ms is not None else np.nan),
         units='firing rate (Hz)' if spiking else 'current (pA)')
     for mean_level in sorted(stimuli):
         width = min(min(s.size for s in stimuli[mean_level]),
@@ -2411,7 +2552,7 @@ def plot_mean_response(analysis: ConditionAnalysis, window_s: float = 1.0,
                       f'(n={int(block.n_epochs.max())} epochs)')
     ax.set_xlabel('time in epoch (s)')
     ax.set_ylabel(analysis.units)
-    ax.set_title(f'{analysis.exp_name} | mean response in {window_s:g} s windows',
+    ax.set_title(f'{analysis_label(analysis)} | mean response in {window_s:g} s windows',
                  fontsize=10)
     ax.legend(frameon=False, fontsize=7)
     fig.tight_layout()
@@ -2700,7 +2841,7 @@ def plot_temporal_kinetics(analysis: ConditionAnalysis,
         ax.set_xlabel('time since luminance step (s)', fontsize=9)
     axes[0][0].legend(frameon=False, fontsize=7)
     n_windows = int(frame.groupby('lightMean').size().max())
-    fig.suptitle(f'{analysis.exp_name} | {analysis.rec_type} | '
+    fig.suptitle(f'{analysis_label(analysis)} | '
                  f'{n_windows} windows | rings mark a fit on a bound',
                  fontsize=10)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
@@ -3126,7 +3267,7 @@ def plot_reconstruction_trace(analysis: ConditionAnalysis,
         if row == 0:
             ax.legend(frameon=False, fontsize=8, ncol=2, loc='upper left')
     axes[-1][0].set_xlabel('time since luminance step (s)', fontsize=9)
-    fig.suptitle(f'{analysis.exp_name} | {analysis.rec_type} | reconstructed '
+    fig.suptitle(f'{analysis_label(analysis)} | reconstructed '
                  f'light trace (shading = true increment phase)', fontsize=10)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     return fig
@@ -3274,7 +3415,7 @@ def plot_reconstruction_transfer(analysis: ConditionAnalysis,
                 ax.set_ylabel(f'lightMean {mean_level:g}\nreconstruction', fontsize=9)
             if row == len(means) - 1:
                 ax.set_xlabel('true stimulus (about its mean)', fontsize=9)
-    fig.suptitle(f'{analysis.exp_name} | {analysis.rec_type} | decoding transfer '
+    fig.suptitle(f'{analysis_label(analysis)} | decoding transfer '
                  f'function (grey dashed = identity, orange = per-phase slope, '
                  f'coloured = mean reconstruction given stimulus)', fontsize=10)
     fig.tight_layout(rect=(0, 0, 1, 0.955))
@@ -3494,7 +3635,7 @@ def plot_transfer_early_late(analysis: ConditionAnalysis,
         span_label = 'adaptive early vs late halves'
     else:
         span_label = f'first {early_s:g} s vs last {late_s:g} s'
-    fig.suptitle(f'{analysis.exp_name} | {analysis.rec_type} | decoding transfer '
+    fig.suptitle(f'{analysis_label(analysis)} | decoding transfer '
                  f'function, {span_label} '
                  f'(dashed grey = identity, dotted = per-phase slope)', fontsize=10)
     fig.tight_layout(rect=(0, 0, 1, 0.955))
@@ -3614,7 +3755,7 @@ def plot_phase_triggered(analysis: ConditionAnalysis, traces: pd.DataFrame,
                 ax.set_ylabel(f'lightMean {mean_level:g}\n(stimulus units)', fontsize=9)
             if row == len(means) - 1:
                 ax.set_xlabel('time from phase onset (ms)', fontsize=9)
-    fig.suptitle(f'{analysis.exp_name} | {analysis.rec_type} | phase-onset '
+    fig.suptitle(f'{analysis_label(analysis)} | phase-onset '
                  f'triggered average ({titles_mode(mode)})', fontsize=10)
     fig.tight_layout(rect=(0, 0, 1, 0.955))
     return fig
@@ -3676,7 +3817,7 @@ def plot_decoding(analysis: ConditionAnalysis, decoded: pd.DataFrame,
             if row == len(rows) - 1:
                 ax.set_xlabel('time since luminance step (s)', fontsize=9)
     axes[0][0].legend(frameon=False, fontsize=7, ncol=2, loc='lower right')
-    fig.suptitle(f'{analysis.exp_name} | {analysis.rec_type} | stimulus '
+    fig.suptitle(f'{analysis_label(analysis)} | stimulus '
                  f'reconstruction by phase (solid = increment, dashed = decrement)',
                  fontsize=10)
     fig.tight_layout(rect=(0, 0, 1, 0.955))
@@ -3805,12 +3946,13 @@ def _safe_output_token(value) -> str:
 
 
 def _condition_output_name(exp_name: str, cell_label: str, rec_type: str,
-                           block_ids: Sequence[int]) -> str:
+                           block_ids: Sequence[int], stim_time_ms: float) -> str:
     import hashlib
     blocks = ','.join(str(int(value)) for value in sorted(set(block_ids)))
     digest = hashlib.sha1(blocks.encode()).hexdigest()[:10]
     return ('__'.join(_safe_output_token(value) for value in
                      (exp_name, cell_label, rec_type))
+            + f'__duration-{_safe_output_token(f"{stim_time_ms:g}ms")}'
             + f'__blocks-{digest}.h5')
 
 
@@ -3850,6 +3992,9 @@ def save_condition_output(
     cell_type = one_text('cell_type_short', one_text('cell_type'))
     if not cell_label:
         raise ValueError('selected blocks do not contain a cell_label')
+    if not np.isfinite(analysis.stim_time_ms) or analysis.stim_time_ms <= 0:
+        raise ValueError(
+            'analysis.stim_time_ms is missing; duration must be explicit before saving')
     protocols = sorted(str(value) for value in selected.protocol_name.dropna().unique())
     rigs = sorted(str(value) for value in lights.rig.dropna().unique())
     leds = sorted(str(value) for value in lights.led.dropna().unique())
@@ -3874,7 +4019,8 @@ def save_condition_output(
     directory = condition_output_dir(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / _condition_output_name(
-        analysis.exp_name, cell_label, analysis.rec_type, analysis.block_ids)
+        analysis.exp_name, cell_label, analysis.rec_type, analysis.block_ids,
+        analysis.stim_time_ms)
     existed = path.exists()
     temporary = path.with_suffix('.h5.tmp')
     with h5py.File(temporary, 'w') as h5:
@@ -3893,6 +4039,9 @@ def save_condition_output(
         h5.attrs['sample_rate'] = float(analysis.sample_rate)
         h5.attrs['sampling_interval'] = float(analysis.sampling_interval)
         h5.attrs['skip_seconds'] = float(analysis.skip_seconds)
+        h5.attrs['stim_time_ms'] = float(analysis.stim_time_ms)
+        h5.attrs['stim_seconds'] = float(analysis.stim_time_ms) / 1e3
+        h5.attrs['n_epochs'] = int(sum(analysis.n_epochs.values()))
         h5.attrs['frequency_cutoff'] = float(analysis.frequency_cutoff)
         h5.attrs['light_means'] = np.asarray(analysis.light_means, dtype=float)
         h5.attrs['contains_lnk'] = False
@@ -3904,9 +4053,49 @@ def save_condition_output(
     if verbose:
         print(f'{"replaced" if existed else "saved"} {cell_label} '
               f'({cell_type}, {analysis.rec_type}) | rig {", ".join(rigs)} | '
+              f'{analysis.stim_time_ms / 1e3:g} s epochs | '
               f'{", ".join(leds)} | LED NDF {" | ".join(led_ndfs)}')
         print(f'{path} | LNK outputs excluded')
     return path
+
+
+def save_duration_outputs(
+        core_by_duration: Dict[float, CoreLNAnalysis],
+        protocol_blocks: pd.DataFrame,
+        reconstruction_by_duration: Optional[Dict[float, dict]] = None,
+        mean_window_s: float = 1.0,
+        output_dir=None,
+        verbose: bool = True) -> pd.DataFrame:
+    """Save every automatically separated duration condition.
+
+    ``core_by_duration`` is keyed by recorded ``stimTime`` in milliseconds.
+    Optional reconstruction entries may contain ``decoded`` and
+    ``early_late``. Each duration is passed to :func:`save_condition_output`,
+    which gives it a duration-specific filename and metadata record.
+    """
+    reconstruction_by_duration = reconstruction_by_duration or {}
+    rows = []
+    for duration, core in sorted(core_by_duration.items()):
+        duration = float(duration)
+        if not np.isclose(duration, core.analysis.stim_time_ms):
+            raise ValueError(
+                f'duration key {duration:g} does not match analysis '
+                f'{core.analysis.stim_time_ms:g} ms')
+        reconstruction = reconstruction_by_duration.get(duration, {})
+        path = save_condition_output(
+            core.analysis, protocol_blocks,
+            temporal_models=core.temporal_models,
+            decoded=reconstruction.get('decoded'),
+            early_late=reconstruction.get('early_late'),
+            mean_window_s=mean_window_s, output_dir=output_dir,
+            verbose=verbose)
+        rows.append({
+            'stim_time_ms': duration,
+            'stim_seconds': duration / 1e3,
+            'n_epochs': int(sum(core.analysis.n_epochs.values())),
+            'output_path': str(path),
+        })
+    return pd.DataFrame(rows)
 
 
 def _output_metadata(path) -> dict:
@@ -3916,9 +4105,11 @@ def _output_metadata(path) -> dict:
         return value.decode() if isinstance(value, bytes) else str(value)
 
     with h5py.File(path, 'r') as h5:
-        if int(h5.attrs.get('output_version', -1)) != CONDITION_OUTPUT_VERSION:
+        version = int(h5.attrs.get('output_version', -1))
+        if version not in (1, CONDITION_OUTPUT_VERSION):
             raise ValueError(f'{path}: unsupported output version')
         return {
+            'output_version': version,
             'condition_id': path.stem,
             'cell_id': (f'{text(h5.attrs["exp_name"])}/'
                         f'{text(h5.attrs["cell_label"])}/'
@@ -3931,6 +4122,9 @@ def _output_metadata(path) -> dict:
             'led': text(h5.attrs.get('led', '')),
             'led_ndfs': text(h5.attrs.get('led_ndfs', '')),
             'optical_density': float(h5.attrs.get('optical_density', np.nan)),
+            'stim_time_ms': float(h5.attrs.get('stim_time_ms', np.nan)),
+            'stim_seconds': float(h5.attrs.get('stim_seconds', np.nan)),
+            'n_epochs_total': int(h5.attrs.get('n_epochs', 0)),
             'protocols': text(h5.attrs.get('protocols', '')).replace('\n', ', '),
             'n_blocks': int(len(h5['block_ids'])),
             'output_path': str(path),
@@ -3940,12 +4134,14 @@ def _output_metadata(path) -> dict:
 def load_condition_index(output_dir=None) -> pd.DataFrame:
     """List saved cells from HDF5 attributes without loading result arrays."""
     directory = condition_output_dir(output_dir)
-    columns = ['condition_id', 'cell_id', 'date', 'cell_label', 'cell_type',
+    columns = ['output_version', 'condition_id', 'cell_id', 'date', 'cell_label', 'cell_type',
                'rec_type', 'rig', 'led', 'led_ndfs', 'optical_density',
-               'protocols', 'n_blocks', 'output_path']
+               'stim_time_ms', 'stim_seconds', 'n_epochs_total', 'protocols',
+               'n_blocks', 'output_path']
     rows = [_output_metadata(path) for path in sorted(directory.glob('*.h5'))]
     return (pd.DataFrame(rows, columns=columns)
-            .sort_values(['date', 'cell_label', 'rec_type'], ignore_index=True))
+            .sort_values(['date', 'cell_label', 'rec_type', 'stim_time_ms'],
+                         ignore_index=True))
 
 
 def load_population_table(table: str, output_dir=None) -> pd.DataFrame:
@@ -4024,6 +4220,10 @@ def plot_population_metrics(summary: pd.DataFrame, x: str,
         ax.set_ylabel(f'{metric} (population mean ± SEM)')
         if hue is not None:
             ax.legend(frameon=False, fontsize=8, title=hue)
+    if 'stim_seconds' in summary:
+        durations = pd.to_numeric(summary['stim_seconds'], errors='coerce').dropna().unique()
+        if len(durations) == 1:
+            fig.suptitle(f'{durations[0]:g} s epochs', fontsize=10)
     fig.tight_layout()
     return fig
 
@@ -5871,7 +6071,7 @@ def plot_apparent_nonlinearity(analysis: ConditionAnalysis, model: LNKModel,
         summary['shift_generator']) else 'a shift')
     ax.text(0.0, 0.24, f'reads as {verdict}', fontsize=9, style='italic',
             transform=ax.transAxes)
-    fig.suptitle(f'{analysis.exp_name} | {analysis.rec_type} | two-state LNK: '
+    fig.suptitle(f'{analysis_label(analysis)} | two-state LNK: '
                  f'the nonlinearity change is predicted, not imposed', fontsize=10)
     fig.tight_layout(rect=(0, 0, 1, 0.93))
     return fig
@@ -6256,7 +6456,7 @@ def plot_nonlinearity_timelapse(analysis: ConditionAnalysis, model: LNKModel,
         if row == len(means) - 1:
             ax.set_xlabel('time (ms)', fontsize=9)
 
-    fig.suptitle(f'{analysis.exp_name} | {analysis.rec_type} | one-state LNK '
+    fig.suptitle(f'{analysis_label(analysis)} | one-state LNK '
                  f'({model.coupling}) — the nonlinearity over time, and whether '
                  f'the filter stayed put', fontsize=10)
     fig.tight_layout(rect=(0, 0, 1, 0.955))
@@ -6448,7 +6648,7 @@ def plot_lnk_fit(analysis: ConditionAnalysis,
                      'only the state differs', fontsize=9.5)
     ax_bar.set_ylim(0, max(values) * 1.22)
 
-    fig.suptitle(f'{analysis.exp_name} | {analysis.rec_type} | LN cascade with '
+    fig.suptitle(f'{analysis_label(analysis)} | LN cascade with '
                  f'one slow adaptive state', fontsize=11)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     return fig
@@ -6607,6 +6807,7 @@ def subset_analysis(analysis: ConditionAnalysis,
         units=analysis.units,
         sampling_interval=dt * int(decimate),
         skip_seconds=float(analysis.skip_seconds),
+        stim_time_ms=float(analysis.stim_time_ms),
         frequency_cutoff=float(analysis.frequency_cutoff),
         filter_length_s=float(analysis.filter_length_s),
         n_bins=int(analysis.n_bins))
@@ -6645,6 +6846,7 @@ def save_analysis(analysis: ConditionAnalysis, path) -> Path:
         'sample_rate': float(analysis.sample_rate),
         'sampling_interval': float(analysis.sampling_interval),
         'skip_seconds': float(analysis.skip_seconds),
+        'stim_time_ms': float(analysis.stim_time_ms),
         'frequency_cutoff': float(analysis.frequency_cutoff),
         'filter_length_s': float(analysis.filter_length_s),
         'n_bins': int(analysis.n_bins),
@@ -6689,6 +6891,7 @@ def load_analysis(path) -> ConditionAnalysis:
         rec_type=meta['rec_type'], sample_rate=meta['sample_rate'],
         units=meta['units'], sampling_interval=meta['sampling_interval'],
         skip_seconds=meta['skip_seconds'],
+        stim_time_ms=float(meta.get('stim_time_ms', np.nan)),
         frequency_cutoff=meta['frequency_cutoff'],
         filter_length_s=meta['filter_length_s'], n_bins=meta['n_bins'])
     analysis.sequence_stimulus = stimulus
@@ -6720,6 +6923,7 @@ def load_fixture(name: str, root=None) -> ConditionAnalysis:
 
 def build_fixture(exp_name: str, block_ids: Sequence[int],
                   rec_type: str = 'extracellular',
+                  stim_time_ms: Optional[float] = None,
                   name: Optional[str] = None,
                   root=None,
                   overwrite: bool = False,
@@ -6749,7 +6953,8 @@ def build_fixture(exp_name: str, block_ids: Sequence[int],
     if path.exists() and not overwrite:
         raise FileExistsError(f'{path} exists; pass overwrite=True to replace it')
     analysis = analyze_condition(
-        exp_name, block_ids, rec_type=rec_type, skip_seconds=skip_seconds,
+        exp_name, block_ids, rec_type=rec_type, stim_time_ms=stim_time_ms,
+        skip_seconds=skip_seconds,
         downsample=downsample, max_epochs=max_epochs,
         max_series_resistance=max_series_resistance,
         align_epoch_means=align_epoch_means, fit=False, verbose=verbose)
@@ -6841,8 +7046,7 @@ def plot_temporal_ln(analysis: ConditionAnalysis,
         if column == 0:
             axes[0][column].set_ylabel('filter')
             axes[1][column].set_ylabel(analysis.units)
-    fig.suptitle(f'{analysis.exp_name} | LN model per window, '
-                 f'{analysis.rec_type}', fontsize=11)
+    fig.suptitle(f'{analysis_label(analysis)} | LN model per window', fontsize=11)
     fig.tight_layout()
     return fig
 
@@ -6928,8 +7132,8 @@ def plot_condition(analysis: ConditionAnalysis, window_seconds: float = 10.0,
         if row == len(panels):
             ax.set_xlabel('time in epoch (s)')
 
-    fig.suptitle(f'{analysis.exp_name} | blocks {analysis.block_ids} | '
-                 f'{analysis.rec_type}', fontsize=11)
+    fig.suptitle(f'{analysis_label(analysis)} | blocks {analysis.block_ids}',
+                 fontsize=11)
     fig.tight_layout(rect=(0, 0, 1, 0.98))
     return fig
 
@@ -6957,6 +7161,7 @@ def run_core_ln_analysis(
         block_ids: Sequence[int],
         rec_type: str = 'extracellular',
         *,
+        stim_time_ms: Optional[float] = None,
         skip_seconds: float = 1.0,
         downsample: int = 10,
         max_epochs: Optional[int] = None,
@@ -6983,9 +7188,12 @@ def run_core_ln_analysis(
 
     ``temporal_window_s=None`` uses :func:`temporal_windows` to divide the full
     usable epoch into equal data-dependent windows without a remainder.
+    ``stim_time_ms`` is passed through to :func:`analyze_condition`; one call
+    therefore represents exactly one duration condition.
     """
     analysis = analyze_condition(
         exp_name, block_ids, rec_type=rec_type,
+        stim_time_ms=stim_time_ms,
         filter_length_s=filter_length_s, downsample=downsample,
         psth_sigma_ms=psth_sigma_ms, n_bins=n_bins,
         frequency_cutoff=frequency_cutoff, skip_seconds=skip_seconds,
@@ -7027,13 +7235,16 @@ __all__ = [
     'DATE_OFFSETS', 'SAVED_DATE_OFFSET_DAYS', 'FALLBACK_OFFSETS',
     'SINGLE_CELL_ROOT', 'metadata_files', 'corrected_dates',
     'resolve_roster_files',
-    'find_blocks', 'find_protocol_cells', 'cell_blocks', 'plot_traces',
+    'find_blocks', 'find_protocol_cells', 'cell_blocks', 'duration_conditions',
+    'plot_traces',
     'epoch_parameters', 'resolve_block_mode', 'load_block_modes',
-    'PROTOCOL_PARAMETERS', 'MIN_STIM_TIME_MS', 'PRIMATE_CELL_TYPES',
+    'PROTOCOL_PARAMETERS', 'MIN_STIM_TIME_MS', 'MIN_EPOCHS_PER_DURATION',
+    'PRIMATE_CELL_TYPES',
     'MODE_CACHE_PATH',
     'led_attenuation', 'matlab_randn', 'gaussian_noise_stimulus',
     'epoch_stimulus', 'fit_sigmoid', 'sigmoid', 'fit_ln_model',
-    'analyze_condition', 'plot_condition', 'mean_response',
+    'analyze_condition', 'analysis_label', 'plot_condition', 'mean_response',
     'plot_mean_response', 'temporal_ln_model', 'plot_temporal_ln',
-    'run_core_ln_analysis',
+    'run_core_ln_analysis', 'save_condition_output', 'save_duration_outputs',
+    'load_condition_index', 'load_population_table',
 ]

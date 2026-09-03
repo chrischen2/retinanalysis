@@ -69,7 +69,8 @@ def _population_analysis():
         exp_name='2020-06-11_B', block_ids=[11, 12],
         rec_type='extracellular', sample_rate=1000.0, units='spikes/s',
         light_means=[.1, 1.0], n_epochs={.1: 2, 1.0: 2},
-        sampling_interval=.1, skip_seconds=1.0, frequency_cutoff=60.0,
+        sampling_interval=.1, skip_seconds=1.0, stim_time_ms=30_000.0,
+        frequency_cutoff=60.0,
         stimulus={.1: np.ones((2, 20)), 1.0: np.ones((2, 20))},
         response={.1: np.arange(40).reshape(2, 20),
                   1.0: np.arange(40, 80).reshape(2, 20)},
@@ -80,6 +81,68 @@ def _population_analysis():
         1.0: [model('1.0-2.0 s', 1.2)],
     }
     return analysis, temporal
+
+
+def test_duration_conditions_counts_every_epoch_and_keeps_exclusion_audit(monkeypatch):
+    import pandas as pd
+
+    parameters = {
+        11: pd.DataFrame({'stimTime': [30_000, 30_000, 60_000],
+                          'lightMean': [.3, 3.0, .3]}),
+        12: pd.DataFrame({'stimTime': [30_000, 30_000, 60_000],
+                          'lightMean': [.3, 3.0, 3.0]}),
+    }
+    monkeypatch.setattr(vmn, 'epoch_parameters', lambda block: parameters[block])
+
+    durations = vmn.duration_conditions(
+        [11, 12], min_epochs=4, min_stim_time_ms=None, show=False)
+
+    short = durations[durations.stim_time_ms.eq(30_000)].iloc[0]
+    long = durations[durations.stim_time_ms.eq(60_000)].iloc[0]
+    assert short.n_epochs == 4 and short.included
+    assert short.epochs_by_light_mean == '0.3: 2, 3: 2'
+    assert short.block_ids == [11, 12]
+    assert long.n_epochs == 2 and not long.included
+    assert long.reason == 'fewer than 4 epochs'
+
+
+def test_analyze_condition_refuses_implicit_mixed_durations(monkeypatch):
+    import pandas as pd
+
+    monkeypatch.setattr(
+        vmn, 'epoch_parameters',
+        lambda block: pd.DataFrame({'stimTime': [30_000, 60_000],
+                                    'lightMean': [.3, 3.0]}))
+
+    with pytest.raises(ValueError, match='multiple epoch durations'):
+        vmn.analyze_condition('synthetic', [11], fit=False, verbose=False)
+
+
+def test_analyze_condition_filters_epochs_to_requested_duration(monkeypatch):
+    import pandas as pd
+
+    params = pd.DataFrame({
+        'stimTime': [30.0, 60.0, 30.0, 60.0],
+        'lightMean': [.3, .3, 3.0, 3.0],
+        'frequencyCutoff': [20.0] * 4,
+    })
+    monkeypatch.setattr(vmn, 'epoch_parameters', lambda block: params)
+    monkeypatch.setattr(
+        vmn, 'load_block',
+        lambda exp_name, block_id, spiking: (np.arange(240).reshape(4, 60),
+                                             1000.0, None))
+    monkeypatch.setattr(
+        vmn, 'epoch_stimulus',
+        lambda row, sample_rate: np.ones(int(row.stimTime)))
+
+    analysis = vmn.analyze_condition(
+        'synthetic', [11], rec_type='exc', stim_time_ms=30.0,
+        skip_seconds=0.0, downsample=1, align_epoch_means=False,
+        fit=False, verbose=False)
+
+    assert analysis.stim_time_ms == 30.0
+    assert analysis.n_epochs == {.3: 1, 3.0: 1}
+    assert {array.shape for array in analysis.stimulus.values()} == {(1, 30)}
 
 
 def test_numpy_does_not_reproduce_matlab_randn():
@@ -1340,6 +1403,9 @@ def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
     assert path == second and len(list(tmp_path.glob('*.h5'))) == 1
     with h5py.File(path, 'r') as stored:
         assert stored.attrs['rig'] == 'B'
+        assert stored.attrs['stim_time_ms'] == 30_000.0
+        assert stored.attrs['stim_seconds'] == 30.0
+        assert stored.attrs['n_epochs'] == 4
         assert stored.attrs['led_ndfs'] == 'B1, B12'
         assert stored.attrs['optical_density'] == 2.0
         assert not bool(stored.attrs['contains_lnk'])
@@ -1348,14 +1414,57 @@ def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
         assert stored['tables/ln_curves/y'].compression == 'gzip'
 
     index = vmn.load_condition_index(tmp_path)
-    assert index[['date', 'cell_label', 'cell_type', 'rec_type', 'rig',
+    assert index[['date', 'cell_label', 'cell_type', 'rec_type',
+                  'stim_seconds', 'n_epochs_total', 'rig',
                   'led', 'led_ndfs']].iloc[0].to_dict() == {
         'date': '2020-06-11_B', 'cell_label': 'Cell3',
         'cell_type': 'OFF-parasol', 'rec_type': 'extracellular',
+        'stim_seconds': 30.0, 'n_epochs_total': 4,
         'rig': 'B', 'led': 'Blue LED', 'led_ndfs': 'B1, B12'}
     loaded = vmn.load_population_table('condition_summary', tmp_path)
     assert len(loaded) == 2
     assert loaded.cell_id.unique().tolist() == ['2020-06-11_B/Cell3/extracellular']
+
+    # The same cell and block IDs at another duration must be a second entity,
+    # not an overwrite of the 30 s condition.
+    analysis.stim_time_ms = 60_000.0
+    third = vmn.save_condition_output(
+        analysis, blocks, temporal_models=temporal, decoded=decoded,
+        early_late=early_late, output_dir=tmp_path, verbose=False)
+    assert third != path and len(list(tmp_path.glob('*.h5'))) == 2
+    assert vmn.load_condition_index(tmp_path).stim_seconds.tolist() == [30.0, 60.0]
+
+
+def test_save_duration_outputs_saves_every_duration(monkeypatch):
+    import pandas as pd
+
+    first, temporal = _population_analysis()
+    second, _ = _population_analysis()
+    second.stim_time_ms = 60_000.0
+    cores = {
+        30_000.0: vmn.CoreLNAnalysis(first, temporal, pd.DataFrame()),
+        60_000.0: vmn.CoreLNAnalysis(second, temporal, pd.DataFrame()),
+    }
+    calls = []
+
+    def fake_save(analysis, blocks, **kwargs):
+        calls.append((analysis.stim_time_ms, kwargs.get('decoded'),
+                      kwargs.get('early_late')))
+        return Path(f'/tmp/{analysis.stim_time_ms:g}.h5')
+
+    monkeypatch.setattr(vmn, 'save_condition_output', fake_save)
+    reconstruction = {
+        30_000.0: {'decoded': 'decoded-30', 'early_late': 'halves-30'},
+        60_000.0: {'decoded': 'decoded-60', 'early_late': 'halves-60'},
+    }
+
+    saved = vmn.save_duration_outputs(
+        cores, pd.DataFrame(), reconstruction_by_duration=reconstruction,
+        verbose=False)
+
+    assert [call[0] for call in calls] == [30_000.0, 60_000.0]
+    assert calls[0][1:] == ('decoded-30', 'halves-30')
+    assert saved.stim_seconds.tolist() == [30.0, 60.0]
 
 
 def test_population_mean_sem_weights_each_cell_once():
