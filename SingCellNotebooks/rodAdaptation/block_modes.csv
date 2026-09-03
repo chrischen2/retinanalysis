@@ -1,374 +1,374 @@
-exp_name,block_id,n_epochs,rec_type,rec_note,series_resistance_mohm,mean_current_pa
-2020-06-11_B,30238,14,exc,"'none' resolved to 'exc': series resistance is 4.5 MOhm, so whole-cell; polarity from the sign of the current",4.5027214250371115,-4907.0213738095235
-2020-06-11_B,30209,2,exc,"'none' resolved to 'exc': series resistance is 8.4 MOhm, so whole-cell; polarity from the sign of the current",8.439716312056738,-739.41617125
-2020-06-11_B,30210,20,exc,"'none' resolved to 'exc': series resistance is 10.9 MOhm, so whole-cell; polarity from the sign of the current",10.935180603661554,-2339.341992734375
-2020-06-11_B,30188,15,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-45.98291377361111
-2020-06-11_B,30174,19,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-70.60929904714916
-2020-06-11_B,30177,6,exc,"'none' resolved to 'exc': series resistance is 3.0 MOhm, so whole-cell; polarity from the sign of the current",2.989545287649526,-13203.161818055556
-2020-06-11_B,30216,14,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-172.4716665625
-2020-06-11_B,30218,27,exc,"'none' resolved to 'exc': series resistance is 7.5 MOhm, so whole-cell; polarity from the sign of the current",7.514815894297095,-2725.7807153549384
-2020-06-16_B,30318,10,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,66.86369231041668
-2020-06-16_B,30319,11,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,37.454450905303
-2020-06-16_B,30325,4,exc,"'none' resolved to 'exc': series resistance is 8.0 MOhm, so whole-cell; polarity from the sign of the current",7.969707897583845,-634.8130645833334
-2020-06-16_B,30326,7,exc,"'none' resolved to 'exc': series resistance is 8.0 MOhm, so whole-cell; polarity from the sign of the current",7.969707897583845,-880.0988581845238
-2020-06-16_B,30331,10,exc,"'none' resolved to 'exc': series resistance is 14.9 MOhm, so whole-cell; polarity from the sign of the current",14.893617021276595,-742.8767589166666
-2020-06-16_B,30332,8,exc,"'none' resolved to 'exc': series resistance is 14.9 MOhm, so whole-cell; polarity from the sign of the current",14.893617021276595,-804.1861094791667
-2020-06-16_B,30333,16,exc,"'none' resolved to 'exc': series resistance is 14.9 MOhm, so whole-cell; polarity from the sign of the current",14.893617021276595,-711.7574102083333
-2020-06-16_B,30336,8,exc,"'none' resolved to 'exc': series resistance is 14.9 MOhm, so whole-cell; polarity from the sign of the current",14.893617021276595,-779.9616248958333
-2020-06-23_B,30406,10,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-10.999477012500003
-2020-06-23_B,30420,10,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,116.49479213749997
-2020-06-23_B,30421,10,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,121.9506919625
-2020-07-13_G,10059,20,none,,,110.48019896354167
-2020-07-13_G,10062,15,none,,,-257.53902
-2020-07-13_G,10064,7,none,,,-91.897246875
-2020-07-14_G,10090,6,none,,,-415.48788489583336
-2020-07-14_G,10099,5,none,,,23.055177785416667
-2020-07-14_G,10100,2,none,,,-62.125553135416666
-2020-07-14_G,10101,5,none,,,-15.400996404166671
-2020-07-14_G,10072,7,none,,,-348.42163260714284
-2020-07-14_G,10074,10,none,,,367.36613682291664
-2020-07-14_G,10078,2,none,,,-573.9150661458333
-2020-07-14_G,10080,6,none,,,-505.0440387152778
-2020-07-29_G,10123,8,none,,,70.49821582552076
-2020-07-29_G,10114,4,none,,,9.051086223958333
-2020-07-29_G,10117,8,none,,,110.310422109375
-2020-07-29_G,10119,6,none,,,134.32342434027777
-2020-07-29_G,10121,7,none,,,-84.44119508928571
-2020-07-29_G,10103,2,none,,,5.817271770833333
-2020-07-29_G,10104,7,none,,,119.49601148065476
-2020-07-29_G,10105,3,none,,,-111.93299423611111
-2020-07-29_G,10110,2,none,,,68.53585052083334
-2020-07-29_G,10111,6,none,,,214.52014293402777
-2020-07-29_G,10112,2,none,,,695.2320843229166
-2020-07-29_G,10107,12,none,,,66.60240720920139
-2020-07-29_G,10125,12,none,,,-26.291890225694456
-2020-07-29_G,10129,7,none,,,-1565.9903023065476
-2020-07-29_G,10130,2,none,,,-1737.18813203125
-2020-07-29_G,10132,7,none,,,-219.66043919642857
-2020-07-29_G,10134,2,none,,,-5742.857584375
-2020-07-29_G,10135,1,none,,,-6745.9950885416665
-2020-08-11_G,10159,12,none,,,-3.3864205850694415
-2020-08-11_G,10153,12,none,,,-362.70324984375
-2020-08-11_G,10156,2,none,,,-1692.5936515625
-2020-08-11_G,10157,7,none,,,-1403.1783888392856
-2020-08-11_G,10175,13,none,,,-193.13476848557693
-2020-08-11_G,10184,16,none,,,-1236.652217545573
-2020-08-11_G,10187,2,none,,,-705.0221216145833
-2020-08-11_G,10188,4,none,,,-643.8261723958333
-2020-08-11_G,10145,1,none,,,63.42291484375
-2020-08-11_G,10146,10,none,,,200.11123552083333
-2020-08-11_G,10149,2,none,,,-2855.456009895833
-2020-08-11_G,10151,6,none,,,-3445.7139546875
-2020-08-11_G,10152,12,none,,,-3743.701936197917
-2020-08-11_G,10137,14,none,,,-386.9657273214286
-2020-08-11_G,10168,14,none,,,-400.2145336904762
-2020-08-11_G,10171,15,none,,,-2601.7096525694446
-2020-08-11_G,10179,8,none,,,-197.4640876953125
-2020-08-25_G,10273,9,none,,,352.2432157323232
-2020-08-25_G,10275,12,none,,,344.81731356060607
-2020-08-25_G,10267,6,none,,,232.8106343936012
-2020-08-25_G,10262,6,none,,,305.27807695075757
-2020-08-25_G,10263,8,none,,,213.35361038352272
-2020-08-25_G,10270,6,none,,,236.98918463541668
-2020-08-25_G,10260,14,none,,,229.7817349489796
-2020-08-25_G,10256,14,none,,,345.79583367559525
-2020-08-25_G_scotopic,10252,14,none,,,164.44115557291667
-2020-08-25_G_scotopic,10246,14,none,,,177.55697450487014
-2020-08-25_G_scotopic,10248,8,none,,,-90.90537030539772
-2020-08-25_G_scotopic,10249,7,none,,,-142.27238543019482
-2020-10-20_G,10544,11,none,,,-1144.4554971212121
-2020-10-20_G,10545,5,none,,,1116.5087615
-2020-10-20_G,10550,12,none,,,830.5571079861111
-2020-10-20_G,10552,11,none,,,-123.11172727272728
-2020-10-20_G,10553,11,none,,,1094.6704248106062
-2020-10-20_G,10557,6,none,,,-14.595317977430556
-2020-12-03_G,10940,12,none,,,171.87898399305558
-2020-12-03_G,10948,8,none,,,-90.4488473046875
-2020-12-03_G,10949,4,none,,,782.03729609375
-2020-12-03_G,10942,12,none,,,-154.51483445659716
-2020-12-03_G,10944,12,none,,,-948.4272474392361
-2020-12-03_G,10945,2,none,,,1902.16428203125
-2020-12-03_G,10946,8,none,,,1738.3131822265625
-2020-12-03_G,10930,11,none,,,-123.91590387121197
-2020-12-03_G,10931,2,none,,,-189.5737268020834
-2020-12-03_G,10934,6,none,,,-863.3374133680555
-2020-12-03_G,10936,12,none,,,-69.77484559027785
-2020-12-03_G,10937,2,none,,,-136.2177142395834
-2021-02-01_B,11401,12,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-40.23535560763889
-2021-02-01_B,11402,50,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-120.11946170208333
-2021-02-01_B,11392,31,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-2.6788060221774264
-2021-03-02_B,11537,9,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-210.53159309606482
-2021-03-02_B,11548,10,exc,"'none' resolved to 'exc': series resistance is 16.3 MOhm, so whole-cell; polarity from the sign of the current",16.33493479752917,-453.8920388541667
-2021-03-02_B,11528,10,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-42.67568655729167
-2021-03-02_B,11562,9,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-144.73772612962964
-2021-04-27_B,12017,12,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,128.46428146875
-2021-04-27_B,12018,4,exc,"'none' resolved to 'exc': series resistance is 6.6 MOhm, so whole-cell; polarity from the sign of the current",6.556751716538104,-1375.871075
-2021-04-27_B,12019,7,exc,"'none' resolved to 'exc': series resistance is 6.6 MOhm, so whole-cell; polarity from the sign of the current",6.556751716538104,-2898.297827380952
-2021-04-27_B,12005,12,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-11.974508962499998
-2021-04-27_B,12013,12,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-164.69269736249996
-2021-04-27_B,12009,12,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-51.176513692708376
-2021-04-27_B,12011,11,exc,"'none' resolved to 'exc': series resistance is 9.0 MOhm, so whole-cell; polarity from the sign of the current",9.04255319148936,-2168.9514218181816
-2021-04-27_B,12021,7,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,28.908819607142828
-2021-04-27_B,12024,7,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-238.43254641071428
-2021-04-27_B,12026,12,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-44.78410497552081
-2021-04-27_B,12015,7,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-300.73065782142857
-2021-05-05_B,12034,10,exc,"'none' resolved to 'exc': series resistance is 2.9 MOhm, so whole-cell; polarity from the sign of the current",2.8923456605466855,-2922.7908464375
-2021-05-05_B,12031,13,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-1219.4176697596154
-2021-05-25_B,12260,10,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-152.4012418125
-2021-05-25_B,12261,5,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-189.873646675
-2021-05-25_B,12262,10,exc,"'none' resolved to 'exc': series resistance is 4.3 MOhm, so whole-cell; polarity from the sign of the current",4.330907054871221,-4966.291271875
-2021-05-25_B,12265,13,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-72.82543282596156
-2021-05-25_B,12249,9,exc,"'none' resolved to 'exc': series resistance is 5.2 MOhm, so whole-cell; polarity from the sign of the current",5.175297738525358,-5159.307402222223
-2021-05-25_B,12247,12,exc,"'none' resolved to 'exc': series resistance is 15.7 MOhm, so whole-cell; polarity from the sign of the current",15.74875292680444,-1858.1909916666666
-2021-05-25_B,12248,3,exc,"'none' resolved to 'exc': series resistance is 15.7 MOhm, so whole-cell; polarity from the sign of the current",15.74875292680444,-2424.101695
-2021-05-25_B,12243,11,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-397.4422872443182
-2021-05-25_B,12253,11,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-231.3125261522729
-2021-05-25_B,12252,13,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-95.26428340769223
-2021-05-25_B,12256,11,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-246.9196070613637
-2021-05-25_B,12258,6,exc,"'none' resolved to 'exc': series resistance is 7.2 MOhm, so whole-cell; polarity from the sign of the current",7.249976567625833,-611.1301005208334
-2021-05-25_B,12245,13,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-8.977275163461538
-2021-05-25_B,12254,13,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-483.9872513942308
-2021-06-22_B,12536,12,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-430.13115475
-2021-06-22_B,12503,2,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-39.67386365625
-2021-06-22_B,12513,10,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-259.5663446649999
-2021-06-22_B,12499,10,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,95.26475959249996
-2021-06-22_B,12519,10,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,16.286679244999995
-2021-06-22_B,12527,12,exc,"'none' resolved to 'exc': series resistance is 9.0 MOhm, so whole-cell; polarity from the sign of the current",8.968635862948577,-236.18229601041668
-2021-07-13_B,12619,6,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-40.02343639583333
-2021-07-19_B,12689,14,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-605.2774101041666
-2021-07-19_B,12690,12,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-539.22366796875
-2021-07-19_B,12684,14,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-85.63428038690476
-2021-07-19_B,12685,13,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-132.61521736378205
-2021-07-27_B,12699,15,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-265.8873403125
-2021-07-27_B,12716,2,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-109.22684799999998
-2021-07-27_B,12721,14,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,685.6263262276785
-2021-07-27_B,12722,5,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,589.7726305208333
-2021-08-18_B,12748,18,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,23.35856522685187
-2021-08-18_B,12753,12,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-139.1741021371526
-2021-08-18_B,12726,1,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-160.75412599999999
-2021-08-18_B,12757,10,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-110.40524134895833
-2021-08-18_B,12758,3,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-111.4979095486111
-2021-08-18_B,12743,13,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-328.23501778846156
-2021-08-18_B,12736,13,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-360.9244074559295
-2021-08-19_B,12777,6,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-45.463191944444446
-2021-08-19_B,12778,3,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-2.3631304166666673
-2021-08-19_B,12771,9,exc,"'none' resolved to 'exc': series resistance is 12.5 MOhm, so whole-cell; polarity from the sign of the current",12.467762733720182,-684.2700911921296
-2021-08-19_B,12763,10,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-156.13481378333339
-2021-09-07_B,12789,12,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-127.26828805555556
-2021-09-07_B,12791,12,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-100.83337185503464
-2021-09-07_B,12796,4,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-200.17887796875
-2021-09-21_B,12869,14,exc,"'none' resolved to 'exc': series resistance is 10.7 MOhm, so whole-cell; polarity from the sign of the current",10.686653771760156,-791.8952333779762
-2021-09-21_B,12880,12,exc,"'none' resolved to 'exc': series resistance is 6.5 MOhm, so whole-cell; polarity from the sign of the current",6.517800716241838,-757.3001583333333
-2021-09-23_B,12906,10,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-839.7542807125
-2021-09-28_B,12910,10,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-2620.8245321875
-2021-09-28_B,12930,14,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-996.2187619285714
-2021-09-28_B,12931,9,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-1046.9186651944444
-2021-10-07_B,12935,12,exc,"'none' resolved to 'exc': series resistance is 9.9 MOhm, so whole-cell; polarity from the sign of the current",9.854758567970444,-282.75051176041666
-2021-10-07_B,12937,12,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-522.7589784166667
-2022-04-06_B,4686,10,exc,"'none' resolved to 'exc': series resistance is 13.3 MOhm, so whole-cell; polarity from the sign of the current",13.27213452299245,-4177.598538854167
-2022-05-10_B,4734,9,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-356.2742369791667
-2022-05-10_B,4730,13,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-44.971991220487425
-2022-05-10_B,4732,7,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-53.77786680357143
-2022-05-10_B,4722,10,exc,"'none' resolved to 'exc': series resistance is 11.5 MOhm, so whole-cell; polarity from the sign of the current",11.549085479656588,-2983.404444625
-2022-05-10_B,4723,10,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-137.92298415999986
-2022-05-10_B,4724,10,exc,"'none' resolved to 'exc': series resistance is 6.6 MOhm, so whole-cell; polarity from the sign of the current",6.636067261496225,-2481.6671336875
-2022-05-10_B,4728,13,exc,"'none' resolved to 'exc': series resistance is 6.3 MOhm, so whole-cell; polarity from the sign of the current",6.2695035460992905,-888.4488636057692
-2022-05-10_B,4736,7,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-101.07338325
-2022-05-10_B,4720,7,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-121.14262974999995
-2022-05-18_B,4781,11,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,205.62773957045434
-2022-05-18_B,4784,10,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-251.096160575
-2022-05-18_B,4794,10,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-37.3179974
-2022-05-18_B,4795,12,exc,"'none' resolved to 'exc': series resistance is 12.4 MOhm, so whole-cell; polarity from the sign of the current",12.374020156774918,-1256.0599557291666
-2022-05-18_B,4782,10,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-60.38670771875
-2022-05-18_B,4786,9,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-148.14691302083332
-2022-05-18_B,4788,9,exc,"'none' resolved to 'exc': series resistance is 7.4 MOhm, so whole-cell; polarity from the sign of the current",7.429998559147014,-1200.4828906944444
-2022-05-18_B,4789,7,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,344.9364504196429
-2022-05-18_B,4791,11,exc,"'none' resolved to 'exc': series resistance is 7.2 MOhm, so whole-cell; polarity from the sign of the current",7.218178424785369,-1797.6085146590908
-2022-05-18_B,4796,10,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,23.36279054249998
-2022-05-18_B,4793,9,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,34.206752461111066
-2022-05-31_B,4800,11,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,84.76442305000009
-2022-05-31_B,4801,27,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,135.32416578780868
-2022-05-31_B,4803,24,inh,"'none' resolved to 'inh': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,20.74620719097221
-2022-05-31_B,4805,12,exc,"'none' resolved to 'exc': series resistance is 8.9 MOhm, so whole-cell; polarity from the sign of the current",8.895917193789534,-753.1036233506944
-2022-05-31_B,4806,4,exc,"'none' resolved to 'exc': series resistance is 8.9 MOhm, so whole-cell; polarity from the sign of the current",8.895917193789534,-663.90460546875
-2022-05-31_B,4798,21,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-51.53680949107145
-2022-06-07_B,4813,19,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-12.28090056304827
-2022-06-07_B,4816,4,inh,"'none' resolved to 'inh': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,54.38744490624994
-2022-06-07_B,4817,8,inh,"'none' resolved to 'inh': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,34.09362590885418
-2022-06-07_B,4818,11,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-87.53350573295434
-2022-06-07_B,4809,21,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-231.49158685019842
-2022-06-07_B,4811,23,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-78.66491188315216
-2023-05-17_B,4346,30,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,270.0410873777776
-2023-05-17_B,4340,22,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-19.244717352272733
-2023-05-17_B,4342,29,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-83.95196608117816
-2025-01-21_G,13726,4,inh,"'none' resolved to 'inh': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,194.45143915364582
-2025-01-21_G,13730,3,exc,"'none' resolved to 'exc': series resistance is 7.2 MOhm, so whole-cell; polarity from the sign of the current",7.156673114119923,-357.12572743055557
-2025-01-21_G,13735,6,exc,"'none' resolved to 'exc': series resistance is 5.1 MOhm, so whole-cell; polarity from the sign of the current",5.149059871350817,-96.61455138888888
-2025-01-21_G,13720,6,exc,"'none' resolved to 'exc': series resistance is 7.0 MOhm, so whole-cell; polarity from the sign of the current",7.02887537993921,-751.1783711805556
-2025-01-21_G,13721,6,exc,"'none' resolved to 'exc': series resistance is 7.0 MOhm, so whole-cell; polarity from the sign of the current",7.02887537993921,-705.0704364583333
-2025-01-21_G,13722,10,exc,"'none' resolved to 'exc': series resistance is 7.0 MOhm, so whole-cell; polarity from the sign of the current",7.02887537993921,-851.65674875
-2025-01-21_G,13723,6,exc,"'none' resolved to 'exc': series resistance is 7.0 MOhm, so whole-cell; polarity from the sign of the current",7.02887537993921,-1557.2663743055555
-2025-01-21_G,13714,4,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-285.18360520833335
-2025-01-28_G,13746,5,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,145.21007557500016
-2025-01-28_G,13747,3,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,126.50654801388887
-2025-01-28_G,13748,3,inh,"'none' resolved to 'inh': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,134.08848505555548
-2025-01-28_G,13736,1,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-60.11282810416666
-2025-01-28_G,13737,3,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-62.15694111805555
-2025-01-28_G,13738,5,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-68.45449591666667
-2025-01-28_G,13740,4,exc,"'none' resolved to 'exc': series resistance is 6.7 MOhm, so whole-cell; polarity from the sign of the current",6.658934570468726,-689.9917321614583
-2025-01-28_G,13741,8,exc,"'none' resolved to 'exc': series resistance is 6.7 MOhm, so whole-cell; polarity from the sign of the current",6.658934570468726,-620.3113510416666
-2025-01-28_G,13742,8,exc,"'none' resolved to 'exc': series resistance is 6.7 MOhm, so whole-cell; polarity from the sign of the current",6.658934570468726,-710.1730295572917
-2025-01-28_G,13745,6,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-357.09501666666665
-2025-02-12_G,13781,4,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-239.64846591145835
-2025-02-12_G,13782,4,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-236.75421484375
-2025-02-12_G,13783,4,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-139.389116484375
-2025-02-12_G,13784,1,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-56.14884609375
-2025-02-12_G,13785,4,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,65.07320052083334
-2025-02-12_G,13786,3,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-315.12146416666667
-2025-02-12_G,13787,4,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,340.60942427083336
-2025-02-12_G,13788,4,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,24.362769114583333
-2025-02-12_G,13789,4,exc,"'none' resolved to 'exc': series resistance is 7.0 MOhm, so whole-cell; polarity from the sign of the current",6.959829452827823,-434.90123033854167
-2025-02-12_G,13790,3,exc,"'none' resolved to 'exc': series resistance is 9.7 MOhm, so whole-cell; polarity from the sign of the current",9.679107080572026,-600.9853546875
-2025-02-12_G,13791,1,exc,"'none' resolved to 'exc': series resistance is 9.7 MOhm, so whole-cell; polarity from the sign of the current",9.679107080572026,-681.1455239583333
-2025-02-12_G,13792,4,exc,"'none' resolved to 'exc': series resistance is 9.7 MOhm, so whole-cell; polarity from the sign of the current",9.679107080572026,-667.5772579427083
-2025-02-12_G,13793,4,exc,"'none' resolved to 'exc': series resistance is 9.7 MOhm, so whole-cell; polarity from the sign of the current",9.679107080572026,-701.07489609375
-2025-02-12_G,13777,3,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,116.88283611111112
-2025-02-12_G,13778,4,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,89.09983889322916
-2025-02-12_G,13779,2,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,55.25101989583333
-2025-02-12_G,13773,4,exc,"'none' resolved to 'exc': series resistance is 9.6 MOhm, so whole-cell; polarity from the sign of the current",9.600415153087702,-793.6999302083333
-2025-02-12_G,13774,4,exc,"'none' resolved to 'exc': series resistance is 9.6 MOhm, so whole-cell; polarity from the sign of the current",9.600415153087702,-934.9282102864584
-2025-02-12_G,13797,4,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-40.703219640625015
-2025-02-12_G,13798,3,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-85.39334990277781
-2025-02-12_G,13799,3,inh,"'none' resolved to 'inh': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,4.337503749999997
-2025-02-19_G,13809,4,inh,"'none' resolved to 'inh': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,86.45841250000001
-2025-02-19_G,13810,4,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,44.873187421874995
-2025-02-19_G,13811,1,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,71.2179693333333
-2025-02-19_G,13812,3,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,63.536306069444386
-2025-02-19_G,13813,4,inh,"'none' resolved to 'inh': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,72.66371897395832
-2025-02-19_G,13814,4,inh,"'none' resolved to 'inh': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,68.80305176562493
-2025-02-19_G,13815,6,inh,"'none' resolved to 'inh': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,66.76609694097219
-2025-02-19_G,13816,2,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,65.28670081249999
-2025-02-19_G,13818,4,exc,"'none' resolved to 'exc': series resistance is 10.7 MOhm, so whole-cell; polarity from the sign of the current",10.67034093822097,-175.13112364583333
-2025-02-19_G,13819,2,exc,"'none' resolved to 'exc': series resistance is 10.7 MOhm, so whole-cell; polarity from the sign of the current",10.67034093822097,-173.02638291666668
-2025-02-19_G,13820,5,exc,"'none' resolved to 'exc': series resistance is 10.7 MOhm, so whole-cell; polarity from the sign of the current",10.67034093822097,-161.724203125
-2025-02-19_G,13821,6,exc,"'none' resolved to 'exc': series resistance is 10.7 MOhm, so whole-cell; polarity from the sign of the current",10.67034093822097,-135.0015990277778
-2025-02-19_G,13822,6,exc,"'none' resolved to 'exc': series resistance is 10.7 MOhm, so whole-cell; polarity from the sign of the current",10.67034093822097,-133.22538677083332
-2025-02-19_G,13807,6,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-22.65438214409723
-2025-02-19_G,13824,2,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,88.71721119791667
-2025-02-19_G,13825,6,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,261.1372016840278
-2025-02-19_G,13826,6,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,200.67872836805554
-2025-02-19_G,13827,3,inh,"'none' resolved to 'inh': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,151.23671954861112
-2025-02-19_G,13831,3,exc,"'none' resolved to 'exc': series resistance is 0.6 MOhm, so whole-cell; polarity from the sign of the current",0.6291085840058694,-558.2506048611111
-2025-02-19_G,13800,4,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,85.76272359375
-2025-02-19_G,13801,1,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,185.7139771875
-2025-02-19_G,13802,1,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,174.04019322916668
-2025-02-19_G,13803,2,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,305.50895307291665
-2025-02-19_G,13804,3,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,332.30260256944445
-2025-02-19_G,13805,6,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,303.7255825173611
-2025-02-19_G,13806,4,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,280.760744453125
-2025-03-06_G,13854,4,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,201.405802578125
-2025-03-06_G,13855,4,inh,"'none' resolved to 'inh': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,246.28458920572916
-2025-03-06_G,13856,6,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,222.65402029513888
-2025-03-06_G,13857,5,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,362.30544490625
-2025-03-06_G,13858,5,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,415.06015348958334
-2025-03-06_G,13859,6,exc,"'none' resolved to 'exc': series resistance is 13.1 MOhm, so whole-cell; polarity from the sign of the current",13.072151998115725,-1022.8564265625
-2025-03-06_G,13836,6,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-54.544538432291695
-2025-03-06_G,13837,6,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-90.99494854166673
-2025-03-06_G,13838,2,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-131.89502392708326
-2025-03-06_G,13839,5,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-114.67033227083333
-2025-03-06_G,13840,5,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-129.62560330833324
-2025-03-06_G,13841,3,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-186.05365541666666
-2025-03-06_G,13842,3,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-257.26169390277767
-2025-03-06_G,13843,4,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-383.115871640625
-2025-03-06_G,13844,4,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-430.2227275260417
-2025-03-06_G,13845,3,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-410.857161875
-2025-03-06_G,13846,5,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-267.6129594166667
-2025-03-06_G,13847,2,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-312.7813075
-2025-03-06_G,13848,1,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-262.447915625
-2025-03-06_G,13849,2,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-224.23861208333332
-2025-03-06_G,13850,6,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-145.50423316840278
-2025-03-06_G,13851,6,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-169.1482267013889
-2025-03-06_G,13832,5,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-29.18999334375
-2025-03-06_G,13833,5,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-40.67160378125
-2025-03-06_G,13834,5,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-99.25322100833327
-2025-03-06_G,13835,5,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-133.85560752083322
-2025-03-06_G,13866,4,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-37.99698572916667
-2025-03-06_G,13867,4,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-67.37250432291667
-2025-03-06_G,13868,4,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-134.4929371875
-2025-03-06_G,13869,1,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-170.46769875
-2025-03-06_G,13870,4,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-215.01310234375
-2025-03-06_G,13871,5,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-254.61397754166666
-2025-03-06_G,13872,4,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-241.90171739583334
-2025-03-06_G,13873,4,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-246.04424911458332
-2025-03-06_G,13864,6,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-65.77079590277778
-2025-03-06_G,13865,6,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-80.05605460416665
-2025-03-06_G,13860,4,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-65.39000694791667
-2025-03-06_G,13861,4,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-238.34819959374985
-2025-03-06_G,13862,5,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-388.98278220833333
-2025-03-06_G,13863,2,exc,"'none' resolved to 'exc': series resistance is 3.2 MOhm, so whole-cell; polarity from the sign of the current",3.1771777502146743,-228.74665625
-2025-05-06_E,16969,15,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-39.90798310694446
-2025-05-06_E,16970,4,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-40.44954364843752
-2025-05-06_E,16971,16,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-39.44766294270835
-2025-05-06_E,16983,32,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-43.49419295345054
-2025-12-16_G,14136,12,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,116.69821738194446
-2025-12-16_G,14126,12,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-210.22339440277784
-2025-12-16_G,14119,17,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-153.91164309803926
-2025-12-16_G,14128,5,inh,"'none' resolved to 'inh': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,0.6340354583333341
-2025-12-16_G,14129,12,inh,"'none' resolved to 'inh': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,11.391926524305578
-2025-12-16_G,14132,11,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,33.84339248863637
-2025-12-16_G,14140,9,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-103.4445161574074
-2025-12-16_G,14123,10,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-39.819719166666644
-2026-01-02_G,14235,12,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-1.3649282986111113
-2026-01-02_G,14219,11,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,0.8459834405303028
-2026-01-02_G,14223,12,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-217.51649527777778
-2026-01-02_G,14224,12,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-196.26254041666667
-2026-01-02_G,14210,3,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,88.55629356944445
-2026-01-02_G,14211,12,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,193.58925993923611
-2026-01-02_G,14212,12,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,411.98868602604165
-2026-01-02_G,14215,10,exc,"'none' resolved to 'exc': series resistance is 15.6 MOhm, so whole-cell; polarity from the sign of the current",15.60596119598838,-47.22741370833333
-2026-01-02_G,14216,12,exc,"'none' resolved to 'exc': series resistance is 20.5 MOhm, so whole-cell; polarity from the sign of the current",20.453540366566756,-51.153785890625
-2026-01-02_G,14228,9,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-49.17507275694443
-2026-01-02_G,14229,2,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-55.725858354166675
-2026-01-02_G,14204,20,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,30.454134993750035
-2026-01-02_G,14205,11,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,12.034814465909077
-2026-01-13_G,14238,12,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,194.4459711180558
-2026-01-13_G,14248,12,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,99.22702138888889
-2026-01-13_G,14249,8,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,85.831477671875
-2026-01-13_G,14266,12,inh,"'none' resolved to 'inh': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,25.587934847222225
-2026-01-13_G,14265,12,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-11.86054136805556
-2026-01-13_G,14256,12,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-43.17687870659722
-2026-01-13_G,14243,12,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,5.025718333333325
-2026-01-13_G,14242,10,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-46.2754870458333
-2026-01-13_G,14260,10,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,225.85344765625
-2026-01-13_G,14263,3,exc,"'none' resolved to 'exc': series resistance is 28.1 MOhm, so whole-cell; polarity from the sign of the current",28.07094446505041,-766.3701707638888
-2026-01-13_G,14264,4,exc,"'none' resolved to 'exc': series resistance is 28.1 MOhm, so whole-cell; polarity from the sign of the current",28.07094446505041,-829.0154747916666
-2026-01-14_G,14272,10,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,69.10527547500001
-2026-01-14_G,14276,4,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-812.7796045833334
-2026-01-14_G,14284,11,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-37.544302204545446
-2026-01-14_G,14268,19,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,18.159535745614036
-2026-01-14_G,14280,5,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-8.394746033333334
-2026-01-28_G,14618,5,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-25.45882005
-2026-01-28_G,14619,4,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-14.260444751250004
-2026-01-28_G,14620,6,exc,"'none' resolved to 'exc': series resistance is 10.6 MOhm, so whole-cell; polarity from the sign of the current",10.574785646236903,-26.874293291666667
-2026-01-28_G,14627,8,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,-8.476619049479167
-2026-01-28_G,14630,10,exc,"'none' resolved to 'exc': series resistance is 7.8 MOhm, so whole-cell; polarity from the sign of the current",7.751757530611295,-199.48761320833333
-2026-01-28_G,14631,6,exc,"'none' resolved to 'exc': series resistance is 7.8 MOhm, so whole-cell; polarity from the sign of the current",7.751757530611295,-231.1032959982639
-2026-01-28_G,14608,10,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,186.6529375
-2026-01-28_G,14609,8,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,89.485812421875
-2026-01-28_G,14613,8,exc,"'none' resolved to 'exc': series resistance is 8.8 MOhm, so whole-cell; polarity from the sign of the current",8.79045456945251,-269.715577265625
-2026-01-28_G,14615,10,exc,"'none' resolved to 'exc': series resistance is 8.8 MOhm, so whole-cell; polarity from the sign of the current",8.79045456945251,-205.1940059375
-2026-01-28_G,14638,8,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,145.18794543229157
-2026-01-28_G,14641,6,exc,"'none' resolved to 'exc': series resistance is 10.5 MOhm, so whole-cell; polarity from the sign of the current",10.512027274449144,-140.04434277777779
-2026-01-28_G,14600,2,inh,"'none' resolved to 'inh': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,14.36709940625
-2026-01-28_G,14603,7,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-76.45878057142858
-2026-02-05_G,14645,8,extracellular,'none' resolved to 'extracellular': series resistance is 0 and the trace contains spikes,0.0,795.923855078125
-2026-02-05_G,14649,7,exc,"'none' resolved to 'exc': series resistance is 14.4 MOhm, so whole-cell; polarity from the sign of the current",14.400622729631552,-164.16295142857143
-2026-02-05_G,14653,8,exc,"'none' resolved to 'exc': series resistance is 14.4 MOhm, so whole-cell; polarity from the sign of the current",14.400622729631552,-192.13933268229167
-2026-02-05_G,14654,8,exc,"'none' resolved to 'exc': series resistance is 14.4 MOhm, so whole-cell; polarity from the sign of the current",14.400622729631552,-210.43668911458334
-2026-02-05_G,14657,8,exc,"'none' resolved to 'exc': series resistance is 6.6 MOhm, so whole-cell; polarity from the sign of the current",6.584671359645655,-84.08411661458334
-2026-02-05_G,14661,3,exc,"'none' resolved to 'exc': series resistance is 5.1 MOhm, so whole-cell; polarity from the sign of the current",5.05357088657541,-93.46094850694445
-2026-02-27_G,37101,10,exc,"'none' resolved to 'exc': series resistance is 8.2 MOhm, so whole-cell; polarity from the sign of the current",8.200354609929079,-350.3843077400662
-2026-02-27_G,37104,5,exc,"'none' resolved to 'exc': series resistance is 8.2 MOhm, so whole-cell; polarity from the sign of the current",8.200354609929079,-235.04351531456953
-2026-02-27_G,37090,6,exc,"'none' resolved to 'exc': series resistance is 11.1 MOhm, so whole-cell; polarity from the sign of the current",11.105182418461949,-225.59271543874172
-2026-02-27_G,37107,10,exc,"'none' resolved to 'exc': the trace has no spikes, so whole-cell with the series resistance never set; polarity from the sign of the current",0.0,-562.7255056291391
-2026-02-27_G,37110,8,exc,"'none' resolved to 'exc': series resistance is 4.9 MOhm, so whole-cell; polarity from the sign of the current",4.8930292700129305,-1368.5778713524421
+cache_version,exp_name,block_id,n_epochs,rec_type,rec_note,series_resistance_mohm,mean_current_pa
+2,2020-06-11_B,30238,14,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",4.5027214250371115,-4907.0213738095235
+2,2020-06-11_B,30209,2,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",8.439716312056738,-739.41617125
+2,2020-06-11_B,30210,20,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",10.935180603661554,-2339.341992734375
+2,2020-06-11_B,30188,15,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2020-06-11_B,30174,19,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2020-06-11_B,30177,6,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",2.989545287649526,-13203.161818055556
+2,2020-06-11_B,30216,14,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2020-06-11_B,30218,27,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",7.514815894297095,-2725.7807153549384
+2,2020-06-16_B,30318,10,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2020-06-16_B,30319,11,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2020-06-16_B,30325,4,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",7.969707897583845,-634.8130645833334
+2,2020-06-16_B,30326,7,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",7.969707897583845,-880.0988581845238
+2,2020-06-16_B,30331,10,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",14.893617021276595,-742.8767589166666
+2,2020-06-16_B,30332,8,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",14.893617021276595,-804.1861094791667
+2,2020-06-16_B,30333,16,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",14.893617021276595,-711.7574102083333
+2,2020-06-16_B,30336,8,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",14.893617021276595,-779.9616248958333
+2,2020-06-23_B,30406,10,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2020-06-23_B,30420,10,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2020-06-23_B,30421,10,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2020-07-13_G,10059,20,,recording mode unresolved: series resistance is missing,,
+2,2020-07-13_G,10062,15,,recording mode unresolved: series resistance is missing,,
+2,2020-07-13_G,10064,7,,recording mode unresolved: series resistance is missing,,
+2,2020-07-14_G,10090,6,,recording mode unresolved: series resistance is missing,,
+2,2020-07-14_G,10099,5,,recording mode unresolved: series resistance is missing,,
+2,2020-07-14_G,10100,2,,recording mode unresolved: series resistance is missing,,
+2,2020-07-14_G,10101,5,,recording mode unresolved: series resistance is missing,,
+2,2020-07-14_G,10072,7,,recording mode unresolved: series resistance is missing,,
+2,2020-07-14_G,10074,10,,recording mode unresolved: series resistance is missing,,
+2,2020-07-14_G,10078,2,,recording mode unresolved: series resistance is missing,,
+2,2020-07-14_G,10080,6,,recording mode unresolved: series resistance is missing,,
+2,2020-07-29_G,10123,8,,recording mode unresolved: series resistance is missing,,
+2,2020-07-29_G,10114,4,,recording mode unresolved: series resistance is missing,,
+2,2020-07-29_G,10117,8,,recording mode unresolved: series resistance is missing,,
+2,2020-07-29_G,10119,6,,recording mode unresolved: series resistance is missing,,
+2,2020-07-29_G,10121,7,,recording mode unresolved: series resistance is missing,,
+2,2020-07-29_G,10103,2,,recording mode unresolved: series resistance is missing,,
+2,2020-07-29_G,10104,7,,recording mode unresolved: series resistance is missing,,
+2,2020-07-29_G,10105,3,,recording mode unresolved: series resistance is missing,,
+2,2020-07-29_G,10110,2,,recording mode unresolved: series resistance is missing,,
+2,2020-07-29_G,10111,6,,recording mode unresolved: series resistance is missing,,
+2,2020-07-29_G,10112,2,,recording mode unresolved: series resistance is missing,,
+2,2020-07-29_G,10107,12,,recording mode unresolved: series resistance is missing,,
+2,2020-07-29_G,10125,12,,recording mode unresolved: series resistance is missing,,
+2,2020-07-29_G,10129,7,,recording mode unresolved: series resistance is missing,,
+2,2020-07-29_G,10130,2,,recording mode unresolved: series resistance is missing,,
+2,2020-07-29_G,10132,7,,recording mode unresolved: series resistance is missing,,
+2,2020-07-29_G,10134,2,,recording mode unresolved: series resistance is missing,,
+2,2020-07-29_G,10135,1,,recording mode unresolved: series resistance is missing,,
+2,2020-08-11_G,10159,12,,recording mode unresolved: series resistance is missing,,
+2,2020-08-11_G,10153,12,,recording mode unresolved: series resistance is missing,,
+2,2020-08-11_G,10156,2,,recording mode unresolved: series resistance is missing,,
+2,2020-08-11_G,10157,7,,recording mode unresolved: series resistance is missing,,
+2,2020-08-11_G,10175,13,,recording mode unresolved: series resistance is missing,,
+2,2020-08-11_G,10184,16,,recording mode unresolved: series resistance is missing,,
+2,2020-08-11_G,10187,2,,recording mode unresolved: series resistance is missing,,
+2,2020-08-11_G,10188,4,,recording mode unresolved: series resistance is missing,,
+2,2020-08-11_G,10145,1,,recording mode unresolved: series resistance is missing,,
+2,2020-08-11_G,10146,10,,recording mode unresolved: series resistance is missing,,
+2,2020-08-11_G,10149,2,,recording mode unresolved: series resistance is missing,,
+2,2020-08-11_G,10151,6,,recording mode unresolved: series resistance is missing,,
+2,2020-08-11_G,10152,12,,recording mode unresolved: series resistance is missing,,
+2,2020-08-11_G,10137,14,,recording mode unresolved: series resistance is missing,,
+2,2020-08-11_G,10168,14,,recording mode unresolved: series resistance is missing,,
+2,2020-08-11_G,10171,15,,recording mode unresolved: series resistance is missing,,
+2,2020-08-11_G,10179,8,,recording mode unresolved: series resistance is missing,,
+2,2020-08-25_G,10273,9,,recording mode unresolved: series resistance is missing,,
+2,2020-08-25_G,10275,12,,recording mode unresolved: series resistance is missing,,
+2,2020-08-25_G,10267,6,,recording mode unresolved: series resistance is missing,,
+2,2020-08-25_G,10262,6,,recording mode unresolved: series resistance is missing,,
+2,2020-08-25_G,10263,8,,recording mode unresolved: series resistance is missing,,
+2,2020-08-25_G,10270,6,,recording mode unresolved: series resistance is missing,,
+2,2020-08-25_G,10260,14,,recording mode unresolved: series resistance is missing,,
+2,2020-08-25_G,10256,14,,recording mode unresolved: series resistance is missing,,
+2,2020-08-25_G_scotopic,10252,14,,recording mode unresolved: series resistance is missing,,
+2,2020-08-25_G_scotopic,10246,14,,recording mode unresolved: series resistance is missing,,
+2,2020-08-25_G_scotopic,10248,8,,recording mode unresolved: series resistance is missing,,
+2,2020-08-25_G_scotopic,10249,7,,recording mode unresolved: series resistance is missing,,
+2,2020-10-20_G,10544,11,,recording mode unresolved: series resistance is missing,,
+2,2020-10-20_G,10545,5,,recording mode unresolved: series resistance is missing,,
+2,2020-10-20_G,10550,12,,recording mode unresolved: series resistance is missing,,
+2,2020-10-20_G,10552,11,,recording mode unresolved: series resistance is missing,,
+2,2020-10-20_G,10553,11,,recording mode unresolved: series resistance is missing,,
+2,2020-10-20_G,10557,6,,recording mode unresolved: series resistance is missing,,
+2,2020-12-03_G,10940,12,,recording mode unresolved: series resistance is missing,,
+2,2020-12-03_G,10948,8,,recording mode unresolved: series resistance is missing,,
+2,2020-12-03_G,10949,4,,recording mode unresolved: series resistance is missing,,
+2,2020-12-03_G,10942,12,,recording mode unresolved: series resistance is missing,,
+2,2020-12-03_G,10944,12,,recording mode unresolved: series resistance is missing,,
+2,2020-12-03_G,10945,2,,recording mode unresolved: series resistance is missing,,
+2,2020-12-03_G,10946,8,,recording mode unresolved: series resistance is missing,,
+2,2020-12-03_G,10930,11,,recording mode unresolved: series resistance is missing,,
+2,2020-12-03_G,10931,2,,recording mode unresolved: series resistance is missing,,
+2,2020-12-03_G,10934,6,,recording mode unresolved: series resistance is missing,,
+2,2020-12-03_G,10936,12,,recording mode unresolved: series resistance is missing,,
+2,2020-12-03_G,10937,2,,recording mode unresolved: series resistance is missing,,
+2,2021-02-01_B,11401,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-02-01_B,11402,50,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-02-01_B,11392,31,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-03-02_B,11537,9,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-03-02_B,11548,10,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",16.33493479752917,-453.8920388541667
+2,2021-03-02_B,11528,10,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-03-02_B,11562,9,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-04-27_B,12017,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-04-27_B,12018,4,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",6.556751716538104,-1375.871075
+2,2021-04-27_B,12019,7,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",6.556751716538104,-2898.297827380952
+2,2021-04-27_B,12005,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-04-27_B,12013,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-04-27_B,12009,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-04-27_B,12011,11,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",9.04255319148936,-2168.9514218181816
+2,2021-04-27_B,12021,7,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-04-27_B,12024,7,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-04-27_B,12026,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-04-27_B,12015,7,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-05-05_B,12034,10,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",2.8923456605466855,-2922.7908464375
+2,2021-05-05_B,12031,13,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-05-25_B,12260,10,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-05-25_B,12261,5,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-05-25_B,12262,10,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",4.330907054871221,-4966.291271875
+2,2021-05-25_B,12265,13,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-05-25_B,12249,9,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",5.175297738525358,-5159.307402222223
+2,2021-05-25_B,12247,12,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",15.74875292680444,-1858.1909916666666
+2,2021-05-25_B,12248,3,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",15.74875292680444,-2424.101695
+2,2021-05-25_B,12243,11,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-05-25_B,12253,11,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-05-25_B,12252,13,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-05-25_B,12256,11,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-05-25_B,12258,6,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",7.249976567625833,-611.1301005208334
+2,2021-05-25_B,12245,13,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-05-25_B,12254,13,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-06-22_B,12536,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-06-22_B,12503,2,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-06-22_B,12513,10,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-06-22_B,12499,10,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-06-22_B,12519,10,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-06-22_B,12527,12,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",8.968635862948577,-236.18229601041668
+2,2021-07-13_B,12619,6,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-07-19_B,12689,14,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-07-19_B,12690,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-07-19_B,12684,14,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-07-19_B,12685,13,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-07-27_B,12699,15,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-07-27_B,12716,2,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-07-27_B,12721,14,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-07-27_B,12722,5,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-08-18_B,12748,18,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-08-18_B,12753,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-08-18_B,12726,1,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-08-18_B,12757,10,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-08-18_B,12758,3,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-08-18_B,12743,13,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-08-18_B,12736,13,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-08-19_B,12777,6,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-08-19_B,12778,3,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-08-19_B,12771,9,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",12.467762733720182,-684.2700911921296
+2,2021-08-19_B,12763,10,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-09-07_B,12789,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-09-07_B,12791,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-09-07_B,12796,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-09-21_B,12869,14,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",10.686653771760156,-791.8952333779762
+2,2021-09-21_B,12880,12,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",6.517800716241838,-757.3001583333333
+2,2021-09-23_B,12906,10,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-09-28_B,12910,10,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-09-28_B,12930,14,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-09-28_B,12931,9,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2021-10-07_B,12935,12,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",9.854758567970444,-282.75051176041666
+2,2021-10-07_B,12937,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2022-04-06_B,4686,10,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",13.27213452299245,-4177.598538854167
+2,2022-05-10_B,4734,9,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2022-05-10_B,4730,13,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2022-05-10_B,4732,7,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2022-05-10_B,4722,10,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",11.549085479656588,-2983.404444625
+2,2022-05-10_B,4723,10,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2022-05-10_B,4724,10,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",6.636067261496225,-2481.6671336875
+2,2022-05-10_B,4728,13,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",6.2695035460992905,-888.4488636057692
+2,2022-05-10_B,4736,7,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2022-05-10_B,4720,7,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2022-05-18_B,4781,11,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2022-05-18_B,4784,10,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2022-05-18_B,4794,10,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2022-05-18_B,4795,12,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",12.374020156774918,-1256.0599557291666
+2,2022-05-18_B,4782,10,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2022-05-18_B,4786,9,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2022-05-18_B,4788,9,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",7.429998559147014,-1200.4828906944444
+2,2022-05-18_B,4789,7,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2022-05-18_B,4791,11,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",7.218178424785369,-1797.6085146590908
+2,2022-05-18_B,4796,10,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2022-05-18_B,4793,9,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2022-05-31_B,4800,11,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2022-05-31_B,4801,27,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2022-05-31_B,4803,24,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2022-05-31_B,4805,12,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",8.895917193789534,-753.1036233506944
+2,2022-05-31_B,4806,4,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",8.895917193789534,-663.90460546875
+2,2022-05-31_B,4798,21,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2022-06-07_B,4813,19,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2022-06-07_B,4816,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2022-06-07_B,4817,8,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2022-06-07_B,4818,11,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2022-06-07_B,4809,21,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2022-06-07_B,4811,23,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2023-05-17_B,4346,30,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2023-05-17_B,4340,22,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2023-05-17_B,4342,29,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-01-21_G,13726,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-01-21_G,13730,3,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",7.156673114119923,-357.12572743055557
+2,2025-01-21_G,13735,6,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",5.149059871350817,-96.61455138888888
+2,2025-01-21_G,13720,6,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",7.02887537993921,-751.1783711805556
+2,2025-01-21_G,13721,6,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",7.02887537993921,-705.0704364583333
+2,2025-01-21_G,13722,10,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",7.02887537993921,-851.65674875
+2,2025-01-21_G,13723,6,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",7.02887537993921,-1557.2663743055555
+2,2025-01-21_G,13714,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-01-28_G,13746,5,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-01-28_G,13747,3,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-01-28_G,13748,3,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-01-28_G,13736,1,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-01-28_G,13737,3,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-01-28_G,13738,5,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-01-28_G,13740,4,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",6.658934570468726,-689.9917321614583
+2,2025-01-28_G,13741,8,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",6.658934570468726,-620.3113510416666
+2,2025-01-28_G,13742,8,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",6.658934570468726,-710.1730295572917
+2,2025-01-28_G,13745,6,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-12_G,13781,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-12_G,13782,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-12_G,13783,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-12_G,13784,1,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-12_G,13785,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-12_G,13786,3,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-12_G,13787,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-12_G,13788,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-12_G,13789,4,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",6.959829452827823,-434.90123033854167
+2,2025-02-12_G,13790,3,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",9.679107080572026,-600.9853546875
+2,2025-02-12_G,13791,1,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",9.679107080572026,-681.1455239583333
+2,2025-02-12_G,13792,4,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",9.679107080572026,-667.5772579427083
+2,2025-02-12_G,13793,4,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",9.679107080572026,-701.07489609375
+2,2025-02-12_G,13777,3,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-12_G,13778,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-12_G,13779,2,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-12_G,13773,4,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",9.600415153087702,-793.6999302083333
+2,2025-02-12_G,13774,4,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",9.600415153087702,-934.9282102864584
+2,2025-02-12_G,13797,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-12_G,13798,3,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-12_G,13799,3,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-19_G,13809,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-19_G,13810,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-19_G,13811,1,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-19_G,13812,3,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-19_G,13813,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-19_G,13814,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-19_G,13815,6,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-19_G,13816,2,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-19_G,13818,4,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",10.67034093822097,-175.13112364583333
+2,2025-02-19_G,13819,2,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",10.67034093822097,-173.02638291666668
+2,2025-02-19_G,13820,5,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",10.67034093822097,-161.724203125
+2,2025-02-19_G,13821,6,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",10.67034093822097,-135.0015990277778
+2,2025-02-19_G,13822,6,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",10.67034093822097,-133.22538677083332
+2,2025-02-19_G,13807,6,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-19_G,13824,2,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-19_G,13825,6,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-19_G,13826,6,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-19_G,13827,3,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-19_G,13831,3,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",0.6291085840058694,-558.2506048611111
+2,2025-02-19_G,13800,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-19_G,13801,1,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-19_G,13802,1,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-19_G,13803,2,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-19_G,13804,3,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-19_G,13805,6,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-02-19_G,13806,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13854,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13855,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13856,6,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13857,5,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13858,5,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13859,6,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",13.072151998115725,-1022.8564265625
+2,2025-03-06_G,13836,6,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13837,6,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13838,2,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13839,5,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13840,5,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13841,3,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13842,3,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13843,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13844,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13845,3,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13846,5,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13847,2,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13848,1,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13849,2,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13850,6,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13851,6,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13832,5,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13833,5,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13834,5,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13835,5,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13866,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13867,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13868,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13869,1,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13870,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13871,5,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13872,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13873,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13864,6,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13865,6,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13860,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13861,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13862,5,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-03-06_G,13863,2,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",3.1771777502146743,-228.74665625
+2,2025-05-06_E,16969,15,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-05-06_E,16970,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-05-06_E,16971,16,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-05-06_E,16983,32,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-12-16_G,14136,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-12-16_G,14126,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-12-16_G,14119,17,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-12-16_G,14128,5,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-12-16_G,14129,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-12-16_G,14132,11,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-12-16_G,14140,9,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2025-12-16_G,14123,10,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-02_G,14235,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-02_G,14219,11,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-02_G,14223,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-02_G,14224,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-02_G,14210,3,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-02_G,14211,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-02_G,14212,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-02_G,14215,10,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",15.60596119598838,-47.22741370833333
+2,2026-01-02_G,14216,12,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",20.453540366566756,-51.153785890625
+2,2026-01-02_G,14228,9,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-02_G,14229,2,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-02_G,14204,20,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-02_G,14205,11,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-13_G,14238,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-13_G,14248,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-13_G,14249,8,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-13_G,14266,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-13_G,14265,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-13_G,14256,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-13_G,14243,12,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-13_G,14242,10,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-13_G,14260,10,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-13_G,14263,3,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",28.07094446505041,-766.3701707638888
+2,2026-01-13_G,14264,4,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",28.07094446505041,-829.0154747916666
+2,2026-01-14_G,14272,10,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-14_G,14276,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-14_G,14284,11,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-14_G,14268,19,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-14_G,14280,5,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-28_G,14618,5,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-28_G,14619,4,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-28_G,14620,6,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",10.574785646236903,-26.874293291666667
+2,2026-01-28_G,14627,8,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-28_G,14630,10,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",7.751757530611295,-199.48761320833333
+2,2026-01-28_G,14631,6,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",7.751757530611295,-231.1032959982639
+2,2026-01-28_G,14608,10,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-28_G,14609,8,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-28_G,14613,8,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",8.79045456945251,-269.715577265625
+2,2026-01-28_G,14615,10,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",8.79045456945251,-205.1940059375
+2,2026-01-28_G,14638,8,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-28_G,14641,6,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",10.512027274449144,-140.04434277777779
+2,2026-01-28_G,14600,2,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-01-28_G,14603,7,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-02-05_G,14645,8,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-02-05_G,14649,7,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",14.400622729631552,-164.16295142857143
+2,2026-02-05_G,14653,8,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",14.400622729631552,-192.13933268229167
+2,2026-02-05_G,14654,8,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",14.400622729631552,-210.43668911458334
+2,2026-02-05_G,14657,8,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",6.584671359645655,-84.08411661458334
+2,2026-02-05_G,14661,3,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",5.05357088657541,-93.46094850694445
+2,2026-02-27_G,37101,10,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",8.200354609929079,-350.3843077400662
+2,2026-02-27_G,37104,5,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",8.200354609929079,-235.04351531456953
+2,2026-02-27_G,37090,6,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",11.105182418461949,-225.59271543874172
+2,2026-02-27_G,37107,10,extracellular,resolved to 'extracellular': series resistance is 0,0.0,
+2,2026-02-27_G,37110,8,exc,"resolved to 'exc': series resistance is positive, so whole-cell; polarity from the sign of the mean trace",4.8930292700129305,-1368.5778713524421
