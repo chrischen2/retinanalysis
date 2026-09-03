@@ -758,6 +758,46 @@ def test_plot_transfer_early_late_default_adaptive_title():
     plt.close(figure)
 
 
+def test_extracellular_firing_rate_qc_errors_at_fraction_threshold(capsys):
+    """Seventy percent below minimum is a failure, including equality."""
+    analysis = vmn.ConditionAnalysis(
+        exp_name='synthetic', block_ids=[1], rec_type='extracellular',
+        sample_rate=1000.0, units='firing rate (Hz)',
+        sampling_interval=1e-3, stim_time_ms=30_000.0)
+    analysis.light_means = [0.1]
+    rates = [1.0] * 7 + [3.0] * 3
+    analysis.response = {
+        0.1: np.vstack([np.full(100, rate) for rate in rates])}
+
+    with pytest.raises(vmn.LowResponseCellError, match='7/10 epochs'):
+        vmn.check_extracellular_firing_rate(
+            analysis, min_firing_rate_hz=2.0,
+            low_rate_epoch_fraction=0.70, verbose=False)
+
+    assert 'LOW RESPONSE CELL' in capsys.readouterr().out
+
+
+def test_extracellular_firing_rate_qc_returns_epoch_table_when_passed():
+    analysis = vmn.ConditionAnalysis(
+        exp_name='synthetic', block_ids=[1], rec_type='extracellular',
+        sample_rate=1000.0, units='firing rate (Hz)',
+        sampling_interval=1e-3)
+    analysis.light_means = [0.1, 1.0]
+    analysis.response = {
+        0.1: np.vstack([np.full(50, 1.0), np.full(50, 3.0)]),
+        1.0: np.vstack([np.full(50, 3.0), np.full(50, 4.0)]),
+    }
+
+    result = vmn.check_extracellular_firing_rate(
+        analysis, min_firing_rate_hz=2.0,
+        low_rate_epoch_fraction=0.70, verbose=False)
+
+    assert len(result) == 4
+    assert result.n_low_rate_epochs.unique().tolist() == [1]
+    assert result.low_rate_fraction.unique().tolist() == [0.25]
+    assert not result.low_response_cell.any()
+
+
 def test_run_core_ln_analysis_keeps_routine_steps_in_one_order(monkeypatch):
     """The notebook wrapper must mean-QC before fitting and return every output."""
     import pandas as pd
@@ -778,6 +818,11 @@ def test_run_core_ln_analysis_keeps_routine_steps_in_one_order(monkeypatch):
     monkeypatch.setattr(
         vmn, 'plot_mean_response',
         lambda value, window_s: calls.append(('mean', value, window_s)) or figures['mean'])
+    response_qc = pd.DataFrame({'low_response_cell': [False]})
+    monkeypatch.setattr(
+        vmn, 'check_extracellular_firing_rate',
+        lambda value, **kwargs: calls.append(('response_qc', value, kwargs))
+        or response_qc)
     monkeypatch.setattr(
         vmn, 'fit_condition',
         lambda value, verbose: calls.append(('fit', value, verbose)) or value)
@@ -803,16 +848,19 @@ def test_run_core_ln_analysis_keeps_routine_steps_in_one_order(monkeypatch):
 
     result = vmn.run_core_ln_analysis(
         'synthetic', [1, 2], rec_type='exc', skip_seconds=2.0,
+        min_firing_rate_hz=2.0, low_rate_epoch_fraction=0.70,
         mean_window_s=2.5, condition_window_s=4.0,
         temporal_window_s=None, verbose=False)
 
     assert [call[0] for call in calls] == [
-        'analyze', 'mean', 'fit', 'condition', 'summary', 'temporal_fit',
+        'analyze', 'response_qc', 'mean', 'fit', 'condition', 'summary', 'temporal_fit',
         'temporal_plot', 'kinetics']
     assert calls[0][3]['fit'] is False
     assert calls[0][3]['skip_seconds'] == 2.0
-    assert calls[1][2] == 2.5 and calls[3][2] == 4.0
-    assert calls[5][2]['window_seconds'] is None
+    assert calls[1][2]['min_firing_rate_hz'] == 2.0
+    assert calls[1][2]['low_rate_epoch_fraction'] == 0.70
+    assert calls[2][2] == 2.5 and calls[4][2] == 4.0
+    assert calls[6][2]['window_seconds'] is None
     assert result.analysis is analysis
     assert result.temporal_models is temporal_models
     assert result.summary is summary
@@ -820,6 +868,7 @@ def test_run_core_ln_analysis_keeps_routine_steps_in_one_order(monkeypatch):
     assert result.condition_figure is figures['condition']
     assert result.temporal_figure is figures['temporal']
     assert result.kinetics_figure is figures['kinetics']
+    assert result.response_qc is response_qc
 
 
 def test_adaptation_state_matches_the_analytic_solution():

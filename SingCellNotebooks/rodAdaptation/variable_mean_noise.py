@@ -2166,6 +2166,88 @@ def analysis_label(analysis: ConditionAnalysis) -> str:
     return f'{analysis.exp_name} | {analysis.rec_type}{duration}'
 
 
+class LowResponseCellError(RuntimeError):
+    """Raised when an extracellular condition fails its firing-rate QC."""
+
+
+def check_extracellular_firing_rate(
+        analysis: ConditionAnalysis,
+        *,
+        min_firing_rate_hz: float,
+        low_rate_epoch_fraction: float,
+        verbose: bool = True) -> pd.DataFrame:
+    """Refuse a broadly silent extracellular condition before model fitting.
+
+    The mean firing rate is calculated separately for every accepted epoch,
+    over the same post-skip response samples that the downstream models use.
+    A condition fails when the fraction of epochs below
+    ``min_firing_rate_hz`` is greater than or equal to
+    ``low_rate_epoch_fraction``. Both decision values are required keyword
+    arguments so the notebook, rather than this function, owns the policy.
+
+    The returned table has one row per epoch and includes the condition-wide
+    counts and decision on every row for easy display or persistence. Whole-
+    cell recordings are returned as an empty table because firing-rate QC is
+    not meaningful for current traces. On failure the function prints a
+    ``LOW RESPONSE CELL`` message and raises :class:`LowResponseCellError`.
+    """
+    minimum = float(min_firing_rate_hz)
+    fraction_threshold = float(low_rate_epoch_fraction)
+    if not np.isfinite(minimum) or minimum < 0:
+        raise ValueError('min_firing_rate_hz must be finite and non-negative')
+    if (not np.isfinite(fraction_threshold)
+            or not 0 <= fraction_threshold <= 1):
+        raise ValueError('low_rate_epoch_fraction must lie between 0 and 1')
+
+    columns = [
+        'lightMean', 'epoch', 'mean_firing_rate_hz', 'below_minimum',
+        'min_firing_rate_hz', 'n_low_rate_epochs', 'n_epochs',
+        'low_rate_fraction', 'low_rate_epoch_fraction', 'low_response_cell',
+    ]
+    if analysis.rec_type != 'extracellular':
+        if verbose:
+            print(f'{analysis.rec_type}: extracellular firing-rate QC skipped')
+        return pd.DataFrame(columns=columns)
+
+    rows = []
+    for mean_level in analysis.light_means:
+        response = np.atleast_2d(np.asarray(
+            analysis.response.get(mean_level, np.zeros((0, 0))), dtype=float))
+        for epoch, trace in enumerate(response):
+            finite = trace[np.isfinite(trace)]
+            mean_rate = float(finite.mean()) if finite.size else np.nan
+            rows.append({
+                'lightMean': float(mean_level), 'epoch': int(epoch),
+                'mean_firing_rate_hz': mean_rate,
+                'below_minimum': bool(not np.isfinite(mean_rate)
+                                      or mean_rate < minimum),
+            })
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        raise ValueError('extracellular firing-rate QC found no accepted epochs')
+
+    n_epochs = int(len(frame))
+    n_low = int(frame.below_minimum.sum())
+    low_fraction = n_low / n_epochs
+    low_response = bool(low_fraction >= fraction_threshold)
+    frame['min_firing_rate_hz'] = minimum
+    frame['n_low_rate_epochs'] = n_low
+    frame['n_epochs'] = n_epochs
+    frame['low_rate_fraction'] = low_fraction
+    frame['low_rate_epoch_fraction'] = fraction_threshold
+    frame['low_response_cell'] = low_response
+
+    status = 'LOW RESPONSE CELL' if low_response else 'response QC passed'
+    message = (f'{status}: {analysis_label(analysis)} | {n_low}/{n_epochs} '
+               f'epochs ({low_fraction:.1%}) below {minimum:g} Hz | '
+               f'failure threshold {fraction_threshold:.1%}')
+    if verbose or low_response:
+        print(message)
+    if low_response:
+        raise LowResponseCellError(message)
+    return frame[columns]
+
+
 def analyze_condition(exp_name: str, block_ids: Sequence[int],
                       rec_type: str = 'extracellular',
                       stim_time_ms: Optional[float] = None,
@@ -7363,6 +7445,7 @@ class CoreLNAnalysis:
     condition_figure: object = None
     temporal_figure: object = None
     kinetics_figure: object = None
+    response_qc: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def run_core_ln_analysis(
@@ -7376,6 +7459,8 @@ def run_core_ln_analysis(
         max_epochs: Optional[int] = None,
         max_series_resistance: Optional[float] = 30e6,
         align_epoch_means: bool = True,
+        min_firing_rate_hz: Optional[float] = None,
+        low_rate_epoch_fraction: Optional[float] = None,
         subtract_baseline: bool = False,
         filter_length_s: float = 1.0,
         frequency_cutoff: Optional[float] = None,
@@ -7399,6 +7484,10 @@ def run_core_ln_analysis(
     usable epoch into equal data-dependent windows without a remainder.
     ``stim_time_ms`` is passed through to :func:`analyze_condition`; one call
     therefore represents exactly one duration condition.
+
+    Supplying ``min_firing_rate_hz`` and ``low_rate_epoch_fraction`` enables
+    extracellular response QC before any model is fitted. Supply both or
+    neither; the thresholds are intentionally owned by the caller.
     """
     analysis = analyze_condition(
         exp_name, block_ids, rec_type=rec_type,
@@ -7410,6 +7499,16 @@ def run_core_ln_analysis(
         max_series_resistance=max_series_resistance,
         align_epoch_means=align_epoch_means, max_epochs=max_epochs,
         fit=False, verbose=verbose)
+
+    if (min_firing_rate_hz is None) != (low_rate_epoch_fraction is None):
+        raise ValueError('supply both min_firing_rate_hz and '
+                         'low_rate_epoch_fraction, or neither')
+    response_qc = pd.DataFrame()
+    if min_firing_rate_hz is not None:
+        response_qc = check_extracellular_firing_rate(
+            analysis, min_firing_rate_hz=min_firing_rate_hz,
+            low_rate_epoch_fraction=low_rate_epoch_fraction,
+            verbose=verbose)
 
     # This is deliberately created before any model is fitted: it is the QC
     # view of the exact accepted arrays that every subsequent fit will use.
@@ -7433,7 +7532,8 @@ def run_core_ln_analysis(
         mean_response_figure=mean_figure,
         condition_figure=static_figure,
         temporal_figure=temporal_figure,
-        kinetics_figure=kinetics_figure)
+        kinetics_figure=kinetics_figure,
+        response_qc=response_qc)
 
 
 __all__ = [
@@ -7453,7 +7553,8 @@ __all__ = [
     'MODE_CACHE_PATH', 'MODE_CACHE_VERSION', 'RECORDING_TYPES',
     'led_attenuation', 'matlab_randn', 'gaussian_noise_stimulus',
     'epoch_stimulus', 'fit_sigmoid', 'sigmoid', 'fit_ln_model',
-    'analyze_condition', 'analysis_label', 'plot_condition', 'mean_response',
+    'analyze_condition', 'analysis_label', 'LowResponseCellError',
+    'check_extracellular_firing_rate', 'plot_condition', 'mean_response',
     'plot_mean_response', 'temporal_ln_model', 'plot_temporal_ln',
     'run_core_ln_analysis', 'save_condition_output', 'save_duration_outputs',
     'save_condition_outputs',
