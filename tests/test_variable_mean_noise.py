@@ -596,6 +596,81 @@ def test_reconstruction_metrics_separate_shape_from_amplitude():
     assert metrics['gain_decrement'] == pytest.approx(0.5, abs=1e-6)
 
 
+def test_generator_direction_decoding_separates_operating_point_and_direction():
+    import pandas as pd
+
+    # At positive drive, increments are completely compressed while
+    # decrements are reconstructed faithfully. At negative drive both survive.
+    truth = np.array([0., 1., 2., 1., 0., -1., -2., -1., 0., 1., 2., 1., 0.])
+    generator = np.array([1., 1., -1., 1., 2., 2., 1., -1., -2., -2., 1., 2., 1.])
+    estimate = truth.copy()
+    for index in range(1, len(truth)):
+        delta = truth[index] - truth[index - 1]
+        if generator[index - 1] > 0 and delta > 0:
+            delta = 0.0
+        estimate[index] = estimate[index - 1] + delta
+    traces = pd.DataFrame({
+        'lightMean': 10., 'mode': 'per_window', 'epoch': 0,
+        'window': '0-1 s', 'order': 0, 'time_s': np.arange(len(truth)),
+        'stimulus': truth, 'reconstruction': estimate, 'generator': generator,
+    })
+
+    result = vmn.generator_direction_decoding(
+        traces, min_abs_change_quantile=0, min_samples=2)
+    positive = result[result.operating_point.eq('positive')].set_index('direction')
+
+    assert positive.loc['decrement', 'gain_delta'] == pytest.approx(1.0)
+    assert positive.loc['increment', 'gain_delta'] == pytest.approx(0.0)
+    assert positive.loc['decrement', 'direction_accuracy'] == pytest.approx(1.0)
+    assert positive.loc['increment', 'direction_accuracy'] == pytest.approx(0.0)
+    assert set(result.light_condition) == {'bright'}
+
+
+def test_directional_saturation_contrast_is_paired_within_cell():
+    import pandas as pd
+
+    rows = pd.DataFrame({
+        'cell_id': ['A', 'A', 'A', 'A'], 'cell_type': ['ON-midget'] * 4,
+        'rec_type': ['extracellular'] * 4, 'stim_seconds': [30.] * 4,
+        'mode': ['per_window'] * 4, 'light_condition': ['bright'] * 4,
+        'operating_point': ['positive'] * 4,
+        'direction': ['increment', 'increment', 'decrement', 'decrement'],
+        'gain_delta': [.1, .3, .7, .9],
+        'direction_accuracy': [.4, .6, .8, 1.0],
+        'nrmse_delta': [1.4, 1.2, .8, .6],
+    })
+
+    paired = vmn.directional_saturation_contrast(rows)
+
+    assert paired.gain_dec_minus_inc.iloc[0] == pytest.approx(.6)
+    assert paired.accuracy_dec_minus_inc.iloc[0] == pytest.approx(.4)
+    assert paired.error_inc_minus_dec.iloc[0] == pytest.approx(.6)
+
+
+def test_reconstruct_traces_can_attach_encoding_generator():
+    rng = np.random.default_rng(4)
+    stimulus = rng.standard_normal((3, 2000))
+    response = stimulus + .1 * rng.standard_normal(stimulus.shape)
+    analysis = vmn.ConditionAnalysis(
+        exp_name='synthetic', block_ids=[1], rec_type='extracellular',
+        sample_rate=1000., units='Hz', light_means=[1.], n_epochs={1.: 3},
+        sampling_interval=.001, stim_time_ms=2000., frequency_cutoff=60.,
+        stimulus={1.: stimulus}, response={1.: response})
+    model = vmn.LNModel(
+        label='full', r2=.5, filter=np.array([1., 0.]),
+        filter_time_s=np.array([0., .001]), nl_x=np.array([]), nl_y=np.array([]),
+        params={'beta': 1.})
+
+    traces = vmn.reconstruct_traces(
+        analysis, mode='per_window', window_seconds=1., decode_bin_ms=50.,
+        generator_models={1.: model}, verbose=False)
+
+    assert len(traces) == 120
+    assert traces.generator.notna().all()
+    assert not vmn.generator_direction_decoding(
+        traces, generator_models={1.: model}).empty
+
+
 def test_steady_state_mode_never_scores_its_training_stretch():
     """The adapted-state decoder must not be scored on what it was fitted on.
 
@@ -1571,17 +1646,24 @@ def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
         'mode': ['per_window'], 'lightMean': [.1], 'half': ['early'],
         'gain_increment': [.8], 'gain_decrement': [.7],
     })
+    directional = pd.DataFrame({
+        'mode': ['per_window'], 'lightMean': [1.0],
+        'light_condition': ['bright'], 'operating_point': ['positive'],
+        'direction': ['decrement'], 'gain_delta': [.8],
+    })
 
     path = vmn.save_condition_output(
         analysis, blocks, temporal_models=temporal, decoded=decoded,
-        early_late=early_late, decode_window_s=2.5,
+        directional_decoding=directional, early_late=early_late,
+        decode_window_s=2.5, cell_index=19,
         decode_window_rule='shortest_within_one_se', mean_window_s=1.0,
         output_dir=tmp_path, verbose=False)
     second = vmn.save_condition_output(
         analysis, blocks, temporal_models=temporal, decoded=decoded,
-        early_late=early_late, decode_window_s=2.5,
+        directional_decoding=directional, early_late=early_late,
+        decode_window_s=2.5,
         decode_window_rule='shortest_within_one_se',
-        output_dir=tmp_path, verbose=False)
+        cell_index=19, output_dir=tmp_path, verbose=False)
 
     assert path == second and len(list(tmp_path.glob('*.h5'))) == 1
     with h5py.File(path, 'r') as stored:
@@ -1589,6 +1671,7 @@ def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
         assert stored.attrs['stim_time_ms'] == 30_000.0
         assert stored.attrs['stim_seconds'] == 30.0
         assert stored.attrs['n_epochs'] == 4
+        assert stored.attrs['cell_index'] == 19
         assert stored.attrs['decode_window_s'] == 2.5
         assert stored.attrs['decode_window_rule'] == 'shortest_within_one_se'
         assert stored.attrs['led_ndfs'] == 'B1, B12'
@@ -1599,16 +1682,19 @@ def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
         assert stored['tables/ln_curves/y'].compression == 'gzip'
 
     index = vmn.load_condition_index(tmp_path)
-    assert index[['date', 'cell_label', 'cell_type', 'rec_type',
+    assert index[['date', 'cell_index', 'cell_label', 'cell_type', 'rec_type',
                   'stim_seconds', 'n_epochs_total', 'rig',
                   'led', 'led_ndfs']].iloc[0].to_dict() == {
-        'date': '2020-06-11_B', 'cell_label': 'Cell3',
+        'date': '2020-06-11_B', 'cell_index': 19, 'cell_label': 'Cell3',
         'cell_type': 'OFF-parasol', 'rec_type': 'extracellular',
         'stim_seconds': 30.0, 'n_epochs_total': 4,
         'rig': 'B', 'led': 'Blue LED', 'led_ndfs': 'B1, B12'}
     loaded = vmn.load_population_table('condition_summary', tmp_path)
     assert len(loaded) == 2
     assert loaded.cell_id.unique().tolist() == ['2020-06-11_B/Cell3/extracellular']
+    loaded_directional = vmn.load_population_table('directional_decoding', tmp_path)
+    assert loaded_directional.gain_delta.tolist() == [.8]
+    assert loaded_directional.cell_index.tolist() == [19]
 
     # The same cell and block IDs at another duration must be a second entity,
     # not an overwrite of the 30 s condition.
@@ -1669,23 +1755,28 @@ def test_save_condition_outputs_saves_every_mode_duration_pair(monkeypatch):
 
     def fake_save(analysis, blocks, **kwargs):
         calls.append((analysis.rec_type, analysis.stim_time_ms,
-                      kwargs.get('decoded')))
+                      kwargs.get('decoded'), kwargs.get('directional_decoding'),
+                      kwargs.get('cell_index')))
         return Path(f'/tmp/{analysis.rec_type}-{analysis.stim_time_ms:g}.h5')
 
     monkeypatch.setattr(vmn, 'save_condition_output', fake_save)
     reconstruction = {
-        ('extracellular', 30_000.0): {'decoded': 'spikes'},
-        ('exc', 60_000.0): {'decoded': 'current'},
+        ('extracellular', 30_000.0): {
+            'decoded': 'spikes', 'directional_decoding': 'spike-directions'},
+        ('exc', 60_000.0): {
+            'decoded': 'current', 'directional_decoding': 'current-directions'},
     }
 
     saved = vmn.save_condition_outputs(
         cores, pd.DataFrame(),
-        reconstruction_by_condition=reconstruction, verbose=False)
+        reconstruction_by_condition=reconstruction, cell_index=19,
+        verbose=False)
 
-    assert calls == [('extracellular', 30_000.0, 'spikes'),
-                     ('exc', 60_000.0, 'current')]
-    assert saved[['rec_type', 'stim_seconds']].values.tolist() == [
-        ['extracellular', 30.0], ['exc', 60.0]]
+    assert calls == [
+        ('extracellular', 30_000.0, 'spikes', 'spike-directions', 19),
+        ('exc', 60_000.0, 'current', 'current-directions', 19)]
+    assert saved[['cell_index', 'rec_type', 'stim_seconds']].values.tolist() == [
+        [19, 'extracellular', 30.0], [19, 'exc', 60.0]]
 
 
 def test_population_mean_sem_weights_each_cell_once():

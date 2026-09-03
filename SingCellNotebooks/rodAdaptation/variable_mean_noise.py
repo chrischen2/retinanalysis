@@ -88,7 +88,8 @@ CONDITION_OUTPUT_DIR = Path(__file__).resolve().parent / 'condition_outputs'
 CONDITION_TABLES = (
     'light_settings', 'mean_response', 'condition_summary',
     'temporal_summary', 'ln_curves', 'temporal_ln_curves',
-    'decoding_windows', 'reconstruction_summary', 'early_late',
+    'decoding_windows', 'reconstruction_summary', 'directional_decoding',
+    'early_late',
     'dropped_epochs', 'epoch_adjustments',
 )
 
@@ -3410,6 +3411,7 @@ def reconstruct_traces(analysis: ConditionAnalysis,
                        min_window_s: float = MIN_DECODE_WINDOW_S,
                        decode_bin_ms: float = 25.0,
                        noise_ratio: float = 0.1,
+                       generator_models: Optional[Dict[float, LNModel]] = None,
                        verbose: bool = True) -> pd.DataFrame:
     """Held-out stimulus reconstructions as a tidy frame, one row per bin.
 
@@ -3420,7 +3422,11 @@ def reconstruct_traces(analysis: ConditionAnalysis,
 
     Columns: ``lightMean``, ``mode``, ``epoch``, ``window``, ``order``,
     ``time_s`` (bin centre since the step), ``stimulus`` and
-    ``reconstruction`` -- both about their own mean, in stimulus units.
+    ``reconstruction`` -- both about their own mean, in stimulus units. When
+    ``generator_models`` supplies the encoding LN model for a light mean, the
+    frame also contains its binned ``generator`` signal. That is the operating
+    point used by :func:`generator_direction_decoding`; it is never estimated
+    from the held-out reconstruction.
 
     **Every epoch is held out exactly once**, rather than a random sample of
     them: a mean over folds is insensitive to which epochs were drawn, but an
@@ -3451,6 +3457,16 @@ def reconstruct_traces(analysis: ConditionAnalysis,
             continue
         n_epochs, n_time = stim.shape
         edges = np.linspace(0, n_time, n_windows + 1).round().astype(int)
+        generator = None
+        model = (generator_models or {}).get(mean_level)
+        if model is not None and np.asarray(model.filter).size:
+            from retinanalysis.utils.cascadegraph import convolve_filter_with_stim
+            generator = np.atleast_2d(
+                convolve_filter_with_stim(np.asarray(model.filter), stim))
+            if generator.shape != stim.shape:
+                raise ValueError(
+                    f'generator shape {generator.shape} does not match stimulus '
+                    f'{stim.shape} for lightMean {mean_level:g}')
 
         steady_lo, steady_decoder = n_time, None
         if mode == 'steady_state':
@@ -3495,10 +3511,14 @@ def reconstruct_traces(analysis: ConditionAnalysis,
                     continue
                 time_s = ((np.arange(binned_e.size) + 0.5) * bin_samples * interval
                           + lo * interval + analysis.skip_seconds)
-                pieces.append(pd.DataFrame({
+                piece = pd.DataFrame({
                     'lightMean': mean_level, 'mode': mode, 'epoch': epoch,
                     'window': label, 'order': index, 'time_s': time_s,
-                    'stimulus': binned_t, 'reconstruction': binned_e}))
+                    'stimulus': binned_t, 'reconstruction': binned_e})
+                if generator is not None:
+                    piece['generator'] = _bin_mean(
+                        generator[epoch:epoch + 1, columns], bin_samples).ravel()
+                pieces.append(piece)
 
     frame = pd.concat(pieces, ignore_index=True) if pieces else pd.DataFrame()
     if verbose:
@@ -3623,6 +3643,229 @@ def reconstruction_summary(decoded: pd.DataFrame) -> pd.DataFrame:
                  gain_asymmetry=('gain_asymmetry', 'mean'),
                  n_windows=('r_all', 'size'))
             .assign(r_gain=lambda f: f.r_all_last - f.r_all_first))
+
+
+def generator_direction_decoding(
+        traces: pd.DataFrame,
+        generator_models: Optional[Dict[float, LNModel]] = None,
+        min_abs_change_quantile: float = 0.25,
+        min_samples: int = 3) -> pd.DataFrame:
+    """Decode light changes by direction at negative/positive generator drive.
+
+    The older phase split asks whether the light is above or below its mean.
+    That cannot test saturation: it does not distinguish a further increment
+    from a decrement made at the same operating point. This analysis instead
+    takes first differences *within each held-out epoch*, labels their light
+    direction, and conditions them on the generator value immediately before
+    the change.
+
+    Generator polarity is oriented by the fitted nonlinearity's ``beta`` so
+    positive always means drive toward the cell's increasing-response side.
+    This removes the arbitrary simultaneous sign flip of an LN filter and its
+    nonlinearity, making ON-midget and ON-parasol cells comparable. The lowest
+    ``min_abs_change_quantile`` of absolute light changes is discarded equally
+    for both directions; those near-zero changes otherwise turn sign accuracy
+    into a noise metric.
+
+    ``gain_delta`` is the through-origin slope of reconstructed versus true
+    light change, ``r_delta`` measures their shape agreement,
+    ``direction_accuracy`` is the fraction reconstructed with the correct
+    sign, and ``nrmse_delta`` is normalised by the SD of all retained changes
+    in that window. Rows remain separated by time window for adaptation plots.
+    """
+    columns = [
+        'lightMean', 'light_condition', 'mode', 'window', 'order', 'centre_s',
+        'operating_point', 'direction', 'n_changes', 'change_threshold',
+        'gain_delta', 'r_delta', 'direction_accuracy', 'nrmse_delta',
+    ]
+    if traces is None or traces.empty:
+        return pd.DataFrame(columns=columns)
+    required = {'lightMean', 'mode', 'epoch', 'window', 'order', 'time_s',
+                'stimulus', 'reconstruction', 'generator'}
+    missing = sorted(required - set(traces.columns))
+    if missing:
+        raise ValueError(
+            f'directional decoding requires generator-annotated traces; missing {missing}')
+    quantile = float(min_abs_change_quantile)
+    if not 0 <= quantile < 1:
+        raise ValueError('min_abs_change_quantile must lie in [0, 1)')
+    min_samples = int(min_samples)
+    if min_samples < 1:
+        raise ValueError('min_samples must be positive')
+
+    means = sorted(pd.to_numeric(traces.lightMean, errors='coerce').dropna().unique())
+    light_labels = {
+        value: ('bright' if value == means[-1] else
+                'dim' if value == means[0] else 'intermediate')
+        for value in means
+    }
+    rows = []
+    keys = ['lightMean', 'mode', 'window', 'order']
+    for (mean_level, mode, window, order), block in traces.groupby(keys, sort=True):
+        changes = []
+        model = (generator_models or {}).get(mean_level)
+        beta = float((model.params or {}).get('beta', np.nan)) if model else np.nan
+        orientation = np.sign(beta) if np.isfinite(beta) and beta != 0 else 1.0
+        for _, epoch in block.groupby('epoch', sort=False):
+            epoch = epoch.sort_values('time_s')
+            if len(epoch) < 2:
+                continue
+            truth = pd.to_numeric(epoch.stimulus, errors='coerce').to_numpy(float)
+            estimate = pd.to_numeric(
+                epoch.reconstruction, errors='coerce').to_numpy(float)
+            generator = (pd.to_numeric(epoch.generator, errors='coerce')
+                         .to_numpy(float) * orientation)
+            changes.append(pd.DataFrame({
+                'truth_delta': np.diff(truth),
+                'estimate_delta': np.diff(estimate),
+                'generator_before': generator[:-1],
+            }))
+        if not changes:
+            continue
+        change = pd.concat(changes, ignore_index=True).replace([np.inf, -np.inf], np.nan)
+        change = change.dropna()
+        if change.empty:
+            continue
+        threshold = float(np.quantile(np.abs(change.truth_delta), quantile))
+        change = change[(np.abs(change.truth_delta) >= threshold) &
+                        change.truth_delta.ne(0)]
+        sigma = float(change.truth_delta.std(ddof=0)) if len(change) else np.nan
+        centre_s = float(pd.to_numeric(block.time_s, errors='coerce').mean())
+        for operating_point, operating_mask in (
+                ('negative', change.generator_before <= 0),
+                ('positive', change.generator_before > 0)):
+            for direction, direction_mask in (
+                    ('decrement', change.truth_delta < 0),
+                    ('increment', change.truth_delta > 0)):
+                piece = change[operating_mask & direction_mask]
+                n = int(len(piece))
+                truth = piece.truth_delta.to_numpy(float)
+                estimate = piece.estimate_delta.to_numpy(float)
+                denom = float(np.sum(truth * truth))
+                valid = n >= min_samples and denom > 0
+                r_delta = (float(np.corrcoef(estimate, truth)[0, 1])
+                           if valid and np.std(estimate) and np.std(truth)
+                           else np.nan)
+                rows.append({
+                    'lightMean': float(mean_level),
+                    'light_condition': light_labels.get(float(mean_level), ''),
+                    'mode': mode, 'window': window, 'order': int(order),
+                    'centre_s': centre_s, 'operating_point': operating_point,
+                    'direction': direction, 'n_changes': n,
+                    'change_threshold': threshold,
+                    'gain_delta': (float(np.sum(estimate * truth) / denom)
+                                   if valid else np.nan),
+                    'r_delta': r_delta,
+                    'direction_accuracy': (float(np.mean(
+                        np.sign(estimate) == np.sign(truth))) if valid else np.nan),
+                    'nrmse_delta': (float(np.sqrt(np.mean((estimate - truth) ** 2))
+                                    / sigma)
+                                    if valid and np.isfinite(sigma) and sigma > 0
+                                    else np.nan),
+                })
+    return pd.DataFrame(rows, columns=columns)
+
+
+def plot_generator_direction_decoding(
+        analysis: ConditionAnalysis,
+        directional: pd.DataFrame,
+        operating_point: str = 'positive',
+        figsize: Tuple[float, float] = (11.0, 7.2)):
+    """Plot decrement versus increment decoding at one generator operating point."""
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    if directional is None or directional.empty:
+        print('no generator-conditioned decoding rows to plot')
+        return None
+    block = directional[directional.operating_point.eq(operating_point)]
+    if block.empty:
+        print(f'no {operating_point} generator operating-point rows to plot')
+        return None
+    style.apply_publication_style()
+    modes = [mode for mode in ('per_window', 'steady_state')
+             if mode in set(block['mode'])]
+    means = [mean for mean in analysis.light_means if mean in set(block.lightMean)]
+    colors = style.colors_for_conditions([f'{mean:g}' for mean in means])
+    metrics = [('gain_delta', 'recovered change (gain)'),
+               ('direction_accuracy', 'correct direction fraction'),
+               ('nrmse_delta', 'change error / change SD')]
+    fig, axes = plt.subplots(len(metrics), len(modes), figsize=figsize,
+                             squeeze=False, sharex=True, sharey='row')
+    for row, (metric, ylabel) in enumerate(metrics):
+        for col, mode in enumerate(modes):
+            ax = axes[row, col]
+            for mean_level in means:
+                level = block[(block['mode'].eq(mode)) &
+                              (block.lightMean.eq(mean_level))]
+                for direction, linestyle in (('increment', '-'),
+                                             ('decrement', '--')):
+                    piece = level[level.direction.eq(direction)].sort_values('centre_s')
+                    if piece.empty:
+                        continue
+                    ax.plot(piece.centre_s, piece[metric], linestyle, marker='o',
+                            ms=3.5, lw=1.6, color=colors[f'{mean_level:g}'],
+                            label=f'{mean_level:g} {direction}')
+            if metric in ('gain_delta', 'direction_accuracy'):
+                ax.axhline(1.0, color='0.65', lw=0.8, ls=':')
+            if row == 0:
+                ax.set_title(titles_mode(mode), fontsize=10)
+            if col == 0:
+                ax.set_ylabel(ylabel, fontsize=9)
+            if row == len(metrics) - 1:
+                ax.set_xlabel('time since luminance step (s)', fontsize=9)
+    axes[0, 0].legend(frameon=False, fontsize=7, ncol=2)
+    fig.suptitle(
+        f'{analysis_label(analysis)} | {operating_point} generator drive | '
+        'solid increment, dashed decrement', fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.955))
+    return fig
+
+
+def directional_saturation_contrast(frame: pd.DataFrame) -> pd.DataFrame:
+    """Pair bright/positive-drive decrement and increment metrics per cell.
+
+    Every returned contrast is signed so a positive value means that decrement
+    information is better preserved: decrement minus increment for gain and
+    direction accuracy, but increment minus decrement for error.
+    """
+    keys = ['cell_id', 'cell_type', 'rec_type', 'stim_seconds', 'mode']
+    contrasts = ['gain_dec_minus_inc', 'accuracy_dec_minus_inc',
+                 'error_inc_minus_dec']
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=[*keys, *contrasts])
+    required = {*keys, 'light_condition', 'operating_point', 'direction',
+                'gain_delta', 'direction_accuracy', 'nrmse_delta'}
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise ValueError(f'directional decoding table is missing {missing}')
+    selected = frame[
+        frame.operating_point.eq('positive') &
+        frame.light_condition.eq('bright')]
+    if selected.empty:
+        return pd.DataFrame(columns=[*keys, *contrasts])
+    paired = selected.pivot_table(
+        index=keys, columns='direction',
+        values=['gain_delta', 'direction_accuracy', 'nrmse_delta'],
+        aggfunc='mean')
+    paired.columns = [f'{metric}_{direction}'
+                      for metric, direction in paired.columns]
+    paired = paired.reset_index()
+    needed = {
+        'gain_delta_decrement', 'gain_delta_increment',
+        'direction_accuracy_decrement', 'direction_accuracy_increment',
+        'nrmse_delta_decrement', 'nrmse_delta_increment',
+    }
+    if not needed.issubset(paired.columns):
+        return pd.DataFrame(columns=[*keys, *contrasts])
+    paired['gain_dec_minus_inc'] = (
+        paired.gain_delta_decrement - paired.gain_delta_increment)
+    paired['accuracy_dec_minus_inc'] = (
+        paired.direction_accuracy_decrement -
+        paired.direction_accuracy_increment)
+    paired['error_inc_minus_dec'] = (
+        paired.nrmse_delta_increment - paired.nrmse_delta_decrement)
+    return paired
 
 
 def plot_reconstruction_trace(analysis: ConditionAnalysis,
@@ -4391,9 +4634,11 @@ def save_condition_output(
         protocol_blocks: pd.DataFrame,
         temporal_models: Optional[Dict[float, List[LNModel]]] = None,
         decoded: Optional[pd.DataFrame] = None,
+        directional_decoding: Optional[pd.DataFrame] = None,
         early_late: Optional[pd.DataFrame] = None,
         decode_window_s: Optional[float] = None,
         decode_window_rule: str = '',
+        cell_index: Optional[int] = None,
         mean_window_s: float = 1.0,
         output_dir=None,
         verbose: bool = True) -> Path:
@@ -4443,6 +4688,9 @@ def save_condition_output(
         'temporal_ln_curves': temporal_curves,
         'decoding_windows': decoded.copy() if decoded is not None else pd.DataFrame(),
         'reconstruction_summary': reconstruction_summary(decoded),
+        'directional_decoding': (directional_decoding.copy()
+                                 if directional_decoding is not None
+                                 else pd.DataFrame()),
         'early_late': early_late.copy() if early_late is not None else pd.DataFrame(),
         'dropped_epochs': analysis.dropped_epochs.copy(),
         'epoch_adjustments': analysis.epoch_adjustments.copy(),
@@ -4460,6 +4708,7 @@ def save_condition_output(
         h5.attrs['exp_name'] = analysis.exp_name
         h5.attrs['cell_label'] = cell_label
         h5.attrs['cell_type'] = cell_type
+        h5.attrs['cell_index'] = int(cell_index) if cell_index is not None else -1
         h5.attrs['rec_type'] = analysis.rec_type
         h5.attrs['units'] = analysis.units
         h5.attrs['rig'] = ', '.join(rigs)
@@ -4498,6 +4747,7 @@ def save_duration_outputs(
         core_by_duration: Dict[float, CoreLNAnalysis],
         protocol_blocks: pd.DataFrame,
         reconstruction_by_duration: Optional[Dict[float, dict]] = None,
+        cell_index: Optional[int] = None,
         mean_window_s: float = 1.0,
         output_dir=None,
         verbose: bool = True) -> pd.DataFrame:
@@ -4527,12 +4777,15 @@ def save_duration_outputs(
             core.analysis, protocol_blocks,
             temporal_models=core.temporal_models,
             decoded=reconstruction.get('decoded'),
+            directional_decoding=reconstruction.get('directional_decoding'),
             early_late=reconstruction.get('early_late'),
             decode_window_s=reconstruction.get('decode_window_s'),
             decode_window_rule=decode_rule,
+            cell_index=cell_index,
             mean_window_s=mean_window_s, output_dir=output_dir,
             verbose=verbose)
         rows.append({
+            'cell_index': int(cell_index) if cell_index is not None else -1,
             'stim_time_ms': duration,
             'stim_seconds': duration / 1e3,
             'n_epochs': int(sum(core.analysis.n_epochs.values())),
@@ -4545,6 +4798,7 @@ def save_condition_outputs(
         core_by_condition: Dict[Tuple[str, float], CoreLNAnalysis],
         protocol_blocks: pd.DataFrame,
         reconstruction_by_condition: Optional[Dict[Tuple[str, float], dict]] = None,
+        cell_index: Optional[int] = None,
         mean_window_s: float = 1.0,
         output_dir=None,
         verbose: bool = True) -> pd.DataFrame:
@@ -4575,12 +4829,15 @@ def save_condition_outputs(
             core.analysis, protocol_blocks,
             temporal_models=core.temporal_models,
             decoded=reconstruction.get('decoded'),
+            directional_decoding=reconstruction.get('directional_decoding'),
             early_late=reconstruction.get('early_late'),
             decode_window_s=reconstruction.get('decode_window_s'),
             decode_window_rule=decode_rule,
+            cell_index=cell_index,
             mean_window_s=mean_window_s, output_dir=output_dir,
             verbose=verbose)
         rows.append({
+            'cell_index': int(cell_index) if cell_index is not None else -1,
             'rec_type': rec_type,
             'stim_time_ms': duration,
             'stim_seconds': duration / 1e3,
@@ -4607,6 +4864,7 @@ def _output_metadata(path) -> dict:
                         f'{text(h5.attrs["cell_label"])}/'
                         f'{text(h5.attrs["rec_type"])}'),
             'date': text(h5.attrs['exp_name']),
+            'cell_index': int(h5.attrs.get('cell_index', -1)),
             'cell_label': text(h5.attrs['cell_label']),
             'cell_type': text(h5.attrs['cell_type']),
             'rec_type': text(h5.attrs['rec_type']),
@@ -4628,7 +4886,8 @@ def _output_metadata(path) -> dict:
 def load_condition_index(output_dir=None) -> pd.DataFrame:
     """List saved cells from HDF5 attributes without loading result arrays."""
     directory = condition_output_dir(output_dir)
-    columns = ['output_version', 'condition_id', 'cell_id', 'date', 'cell_label', 'cell_type',
+    columns = ['output_version', 'condition_id', 'cell_id', 'date', 'cell_index',
+               'cell_label', 'cell_type',
                'rec_type', 'rig', 'led', 'led_ndfs', 'optical_density',
                'stim_time_ms', 'stim_seconds', 'n_epochs_total',
                'decode_window_s', 'decode_window_rule', 'protocols',
@@ -4650,6 +4909,8 @@ def load_population_table(table: str, output_dir=None) -> pd.DataFrame:
     for path in sorted(directory.glob('*.h5')):
         metadata = _output_metadata(path)
         with h5py.File(path, 'r') as h5:
+            if f'tables/{table}' not in h5:
+                continue
             frame = _read_output_frame(h5[f'tables/{table}'])
         if frame.empty:
             continue
