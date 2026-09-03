@@ -891,6 +891,83 @@ def _spike_rate(spike_samples, n_samples: int, sample_rate: float,
     return rate_hz
 
 
+def epoch_response_summary(
+        exp_name: str,
+        block_ids: Sequence[int],
+        rec_type: str,
+        max_epochs: Optional[int] = None,
+        subtract_baseline: bool = False,
+        stim_time_ms: Optional[float] = None,
+        show: bool = True) -> pd.DataFrame:
+    """One intuitive response-size measurement for every recorded epoch.
+
+    Extracellular epochs report the exact spike count divided by the recorded
+    epoch duration, in Hz. Whole-cell epochs report both their mean current and
+    their modulation SD in pA. The latter is the RMS distance from that
+    epoch's own mean, so holding-current offsets do not masquerade as response
+    modulation; variance is intentionally avoided because its pA-squared unit
+    is not intuitive.
+
+    ``stim_time_ms`` and ``max_epochs`` follow :func:`plot_traces`, allowing
+    the table and raw figure to describe exactly the same selected epochs.
+    """
+    spiking = rec_type == 'extracellular'
+    rows = []
+    for block_id in block_ids:
+        params = epoch_parameters(int(block_id))
+        if params.empty:
+            continue
+        amp, sample_rate, spike_times = load_block(
+            exp_name, int(block_id), spiking)
+        for epoch in range(min(len(params), amp.shape[0])):
+            duration = _numeric(params.iloc[epoch].get('stimTime', np.nan))
+            if (stim_time_ms is not None
+                    and not np.isclose(duration, float(stim_time_ms))):
+                continue
+            if max_epochs is not None and len(rows) >= max_epochs:
+                break
+            n_samples = int(amp.shape[1])
+            duration_s = n_samples / float(sample_rate)
+            row = {
+                'block_id': int(block_id), 'epoch': int(epoch),
+                'lightMean': float(params.iloc[epoch].get('lightMean', np.nan)),
+                'duration_s': duration_s,
+            }
+            if spiking:
+                samples = np.asarray(spike_times[epoch], dtype=np.int64)
+                n_spikes = int(np.sum((samples >= 0) & (samples < n_samples)))
+                row.update({
+                    'n_spikes': n_spikes,
+                    'mean_firing_rate_hz': (n_spikes / duration_s
+                                            if duration_s > 0 else np.nan),
+                })
+            else:
+                trace = np.asarray(amp[epoch], dtype=float)
+                if subtract_baseline:
+                    baseline = min(int(0.1 * sample_rate), trace.size)
+                    if baseline:
+                        trace = trace - float(np.nanmean(trace[:baseline]))
+                row.update({
+                    'mean_current_pA': float(np.nanmean(trace)),
+                    'modulation_sd_pA': float(np.nanstd(trace)),
+                })
+            rows.append(row)
+
+    frame = pd.DataFrame(rows)
+    if show:
+        if frame.empty:
+            print('no epochs to summarize')
+        elif spiking:
+            print('per-epoch response (mean firing rate over the recorded epoch):')
+            print(frame[['block_id', 'epoch', 'lightMean', 'n_spikes',
+                         'mean_firing_rate_hz']].round(3).to_string(index=False))
+        else:
+            print('per-epoch response (modulation SD is in pA):')
+            print(frame[['block_id', 'epoch', 'lightMean', 'mean_current_pA',
+                         'modulation_sd_pA']].round(3).to_string(index=False))
+    return frame
+
+
 def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
                 max_epochs: Optional[int] = 12, downsample: int = 50,
                 subtract_baseline: bool = False,
@@ -7546,7 +7623,7 @@ __all__ = [
     'resolve_roster_files',
     'find_blocks', 'find_protocol_cells', 'cell_blocks', 'duration_conditions',
     'recording_duration_conditions',
-    'plot_traces',
+    'epoch_response_summary', 'plot_traces',
     'epoch_parameters', 'resolve_block_mode', 'load_block_modes',
     'PROTOCOL_PARAMETERS', 'MIN_STIM_TIME_MS', 'MIN_EPOCHS_PER_DURATION',
     'PRIMATE_CELL_TYPES',

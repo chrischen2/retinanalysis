@@ -496,6 +496,46 @@ def test_psth_binning_matches_smoothing_at_the_full_rate():
     assert abs(fast.sum() - slow.sum()) < 0.01 * slow.sum()
 
 
+def test_epoch_response_summary_reports_exact_mean_firing_rate(monkeypatch):
+    import pandas as pd
+
+    params = pd.DataFrame({
+        'stimTime': [1000.0, 1000.0], 'lightMean': [0.1, 1.0]})
+    amp = np.zeros((2, 1000))
+    spikes = [np.arange(10), np.arange(20)]
+    monkeypatch.setattr(vmn, 'epoch_parameters', lambda _block: params)
+    monkeypatch.setattr(
+        vmn, 'load_block',
+        lambda _exp, _block, _spiking: (amp, 1000.0, spikes))
+
+    summary = vmn.epoch_response_summary(
+        'synthetic', [1], 'extracellular', show=False)
+
+    assert summary.n_spikes.tolist() == [10, 20]
+    assert summary.mean_firing_rate_hz.tolist() == [10.0, 20.0]
+
+
+def test_epoch_response_summary_reports_whole_cell_modulation_in_pa(monkeypatch):
+    import pandas as pd
+
+    params = pd.DataFrame({
+        'stimTime': [1000.0, 1000.0], 'lightMean': [0.1, 1.0]})
+    amp = np.vstack([
+        np.tile([7.0, 13.0], 500),
+        np.tile([-9.0, -1.0], 500),
+    ])
+    monkeypatch.setattr(vmn, 'epoch_parameters', lambda _block: params)
+    monkeypatch.setattr(
+        vmn, 'load_block',
+        lambda _exp, _block, _spiking: (amp, 1000.0, None))
+
+    summary = vmn.epoch_response_summary(
+        'synthetic', [1], 'exc', show=False)
+
+    np.testing.assert_allclose(summary.mean_current_pA, [10.0, -5.0])
+    np.testing.assert_allclose(summary.modulation_sd_pA, [3.0, 4.0])
+
+
 def _polarity_dataset(n_epochs=6, n_time=4000, lag=8, seed=0):
     """A cell whose response is a lagged, rectified copy of a noise stimulus."""
     rng = np.random.default_rng(seed)
