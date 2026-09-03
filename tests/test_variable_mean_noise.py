@@ -1883,6 +1883,11 @@ def test_population_wrappers_are_safe_before_any_records_exist(tmp_path):
     assert decoding['directional_contrast_figures'] == {}
 
 
+def test_condition_output_default_is_external_rod_noise_folder():
+    assert vmn.condition_output_dir() == Path(
+        '/Volumes/ChrisNewSSD/retinanalysis_output/rod_adaptation/noise')
+
+
 def test_reconstruction_batch_helper_returns_save_ready_bundle(monkeypatch):
     import pandas as pd
 

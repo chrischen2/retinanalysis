@@ -84,7 +84,8 @@ SUMMARY_VARIABLE = 'rodNoiseLNModelSummary'
 # the saved tables are the inexpensive, reproducible core LN and reconstruction
 # outputs.
 CONDITION_OUTPUT_VERSION = 2
-CONDITION_OUTPUT_DIR = Path(__file__).resolve().parent / 'condition_outputs'
+CONDITION_OUTPUT_DIR = Path(
+    '/Volumes/ChrisNewSSD/retinanalysis_output/rod_adaptation/noise')
 CONDITION_TABLES = (
     'light_settings', 'mean_response', 'condition_summary',
     'temporal_summary', 'ln_curves', 'temporal_ln_curves',
