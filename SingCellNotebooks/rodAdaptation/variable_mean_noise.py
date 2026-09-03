@@ -2429,9 +2429,10 @@ class ConditionAnalysis:
     sequence_epoch: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=int))
     stimulus: Dict[float, np.ndarray] = field(default_factory=dict)
     response: Dict[float, np.ndarray] = field(default_factory=dict)
-    # Manual Section 2 exclusions, as zero-based ``(block_id, epoch)`` pairs.
-    # Retained so any later reload (notably reconstruction) uses identical data.
+    # All Section 2 exclusions, as zero-based ``(block_id, epoch)`` pairs.
+    # Activity-based exclusions are also retained separately for provenance.
     excluded_epochs: List[Tuple[int, int]] = field(default_factory=list)
+    activity_excluded_epochs: List[Tuple[int, int]] = field(default_factory=list)
     # What the whole-cell salvage did: epochs refused on series resistance,
     # and the per-epoch offsets removed to bring their holding currents onto a
     # common level. Both are kept so a fit can be traced back to the traces.
@@ -2628,6 +2629,7 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                       align_epoch_means: bool = True,
                       max_epochs: Optional[int] = None,
                       excluded_epochs=(),
+                      activity_excluded_epochs=(),
                       fit: bool = True,
                       verbose: bool = True) -> ConditionAnalysis:
     """Load epochs, regenerate their stimuli, and fit one LN model per light mean.
@@ -2755,7 +2757,8 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
             + ', '.join(f'{value:g}' for value in available_durations))
 
     spiking = rec_type == 'extracellular'
-    excluded = _excluded_epoch_set(excluded_epochs)
+    activity_excluded = _excluded_epoch_set(activity_excluded_epochs)
+    excluded = _excluded_epoch_set(excluded_epochs) | activity_excluded
     selected_means = (None if light_means is None else
                       tuple(float(value) for value in light_means))
     # The drift guards below correct a *holding current*, which only a
@@ -2807,11 +2810,15 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                                 for value in selected_means)):
                 continue
             if (int(block_id), int(index)) in excluded:
+                exclusion_reason = (
+                    'below Section 2 activity threshold'
+                    if (int(block_id), int(index)) in activity_excluded
+                    else 'manually excluded in Section 2')
                 dropped.append({
                     'block_id': int(block_id), 'epoch': int(index),
                     'light_mean': mean_level,
                     'series_resistance_mohm': np.nan,
-                    'reason': 'manually excluded in Section 2'})
+                    'reason': exclusion_reason})
                 continue
             if cutoff is None and 'frequencyCutoff' in row:
                 cutoff = float(row['frequencyCutoff'])
@@ -2880,7 +2887,8 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
         sampling_interval=interval, skip_seconds=float(skip_seconds),
         stim_time_ms=(float(stim_time_ms) if stim_time_ms is not None else np.nan),
         units='firing rate (Hz)' if spiking else 'current (pA)',
-        excluded_epochs=sorted(excluded))
+        excluded_epochs=sorted(excluded),
+        activity_excluded_epochs=sorted(activity_excluded))
     for mean_level in sorted(stimuli):
         width = min(min(s.size for s in stimuli[mean_level]),
                     min(r.size for r in responses[mean_level]))
@@ -4928,6 +4936,13 @@ def save_condition_output(
             'excluded_epochs',
             data=excluded_array.reshape((-1, 2)) if excluded_array.size
             else np.empty((0, 2), dtype=np.int64))
+        activity_excluded_array = np.asarray(
+            analysis.activity_excluded_epochs, dtype=np.int64)
+        h5.create_dataset(
+            'activity_excluded_epochs',
+            data=(activity_excluded_array.reshape((-1, 2))
+                  if activity_excluded_array.size
+                  else np.empty((0, 2), dtype=np.int64)))
         tables = h5.create_group('tables')
         for name in CONDITION_TABLES:
             _write_output_frame(tables.create_group(name), frames[name])
@@ -8154,6 +8169,7 @@ def run_core_ln_analysis(
         max_series_resistance: Optional[float] = 30e6,
         align_epoch_means: bool = True,
         excluded_epochs=(),
+        activity_excluded_epochs=(),
         min_firing_rate_hz: Optional[float] = None,
         low_rate_epoch_fraction: Optional[float] = None,
         subtract_baseline: bool = False,
@@ -8195,6 +8211,7 @@ def run_core_ln_analysis(
         max_series_resistance=max_series_resistance,
         align_epoch_means=align_epoch_means, max_epochs=max_epochs,
         excluded_epochs=excluded_epochs,
+        activity_excluded_epochs=activity_excluded_epochs,
         fit=False, verbose=verbose)
 
     if (min_firing_rate_hz is None) != (low_rate_epoch_fraction is None):
@@ -8280,6 +8297,11 @@ def inspect_recording_conditions(
     updated['included_light_means'] = [[] for _ in range(len(updated))]
     updated['n_qc_excluded_light_means'] = 0
     updated['qc_exclusion_reason'] = ''
+    if 'excluded_epochs' not in updated:
+        updated['excluded_epochs'] = [[] for _ in range(len(updated))]
+    updated['activity_excluded_epochs'] = [[] for _ in range(len(updated))]
+    updated['n_activity_excluded_epochs'] = 0
+    updated['n_epochs_after_activity_qc'] = 0
     audit_rows = []
 
     for row_index, condition in updated[updated.included].iterrows():
@@ -8304,7 +8326,8 @@ def inspect_recording_conditions(
             max_epochs=max_epochs, stim_time_ms=condition.stim_time_ms,
             excluded_epochs=excluded_epochs)
 
-        retained_means, failed_reasons = [], []
+        retained_means, failed_reasons, activity_excluded = [], [], []
+        n_retained_active = 0
         numeric_means = pd.to_numeric(
             summary.get('lightMean', pd.Series(dtype=float)), errors='coerce')
         for mean_level in sorted(numeric_means.dropna().unique()):
@@ -8325,13 +8348,19 @@ def inspect_recording_conditions(
             low_fraction = float(quality.low_response_fraction.iloc[0])
             threshold = float(quality.response_threshold.iloc[0])
             metric = str(quality.response_metric_name.iloc[0])
-            reason = (f'{n_low}/{n_epochs} epochs ({low_fraction:.1%}) below '
-                      f'{threshold:g} on {metric}' if failed else '')
+            if failed:
+                reason = (f'{n_low}/{n_epochs} epochs ({low_fraction:.1%}) '
+                          f'below {threshold:g} on {metric}')
+            elif n_low:
+                reason = f'{n_low} below-threshold epoch(s) removed'
+            else:
+                reason = ''
             audit_rows.append({
                 'rec_type': rec_type, 'stim_time_ms': duration,
                 'stim_seconds': duration / 1e3,
                 'lightMean': float(mean_level), 'n_epochs': n_epochs,
                 'n_below_threshold': n_low,
+                'n_epochs_used': 0 if failed else n_epochs - n_low,
                 'below_threshold_fraction': low_fraction,
                 'response_metric': metric, 'response_threshold': threshold,
                 'included': not failed, 'reason': reason,
@@ -8340,7 +8369,23 @@ def inspect_recording_conditions(
                 failed_reasons.append(f'lightMean {mean_level:g}: {reason}')
             else:
                 retained_means.append(float(mean_level))
+                n_retained_active += n_epochs - n_low
+                quiet = quality[quality.below_response_threshold]
+                if len(quiet) and not {'block_id', 'epoch'} <= set(quiet.columns):
+                    raise ValueError(
+                        'response summary must include block_id and epoch to '
+                        'exclude below-threshold epochs')
+                activity_excluded.extend(
+                    (int(row.block_id), int(row.epoch))
+                    for row in quiet.itertuples())
 
+        activity_excluded = sorted(set(activity_excluded))
+        prior_excluded = _excluded_epoch_set(condition.get('excluded_epochs', ()))
+        updated.at[row_index, 'activity_excluded_epochs'] = activity_excluded
+        updated.at[row_index, 'n_activity_excluded_epochs'] = len(activity_excluded)
+        updated.at[row_index, 'excluded_epochs'] = sorted(
+            prior_excluded | set(activity_excluded))
+        updated.at[row_index, 'n_epochs_after_activity_qc'] = n_retained_active
         updated.at[row_index, 'included_light_means'] = retained_means
         updated.at[row_index, 'n_qc_excluded_light_means'] = len(failed_reasons)
         no_epochs_reason = ('no epochs available for response QC'
@@ -8370,6 +8415,8 @@ def inspect_recording_conditions(
         print(f'{len(retained)} mode-duration condition(s) retained; '
               f'{int(condition_audit.included.sum()) if len(condition_audit) else 0} '
               'mean-light condition(s) retained.')
+        n_quiet = int(updated.n_activity_excluded_epochs.sum())
+        print(f'{n_quiet} below-threshold epoch(s) removed from retained groups.')
     return ResponseInspection(
         summaries, figures, qc, signature, updated, condition_audit)
 
@@ -8405,8 +8452,12 @@ def run_core_condition_analyses(
     for condition in conditions.itertuples():
         rec_type, duration = str(condition.rec_type), float(condition.stim_time_ms)
         excluded_epochs = getattr(condition, 'excluded_epochs', ())
+        activity_excluded_epochs = getattr(
+            condition, 'activity_excluded_epochs', ())
         included_light_means = getattr(condition, 'included_light_means', None)
-        retained_epochs = getattr(condition, 'n_epochs_retained', condition.n_epochs)
+        retained_epochs = getattr(
+            condition, 'n_epochs_after_activity_qc',
+            getattr(condition, 'n_epochs_retained', condition.n_epochs))
         if verbose:
             print(f'\n=== {rec_type} | {condition.stim_seconds:g} s epochs | '
                   f'{retained_epochs} retained of {condition.n_epochs} recorded ===')
@@ -8418,6 +8469,7 @@ def run_core_condition_analyses(
             max_series_resistance=max_series_resistance,
             align_epoch_means=align_epoch_means,
             excluded_epochs=excluded_epochs,
+            activity_excluded_epochs=activity_excluded_epochs,
             mean_window_s=mean_window_s,
             condition_window_s=condition_window_s,
             temporal_window_s=temporal_window_s, verbose=verbose)
@@ -8463,6 +8515,7 @@ def run_reconstruction_analyses(
             max_series_resistance=max_series_resistance,
             align_epoch_means=align_epoch_means,
             excluded_epochs=core.analysis.excluded_epochs,
+            activity_excluded_epochs=core.analysis.activity_excluded_epochs,
             fit=False, verbose=False)
         if decode_window_s == 'auto':
             selected_window, window_selection = select_decode_window(

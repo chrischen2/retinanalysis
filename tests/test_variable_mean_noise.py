@@ -284,12 +284,15 @@ def test_analyze_condition_omits_manually_excluded_epochs(monkeypatch):
     analysis = vmn.analyze_condition(
         'synthetic', [11], rec_type='exc', stim_time_ms=30.0,
         skip_seconds=0.0, downsample=1, align_epoch_means=False,
-        excluded_epochs=[(11, 1)], fit=False, verbose=False)
+        excluded_epochs=[(11, 1)], activity_excluded_epochs=[(11, 1)],
+        fit=False, verbose=False)
 
     assert analysis.n_epochs == {.3: 2}
     assert analysis.excluded_epochs == [(11, 1)]
     assert analysis.dropped_epochs[['block_id', 'epoch']].values.tolist() == [[11, 1]]
-    assert analysis.dropped_epochs.reason.tolist() == ['manually excluded in Section 2']
+    assert analysis.activity_excluded_epochs == [(11, 1)]
+    assert analysis.dropped_epochs.reason.tolist() == [
+        'below Section 2 activity threshold']
 
 
 def test_numpy_does_not_reproduce_matlab_randn():
@@ -1718,6 +1721,7 @@ def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
 
     analysis, temporal = _population_analysis()
     analysis.excluded_epochs = [(11, 1)]
+    analysis.activity_excluded_epochs = [(11, 1)]
     blocks = pd.DataFrame({
         'block_id': [11, 12], 'exp_name': ['2020-06-11_B'] * 2,
         'cell_label': ['Cell3'] * 2, 'cell_type_short': ['OFF-parasol'] * 2,
@@ -1770,6 +1774,7 @@ def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
         assert stored.attrs['cell_index'] == 19
         assert stored.attrs['mean_rate_hz'] == pytest.approx(39.5)
         assert stored['excluded_epochs'][:].tolist() == [[11, 1]]
+        assert stored['activity_excluded_epochs'][:].tolist() == [[11, 1]]
         assert stored.attrs['decode_window_s'] == 2.5
         assert stored.attrs['decode_window_rule'] == 'shortest_within_one_se'
         assert stored.attrs['led_ndfs'] == 'B1, B12'
@@ -1987,10 +1992,12 @@ def test_inspection_excludes_only_failed_activity_conditions(monkeypatch):
     def fake_summary(_exp, _blocks, rec_type, **_kwargs):
         if rec_type == 'extracellular':
             return pd.DataFrame({
-                'lightMean': [.1, .1, 1., 1.],
-                'mean_firing_rate_hz': [40., 45., 0., 0.],
+                'block_id': [11] * 5, 'epoch': [0, 1, 2, 3, 4],
+                'lightMean': [.1, .1, .1, 1., 1.],
+                'mean_firing_rate_hz': [40., 0., 45., 0., 0.],
             })
         return pd.DataFrame({
+            'block_id': [12, 12], 'epoch': [0, 1],
             'lightMean': [.1, .1], 'modulation_sd_pA': [10., 20.],
         })
 
@@ -2005,12 +2012,29 @@ def test_inspection_excludes_only_failed_activity_conditions(monkeypatch):
     updated = inspection.conditions.set_index('rec_type')
     assert updated.loc['extracellular', 'included']
     assert updated.loc['extracellular', 'included_light_means'] == [.1]
+    assert updated.loc['extracellular', 'activity_excluded_epochs'] == [(11, 1)]
+    assert updated.loc['extracellular', 'excluded_epochs'] == [(11, 1)]
+    assert updated.loc['extracellular', 'n_epochs_after_activity_qc'] == 2
     assert not updated.loc['exc', 'included']
     assert 'all mean-light conditions failed' in updated.loc['exc', 'reason']
     audit = inspection.condition_audit.set_index(['rec_type', 'lightMean'])
     assert audit.loc[('extracellular', .1), 'included']
+    assert audit.loc[('extracellular', .1), 'n_epochs_used'] == 2
     assert not audit.loc[('extracellular', 1.), 'included']
     assert not audit.loc[('exc', .1), 'included']
+
+    captured = {}
+    monkeypatch.setattr(
+        vmn, 'run_core_ln_analysis',
+        lambda *args, **kwargs: captured.update(kwargs) or object())
+    retained = inspection.conditions[inspection.conditions.included].copy()
+    vmn.run_core_condition_analyses(
+        'example', [11, 12], retained, qc_signature=inspection.signature,
+        min_firing_rate_hz=30., min_whole_cell_modulation_pa=100.,
+        low_response_epoch_fraction=.8, verbose=False)
+    assert captured['light_means'] == [.1]
+    assert captured['excluded_epochs'] == [(11, 1)]
+    assert captured['activity_excluded_epochs'] == [(11, 1)]
 
 
 def test_population_wrappers_are_safe_before_any_records_exist(tmp_path):
