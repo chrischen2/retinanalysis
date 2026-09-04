@@ -1550,6 +1550,118 @@ def corrected_dates(roster: pd.DataFrame,
     return roster['calendar_date'].map(shift)
 
 
+def compare_matlab_roster_to_saved(
+        roster: pd.DataFrame,
+        saved_cells: pd.DataFrame,
+        offset_days: int = SAVED_DATE_OFFSET_DAYS,
+        show: bool = True) -> pd.DataFrame:
+    """Match MATLAB roster rows to saved Section 5a condition entries.
+
+    The required identity is corrected calendar date (the saved rig suffix is
+    ignored because MATLAB did not record it), case-sensitive cell label,
+    recording type, and epoch duration. A normalized cell-type agreement makes
+    the result ``likely matched``; disagreement only on cell type makes it a
+    ``candidate`` so known cell-type annotation errors remain reviewable.
+    Rows without a required-field match remain visible as ``not matched``.
+    """
+    columns = [
+        'matlab_index', 'match_status', 'recorded_date', 'corrected_date',
+        'matlab_cell_label', 'saved_cell_label', 'matlab_cell_type',
+        'saved_cell_type', 'cell_type_agrees', 'matlab_rec_type',
+        'saved_rec_type', 'matlab_epoch_seconds', 'saved_stim_seconds',
+        'saved_date', 'saved_cell_index', 'saved_entry', 'saved_output_path',
+    ]
+    matlab = roster.reset_index(drop=True).copy()
+    saved = saved_cells.reset_index(drop=True).copy()
+    if 'calendar_date' not in matlab:
+        matlab['calendar_date'] = matlab.get(
+            'exp_date', pd.Series('', index=matlab.index)).astype(str).str.replace(
+                '/', '-', regex=False)
+    matlab['recorded_date'] = matlab['calendar_date'].astype(str)
+    matlab['corrected_date'] = corrected_dates(matlab, offset_days)
+
+    if saved.empty:
+        saved = pd.DataFrame(columns=[
+            'date', 'cell_label', 'cell_type', 'rec_type', 'stim_time_ms',
+            'stim_seconds', 'cell_index', 'output_path'])
+    for column, default in (
+            ('date', ''), ('cell_label', ''), ('cell_type', ''),
+            ('rec_type', ''), ('stim_time_ms', np.nan),
+            ('stim_seconds', np.nan), ('cell_index', -1),
+            ('output_path', '')):
+        if column not in saved:
+            saved[column] = default
+    saved['_calendar_date'] = saved['date'].astype(str).str.extract(
+        r'^(\d{4}-\d{2}-\d{2})', expand=False).fillna('')
+    saved['_stim_time_ms'] = pd.to_numeric(saved['stim_time_ms'], errors='coerce')
+
+    rows = []
+    for position, entry in matlab.iterrows():
+        matlab_index = entry.get('index', position)
+        duration_ms = _numeric(entry.get('epoch_len_ms', np.nan))
+        label = str(entry.get('cell_label', ''))
+        rec_type = str(entry.get('rec_type', '')).strip().lower()
+        duration_match = np.isclose(
+            saved['_stim_time_ms'], duration_ms, rtol=0, atol=0.5,
+            equal_nan=False)
+        matches = saved[
+            saved['_calendar_date'].eq(entry.corrected_date)
+            & saved['cell_label'].astype(str).eq(label)
+            & saved['rec_type'].astype(str).str.strip().str.lower().eq(rec_type)
+            & duration_match]
+
+        base = {
+            'matlab_index': int(matlab_index),
+            'recorded_date': entry.recorded_date,
+            'corrected_date': entry.corrected_date,
+            'matlab_cell_label': label,
+            'matlab_cell_type': str(entry.get('cell_type', '')),
+            'matlab_rec_type': str(entry.get('rec_type', '')),
+            'matlab_epoch_seconds': (duration_ms / 1e3
+                                     if np.isfinite(duration_ms) else np.nan),
+        }
+        if matches.empty:
+            rows.append({
+                **base, 'match_status': 'not matched',
+                'saved_cell_label': '', 'saved_cell_type': '',
+                'cell_type_agrees': False, 'saved_rec_type': '',
+                'saved_stim_seconds': np.nan, 'saved_date': '',
+                'saved_cell_index': -1, 'saved_entry': '',
+                'saved_output_path': '',
+            })
+            continue
+
+        for _, candidate in matches.iterrows():
+            type_agrees = (_normalize_cell_type(entry.get('cell_type', ''))
+                           == _normalize_cell_type(candidate.cell_type))
+            stim_seconds = _numeric(candidate.stim_seconds)
+            saved_entry = (
+                f'cell_index {int(candidate.cell_index)} | {candidate.date} | '
+                f'{candidate.cell_label} | {candidate.cell_type} | '
+                f'{candidate.rec_type} | {stim_seconds:g} s')
+            rows.append({
+                **base,
+                'match_status': ('likely matched' if type_agrees else 'candidate'),
+                'saved_cell_label': str(candidate.cell_label),
+                'saved_cell_type': str(candidate.cell_type),
+                'cell_type_agrees': bool(type_agrees),
+                'saved_rec_type': str(candidate.rec_type),
+                'saved_stim_seconds': stim_seconds,
+                'saved_date': str(candidate.date),
+                'saved_cell_index': int(candidate.cell_index),
+                'saved_entry': saved_entry,
+                'saved_output_path': str(candidate.output_path),
+            })
+
+    result = pd.DataFrame(rows, columns=columns)
+    if show:
+        print(f'{len(matlab)} MATLAB entr(ies) compared with '
+              f'{len(saved_cells)} saved condition entr(ies)')
+        if len(result):
+            print(result.match_status.value_counts().to_string())
+    return result
+
+
 def resolve_roster_files(roster: pd.DataFrame, root=None,
                          offset_days: int = SAVED_DATE_OFFSET_DAYS,
                          fallback_offsets: Sequence[int] = FALLBACK_OFFSETS,
@@ -8805,6 +8917,7 @@ __all__ = [
     'summary_path', 'load_summary', 'load_cell',
     'DATE_OFFSETS', 'SAVED_DATE_OFFSET_DAYS', 'FALLBACK_OFFSETS',
     'SINGLE_CELL_ROOT', 'metadata_files', 'corrected_dates',
+    'compare_matlab_roster_to_saved',
     'resolve_roster_files',
     'find_blocks', 'find_protocol_cells', 'cell_blocks', 'duration_conditions',
     'recording_duration_conditions', 'apply_recording_type_exclusions',

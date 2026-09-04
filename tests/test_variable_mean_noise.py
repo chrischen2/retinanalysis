@@ -140,6 +140,41 @@ def test_recording_duration_conditions_threshold_is_per_paired_condition(monkeyp
         ('unresolved', 30_000), 'reason']
 
 
+def test_matlab_saved_comparison_uses_corrected_date_and_exact_label_case():
+    import pandas as pd
+
+    roster = pd.DataFrame({
+        'index': [4, 5, 6],
+        'calendar_date': ['2021-04-25'] * 3,
+        'cell_label': ['Cell1', 'Cell2', 'cell3'],
+        'cell_type': ['OnMidget', 'OnParasol', 'OnParasol'],
+        'rec_type': ['exc', 'extracellular', 'extracellular'],
+        'epoch_len_ms': [50_000., 60_000., 60_000.],
+    })
+    saved = pd.DataFrame({
+        'date': ['2021-04-27_B'] * 3,
+        'cell_label': ['Cell1', 'Cell2', 'Cell3'],
+        'cell_type': ['ON-midget', 'OFF-parasol', 'OnParasol'],
+        'rec_type': ['exc', 'extracellular', 'extracellular'],
+        'stim_time_ms': [50_000., 60_000., 60_000.],
+        'stim_seconds': [50., 60., 60.],
+        'cell_index': [11, 12, 13],
+        'output_path': ['/tmp/a.h5', '/tmp/b.h5', '/tmp/c.h5'],
+    })
+
+    compared = vmn.compare_matlab_roster_to_saved(roster, saved, show=False)
+
+    indexed = compared.set_index('matlab_index')
+    assert indexed.loc[4, 'match_status'] == 'likely matched'
+    assert indexed.loc[4, 'corrected_date'] == '2021-04-27'
+    assert indexed.loc[4, 'saved_date'] == '2021-04-27_B'
+    assert indexed.loc[5, 'match_status'] == 'candidate'
+    assert not indexed.loc[5, 'cell_type_agrees']
+    assert 'cell_index 12' in indexed.loc[5, 'saved_entry']
+    assert indexed.loc[6, 'match_status'] == 'not matched'
+    assert indexed.loc[6, 'saved_entry'] == ''
+
+
 def test_apply_recording_type_exclusions_preserves_condition_audit():
     import pandas as pd
 
