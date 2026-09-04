@@ -67,24 +67,15 @@ def test_update_single_cell_json_publishes_canonical_auisql_name(
     json_dir.mkdir()
     auisql = h5_dir / '2026-09-04_G.auisql.h5'
     auisql.touch()
+    auisql.with_suffix('').touch()
 
-    class FakeReader:
-        def __init__(self, *, h5_path, out_path, **kwargs):
-            self.h5_path = h5_path
-            self.out_path = out_path
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return None
-
-        def read_write(self):
-            with open(self.out_path, 'w') as stream:
-                json.dump({'source': self.h5_path}, stream)
+    def fake_convert(database_path, h5_path, out_path):
+        with open(out_path, 'w') as stream:
+            json.dump({'source': str(h5_path)}, stream)
 
     monkeypatch.setattr(
-        'retinanalysis.utils.parse_data.Symphony2Reader', FakeReader)
+        'retinanalysis.SCutils.auisql_json.convert_auisql_to_json',
+        fake_convert)
 
     report = update_single_cell_json(volume=volume, verbose=False)
 
@@ -93,3 +84,14 @@ def test_update_single_cell_json_publishes_canonical_auisql_name(
     assert report.created == (canonical_json,)
     assert canonical_json.is_file()
     assert not (json_dir / '2026-09-04_G.auisql.json').exists()
+
+
+def test_repair_h5_paths_skips_unstored_auisql_stimulus(tmp_path):
+    metadata = {'stimuli': {'UV LED': {
+        'uuid': 'not-in-h5', 'h5path': '', 'dataStored': False,
+    }}}
+    h5_path = tmp_path / 'response.h5'
+    with h5py.File(h5_path, 'w'):
+        pass
+
+    assert repair_h5_paths(metadata, h5_path) == 0

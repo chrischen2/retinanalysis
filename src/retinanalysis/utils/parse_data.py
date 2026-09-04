@@ -1802,8 +1802,9 @@ def find_new_h5_files(h5_dir: Path, json_dir: Path):
 
     Prefer ``YYYY-MM-DD_Rig.h5`` when it and
     ``YYYY-MM-DD_Rig.auisql.h5`` both exist. If only the AUISQL H5 exists,
-    use it as the source for ``YYYY-MM-DD_Rig.json``. Hidden files, macOS
-    AppleDouble files, and unrelated H5 files are ignored.
+    use its complete AUISQL bundle as the source for
+    ``YYYY-MM-DD_Rig.json``. Hidden files, macOS AppleDouble files, and
+    unrelated H5 files are ignored.
     """
     sources_by_stem = {}
     for path in sorted(h5_dir.glob('*.h5')):
@@ -1899,14 +1900,21 @@ if __name__ == '__main__':
         print(f'Writing to {out_path}')
 
         try:
-            with Symphony2Reader(
-                h5_path=str(h5_path),
-                out_path=str(out_path),
-                mea_raw_data_path=raw_data_path,
-                stage_type=stage_type,
-                save_h5_path=save_h5_path
-            ) as reader:
-                reader.read_write()
+            if h5_path.name.lower().endswith('.auisql.h5'):
+                from retinanalysis.SCutils.auisql_json import (
+                    convert_auisql_to_json,
+                )
+                convert_auisql_to_json(
+                    h5_path.with_suffix(''), h5_path, out_path)
+            else:
+                with Symphony2Reader(
+                    h5_path=str(h5_path),
+                    out_path=str(out_path),
+                    mea_raw_data_path=raw_data_path,
+                    stage_type=stage_type,
+                    save_h5_path=save_h5_path
+                ) as reader:
+                    reader.read_write()
 
         except Exception as e:
             print(f'Failed to process {h5_path}: {e}')

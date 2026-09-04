@@ -118,7 +118,8 @@ def _h5path_records(value):
         for key, child in value.items():
             if key in ('responses', 'stimuli') and isinstance(child, dict):
                 for record in child.values():
-                    if isinstance(record, dict):
+                    if (isinstance(record, dict)
+                            and record.get('dataStored') is not False):
                         yield record
             yield from _h5path_records(child)
     elif isinstance(value, list):
@@ -197,7 +198,8 @@ def update_single_cell_json(
     retained by default because database ingestion and raw-trace loading need
     them. When both a canonical H5 and its ``.auisql.h5`` counterpart exist,
     the canonical H5 is used. An AUISQL file is used only as a fallback when
-    the canonical H5 is absent, and still produces the canonical JSON name.
+    the canonical H5 is absent and its companion ``.auisql`` metadata database
+    is available. It still produces the canonical JSON name.
 
     Typical use::
 
@@ -244,14 +246,22 @@ def update_single_cell_json(
                     prefix=f'.{h5_path.stem}-', dir=json_dir) as temp_name:
                 temp_dir = Path(temp_name)
                 temp_json = temp_dir / output_json.name
-                with Symphony2Reader(
-                    h5_path=str(h5_path),
-                    out_path=str(temp_json),
-                    mea_raw_data_path=None,
-                    stage_type=stage_type,
-                    save_h5_path=save_h5_path,
-                ) as reader:
-                    reader.read_write()
+                if h5_path.name.lower().endswith('.auisql.h5'):
+                    from retinanalysis.SCutils.auisql_json import (
+                        convert_auisql_to_json,
+                    )
+                    auisql_path = h5_path.with_suffix('')
+                    convert_auisql_to_json(
+                        auisql_path, h5_path, temp_json)
+                else:
+                    with Symphony2Reader(
+                        h5_path=str(h5_path),
+                        out_path=str(temp_json),
+                        mea_raw_data_path=None,
+                        stage_type=stage_type,
+                        save_h5_path=save_h5_path,
+                    ) as reader:
+                        reader.read_write()
 
                 if not temp_json.is_file():
                     raise RuntimeError('parse_data did not create a JSON file')

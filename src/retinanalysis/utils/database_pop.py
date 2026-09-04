@@ -3,7 +3,8 @@ from retinanalysis.utils import (DATA_DIR,
                                  USER)
 from retinanalysis.config.settings import find_path
 from retinanalysis.utils.experiment_files import (is_mea_experiment_file,
-                                                   is_single_cell_experiment_file)
+                                                   is_single_cell_experiment_file,
+                                                   single_cell_json_stem)
 
 import datajoint as dj
 import json
@@ -662,10 +663,10 @@ def gen_tags(file_to_create: str, dir: str):
 def gen_meta_list(data_dir: str, meta_dir: str, tags_dir: str) -> list:
     """Return ingestible experiment triples from one source tree.
 
-    Single-cell H5 names must follow ``YYYY-MM-DD_X.h5`` (with optional run
-    suffixes such as ``_2`` or ``_c1-3``). Auxiliary and legacy files are
-    ignored silently; in particular, ``*.auisql.h5`` is not experiment data.
-    The metadata-only pass separately recognizes the compact MEA date format.
+    Single-cell H5 names normally follow ``YYYY-MM-DD_X.h5`` (with optional
+    run suffixes such as ``_2`` or ``_c1-3``). A complete AUISQL bundle is a
+    supported fallback only when its canonical H5 is absent. The metadata-only
+    pass separately recognizes the compact MEA date format.
     """
     stack = [data_dir]
     meta_list = []
@@ -677,17 +678,28 @@ def gen_meta_list(data_dir: str, meta_dir: str, tags_dir: str) -> list:
             if os.path.isdir(full_path):
                 stack.append(full_path)
             else:
-                if is_single_cell_experiment_file(item, suffix='.h5'):
+                is_primary_h5 = is_single_cell_experiment_file(
+                    item, suffix='.h5')
+                json_stem = single_cell_json_stem(item)
+                is_auisql_fallback = (
+                    json_stem is not None
+                    and item.lower().endswith('.auisql.h5')
+                    and os.path.isfile(
+                        os.path.join(current_dir, json_stem + '.auisql'))
+                    and not os.path.isfile(
+                        os.path.join(current_dir, json_stem + '.h5'))
+                )
+                if is_primary_h5 or is_auisql_fallback:
                     # check for meta
-                    meta_file = os.path.join(meta_dir, item[:-3] + '.json')
+                    meta_file = os.path.join(meta_dir, json_stem + '.json')
                     if not os.path.exists(meta_file):
                         parse_data(full_path, meta_dir)
                         # As parse_data is not implemented, we will skip this file for now.
                         continue
                     # check for tags
-                    tags_file = os.path.join(tags_dir, item[:-3] + '.json')
+                    tags_file = os.path.join(tags_dir, json_stem + '.json')
                     if not os.path.exists(tags_file):
-                        gen_tags(item[:-3] + '.json', tags_dir)
+                        gen_tags(json_stem + '.json', tags_dir)
                     meta_list.append([meta_file, full_path, tags_file])
     
     # That should be all of the single cell. MEA metadata uses the disjoint

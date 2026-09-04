@@ -9,9 +9,13 @@ that `import retinanalysis` stays fast for users who never touch the
 single-cell path.
 """
 
-_MODULES = {"dataprocessor", "protocols", "explore", "h5_json"}
+_MODULES = {
+    "auisql_json", "dataprocessor", "protocols", "explore", "h5_json"
+}
 _ATTRIBUTES = {
+    "AuisqlReader": ("auisql_json", "AuisqlReader"),
     "SingleCellJsonUpdate": ("h5_json", "SingleCellJsonUpdate"),
+    "convert_auisql_to_json": ("auisql_json", "convert_auisql_to_json"),
     "update_single_cell_json": ("h5_json", "update_single_cell_json"),
 }
 

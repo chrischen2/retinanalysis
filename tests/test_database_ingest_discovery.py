@@ -7,6 +7,48 @@ import pytest
 from retinanalysis.utils import database_pop
 
 
+def test_complete_auisql_bundle_is_ingestible_fallback(tmp_path):
+    h5_dir = tmp_path / 'h5'
+    meta_dir = tmp_path / 'meta'
+    tags_dir = tmp_path / 'tags'
+    for directory in (h5_dir, meta_dir, tags_dir):
+        directory.mkdir()
+    stem = '2022-09-09_B'
+    database = h5_dir / f'{stem}.auisql'
+    response_h5 = h5_dir / f'{stem}.auisql.h5'
+    database.touch()
+    response_h5.touch()
+    metadata = meta_dir / f'{stem}.json'
+    metadata.write_text('{}')
+
+    rows = database_pop.gen_meta_list(
+        str(h5_dir), str(meta_dir), str(tags_dir))
+
+    assert rows == [[str(metadata), str(response_h5),
+                     str(tags_dir / f'{stem}.json')]]
+
+
+def test_primary_h5_wins_over_complete_auisql_bundle(tmp_path):
+    h5_dir = tmp_path / 'h5'
+    meta_dir = tmp_path / 'meta'
+    tags_dir = tmp_path / 'tags'
+    for directory in (h5_dir, meta_dir, tags_dir):
+        directory.mkdir()
+    stem = '2022-09-09_B'
+    primary_h5 = h5_dir / f'{stem}.h5'
+    primary_h5.touch()
+    (h5_dir / f'{stem}.auisql').touch()
+    (h5_dir / f'{stem}.auisql.h5').touch()
+    metadata = meta_dir / f'{stem}.json'
+    metadata.write_text('{}')
+
+    rows = database_pop.gen_meta_list(
+        str(h5_dir), str(meta_dir), str(tags_dir))
+
+    assert rows == [[str(metadata), str(primary_h5),
+                     str(tags_dir / f'{stem}.json')]]
+
+
 def test_mea_json_is_loaded_when_same_stem_h5_exists(tmp_path, monkeypatch):
     """A compact MEA H5 is auxiliary and must not hide its metadata JSON."""
     h5_dir = tmp_path / 'h5'
