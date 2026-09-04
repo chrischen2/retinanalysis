@@ -95,7 +95,10 @@ def _amp_trace_samples(df: pd.DataFrame, amp: str = 'Amp1', n_trials: int = 12,
     mode discovery.
     """
     import h5py
-    from retinanalysis.utils.datajoint_utils import get_h5_file
+    from retinanalysis.utils.datajoint_utils import (
+        get_h5_file,
+        read_h5_response_trace,
+    )
 
     paths = (_amp_response_table(df['block_id'], amp=amp)
              if response_table is None else response_table)
@@ -118,7 +121,7 @@ def _amp_trace_samples(df: pd.DataFrame, amp: str = 'Amp1', n_trials: int = 12,
                     rates = rows['sample_rate'].dropna().astype(float).unique()
                     if len(rates) != 1:
                         raise ValueError(f'expected one sample rate, found {len(rates)}')
-                    traces = [np.asarray(h5[path]['data']['quantity'])
+                    traces = [read_h5_response_trace(h5, path)
                               for path in rows['h5path']]
                     if traces:
                         out[int(block_id)] = (np.asarray(traces), float(rates[0]))

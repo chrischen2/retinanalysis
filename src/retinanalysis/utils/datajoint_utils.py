@@ -1134,6 +1134,25 @@ def get_h5_file(exp_name: str) -> str:
                                 f'Tried {str_h5_in_config} and {str_h5_from_db}')
 
 
+def read_h5_response_trace(h5_file: h5py.File, h5path: str) -> np.ndarray:
+    """Read one response trace from Symphony or AUISQL H5 storage.
+
+    Original Symphony files store each response below a group as
+    ``data/quantity``. AUISQL companion files store the numeric array directly
+    in a root-level UUID dataset. ``Response.h5path`` remains authoritative in
+    both cases.
+    """
+    node = h5_file[h5path]
+    if isinstance(node, h5py.Dataset):
+        return np.asarray(node[()])
+    try:
+        return np.asarray(node['data']['quantity'][()])
+    except (KeyError, TypeError) as error:
+        raise KeyError(
+            f'Response path {h5path!r} is neither an AUISQL dataset nor a '
+            'Symphony response group containing data/quantity') from error
+
+
 
 def get_epochblock_frame_data(exp_name: str, block_id: int, str_h5: Optional[str]=None, verbose: bool = True):
     if str_h5 is None:
@@ -1154,8 +1173,7 @@ def get_epochblock_frame_data(exp_name: str, block_id: int, str_h5: Optional[str
     frame_data = []
     with h5py.File(str_h5, 'r') as f:
         for h5path in frame_h5paths:
-            trace = f[h5path]['data']['quantity']
-            frame_data.append(trace)
+            frame_data.append(read_h5_response_trace(f, h5path))
     
     frame_data = np.array(frame_data)
     if verbose:
@@ -1191,8 +1209,7 @@ def get_epochblock_amp_data(exp_name: str, block_id: int, str_h5: Optional[str]=
     amp_data = []
     with h5py.File(str_h5, 'r') as f:
         for h5path in amp_h5paths:
-            trace = f[h5path]['data']['quantity']
-            amp_data.append(trace)
+            amp_data.append(read_h5_response_trace(f, h5path))
     
     amp_data = np.array(amp_data)
     if verbose:

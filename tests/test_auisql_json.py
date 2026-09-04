@@ -66,6 +66,8 @@ def test_convert_auisql_bundle_to_analysis_json(tmp_path):
              'epochBlock:endTime', None, None),
             (8, 14, None, None, 1, None, None, None, 10000,
              'sampleRate', None, None),
+            (12, 14, None, None, 1, None, None, None, 3200000,
+             'background:Amp1:seriesResistance', None, None),
             (9, 14, None, None, None, 2, None, None, 0.4,
              'mean', None, None),
             (10, 14, None, None, None, 2, None, None, 0.12,
@@ -87,6 +89,7 @@ def test_convert_auisql_bundle_to_analysis_json(tmp_path):
     assert cell['type'] == 'RGC\\ON-parasol'
     assert epoch['parameters']['mean'] == 0.4
     assert epoch['parameters']['stDev'] == 0.12
+    assert epoch['parameters']['seriesResistance'] == 3200000
     assert cell['start_time'].startswith('09/09/2022 ')
     assert epoch['responses']['Input 0']['h5path'] == '/ABC-123'
     assert epoch['stimuli']['Output 2']['dataStored'] is False

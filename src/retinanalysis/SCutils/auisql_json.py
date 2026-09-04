@@ -257,6 +257,13 @@ class AuisqlReader:
                 background.setdefault('sampleRateUnits', 'Hz')
                 background['uuid'] = _synthetic_uuid(
                     self.bundle_name, f'background:{epoch_pk}', device)
+            # The Symphony reader promotes device settings into epoch
+            # parameters. Preserve that database-facing behavior because
+            # recording-mode and NDF logic query parameters after ingestion.
+            for device in sorted(backgrounds):
+                for key, value in backgrounds[device].items():
+                    if key != 'uuid':
+                        direct_parameters.setdefault(key, value)
 
             responses = {}
             for response in response_by_epoch[epoch_pk]:
