@@ -18,6 +18,10 @@ import h5py
 _APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)
 _LOCAL_ZONE = ZoneInfo('America/Los_Angeles')
 _UUID_NAMESPACE = uuid.UUID('9c8bb64d-f75d-4d72-8a91-27088f9c9670')
+# Legacy AUISQL exports store acquisition dates exactly two days early. This
+# was verified against recordings for which both original Symphony H5 JSON and
+# AUISQL representations are available.
+_AUISQL_DATE_CORRECTION = timedelta(days=2)
 
 
 def _synthetic_uuid(bundle_name: str, level: str, identifier: Any) -> str:
@@ -28,8 +32,8 @@ def _synthetic_uuid(bundle_name: str, level: str, identifier: Any) -> str:
 def _apple_datetime(seconds: Optional[float]) -> Optional[datetime]:
     if seconds is None:
         return None
-    return (_APPLE_EPOCH + timedelta(seconds=float(seconds))).astimezone(
-        _LOCAL_ZONE)
+    return (_APPLE_EPOCH + timedelta(seconds=float(seconds))
+            + _AUISQL_DATE_CORRECTION).astimezone(_LOCAL_ZONE)
 
 
 def _time_string(value: Optional[datetime]) -> Optional[str]:
@@ -426,6 +430,7 @@ class AuisqlReader:
                 'response_file': self.h5_path.name,
                 'synthetic_hierarchy_uuids': True,
                 'stimulus_waveforms_available': False,
+                'date_correction_days': 2,
             },
         }
 

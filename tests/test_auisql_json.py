@@ -87,6 +87,7 @@ def test_convert_auisql_bundle_to_analysis_json(tmp_path):
     assert cell['type'] == 'RGC\\ON-parasol'
     assert epoch['parameters']['mean'] == 0.4
     assert epoch['parameters']['stDev'] == 0.12
+    assert cell['start_time'].startswith('09/09/2022 ')
     assert epoch['responses']['Input 0']['h5path'] == '/ABC-123'
     assert epoch['stimuli']['Output 2']['dataStored'] is False
     assert output.is_file()
