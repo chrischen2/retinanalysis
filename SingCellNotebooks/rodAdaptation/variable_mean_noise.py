@@ -23,24 +23,22 @@ How this module is meant to be used
 -----------------------------------
 The saved MATLAB file is a **data-entry list**, not the data:
 
-1. :func:`load_summary` reads ``matlabSummary/rodVariableMeanNoise.mat`` -- the
-   53 cells the MATLAB analysis was run on;
-2. :func:`find_blocks` searches the database for VariableMeanNoise recordings,
-   the same discovery step as section 1 of the cone-disc notebooks;
-3. :func:`match_roster` intersects the two, so the analysis runs on cells that
-   were chosen *and* whose raw data is reachable;
-4. :func:`analyze_condition` loads those epochs, regenerates each epoch's
+1. :func:`find_blocks` searches the database for target primate
+   VariableMeanNoise recordings;
+2. :func:`find_protocol_cells` retains cells with a >=30 s, two-mean
+   duration/contrast condition;
+3. :func:`audit_matlab_roster_discovery` checks the 53-cell MATLAB data-entry
+   list against that unrestricted discovery without using it as a whitelist;
+4. :func:`analyze_condition` loads selected epochs, regenerates each epoch's
    stimulus, and fits the LN model in Python with cascadegraph.
 
 The MATLAB's own fits stay available through :func:`load_cell`, which is what
 makes step 4 checkable: the same cell can be refitted here and compared against
 what the MATLAB stored.
 
-**Reachability.** Of the 16 dates in the saved file, one (2021-08-18_B) is in
-the database. The wider search finds VariableMeanNoise blocks over ~146
-experiments, so the pipeline has plenty to run on -- but the overlap with the
-saved roster is currently one date, and :func:`match_roster` is where that
-shows up rather than in a confusing empty result later.
+**Reachability.** MATLAB dates are corrected by +2 days, then checked by exact,
+case-sensitive cell label, recording type, and epoch duration. Any exceptional
+date fallback or missing database acquisition remains explicit in the audit.
 
 Stimulus regeneration
 ---------------------
@@ -129,6 +127,17 @@ def _numeric(value) -> float:
         return float(value)
     except (TypeError, ValueError):
         return np.nan
+
+
+def _epoch_light_contrast(row) -> float:
+    """Scalar noise contrast for one normalized epoch parameter row."""
+    recorded = _numeric(row.get('Contrast', np.nan))
+    if np.isfinite(recorded):
+        return recorded
+    mean_level = _numeric(row.get('lightMean', np.nan))
+    stdv = _numeric(row.get('stdv', np.nan))
+    return (stdv / mean_level if np.isfinite(stdv)
+            and np.isfinite(mean_level) and mean_level != 0 else np.nan)
 
 
 @lru_cache(maxsize=4)
@@ -326,10 +335,19 @@ MIN_STIM_TIME_MS = 30_000
 # safe without silently demanding a large dataset.
 MIN_EPOCHS_PER_DURATION = 4
 
-# The primate ganglion-cell types this analysis is about. Everything else the
-# rigs recorded -- cones, horizontals, unlabelled cells -- is a different
-# experiment and is dropped rather than silently averaged in.
+# Recognized names remain available for callers that want an explicit subtype
+# restriction, but the notebook filters primate recordings by the experiment's
+# authoritative ``label == Primate``. That retains less common primate types
+# (for example small bistratified, bipolar, and horizontal cells) instead of
+# guessing species from a cell-type name.
 PRIMATE_CELL_TYPES = ('ON-parasol', 'OFF-parasol', 'ON-midget', 'OFF-midget', 'AII')
+PRIMATE_EXPERIMENT_LABELS = ('Primate',)
+
+# Section 1 indices 0--124 were already used for long-running analyses before
+# the legacy lightMean parsing bug was repaired.  Keep those identities fixed;
+# recovered cells are appended after the largest registered index.
+CELL_INDEX_REGISTRY_PATH = (
+    Path(__file__).resolve().parent / 'variable_mean_noise_cell_index.csv')
 
 # Where the per-block recording-mode cache lives. Resolving a mode can need the
 # block's raw trace, which is seconds per block, so it is done once and stored.
@@ -340,10 +358,57 @@ RECORDING_TYPES = ('extracellular', 'exc', 'inh')
 
 def _match_cell_type(value, allowed=PRIMATE_CELL_TYPES) -> bool:
     """True when a recorded cell type is one of ``allowed``, spelling aside."""
-    text = str(value or '').lower().replace('\\', '/').split('/')[-1]
-    text = text.replace('-', '').replace(' ', '').replace('_', '')
-    return any(text == str(a).lower().replace('-', '').replace(' ', '')
-               for a in allowed)
+    def canonical(one):
+        text = str(one or '').lower().replace('\\', '/').split('/')[-1]
+        text = text.replace('-', '').replace(' ', '').replace('_', '')
+        # Both names occur in primate annotations for the same AII/A2 class.
+        aliases = {
+            'a2': 'aii', 'a2amacrine': 'aii', 'aiiamacrine': 'aii',
+            'onparasolcell': 'onparasol', 'offparasolcell': 'offparasol',
+            'onmidgetcell': 'onmidget', 'offmidgetcell': 'offmidget',
+        }
+        return aliases.get(text, text)
+
+    text = canonical(value)
+    return any(text == canonical(one) for one in allowed)
+
+
+def _stable_cell_indices(cells: pd.DataFrame,
+                         path: Optional[Path] = None) -> pd.DataFrame:
+    """Assign stable Section 1 IDs without renumbering previously listed cells.
+
+    Identity is exact experiment name plus case-sensitive cell label.  That is
+    deliberately independent of cell type: the MATLAB comparison treats type
+    as fallible metadata, while date/rig and label identify the acquisition.
+    """
+    path = CELL_INDEX_REGISTRY_PATH if path is None else Path(path)
+    frame = cells.copy()
+    if path.exists():
+        registry = pd.read_csv(path, dtype={'exp_name': str, 'cell_label': str})
+        required = {'cell_index', 'exp_name', 'cell_label'}
+        missing = required.difference(registry.columns)
+        if missing:
+            raise ValueError(f'{path.name} is missing {sorted(missing)}')
+        if registry.duplicated(['exp_name', 'cell_label']).any():
+            raise ValueError(f'{path.name} contains duplicate cell identities')
+        if registry.cell_index.duplicated().any():
+            raise ValueError(f'{path.name} contains duplicate cell_index values')
+        lookup = registry.set_index(['exp_name', 'cell_label']).cell_index
+        known_max = int(pd.to_numeric(registry.cell_index).max())
+    else:
+        lookup = pd.Series(dtype=int)
+        known_max = -1
+
+    identities = list(zip(frame.exp_name.astype(str),
+                          frame.cell_label.astype(str)))
+    assigned = [lookup.get(identity, np.nan) for identity in identities]
+    next_index = known_max + 1
+    for position, value in enumerate(assigned):
+        if pd.isna(value):
+            assigned[position] = next_index
+            next_index += 1
+    frame.insert(0, 'cell_index', np.asarray(assigned, dtype=int))
+    return frame
 
 
 def build_mode_cache(protocol_blocks: pd.DataFrame,
@@ -482,7 +547,9 @@ def _first_epoch_metadata(block_ids: Sequence[int]):
 def find_blocks(exp_names: Optional[Sequence[str]] = None,
                 protocols: Sequence[str] = PROTOCOLS,
                 min_stim_time_ms: Optional[float] = MIN_STIM_TIME_MS,
-                cell_types: Optional[Sequence[str]] = PRIMATE_CELL_TYPES,
+                cell_types: Optional[Sequence[str]] = None,
+                experiment_labels: Optional[Sequence[str]] = PRIMATE_EXPERIMENT_LABELS,
+                include_cell_types: Optional[Sequence[str]] = PRIMATE_CELL_TYPES,
                 show: bool = True, height: int = 420) -> pd.DataFrame:
     """Every VariableMeanNoise block, with its cell and its protocol settings.
 
@@ -491,11 +558,19 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None,
     block's first epoch, both in batched queries rather than per block.
 
     ``min_stim_time_ms`` keeps blocks having at least one epoch whose noise ran
-    that long (30 s by default). Every duration is read from every epoch rather
-    than inferred from the block's first epoch. The protocol's own default is
+    that long (30 s by default). Light means and contrasts are summarized only
+    from epochs meeting that duration gate, so a short second mean cannot make
+    a one-long-mean recording look eligible. Every duration is read from every
+    epoch rather than inferred from the block's first epoch. The protocol's own default is
     600 ms, and a large share
     of the recorded blocks are short runs that cannot show adaptation to a mean
     step; what is dropped is always reported.
+
+    ``experiment_labels=('Primate',)`` is the default species gate. The
+    explicitly requested midget/parasol/AII aliases in ``include_cell_types``
+    are also retained when an old experiment label disagrees (the two AII
+    recordings are stored under ``Mouse``). Optional ``cell_types`` is a final
+    additional subtype restriction.
 
     The two package copies of the protocol are searched together and
     ``protocol_name`` says which one each block came from.
@@ -521,7 +596,8 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None,
 
     experiments = (schema.Experiment() & [f'id={int(i)}'
                                           for i in blocks.experiment_id.unique()]
-                   ).to_pandas().reset_index()[['id', 'exp_name']]
+                   ).to_pandas().reset_index()[['id', 'exp_name', 'label']]
+    experiments = experiments.rename(columns={'label': 'experiment_label'})
     groups = (schema.EpochGroup() & [f'id={int(i)}'
                                      for i in blocks.group_id.unique()]
               ).to_pandas().reset_index()[['id', 'parent_id', 'properties']]
@@ -558,16 +634,21 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None,
     means, contrasts, durations = [], [], []
     for block_id in frame.block_id:
         params = epoch_parameters(int(block_id))
-        light = pd.to_numeric(params.get('lightMean', pd.Series(dtype=float)),
-                              errors='coerce').dropna()
-        stdv = pd.to_numeric(params.get('stdv', pd.Series(dtype=float)),
-                             errors='coerce').dropna()
-        means.append(sorted(light.unique()))
-        ratio = (stdv / light).round(4) if len(light) == len(stdv) else pd.Series(dtype=float)
-        contrasts.append(sorted(ratio.dropna().unique()))
         stim_times = pd.to_numeric(
-            params.get('stimTime', pd.Series(dtype=float)), errors='coerce').dropna()
-        durations.append(sorted(float(value) for value in stim_times.unique()))
+            params.get('stimTime', pd.Series(np.nan, index=params.index)),
+            errors='coerce')
+        eligible = (pd.Series(True, index=params.index) if min_stim_time_ms is None
+                    else stim_times.ge(float(min_stim_time_ms)))
+        selected = params.loc[eligible]
+        light = pd.to_numeric(
+            selected.get('lightMean', pd.Series(dtype=float)),
+            errors='coerce')
+        stdv = pd.to_numeric(
+            selected.get('stdv', pd.Series(dtype=float)), errors='coerce')
+        means.append(sorted(light.dropna().unique()))
+        ratio = (stdv / light).round(4)
+        contrasts.append(sorted(ratio.dropna().unique()))
+        durations.append(sorted(float(value) for value in stim_times.dropna().unique()))
     frame['light_means'] = means
     frame['light_contrasts'] = contrasts
     frame['stim_times_ms'] = durations
@@ -576,12 +657,31 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None,
     frame['led_color'] = (frame['led'].astype(str).str.split().str[0]
                           .str.lower().replace('none', ''))
 
-    dropped = dropped_type = 0
+    dropped = dropped_experiment = dropped_type = 0
+    excluded_recording_types = pd.Series(dtype=int)
     if min_stim_time_ms is not None:
         keep = frame.stim_times_ms.map(
             lambda values: any(value >= float(min_stim_time_ms)
                                for value in values))
         dropped = int((~keep).sum())
+        frame = frame[keep]
+    if experiment_labels is not None:
+        allowed_labels = {str(value).strip().lower()
+                          for value in experiment_labels}
+        keep_experiment = frame.experiment_label.astype(
+            str).str.strip().str.lower().isin(
+            allowed_labels)
+        keep_named = (pd.Series(False, index=frame.index)
+                      if include_cell_types is None else
+                      frame.cell_type_short.map(
+                          lambda value: _match_cell_type(
+                              value, include_cell_types)))
+        keep = keep_experiment | keep_named
+        dropped_experiment = int((~keep).sum())
+        excluded_recording_types = (frame.loc[~keep]
+                                    .groupby(['experiment_label',
+                                              'cell_type_short'], dropna=False)
+                                    .size().sort_values(ascending=False))
         frame = frame[keep]
     if cell_types is not None:
         keep = frame.cell_type_short.map(lambda v: _match_cell_type(v, cell_types))
@@ -595,12 +695,16 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None,
         if dropped:
             print(f'  dropped {dropped} block(s) with stimTime < '
                   f'{min_stim_time_ms / 1e3:g} s')
+        if dropped_experiment:
+            print(f'  dropped {dropped_experiment} block(s) outside Primate '
+                  'experiments and the explicitly retained cell-type aliases')
+            print(excluded_recording_types.to_string())
         if dropped_type:
-            print(f'  dropped {dropped_type} block(s) on non-primate-RGC cell types')
+            print(f'  dropped {dropped_type} block(s) on non-target cell types')
         print('  by protocol: ' + ', '.join(
             f'{n.rsplit(".", 1)[-1]} ({c})' if False else f'{n} {c}'
             for n, c in frame.protocol_name.value_counts().items()))
-        columns = [c for c in ('exp_name', 'cell_label', 'cell_type_short',
+        columns = [c for c in ('exp_name', 'experiment_label', 'cell_label', 'cell_type_short',
                                'block_id', 'stim_seconds', 'led', 'ndfs',
                                'frequencyCutoff', 'numberOfFilters', 'Contrast',
                                'n_epochs', 'protocol_name') if c in frame]
@@ -613,7 +717,7 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None,
 def find_protocol_cells(blocks: Optional[pd.DataFrame] = None,
                         modes: Optional[pd.DataFrame] = None,
                         require_step: bool = True,
-                        single_contrast: bool = True,
+                        single_contrast: bool = False,
                         show: bool = True, height: int = 460) -> pd.DataFrame:
     """One row per cell -- the section 1 table to pick a ``cell_index`` from.
 
@@ -624,8 +728,9 @@ def find_protocol_cells(blocks: Optional[pd.DataFrame] = None,
         drops cells that only ever ran **one** light mean. This protocol is
         about the step between means, and a cell that saw one mean has no step;
     ``single_contrast``
-        drops cells that ran more than one noise contrast, since a filter
-        pooled across contrasts describes neither.
+        optionally applies the historical whole-cell exclusion for multiple
+        contrasts. It is off by default: Section 2 separates contrasts into
+        independent conditions, so a valid acquisition is not discarded.
 
     ``modes`` is the cached per-block recording type from
     :func:`load_block_modes`. When it is available the epoch counts are broken
@@ -654,6 +759,9 @@ def find_protocol_cells(blocks: Optional[pd.DataFrame] = None,
         means = sorted({m for values in group.light_means for m in values})
         contrasts = sorted({c for values in group.light_contrasts for c in values})
         counts = group.groupby('rec_type').n_epochs.sum()
+        usable = duration_conditions(
+            group.block_id.tolist(), min_epochs=1,
+            min_stim_time_ms=MIN_STIM_TIME_MS, require_step=True, show=False)
         rows.append({
             'exp_name': exp_name, 'cell_label': cell_label,
             'cell_type': cell_type,
@@ -665,6 +773,7 @@ def find_protocol_cells(blocks: Optional[pd.DataFrame] = None,
             'n_light_means': len(means),
             'light_contrast': ', '.join(f'{c:g}' for c in contrasts),
             'n_contrasts': len(contrasts),
+            'n_eligible_conditions': int(usable.included.sum()),
             'stim_seconds': ', '.join(
                 f'{value / 1e3:g}' for value in sorted({
                     duration for values in group.stim_times_ms for duration in values})),
@@ -676,9 +785,11 @@ def find_protocol_cells(blocks: Optional[pd.DataFrame] = None,
         return cells
 
     dropped_step = dropped_contrast = 0
+    step_excluded = pd.DataFrame()
     if require_step:
-        keep = cells.n_light_means.gt(1)
+        keep = cells.n_eligible_conditions.gt(0)
         dropped_step = int((~keep).sum())
+        step_excluded = cells.loc[~keep].copy()
         cells = cells[keep]
     if single_contrast:
         keep = cells.n_contrasts.le(1)
@@ -686,19 +797,28 @@ def find_protocol_cells(blocks: Optional[pd.DataFrame] = None,
         cells = cells[keep]
 
     cells = cells.sort_values(['exp_name', 'cell_label']).reset_index(drop=True)
-    cells.insert(0, 'cell_index', np.arange(len(cells)))
+    cells = _stable_cell_indices(cells)
+    cells = cells.sort_values('cell_index').reset_index(drop=True)
     if show:
         print(f'{len(cells)} cells across {cells.exp_name.nunique()} experiments')
         if dropped_step:
-            print(f'  dropped {dropped_step} cell(s) that ran only one light mean')
+            print(f'  dropped {dropped_step} cell(s) with no >=30 s '
+                  'duration x contrast condition containing at least 2 means')
+            print(step_excluded[[
+                'exp_name', 'cell_label', 'cell_type', 'light_means',
+                'light_contrast', 'stim_seconds']].to_string(index=False))
         if dropped_contrast:
             print(f'  dropped {dropped_contrast} cell(s) that ran more than one contrast')
+        elif int(cells.n_contrasts.gt(1).sum()):
+            print(f'  retained {int(cells.n_contrasts.gt(1).sum())} cell(s) with '
+                  'multiple contrasts; Section 2 separates those conditions')
         if modes.empty:
             print('  recording types not resolved yet -- build the mode cache '
                   'to fill n_extracellular / n_exc / n_inh')
         columns = ['exp_name', 'cell_index', 'cell_label', 'cell_type',
                    'n_extracellular', 'n_exc', 'n_inh', 'light_means',
-                   'light_contrast', 'stim_seconds', 'led']
+                   'light_contrast', 'n_eligible_conditions',
+                   'stim_seconds', 'led']
         if int(cells.n_unresolved.sum()):
             columns.insert(7, 'n_unresolved')
         sc.tree_table(cells[columns], levels=['exp_name'], height=height,
@@ -757,10 +877,11 @@ def cell_blocks(cells: pd.DataFrame, cell_index: int,
 def duration_conditions(block_ids: Sequence[int],
                         min_epochs: int = MIN_EPOCHS_PER_DURATION,
                         min_stim_time_ms: Optional[float] = MIN_STIM_TIME_MS,
+                        require_step: bool = True,
                         show: bool = True) -> pd.DataFrame:
-    """Audit and select the recorded ``stimTime`` groups in some blocks.
+    """Audit/select exact ``stimTime x Contrast`` groups in some blocks.
 
-    One row is returned per exact epoch duration. Counts come from every
+    One row is returned per exact epoch duration and noise contrast. Counts come from every
     epoch's parameters, not the first epoch in a block. ``included`` applies
     the caller's total-epoch threshold and optional minimum duration; excluded
     rows remain in the table so no duration disappears without an explanation.
@@ -781,13 +902,16 @@ def duration_conditions(block_ids: Sequence[int],
         means = pd.to_numeric(
             params.get('lightMean', pd.Series(np.nan, index=params.index)),
             errors='coerce')
-        for duration, mean_level in zip(durations, means):
+        for row_index, (duration, mean_level) in enumerate(zip(durations, means)):
             if np.isfinite(duration) and duration > 0:
                 rows.append({'stim_time_ms': float(duration),
+                             'light_contrast': _epoch_light_contrast(
+                                 params.iloc[row_index]),
                              'lightMean': float(mean_level),
                              'block_id': block_id})
 
-    columns = ['stim_time_ms', 'stim_seconds', 'n_epochs', 'light_means',
+    columns = ['stim_time_ms', 'stim_seconds', 'light_contrast',
+               'n_epochs', 'light_means',
                'epochs_by_light_mean', 'n_blocks', 'block_ids', 'included',
                'reason']
     if not rows:
@@ -795,7 +919,8 @@ def duration_conditions(block_ids: Sequence[int],
 
     epochs = pd.DataFrame(rows)
     out = []
-    for duration, group in epochs.groupby('stim_time_ms', sort=True):
+    for (duration, contrast), group in epochs.groupby(
+            ['stim_time_ms', 'light_contrast'], sort=True, dropna=False):
         counts = (group.dropna(subset=['lightMean']).groupby('lightMean').size()
                   .sort_index())
         n_epochs = int(len(group))
@@ -804,10 +929,13 @@ def duration_conditions(block_ids: Sequence[int],
             reasons.append(f'shorter than {float(min_stim_time_ms) / 1e3:g} s')
         if n_epochs < minimum:
             reasons.append(f'fewer than {minimum} epochs')
+        if require_step and len(counts) < 2:
+            reasons.append('fewer than 2 light means')
         included = not reasons
         out.append({
             'stim_time_ms': float(duration),
             'stim_seconds': float(duration) / 1e3,
+            'light_contrast': float(contrast),
             'n_epochs': n_epochs,
             'light_means': ', '.join(f'{value:g}' for value in counts.index),
             'epochs_by_light_mean': ', '.join(
@@ -819,7 +947,7 @@ def duration_conditions(block_ids: Sequence[int],
         })
     frame = pd.DataFrame(out, columns=columns)
     if show:
-        print(f'{len(frame)} epoch-duration condition(s); '
+        print(f'{len(frame)} duration x contrast condition(s); '
               f'{int(frame.included.sum())} meet MIN_EPOCHS_PER_DURATION={minimum}')
         print(frame.drop(columns='block_ids').to_string(index=False))
         dropped = frame[~frame.included]
@@ -836,7 +964,7 @@ def recording_duration_conditions(
         min_epochs: int = MIN_EPOCHS_PER_DURATION,
         min_stim_time_ms: Optional[float] = MIN_STIM_TIME_MS,
         show: bool = True) -> pd.DataFrame:
-    """Audit/select every ``recording type x stimTime`` condition.
+    """Audit/select every ``recording type x stimTime x Contrast`` condition.
 
     Recording type is assigned per block by :func:`resolve_block_mode`, then
     epoch duration is assigned per epoch by :func:`duration_conditions`. The
@@ -846,7 +974,7 @@ def recording_duration_conditions(
     """
     modes = load_block_modes() if modes is None else modes.copy()
     selected_ids = sorted({int(value) for value in block_ids})
-    columns = ['rec_type', 'stim_time_ms', 'stim_seconds', 'n_epochs',
+    columns = ['rec_type', 'stim_time_ms', 'stim_seconds', 'light_contrast', 'n_epochs',
                'light_means', 'epochs_by_light_mean', 'n_blocks', 'block_ids',
                'included', 'reason']
     if not selected_ids:
@@ -893,10 +1021,11 @@ def recording_duration_conditions(
         order = {value: index for index, value in enumerate(
             (*RECORDING_TYPES, 'unresolved'))}
         frame['_mode_order'] = frame.rec_type.map(order).fillna(len(order))
-        frame = (frame.sort_values(['_mode_order', 'stim_time_ms'])
+        frame = (frame.sort_values(['_mode_order', 'stim_time_ms',
+                                    'light_contrast'])
                  .drop(columns='_mode_order').reset_index(drop=True))
     if show:
-        print(f'{len(frame)} recording-mode x epoch-duration condition(s); '
+        print(f'{len(frame)} recording-mode x duration x contrast condition(s); '
               f'{int(frame.included.sum())} meet MIN_EPOCHS={int(min_epochs)}')
         if len(frame):
             print(frame.drop(columns='block_ids').to_string(index=False))
@@ -1003,6 +1132,11 @@ def apply_epoch_range_exclusions(
                 duration = _numeric(params.iloc[epoch].get('stimTime', np.nan))
                 if not np.isclose(duration, float(condition.stim_time_ms)):
                     continue
+                contrast = _epoch_light_contrast(params.iloc[epoch])
+                if (hasattr(condition, 'light_contrast')
+                        and not np.isclose(
+                            contrast, float(condition.light_contrast))):
+                    continue
                 if any(first <= epoch <= last for first, last in ranges):
                     matches.append((block_id, int(epoch)))
         excluded_by_row.append(sorted(set(matches)))
@@ -1092,6 +1226,7 @@ def epoch_response_summary(
         max_epochs: Optional[int] = None,
         subtract_baseline: bool = False,
         stim_time_ms: Optional[float] = None,
+        light_contrast: Optional[float] = None,
         excluded_epochs=(),
         show: bool = True) -> pd.DataFrame:
     """One intuitive response-size measurement for every recorded epoch.
@@ -1121,6 +1256,10 @@ def epoch_response_summary(
             duration = _numeric(params.iloc[epoch].get('stimTime', np.nan))
             if (stim_time_ms is not None
                     and not np.isclose(duration, float(stim_time_ms))):
+                continue
+            if (light_contrast is not None
+                    and not np.isclose(_epoch_light_contrast(params.iloc[epoch]),
+                                       float(light_contrast))):
                 continue
             if max_epochs is not None and len(rows) >= max_epochs:
                 break
@@ -1170,6 +1309,7 @@ def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
                 max_epochs: Optional[int] = 12, downsample: int = 50,
                 subtract_baseline: bool = False,
                 stim_time_ms: Optional[float] = None,
+                light_contrast: Optional[float] = None,
                 excluded_epochs=(),
                 figsize: Tuple[float, float] = (12.0, 5.0)):
     """Every epoch's response, coloured by the light mean it was recorded at.
@@ -1200,6 +1340,10 @@ def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
             duration = _numeric(params.iloc[index].get('stimTime', np.nan))
             if (stim_time_ms is not None
                     and not np.isclose(duration, float(stim_time_ms))):
+                continue
+            if (light_contrast is not None
+                    and not np.isclose(_epoch_light_contrast(params.iloc[index]),
+                                       float(light_contrast))):
                 continue
             if max_epochs is not None and len(traces) >= max_epochs:
                 break
@@ -1239,8 +1383,10 @@ def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
     ax.legend(frameon=False, fontsize=7)
     duration_label = ('' if stim_time_ms is None else
                       f' | {float(stim_time_ms) / 1e3:g} s epochs')
+    contrast_label = ('' if light_contrast is None else
+                      f' | contrast {float(light_contrast):g}')
     ax.set_title(f'{exp_name} | blocks {list(block_ids)} | {rec_type}'
-                 f'{duration_label} | '
+                 f'{duration_label}{contrast_label} | '
                  f'{len(traces)} epochs, offset vertically', fontsize=10)
     fig.tight_layout()
     return fig
@@ -1260,9 +1406,61 @@ def _epoch_parameters_cached(block_id: int) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def normalize_epoch_light_means(parameters: pd.DataFrame) -> pd.DataFrame:
+    """Return epoch parameters with one trustworthy scalar ``lightMean``.
+
+    Older VariableMeanNoise files stored the pair of protocol means in every
+    epoch (for example ``[0.02, 0.4]``), while ``stdv`` and ``Contrast`` were
+    scalar for the mean actually shown in that epoch.  Pandas converted those
+    arrays to NaN during discovery, falsely making good two-mean recordings
+    look like zero/one-mean cells.  For such rows the presented mean is
+    ``stdv / Contrast`` and must agree with one of the recorded candidates.
+
+    ``lightMeanRecorded`` retains the untouched value for provenance.  An
+    ambiguous legacy row stays NaN instead of guessing a mean.
+    """
+    frame = parameters.copy()
+    if frame.empty or 'lightMean' not in frame:
+        return frame
+
+    recorded = frame['lightMean'].copy()
+    resolved, statuses = [], []
+    for index, raw in recorded.items():
+        try:
+            candidates = np.asarray(raw, dtype=float).ravel()
+            candidates = candidates[np.isfinite(candidates)]
+        except (TypeError, ValueError):
+            candidates = np.zeros(0, dtype=float)
+
+        if candidates.size == 1:
+            resolved.append(float(candidates[0]))
+            statuses.append('recorded scalar')
+            continue
+
+        stdv = _numeric(frame.at[index, 'stdv']) if 'stdv' in frame else np.nan
+        contrast = (_numeric(frame.at[index, 'Contrast'])
+                    if 'Contrast' in frame else np.nan)
+        derived = (stdv / contrast if np.isfinite(stdv)
+                   and np.isfinite(contrast) and contrast != 0 else np.nan)
+        matching = (candidates[np.isclose(candidates, derived, rtol=1e-6,
+                                          atol=1e-12)]
+                    if np.isfinite(derived) else np.zeros(0))
+        if matching.size:
+            resolved.append(float(matching[0]))
+            statuses.append('derived from stdv / Contrast')
+        else:
+            resolved.append(np.nan)
+            statuses.append('ambiguous legacy lightMean')
+
+    frame['lightMeanRecorded'] = recorded
+    frame['lightMean'] = resolved
+    frame['lightMeanStatus'] = statuses
+    return frame
+
+
 def epoch_parameters(block_id: int) -> pd.DataFrame:
-    """Recorded parameters for every epoch of one block, one row per epoch."""
-    return _epoch_parameters_cached(int(block_id)).copy()
+    """Recorded parameters for every epoch, with scalar presented light means."""
+    return normalize_epoch_light_means(_epoch_parameters_cached(int(block_id)))
 
 
 def block_cells(blocks: pd.DataFrame) -> pd.DataFrame:
@@ -1474,7 +1672,9 @@ SINGLE_CELL_ROOT = Path('/Volumes/ChrisNewSSD/single_cell')
 def _normalize_cell_type(value) -> str:
     """``RGC\\ON-midget`` and ``OnMidget`` both become ``onmidget``."""
     text = str(value or '').lower().replace('\\', '/').split('/')[-1]
-    return text.replace('-', '').replace(' ', '').replace('_', '')
+    text = text.replace('-', '').replace(' ', '').replace('_', '')
+    return {'a2': 'aii', 'a2amacrine': 'aii',
+            'aiiamacrine': 'aii'}.get(text, text)
 
 
 def metadata_files(root=None) -> pd.DataFrame:
@@ -1550,6 +1750,130 @@ def corrected_dates(roster: pd.DataFrame,
     return roster['calendar_date'].map(shift)
 
 
+def audit_matlab_roster_discovery(
+        roster: pd.DataFrame,
+        protocol_cells: pd.DataFrame,
+        modes: Optional[pd.DataFrame] = None,
+        offset_days: int = SAVED_DATE_OFFSET_DAYS,
+        show: bool = True) -> pd.DataFrame:
+    """Show whether every MATLAB-listed good acquisition survives discovery.
+
+    MATLAB omitted the rig suffix, so dates match the date prefix of
+    ``exp_name``.  Corrected date is tried first; the recorded date is an
+    explicit fallback for the known exceptional entry. Cell labels remain
+    case-sensitive. A row is ``available`` only when its recording type and
+    epoch duration also identify a retained two-mean, >=30 s condition. Cell
+    type is audited but never used to reject the acquisition because that
+    annotation is known to contain occasional mistakes.
+    """
+    modes = load_block_modes() if modes is None else modes
+    matlab = roster.copy().reset_index(drop=True)
+    matlab['recorded_date'] = matlab.get(
+        'calendar_date', matlab.exp_date.astype(str).str.replace('/', '-', regex=False))
+    matlab['corrected_date'] = corrected_dates(matlab, offset_days)
+    rows = []
+
+    for entry in matlab.itertuples():
+        label = str(entry.cell_label)
+        candidates = pd.DataFrame()
+        date_source = ''
+        for date_value, source in ((str(entry.corrected_date), 'corrected date'),
+                                   (str(entry.recorded_date),
+                                    'recorded-date fallback')):
+            candidate = protocol_cells[
+                protocol_cells.exp_name.astype(str).str.startswith(date_value + '_')
+                & protocol_cells.cell_label.astype(str).eq(label)]
+            if len(candidate):
+                candidates, date_source = candidate, source
+                break
+
+        case_candidate = ''
+        if candidates.empty:
+            possible = protocol_cells[
+                protocol_cells.exp_name.astype(str).str[:10].isin(
+                    [str(entry.corrected_date), str(entry.recorded_date)])
+                & protocol_cells.cell_label.astype(str).str.lower().eq(label.lower())]
+            if len(possible):
+                case_candidate = '; '.join(
+                    f'{row.exp_name}/{row.cell_label}' for row in possible.itertuples())
+
+        matches = []
+        condition_text = []
+        for _, candidate in candidates.iterrows():
+            block_ids = list(candidate['_block_ids'])
+            rec_type = str(entry.rec_type).strip().lower()
+            conditions = recording_duration_conditions(
+                block_ids, modes=modes, min_epochs=1,
+                min_stim_time_ms=MIN_STIM_TIME_MS, show=False)
+            if len(conditions):
+                condition_text.extend(
+                    f'{candidate.exp_name}: {row.rec_type}, '
+                    f'{row.stim_seconds:g}s, '
+                    f'contrast {row.light_contrast:g}, {row.light_means}'
+                    for row in conditions.itertuples())
+            target_ms = _numeric(entry.epoch_len_ms)
+            eligible = conditions.loc[
+                conditions['included'].astype(bool)
+                & conditions.rec_type.astype(str).str.lower().eq(rec_type)]
+            if np.isfinite(target_ms):
+                eligible = eligible[np.isclose(eligible.stim_time_ms, target_ms)]
+            else:
+                eligible = eligible.iloc[0:0]
+            if len(eligible):
+                matches.append(candidate)
+
+        chosen = matches[0] if matches else (
+            candidates.iloc[0] if len(candidates) else None)
+        if matches:
+            status = ('available' if date_source == 'corrected date'
+                      else 'available using recorded-date fallback')
+            reason = ''
+        elif len(candidates):
+            status = 'condition mismatch'
+            reason = ('date and case-sensitive label found, but recording type '
+                      'and/or epoch duration did not identify a retained two-mean condition')
+        elif case_candidate:
+            status = 'case-sensitive label mismatch'
+            reason = f'case-insensitive candidate: {case_candidate}'
+        else:
+            status = 'not found in current discovery'
+            reason = 'no corrected/recorded-date plus exact-label cell'
+
+        actual_type = str(chosen.cell_type) if chosen is not None else ''
+        rows.append({
+            'matlab_index': int(entry.index), 'status': status,
+            'recorded_date': str(entry.recorded_date),
+            'corrected_date': str(entry.corrected_date),
+            'matlab_cell_label': label,
+            'matlab_cell_type': str(entry.cell_type),
+            'matlab_rec_type': str(entry.rec_type),
+            'matlab_epoch_seconds': (_numeric(entry.epoch_len_ms) / 1e3
+                                     if np.isfinite(_numeric(entry.epoch_len_ms))
+                                     else np.nan),
+            'cell_index': (int(chosen.cell_index) if chosen is not None else -1),
+            'discovered_exp_name': (str(chosen.exp_name)
+                                    if chosen is not None else ''),
+            'discovered_cell_label': (str(chosen.cell_label)
+                                      if chosen is not None else ''),
+            'discovered_cell_type': actual_type,
+            'cell_type_agrees': (_match_cell_type(entry.cell_type, (actual_type,))
+                                 if actual_type else False),
+            'available_conditions': '; '.join(dict.fromkeys(condition_text)),
+            'reason': reason,
+        })
+    out = pd.DataFrame(rows)
+    if show:
+        print(out.status.value_counts(dropna=False).to_string())
+        failures = out[~out.status.str.startswith('available')]
+        if len(failures):
+            print('\nMATLAB roster entries not recovered exactly:')
+            print(failures[[
+                'matlab_index', 'recorded_date', 'corrected_date',
+                'matlab_cell_label', 'matlab_rec_type',
+                'matlab_epoch_seconds', 'status', 'reason']].to_string(index=False))
+    return out
+
+
 def compare_matlab_roster_to_saved(
         roster: pd.DataFrame,
         saved_cells: pd.DataFrame,
@@ -1559,17 +1883,20 @@ def compare_matlab_roster_to_saved(
 
     The required identity is corrected calendar date (the saved rig suffix is
     ignored because MATLAB did not record it), case-sensitive cell label,
-    recording type, and epoch duration. A normalized cell-type agreement makes
+    recording type, and epoch duration. The recorded date is tried only as an
+    explicit fallback and reported in ``date_match_source``. A normalized cell-type agreement makes
     the result ``likely matched``; disagreement only on cell type makes it a
     ``candidate`` so known cell-type annotation errors remain reviewable.
     Rows without a required-field match remain visible as ``not matched``.
     """
     columns = [
         'matlab_index', 'match_status', 'recorded_date', 'corrected_date',
+        'date_match_source',
         'matlab_cell_label', 'saved_cell_label', 'matlab_cell_type',
         'saved_cell_type', 'cell_type_agrees', 'matlab_rec_type',
         'saved_rec_type', 'matlab_epoch_seconds', 'saved_stim_seconds',
         'saved_date', 'saved_cell_index', 'saved_entry', 'saved_output_path',
+        'saved_current_cell_index', 'saved_index_status',
     ]
     matlab = roster.reset_index(drop=True).copy()
     saved = saved_cells.reset_index(drop=True).copy()
@@ -1588,6 +1915,7 @@ def compare_matlab_roster_to_saved(
             ('date', ''), ('cell_label', ''), ('cell_type', ''),
             ('rec_type', ''), ('stim_time_ms', np.nan),
             ('stim_seconds', np.nan), ('cell_index', -1),
+            ('current_cell_index', np.nan), ('index_status', ''),
             ('output_path', '')):
         if column not in saved:
             saved[column] = default
@@ -1604,16 +1932,22 @@ def compare_matlab_roster_to_saved(
         duration_match = np.isclose(
             saved['_stim_time_ms'], duration_ms, rtol=0, atol=0.5,
             equal_nan=False)
-        matches = saved[
-            saved['_calendar_date'].eq(entry.corrected_date)
-            & saved['cell_label'].astype(str).eq(label)
-            & saved['rec_type'].astype(str).str.strip().str.lower().eq(rec_type)
-            & duration_match]
+        identity = (saved['cell_label'].astype(str).eq(label)
+                    & saved['rec_type'].astype(str).str.strip().str.lower().eq(rec_type)
+                    & duration_match)
+        matches = saved[saved['_calendar_date'].eq(entry.corrected_date) & identity]
+        date_match_source = 'corrected date'
+        if matches.empty:
+            matches = saved[
+                saved['_calendar_date'].eq(entry.recorded_date) & identity]
+            date_match_source = ('recorded-date fallback'
+                                 if len(matches) else '')
 
         base = {
             'matlab_index': int(matlab_index),
             'recorded_date': entry.recorded_date,
             'corrected_date': entry.corrected_date,
+            'date_match_source': date_match_source,
             'matlab_cell_label': label,
             'matlab_cell_type': str(entry.get('cell_type', '')),
             'matlab_rec_type': str(entry.get('rec_type', '')),
@@ -1627,7 +1961,8 @@ def compare_matlab_roster_to_saved(
                 'cell_type_agrees': False, 'saved_rec_type': '',
                 'saved_stim_seconds': np.nan, 'saved_date': '',
                 'saved_cell_index': -1, 'saved_entry': '',
-                'saved_output_path': '',
+                'saved_output_path': '', 'saved_current_cell_index': np.nan,
+                'saved_index_status': '',
             })
             continue
 
@@ -1649,6 +1984,9 @@ def compare_matlab_roster_to_saved(
                 'saved_stim_seconds': stim_seconds,
                 'saved_date': str(candidate.date),
                 'saved_cell_index': int(candidate.cell_index),
+                'saved_current_cell_index': _numeric(
+                    candidate.current_cell_index),
+                'saved_index_status': str(candidate.index_status),
                 'saved_entry': saved_entry,
                 'saved_output_path': str(candidate.output_path),
             })
@@ -2520,6 +2858,9 @@ class ConditionAnalysis:
     # Exact recorded protocol duration for this condition. Duration is a
     # condition dimension, never an array-truncation detail.
     stim_time_ms: float = np.nan
+    # Noise contrast is also a condition dimension. Keeping it explicit avoids
+    # pooling blocks that used different stimulus distributions.
+    light_contrast: float = np.nan
     # The stimulus's own ``frequencyCutoff``, as resolved from the epochs. Kept
     # so anything fitted downstream (the windowed models in particular) cuts
     # off where the stimulus does instead of guessing a number.
@@ -2555,8 +2896,10 @@ class ConditionAnalysis:
         means = ', '.join(f'{m:g}' for m in self.light_means)
         duration = (f' | {self.stim_time_ms / 1e3:g} s epochs'
                     if np.isfinite(self.stim_time_ms) else '')
+        contrast = (f' | contrast {self.light_contrast:g}'
+                    if np.isfinite(self.light_contrast) else '')
         return (f'<ConditionAnalysis {self.exp_name} blocks={self.block_ids} '
-                f'| {self.rec_type}{duration} | lightMean {means}>')
+                f'| {self.rec_type}{duration}{contrast} | lightMean {means}>')
 
 
 def analysis_label(analysis: ConditionAnalysis) -> str:
@@ -2564,7 +2907,10 @@ def analysis_label(analysis: ConditionAnalysis) -> str:
     stim_time_ms = float(getattr(analysis, 'stim_time_ms', np.nan))
     duration = (f' | {stim_time_ms / 1e3:g} s epochs'
                 if np.isfinite(stim_time_ms) else '')
-    return f'{analysis.exp_name} | {analysis.rec_type}{duration}'
+    light_contrast = float(getattr(analysis, 'light_contrast', np.nan))
+    contrast = (f' | contrast {light_contrast:g}'
+                if np.isfinite(light_contrast) else '')
+    return f'{analysis.exp_name} | {analysis.rec_type}{duration}{contrast}'
 
 
 class LowResponseCellError(RuntimeError):
@@ -2729,6 +3075,7 @@ def check_extracellular_firing_rate(
 def analyze_condition(exp_name: str, block_ids: Sequence[int],
                       rec_type: str = 'extracellular',
                       stim_time_ms: Optional[float] = None,
+                      light_contrast: Optional[float] = None,
                       light_means: Optional[Sequence[float]] = None,
                       filter_length_s: float = 1.0,
                       downsample: int = 10,
@@ -2851,7 +3198,8 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
 
     duration_table = duration_conditions(
         block_ids, min_epochs=1, min_stim_time_ms=None, show=False)
-    available_durations = duration_table.stim_time_ms.tolist()
+    available_durations = sorted(
+        pd.to_numeric(duration_table.stim_time_ms, errors='coerce').dropna().unique())
     if stim_time_ms is None:
         if len(available_durations) > 1:
             choices = ', '.join(f'{value / 1e3:g} s'
@@ -2867,6 +3215,25 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
         raise ValueError(
             f'stim_time_ms={stim_time_ms:g} is not present; available values are '
             + ', '.join(f'{value:g}' for value in available_durations))
+    available_contrasts = sorted(
+        pd.to_numeric(duration_table.loc[
+            np.isclose(pd.to_numeric(duration_table.stim_time_ms, errors='coerce'),
+                       float(stim_time_ms)), 'light_contrast'],
+            errors='coerce').dropna().unique()) if stim_time_ms is not None else []
+    if light_contrast is None:
+        if len(available_contrasts) > 1:
+            raise ValueError(
+                'selected blocks contain multiple noise contrasts ('
+                + ', '.join(f'{value:g}' for value in available_contrasts)
+                + '); analyze them separately with light_contrast=...')
+        if available_contrasts:
+            light_contrast = float(available_contrasts[0])
+    elif (available_contrasts
+          and not any(np.isclose(float(light_contrast), value)
+                      for value in available_contrasts)):
+        raise ValueError(
+            f'light_contrast={light_contrast:g} is not present; available values are '
+            + ', '.join(f'{value:g}' for value in available_contrasts))
 
     spiking = rec_type == 'extracellular'
     activity_excluded = _excluded_epoch_set(activity_excluded_epochs)
@@ -2915,6 +3282,10 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
             duration = _numeric(row.get('stimTime', np.nan))
             if (stim_time_ms is not None
                     and not np.isclose(duration, float(stim_time_ms))):
+                continue
+            if (light_contrast is not None
+                    and not np.isclose(_epoch_light_contrast(row),
+                                       float(light_contrast))):
                 continue
             mean_level = float(row['lightMean'])
             if (selected_means is not None
@@ -2998,6 +3369,8 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
         rec_type=rec_type, sample_rate=sample_rate,
         sampling_interval=interval, skip_seconds=float(skip_seconds),
         stim_time_ms=(float(stim_time_ms) if stim_time_ms is not None else np.nan),
+        light_contrast=(float(light_contrast)
+                        if light_contrast is not None else np.nan),
         units='firing rate (Hz)' if spiking else 'current (pA)',
         excluded_epochs=sorted(excluded),
         activity_excluded_epochs=sorted(activity_excluded))
@@ -4135,11 +4508,15 @@ def directional_saturation_contrast(frame: pd.DataFrame) -> pd.DataFrame:
     information is better preserved: decrement minus increment for gain and
     direction accuracy, but increment minus decrement for error.
     """
-    keys = ['cell_id', 'cell_type', 'rec_type', 'stim_seconds', 'mode']
+    keys = ['cell_id', 'cell_type', 'rec_type', 'stim_seconds',
+            'light_contrast', 'mode']
     contrasts = ['gain_dec_minus_inc', 'accuracy_dec_minus_inc',
                  'error_inc_minus_dec']
     if frame is None or frame.empty:
         return pd.DataFrame(columns=[*keys, *contrasts])
+    frame = frame.copy()
+    if 'light_contrast' not in frame:
+        frame['light_contrast'] = np.nan
     required = {*keys, 'light_condition', 'operating_point', 'direction',
                 'gain_delta', 'direction_accuracy', 'nrmse_delta'}
     missing = sorted(required - set(frame.columns))
@@ -4147,9 +4524,14 @@ def directional_saturation_contrast(frame: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f'directional decoding table is missing {missing}')
     selected = frame[
         frame.operating_point.eq('positive') &
-        frame.light_condition.eq('bright')]
+        frame.light_condition.eq('bright')].copy()
     if selected.empty:
         return pd.DataFrame(columns=[*keys, *contrasts])
+    # Older saved outputs predate explicit contrast metadata. Keep those rows
+    # as one unknown-contrast group instead of letting pivot_table drop NaN.
+    unknown_contrast = -np.finfo(float).max
+    selected['light_contrast'] = pd.to_numeric(
+        selected.light_contrast, errors='coerce').fillna(unknown_contrast)
     paired = selected.pivot_table(
         index=keys, columns='direction',
         values=['gain_delta', 'direction_accuracy', 'nrmse_delta'],
@@ -4157,6 +4539,8 @@ def directional_saturation_contrast(frame: pd.DataFrame) -> pd.DataFrame:
     paired.columns = [f'{metric}_{direction}'
                       for metric, direction in paired.columns]
     paired = paired.reset_index()
+    paired['light_contrast'] = paired.light_contrast.replace(
+        unknown_contrast, np.nan)
     needed = {
         'gain_delta_decrement', 'gain_delta_increment',
         'direction_accuracy_decrement', 'direction_accuracy_increment',
@@ -4925,13 +5309,17 @@ def _safe_output_token(value) -> str:
 
 
 def _condition_output_name(exp_name: str, cell_label: str, rec_type: str,
-                           block_ids: Sequence[int], stim_time_ms: float) -> str:
+                           block_ids: Sequence[int], stim_time_ms: float,
+                           light_contrast: float = np.nan) -> str:
     import hashlib
     blocks = ','.join(str(int(value)) for value in sorted(set(block_ids)))
     digest = hashlib.sha1(blocks.encode()).hexdigest()[:10]
+    contrast = (f'__contrast-{_safe_output_token(f"{light_contrast:g}")}'
+                if np.isfinite(light_contrast) else '')
     return ('__'.join(_safe_output_token(value) for value in
                      (exp_name, cell_label, rec_type))
             + f'__duration-{_safe_output_token(f"{stim_time_ms:g}ms")}'
+            + contrast
             + f'__blocks-{digest}.h5')
 
 
@@ -5012,7 +5400,15 @@ def save_condition_output(
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / _condition_output_name(
         analysis.exp_name, cell_label, analysis.rec_type, analysis.block_ids,
+        analysis.stim_time_ms, analysis.light_contrast)
+    legacy_path = directory / _condition_output_name(
+        analysis.exp_name, cell_label, analysis.rec_type, analysis.block_ids,
         analysis.stim_time_ms)
+    # Reuse the pre-contrast filename for the exact same blocks so a rerun
+    # updates, rather than duplicates, an expensive older result. Newly split
+    # multi-contrast conditions have different block sets and get new names.
+    if legacy_path.exists():
+        path = legacy_path
     existed = path.exists()
     temporary = path.with_suffix('.h5.tmp')
     with h5py.File(temporary, 'w') as h5:
@@ -5038,6 +5434,7 @@ def save_condition_output(
         h5.attrs['skip_seconds'] = float(analysis.skip_seconds)
         h5.attrs['stim_time_ms'] = float(analysis.stim_time_ms)
         h5.attrs['stim_seconds'] = float(analysis.stim_time_ms) / 1e3
+        h5.attrs['light_contrast'] = float(analysis.light_contrast)
         h5.attrs['n_epochs'] = int(sum(analysis.n_epochs.values()))
         h5.attrs['frequency_cutoff'] = float(analysis.frequency_cutoff)
         h5.attrs['light_means'] = np.asarray(analysis.light_means, dtype=float)
@@ -5120,9 +5517,10 @@ def save_duration_outputs(
 
 
 def save_condition_outputs(
-        core_by_condition: Dict[Tuple[str, float], CoreLNAnalysis],
+        core_by_condition: Dict[Tuple[str, float, float], CoreLNAnalysis],
         protocol_blocks: pd.DataFrame,
-        reconstruction_by_condition: Optional[Dict[Tuple[str, float], dict]] = None,
+        reconstruction_by_condition: Optional[
+            Dict[Tuple[str, float, float], dict]] = None,
         cell_index: Optional[int] = None,
         mean_window_s: float = 1.0,
         output_dir=None,
@@ -5131,10 +5529,20 @@ def save_condition_outputs(
     reconstruction_by_condition = reconstruction_by_condition or {}
     rows = []
     order = {value: index for index, value in enumerate(RECORDING_TYPES)}
+    def unpack(key, core):
+        if len(key) == 3:
+            return key
+        if len(key) == 2:  # compatibility with pre-contrast programmatic callers
+            return (*key, float(getattr(core.analysis, 'light_contrast', np.nan)))
+        raise ValueError(f'condition key must have 2 or 3 fields, got {key!r}')
+
     items = sorted(core_by_condition.items(), key=lambda item: (
-        order.get(str(item[0][0]), len(order)), float(item[0][1])))
-    for (rec_type, duration), core in items:
+        order.get(str(item[0][0]), len(order)), float(item[0][1]),
+        np.nan_to_num(float(unpack(item[0], item[1])[2]), nan=-1.0)))
+    for original_key, core in items:
+        rec_type, duration, contrast = unpack(original_key, core)
         duration = float(duration)
+        contrast = float(contrast)
         if str(rec_type) != core.analysis.rec_type:
             raise ValueError(
                 f'recording-type key {rec_type!r} does not match analysis '
@@ -5143,7 +5551,12 @@ def save_condition_outputs(
             raise ValueError(
                 f'duration key {duration:g} does not match analysis '
                 f'{core.analysis.stim_time_ms:g} ms')
-        reconstruction = reconstruction_by_condition.get((rec_type, duration), {})
+        if (np.isfinite(contrast) or np.isfinite(core.analysis.light_contrast)) and not np.isclose(
+                contrast, core.analysis.light_contrast):
+            raise ValueError(
+                f'contrast key {contrast:g} does not match analysis '
+                f'{core.analysis.light_contrast:g}')
+        reconstruction = reconstruction_by_condition.get(original_key, {})
         selection = reconstruction.get('window_selection')
         decode_rule = (
             'shortest_within_one_se'
@@ -5164,6 +5577,7 @@ def save_condition_outputs(
         rows.append({
             'cell_index': int(cell_index) if cell_index is not None else -1,
             'rec_type': rec_type,
+            'light_contrast': contrast,
             'stim_time_ms': duration,
             'stim_seconds': duration / 1e3,
             'n_epochs': int(sum(core.analysis.n_epochs.values())),
@@ -5199,6 +5613,7 @@ def _output_metadata(path) -> dict:
             'optical_density': float(h5.attrs.get('optical_density', np.nan)),
             'stim_time_ms': float(h5.attrs.get('stim_time_ms', np.nan)),
             'stim_seconds': float(h5.attrs.get('stim_seconds', np.nan)),
+            'light_contrast': float(h5.attrs.get('light_contrast', np.nan)),
             'n_epochs_total': int(h5.attrs.get('n_epochs', 0)),
             'decode_window_s': float(h5.attrs.get('decode_window_s', np.nan)),
             'decode_window_rule': text(h5.attrs.get('decode_window_rule', '')),
@@ -5215,27 +5630,51 @@ def load_condition_index(output_dir=None,
     ``output_version`` remains an internal compatibility check and is not part
     of the user-facing table. If old records predate ``cell_index``, passing
     the current ``protocol_cells`` table fills the display index by matching
-    experiment and cell label; newly saved records carry it directly.
+    experiment and case-sensitive cell label; newly saved records carry it
+    directly. ``current_cell_index`` and ``index_status`` expose any mismatch
+    instead of silently relabelling an older saved result.
     """
+    if protocol_cells is None and CELL_INDEX_REGISTRY_PATH.exists():
+        registry = pd.read_csv(
+            CELL_INDEX_REGISTRY_PATH,
+            dtype={'exp_name': str, 'cell_label': str})
+        protocol_cells = registry[['exp_name', 'cell_label', 'cell_index']]
+
     directory = condition_output_dir(output_dir)
     columns = ['condition_id', 'cell_id', 'date', 'cell_index',
+               'current_cell_index', 'index_status',
                'cell_label', 'cell_type',
                'mean_rate_hz',
                'rec_type', 'rig', 'led', 'led_ndfs', 'optical_density',
-               'stim_time_ms', 'stim_seconds', 'n_epochs_total',
+               'stim_time_ms', 'stim_seconds', 'light_contrast', 'n_epochs_total',
                'decode_window_s', 'decode_window_rule', 'protocols',
                'n_blocks', 'output_path']
     rows = [_output_metadata(path) for path in sorted(directory.glob('*.h5'))]
-    frame = pd.DataFrame(rows, columns=columns)
+    frame = pd.DataFrame(rows)
+    frame['current_cell_index'] = np.nan
+    frame['index_status'] = ('saved index; current discovery not supplied'
+                             if len(frame) else pd.Series(dtype=object))
     if protocol_cells is not None and len(frame) and len(protocol_cells):
         lookup = (protocol_cells[['exp_name', 'cell_label', 'cell_index']]
                   .drop_duplicates(['exp_name', 'cell_label']))
         current = frame.merge(
             lookup, left_on=['date', 'cell_label'],
             right_on=['exp_name', 'cell_label'], how='left', suffixes=('', '_current'))
+        current['current_cell_index'] = current['cell_index_current']
         missing = current.cell_index.lt(0) & current.cell_index_current.notna()
         current.loc[missing, 'cell_index'] = current.loc[missing, 'cell_index_current']
+        current['index_status'] = 'not in current discovery'
+        current.loc[missing, 'index_status'] = 'backfilled from stable registry'
+        both = current.cell_index.ge(0) & current.cell_index_current.notna()
+        agrees = both & current.cell_index.eq(current.cell_index_current)
+        current.loc[agrees & ~missing, 'index_status'] = 'stable index agrees'
+        conflict = both & ~current.cell_index.eq(current.cell_index_current)
+        current.loc[conflict, 'index_status'] = current.loc[conflict].apply(
+            lambda row: (f'saved index {int(row.cell_index)} != stable registry '
+                         f'{int(row.cell_index_current)}'), axis=1)
         frame = current[columns]
+    else:
+        frame = frame.reindex(columns=columns)
     return frame.sort_values(
         ['date', 'cell_label', 'rec_type', 'stim_time_ms'], ignore_index=True)
 
@@ -7907,6 +8346,7 @@ def subset_analysis(analysis: ConditionAnalysis,
         sampling_interval=dt * int(decimate),
         skip_seconds=float(analysis.skip_seconds),
         stim_time_ms=float(analysis.stim_time_ms),
+        light_contrast=float(analysis.light_contrast),
         frequency_cutoff=float(analysis.frequency_cutoff),
         filter_length_s=float(analysis.filter_length_s),
         n_bins=int(analysis.n_bins))
@@ -7946,6 +8386,7 @@ def save_analysis(analysis: ConditionAnalysis, path) -> Path:
         'sampling_interval': float(analysis.sampling_interval),
         'skip_seconds': float(analysis.skip_seconds),
         'stim_time_ms': float(analysis.stim_time_ms),
+        'light_contrast': float(analysis.light_contrast),
         'frequency_cutoff': float(analysis.frequency_cutoff),
         'filter_length_s': float(analysis.filter_length_s),
         'n_bins': int(analysis.n_bins),
@@ -7991,6 +8432,7 @@ def load_analysis(path) -> ConditionAnalysis:
         units=meta['units'], sampling_interval=meta['sampling_interval'],
         skip_seconds=meta['skip_seconds'],
         stim_time_ms=float(meta.get('stim_time_ms', np.nan)),
+        light_contrast=float(meta.get('light_contrast', np.nan)),
         frequency_cutoff=meta['frequency_cutoff'],
         filter_length_s=meta['filter_length_s'], n_bins=meta['n_bins'])
     analysis.sequence_stimulus = stimulus
@@ -8260,9 +8702,9 @@ class CoreLNAnalysis:
 class ResponseInspection:
     """Raw outputs plus the condition table after per-condition activity QC."""
 
-    summaries: Dict[Tuple[str, float], pd.DataFrame]
-    figures: Dict[Tuple[str, float], object]
-    qc: Dict[Tuple[str, float, float], pd.DataFrame]
+    summaries: Dict[Tuple[str, float, float], pd.DataFrame]
+    figures: Dict[Tuple[str, float, float], object]
+    qc: Dict[Tuple[str, float, float, float], pd.DataFrame]
     signature: tuple
     conditions: pd.DataFrame = field(default_factory=pd.DataFrame)
     condition_audit: pd.DataFrame = field(default_factory=pd.DataFrame)
@@ -8274,6 +8716,7 @@ def run_core_ln_analysis(
         rec_type: str = 'extracellular',
         *,
         stim_time_ms: Optional[float] = None,
+        light_contrast: Optional[float] = None,
         light_means: Optional[Sequence[float]] = None,
         skip_seconds: float = 1.0,
         downsample: int = 10,
@@ -8315,6 +8758,7 @@ def run_core_ln_analysis(
     analysis = analyze_condition(
         exp_name, block_ids, rec_type=rec_type,
         stim_time_ms=stim_time_ms,
+        light_contrast=light_contrast,
         light_means=light_means,
         filter_length_s=filter_length_s, downsample=downsample,
         psth_sigma_ms=psth_sigma_ms, n_bins=n_bins,
@@ -8373,6 +8817,9 @@ def response_qc_signature(
     """Immutable identity of the selected conditions and response-QC policy."""
     pairs = tuple((
         row.rec_type, float(row.stim_time_ms),
+        (float(row.light_contrast)
+         if np.isfinite(_numeric(getattr(row, 'light_contrast', np.nan)))
+         else None),
         tuple(tuple(value) for value in getattr(row, 'excluded_epochs', ())),
         tuple(float(value) for value in getattr(
             row, 'included_light_means', ())))
@@ -8402,6 +8849,8 @@ def inspect_recording_conditions(
     """
     summaries, figures, qc = {}, {}, {}
     updated = conditions.copy()
+    if 'light_contrast' not in updated:
+        updated['light_contrast'] = np.nan
     if 'included' not in updated:
         updated['included'] = True
     if 'reason' not in updated:
@@ -8419,23 +8868,28 @@ def inspect_recording_conditions(
     for row_index, condition in updated[updated.included].iterrows():
         rec_type = str(condition.rec_type)
         duration = float(condition.stim_time_ms)
-        key = (rec_type, duration)
+        contrast = float(condition.light_contrast)
+        key = ((rec_type, duration, contrast) if np.isfinite(contrast)
+               else (rec_type, duration))
         excluded_epochs = condition.get('excluded_epochs', ())
         retained_epochs = condition.get('n_epochs_retained', condition.n_epochs)
         if verbose:
             print(f'\nraw inspection: {rec_type} | '
-                  f'{condition.stim_seconds:g} s | {retained_epochs} retained '
+                  f'{condition.stim_seconds:g} s | contrast {contrast:g} | '
+                  f'{retained_epochs} retained '
                   f'of {condition.n_epochs} recorded epochs | '
                   f'blocks {condition.block_ids}')
         summary = epoch_response_summary(
             exp_name, condition.block_ids, rec_type,
             max_epochs=max_epochs, stim_time_ms=condition.stim_time_ms,
+            light_contrast=(contrast if np.isfinite(contrast) else None),
             excluded_epochs=excluded_epochs,
             show=verbose)
         summaries[key] = summary
         figures[key] = plot_traces(
             exp_name, condition.block_ids, rec_type,
             max_epochs=max_epochs, stim_time_ms=condition.stim_time_ms,
+            light_contrast=(contrast if np.isfinite(contrast) else None),
             excluded_epochs=excluded_epochs)
 
         retained_means, failed_reasons, activity_excluded = [], [], []
@@ -8453,7 +8907,10 @@ def inspect_recording_conditions(
                                  f'{condition.stim_seconds:g} s | '
                                  f'lightMean {mean_level:g}'),
                 raise_on_failure=False, verbose=verbose)
-            qc[(rec_type, duration, float(mean_level))] = quality
+            qc_key = ((rec_type, duration, contrast, float(mean_level))
+                      if np.isfinite(contrast)
+                      else (rec_type, duration, float(mean_level)))
+            qc[qc_key] = quality
             failed = bool(quality.low_response_cell.iloc[0])
             n_low = int(quality.n_low_response_epochs.iloc[0])
             n_epochs = int(quality.n_response_epochs.iloc[0])
@@ -8470,6 +8927,7 @@ def inspect_recording_conditions(
             audit_rows.append({
                 'rec_type': rec_type, 'stim_time_ms': duration,
                 'stim_seconds': duration / 1e3,
+                'light_contrast': contrast,
                 'lightMean': float(mean_level), 'n_epochs': n_epochs,
                 'n_below_threshold': n_low,
                 'n_epochs_used': 0 if failed else n_epochs - n_low,
@@ -8550,7 +9008,7 @@ def run_core_condition_analyses(
         mean_window_s: float = 2.0,
         condition_window_s: float = 6.0,
         temporal_window_s: Optional[float] = None,
-        verbose: bool = True) -> Dict[Tuple[str, float], CoreLNAnalysis]:
+        verbose: bool = True) -> Dict[Tuple[str, float, float], CoreLNAnalysis]:
     """Verify Section 2 QC and run the core analysis for every condition."""
     expected = response_qc_signature(
         exp_name, block_ids, conditions, max_epochs,
@@ -8563,6 +9021,7 @@ def run_core_condition_analyses(
     results = {}
     for condition in conditions.itertuples():
         rec_type, duration = str(condition.rec_type), float(condition.stim_time_ms)
+        contrast = _numeric(getattr(condition, 'light_contrast', np.nan))
         excluded_epochs = getattr(condition, 'excluded_epochs', ())
         activity_excluded_epochs = getattr(
             condition, 'activity_excluded_epochs', ())
@@ -8572,10 +9031,13 @@ def run_core_condition_analyses(
             getattr(condition, 'n_epochs_retained', condition.n_epochs))
         if verbose:
             print(f'\n=== {rec_type} | {condition.stim_seconds:g} s epochs | '
+                  f'contrast {contrast:g} | '
                   f'{retained_epochs} retained of {condition.n_epochs} recorded ===')
         core = run_core_ln_analysis(
             exp_name, condition.block_ids, rec_type=rec_type,
-            stim_time_ms=duration, light_means=included_light_means,
+            stim_time_ms=duration,
+            light_contrast=(contrast if np.isfinite(contrast) else None),
+            light_means=included_light_means,
             skip_seconds=skip_seconds,
             downsample=downsample, max_epochs=max_epochs,
             max_series_resistance=max_series_resistance,
@@ -8585,7 +9047,9 @@ def run_core_condition_analyses(
             mean_window_s=mean_window_s,
             condition_window_s=condition_window_s,
             temporal_window_s=temporal_window_s, verbose=verbose)
-        results[(rec_type, duration)] = core
+        key = ((rec_type, duration, contrast) if np.isfinite(contrast)
+               else (rec_type, duration))
+        results[key] = core
         if verbose and len(core.analysis.dropped_epochs):
             print(core.analysis.dropped_epochs.to_string(index=False))
         if verbose and len(core.analysis.epoch_adjustments):
@@ -8599,7 +9063,7 @@ def run_core_condition_analyses(
 
 def run_reconstruction_analyses(
         exp_name: str,
-        core_by_condition: Dict[Tuple[str, float], CoreLNAnalysis],
+        core_by_condition: Dict[Tuple[str, float, float], CoreLNAnalysis],
         *,
         decode_skip_s: float,
         decode_window_s,
@@ -8613,15 +9077,21 @@ def run_reconstruction_analyses(
         max_epochs: Optional[int] = None,
         max_series_resistance: Optional[float] = 30e6,
         align_epoch_means: bool = True,
-        verbose: bool = True) -> Dict[Tuple[str, float], dict]:
+        verbose: bool = True) -> Dict[Tuple[str, float, float], dict]:
     """Run all held-out reconstruction analyses for every saved condition."""
     results = {}
-    for (rec_type, duration), core in core_by_condition.items():
+    for key, core in core_by_condition.items():
+        rec_type, duration = key[:2]
+        contrast = (float(key[2]) if len(key) == 3 else
+                    float(getattr(core.analysis, 'light_contrast', np.nan)))
         if verbose:
-            print(f'\n=== reconstruction | {rec_type} | {duration / 1e3:g} s epochs ===')
+            print(f'\n=== reconstruction | {rec_type} | {duration / 1e3:g} s epochs '
+                  f'| contrast {contrast:g} ===')
         analysis = analyze_condition(
             exp_name, core.analysis.block_ids, rec_type=rec_type,
-            stim_time_ms=duration, light_means=core.analysis.light_means,
+            stim_time_ms=duration,
+            light_contrast=(contrast if np.isfinite(contrast) else None),
+            light_means=core.analysis.light_means,
             skip_seconds=decode_skip_s,
             downsample=downsample, max_epochs=max_epochs,
             max_series_resistance=max_series_resistance,
@@ -8656,7 +9126,7 @@ def run_reconstruction_analyses(
             analysis, window_seconds=selected_window,
             decode_bin_ms=decode_bin_ms, steady_state_s=steady_state_s,
             verbose=verbose)
-        results[(rec_type, duration)] = {
+        results[key] = {
             'analysis': analysis, 'decode_window_s': selected_window,
             'window_selection': window_selection, 'traces': traces,
             'decoded': decoded, 'directional_decoding': directional,
@@ -8684,12 +9154,16 @@ def run_reconstruction_analyses(
 
 
 def add_early_late_reconstruction(
-        reconstruction_by_condition: Dict[Tuple[str, float], dict],
-        *, verbose: bool = True) -> Dict[Tuple[str, float], dict]:
+        reconstruction_by_condition: Dict[Tuple[str, float, float], dict],
+        *, verbose: bool = True) -> Dict[Tuple[str, float, float], dict]:
     """Add early/late transfer tables and figures to reconstruction bundles."""
-    for (rec_type, duration), result in reconstruction_by_condition.items():
+    for key, result in reconstruction_by_condition.items():
+        rec_type, duration = key[:2]
+        contrast = (float(key[2]) if len(key) == 3 else
+                    float(getattr(result.get('analysis'), 'light_contrast', np.nan)))
         if verbose:
-            print(f'\n=== early vs late | {rec_type} | {duration / 1e3:g} s epochs ===')
+            print(f'\n=== early vs late | {rec_type} | {duration / 1e3:g} s epochs '
+                  f'| contrast {contrast:g} ===')
         early_late = transfer_early_late(result['traces'])
         result['early_late'] = early_late
         result['early_late_figure'] = plot_transfer_early_late(
@@ -8729,29 +9203,33 @@ def population_overview_analysis(
     saved = select(load_condition_index(output_dir))
     mean_rows = select(load_population_table('mean_response', output_dir))
     mean_population = population_mean_sem(
-        mean_rows, ['cell_type', 'rec_type', 'stim_seconds', 'light_mean', 'time_s'],
+        mean_rows, ['cell_type', 'rec_type', 'stim_seconds', 'light_contrast',
+                    'light_mean', 'time_s'],
         ['mean'])
     condition_rows = select(load_population_table('condition_summary', output_dir))
     if 'mean_rate_hz' not in condition_rows:
         condition_rows = condition_rows.copy()
         condition_rows['mean_rate_hz'] = np.nan
     condition_population = population_mean_sem(
-        condition_rows, ['cell_type', 'rec_type', 'stim_seconds', 'lightMean'],
+        condition_rows, ['cell_type', 'rec_type', 'stim_seconds',
+                         'light_contrast', 'lightMean'],
         ['mean_rate_hz', 'r2', 'time_to_peak_ms', 'biphasic_index'])
     return {
         'saved_cells': saved, 'mean_population': mean_population,
         'condition_population': condition_population,
         'mean_figures': {
-            duration: plot_population_metrics(
+            condition: plot_population_metrics(
                 block, x='time_s', metrics=['mean'], hue='light_mean')
-            for duration, block in mean_population.groupby('stim_seconds')}
+            for condition, block in mean_population.groupby(
+                ['stim_seconds', 'light_contrast'], dropna=False)}
             if not mean_population.empty else {},
         'condition_figures': {
-            duration: plot_population_metrics(
+            condition: plot_population_metrics(
                 block, x='lightMean',
                 metrics=['mean_rate_hz', 'r2', 'time_to_peak_ms',
                          'biphasic_index'], hue='cell_type')
-            for duration, block in condition_population.groupby('stim_seconds')}
+            for condition, block in condition_population.groupby(
+                ['stim_seconds', 'light_contrast'], dropna=False)}
             if not condition_population.empty else {},
     }
 
@@ -8764,14 +9242,16 @@ def population_temporal_analysis(
     rows = select_population_rows(
         load_population_table('temporal_summary', output_dir), rec_types, cell_types)
     summary = population_mean_sem(
-        rows, ['cell_type', 'rec_type', 'stim_seconds', 'lightMean', 'order'],
+        rows, ['cell_type', 'rec_type', 'stim_seconds', 'light_contrast',
+               'lightMean', 'order'],
         ['centre_s', 'r2', 'time_to_peak_ms', 'biphasic_index',
          'alpha', 'beta', 'gamma', 'epsilon'])
     figures = {
-        duration: plot_population_metrics(
+        condition: plot_population_metrics(
             block, x='order', metrics=['r2', 'time_to_peak_ms', 'biphasic_index'],
             hue='lightMean')
-        for duration, block in summary.groupby('stim_seconds')} if not summary.empty else {}
+        for condition, block in summary.groupby(
+            ['stim_seconds', 'light_contrast'], dropna=False)} if not summary.empty else {}
     return {'rows': rows, 'summary': summary, 'figures': figures}
 
 
@@ -8786,13 +9266,15 @@ def population_decoding_analysis(
         'reconstruction_summary', output_dir))
     reconstruction = population_mean_sem(
         reconstruction_rows,
-        ['cell_type', 'rec_type', 'stim_seconds', 'mode', 'lightMean'],
+        ['cell_type', 'rec_type', 'stim_seconds', 'light_contrast',
+         'mode', 'lightMean'],
         ['r_all_first', 'r_all_last', 'r_gain', 'r_asymmetry',
          'gain_asymmetry', 'nrmse_inc', 'nrmse_dec'])
     early_late_rows = select(load_population_table('early_late', output_dir))
     early_late = population_mean_sem(
         early_late_rows,
-        ['cell_type', 'rec_type', 'stim_seconds', 'mode', 'lightMean', 'half'],
+        ['cell_type', 'rec_type', 'stim_seconds', 'light_contrast',
+         'mode', 'lightMean', 'half'],
         ['gain_increment', 'gain_decrement', 'gain_asymmetry',
          'r_increment', 'r_decrement', 'r_asymmetry'])
     directional_rows = select(load_population_table('directional_decoding', output_dir))
@@ -8801,11 +9283,12 @@ def population_decoding_analysis(
                          directional_rows.light_condition.eq('bright')].copy())
     directional = population_mean_sem(
         positive_bright,
-        ['cell_type', 'rec_type', 'stim_seconds', 'mode', 'direction', 'order'],
+        ['cell_type', 'rec_type', 'stim_seconds', 'light_contrast',
+         'mode', 'direction', 'order'],
         ['gain_delta', 'direction_accuracy', 'nrmse_delta'])
     paired = directional_saturation_contrast(directional_rows)
     contrast = population_mean_sem(
-        paired, ['cell_type', 'rec_type', 'stim_seconds', 'mode'],
+        paired, ['cell_type', 'rec_type', 'stim_seconds', 'light_contrast', 'mode'],
         ['gain_dec_minus_inc', 'accuracy_dec_minus_inc', 'error_inc_minus_dec'])
     key_contrast = (contrast if contrast.empty else
                     contrast[contrast.cell_type.isin(key_cell_types)])
@@ -8814,24 +9297,26 @@ def population_decoding_analysis(
         'directional': directional, 'paired_direction': paired,
         'directional_contrast': contrast,
         'reconstruction_figures': {
-            duration: plot_population_metrics(
+            condition: plot_population_metrics(
                 block, x='lightMean',
                 metrics=['r_gain', 'r_asymmetry', 'gain_asymmetry'], hue='mode')
-            for duration, block in reconstruction.groupby('stim_seconds')}
+            for condition, block in reconstruction.groupby(
+                ['stim_seconds', 'light_contrast'], dropna=False)}
             if not reconstruction.empty else {},
         'directional_contrast_figures': {
-            duration: plot_population_metrics(
+            condition: plot_population_metrics(
                 block, x='cell_type',
                 metrics=['gain_dec_minus_inc', 'accuracy_dec_minus_inc',
                          'error_inc_minus_dec'], hue='mode')
-            for duration, block in key_contrast.groupby('stim_seconds')}
+            for condition, block in key_contrast.groupby(
+                ['stim_seconds', 'light_contrast'], dropna=False)}
             if not key_contrast.empty else {},
     }
 
 
 def run_one_state_lnk_conditions(
-        reconstruction_by_condition: Dict[Tuple[str, float], dict],
-        core_by_condition: Dict[Tuple[str, float], CoreLNAnalysis],
+        reconstruction_by_condition: Dict[Tuple[str, float, float], dict],
+        core_by_condition: Dict[Tuple[str, float, float], CoreLNAnalysis],
         *, state_dt_ms: Optional[float] = None,
         test_fraction: float = 0.2,
         warmup_epochs: int = 1,
@@ -8839,13 +9324,17 @@ def run_one_state_lnk_conditions(
         view_s: Tuple[float, float] = (25.0, 95.0),
         nl_windows: int = 5,
         nl_warmup_epochs: int = 1,
-        verbose: bool = True) -> Dict[Tuple[str, float], dict]:
+        verbose: bool = True) -> Dict[Tuple[str, float, float], dict]:
     """Fit and visualize both one-state LNK couplings for every condition."""
     results = {}
     for key, reconstruction in reconstruction_by_condition.items():
-        rec_type, duration = key
+        rec_type, duration = key[:2]
+        contrast = (float(key[2]) if len(key) == 3 else
+                    float(getattr(reconstruction.get('analysis'),
+                                  'light_contrast', np.nan)))
         if verbose:
-            print(f'\n=== one-state LNK | {rec_type} | {duration / 1e3:g} s epochs ===')
+            print(f'\n=== one-state LNK | {rec_type} | {duration / 1e3:g} s epochs '
+                  f'| contrast {contrast:g} ===')
         analysis = reconstruction['analysis']
         core = core_by_condition[key]
         models = compare_lnk_couplings(
@@ -8882,17 +9371,21 @@ def run_one_state_lnk_conditions(
 
 
 def run_two_state_lnk_conditions(
-        reconstruction_by_condition: Dict[Tuple[str, float], dict],
+        reconstruction_by_condition: Dict[Tuple[str, float, float], dict],
         *, state_dt_ms: float = 250.0,
         n_restarts: int = 2,
         test_fraction: float = 0.25,
-        verbose: bool = True) -> Dict[Tuple[str, float], dict]:
+        verbose: bool = True) -> Dict[Tuple[str, float, float], dict]:
     """Fit and visualize the two-state LNK model for every condition."""
     results = {}
     for key, reconstruction in reconstruction_by_condition.items():
-        rec_type, duration = key
+        rec_type, duration = key[:2]
+        contrast = (float(key[2]) if len(key) == 3 else
+                    float(getattr(reconstruction.get('analysis'),
+                                  'light_contrast', np.nan)))
         if verbose:
-            print(f'\n=== two-state LNK | {rec_type} | {duration / 1e3:g} s epochs ===')
+            print(f'\n=== two-state LNK | {rec_type} | {duration / 1e3:g} s epochs '
+                  f'| contrast {contrast:g} ===')
         analysis = reconstruction['analysis']
         model = fit_lnk_two_state(
             analysis, state_dt_ms=state_dt_ms, n_restarts=n_restarts,
@@ -8917,15 +9410,17 @@ __all__ = [
     'summary_path', 'load_summary', 'load_cell',
     'DATE_OFFSETS', 'SAVED_DATE_OFFSET_DAYS', 'FALLBACK_OFFSETS',
     'SINGLE_CELL_ROOT', 'metadata_files', 'corrected_dates',
-    'compare_matlab_roster_to_saved',
+    'compare_matlab_roster_to_saved', 'audit_matlab_roster_discovery',
     'resolve_roster_files',
     'find_blocks', 'find_protocol_cells', 'cell_blocks', 'duration_conditions',
     'recording_duration_conditions', 'apply_recording_type_exclusions',
     'apply_epoch_range_exclusions',
     'epoch_response_summary', 'plot_traces',
-    'epoch_parameters', 'resolve_block_mode', 'load_block_modes',
+    'epoch_parameters', 'normalize_epoch_light_means',
+    'resolve_block_mode', 'load_block_modes',
     'PROTOCOL_PARAMETERS', 'MIN_STIM_TIME_MS', 'MIN_EPOCHS_PER_DURATION',
-    'PRIMATE_CELL_TYPES',
+    'PRIMATE_CELL_TYPES', 'PRIMATE_EXPERIMENT_LABELS',
+    'CELL_INDEX_REGISTRY_PATH',
     'MODE_CACHE_PATH', 'MODE_CACHE_VERSION', 'RECORDING_TYPES',
     'led_attenuation', 'matlab_randn', 'gaussian_noise_stimulus',
     'epoch_stimulus', 'fit_sigmoid', 'sigmoid', 'fit_ln_model',

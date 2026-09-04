@@ -83,6 +83,45 @@ def _population_analysis():
     return analysis, temporal
 
 
+def test_normalize_epoch_light_means_recovers_legacy_array_values():
+    import pandas as pd
+
+    raw = pd.DataFrame({
+        'lightMean': [np.array([.02, .4]), np.array([.02, .4])],
+        'stdv': [.01, .2], 'Contrast': [.5, .5],
+    })
+
+    normalized = vmn.normalize_epoch_light_means(raw)
+
+    assert normalized.lightMean.tolist() == pytest.approx([.02, .4])
+    assert normalized.lightMeanStatus.tolist() == [
+        'derived from stdv / Contrast'] * 2
+    assert np.array_equal(normalized.lightMeanRecorded.iloc[0], [.02, .4])
+
+
+def test_a2_and_aii_cell_type_aliases_match():
+    assert vmn._match_cell_type('A2 amacrine')
+    assert vmn._match_cell_type('AII')
+
+
+def test_stable_cell_indices_keep_old_ids_and_append_recovered_cells(tmp_path):
+    import pandas as pd
+
+    registry = tmp_path / 'indices.csv'
+    registry.write_text(
+        'cell_index,exp_name,cell_label\n'
+        '8,2021-01-01_B,Cell1\n'
+        '9,2021-01-02_B,cell2\n')
+    cells = pd.DataFrame({
+        'exp_name': ['2020-07-29_G', '2021-01-01_B'],
+        'cell_label': ['cell1', 'Cell1'],
+    })
+
+    indexed = vmn._stable_cell_indices(cells, registry)
+
+    assert indexed.cell_index.tolist() == [10, 8]
+
+
 def test_duration_conditions_counts_every_epoch_and_keeps_exclusion_audit(monkeypatch):
     import pandas as pd
 
@@ -104,6 +143,24 @@ def test_duration_conditions_counts_every_epoch_and_keeps_exclusion_audit(monkey
     assert short.block_ids == [11, 12]
     assert long.n_epochs == 2 and not long.included
     assert long.reason == 'fewer than 4 epochs'
+
+
+def test_duration_conditions_split_contrast_without_dropping_cell(monkeypatch):
+    import pandas as pd
+
+    parameters = pd.DataFrame({
+        'stimTime': [50_000] * 4,
+        'lightMean': [.45, 4.5, .5, 5.0],
+        'Contrast': [.35, .35, .30, .30],
+    })
+    monkeypatch.setattr(vmn, 'epoch_parameters', lambda _block: parameters)
+
+    conditions = vmn.duration_conditions(
+        [11], min_epochs=2, min_stim_time_ms=30_000, show=False)
+
+    assert conditions.light_contrast.tolist() == pytest.approx([.30, .35])
+    assert conditions.included.tolist() == [True, True]
+    assert conditions.light_means.tolist() == ['0.5, 5', '0.45, 4.5']
 
 
 def test_recording_duration_conditions_threshold_is_per_paired_condition(monkeypatch):
@@ -1874,6 +1931,36 @@ def test_condition_index_backfills_legacy_cell_index_from_current_cell_table(
     index = vmn.load_condition_index(tmp_path, protocol_cells=current)
 
     assert index.cell_index.tolist() == [27]
+    assert index.current_cell_index.tolist() == [27]
+    assert index.index_status.tolist() == ['backfilled from stable registry']
+
+
+def test_condition_index_preserves_and_flags_conflicting_saved_index(
+        tmp_path, monkeypatch):
+    import pandas as pd
+
+    analysis, temporal = _population_analysis()
+    blocks = pd.DataFrame({
+        'block_id': [11, 12], 'cell_label': ['Cell3'] * 2,
+        'cell_type_short': ['OFF-parasol'] * 2,
+        'protocol_name': [vmn.PROTOCOLS[0]] * 2,
+    })
+    monkeypatch.setattr(vmn, 'condition_light_settings', lambda blocks, analysis:
+        pd.DataFrame({'rig': ['B'], 'led': ['UV LED'], 'led_ndfs': ['B1'],
+                      'optical_density': [1.0]}))
+    vmn.save_condition_output(
+        analysis, blocks, temporal_models=temporal, cell_index=19,
+        output_dir=tmp_path, verbose=False)
+    current = pd.DataFrame({
+        'exp_name': ['2020-06-11_B'], 'cell_label': ['Cell3'],
+        'cell_index': [27]})
+
+    index = vmn.load_condition_index(tmp_path, protocol_cells=current)
+
+    assert index.cell_index.tolist() == [19]
+    assert index.current_cell_index.tolist() == [27]
+    assert index.index_status.tolist() == [
+        'saved index 19 != stable registry 27']
 
 
 def test_save_duration_outputs_saves_every_duration(monkeypatch):
