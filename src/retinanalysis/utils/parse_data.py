@@ -11,7 +11,10 @@ from datetime import datetime, timedelta
 from typing import Union
 import sys
 from pathlib import Path
-from retinanalysis.utils.experiment_files import is_single_cell_experiment_file
+from retinanalysis.utils.experiment_files import (
+    is_single_cell_experiment_file,
+    single_cell_json_stem,
+)
 
 def strip_uuid(uuid: str) -> str:
     """ Strip the UUID from the UUID string. """
@@ -1795,16 +1798,24 @@ class Symphony2Reader:
 
 def find_new_h5_files(h5_dir: Path, json_dir: Path):
     """
-    Return a sorted list of real .h5 files in h5_dir that do not yet have a
-    corresponding .json file in json_dir.
+    Return one H5 source per experiment lacking canonical JSON metadata.
 
-    Ignores hidden files and macOS AppleDouble files like ._filename.h5.
+    Prefer ``YYYY-MM-DD_Rig.h5`` when it and
+    ``YYYY-MM-DD_Rig.auisql.h5`` both exist. If only the AUISQL H5 exists,
+    use it as the source for ``YYYY-MM-DD_Rig.json``. Hidden files, macOS
+    AppleDouble files, and unrelated H5 files are ignored.
     """
-    h5_files = sorted(
-        p for p in h5_dir.glob("*.h5")
-        if p.is_file()
-        and is_single_cell_experiment_file(p, suffix='.h5')
-    )
+    sources_by_stem = {}
+    for path in sorted(h5_dir.glob('*.h5')):
+        if not path.is_file():
+            continue
+        json_stem = single_cell_json_stem(path)
+        if json_stem is None:
+            continue
+        current = sources_by_stem.get(json_stem)
+        is_primary = is_single_cell_experiment_file(path, suffix='.h5')
+        if current is None or is_primary:
+            sources_by_stem[json_stem] = path
 
     existing_json_stems = {
         p.stem for p in json_dir.glob("*.json")
@@ -1813,8 +1824,11 @@ def find_new_h5_files(h5_dir: Path, json_dir: Path):
         and not p.name.startswith("._")
     }
 
-    new_h5_files = [p for p in h5_files if p.stem not in existing_json_stems]
-    return new_h5_files
+    return [
+        sources_by_stem[stem]
+        for stem in sorted(sources_by_stem)
+        if stem not in existing_json_stems
+    ]
 
 if __name__ == '__main__':
 
@@ -1878,7 +1892,7 @@ if __name__ == '__main__':
     print(f'Raw data path: {raw_data_path}')
 
     for h5_path in h5_files_to_process:
-        out_path = json_folder / f'{h5_path.stem}.json'
+        out_path = json_folder / f'{single_cell_json_stem(h5_path)}.json'
 
         print('\n----------------------------------------')
         print(f'Parsing {h5_path}')

@@ -45,6 +45,32 @@ def is_single_cell_experiment_file(
     return True
 
 
+def single_cell_json_stem(path_or_name) -> Optional[str]:
+    """Return the canonical JSON stem for a single-cell H5 source.
+
+    Ordinary files map directly (``2020-10-08_B.h5`` ->
+    ``2020-10-08_B``). An AUISQL fallback maps to that same canonical stem
+    (``2020-10-08_B.auisql.h5`` -> ``2020-10-08_B``). Other filenames return
+    ``None``.
+    """
+    name = Path(path_or_name).name
+    if name.startswith('.') or Path(name).suffix.lower() != '.h5':
+        return None
+
+    stem = Path(name).stem
+    if stem.lower().endswith('.auisql'):
+        stem = stem[:-len('.auisql')]
+
+    match = _SINGLE_CELL_STEM.fullmatch(stem)
+    if match is None:
+        return None
+    try:
+        datetime.date.fromisoformat(match.group('date'))
+    except ValueError:
+        return None
+    return stem
+
+
 def is_mea_experiment_file(path_or_name, suffix: Optional[str] = None) -> bool:
     """Whether a filename follows the established MEA date-name format."""
     name = Path(path_or_name).name
@@ -60,4 +86,8 @@ def is_mea_experiment_file(path_or_name, suffix: Optional[str] = None) -> bool:
     return True
 
 
-__all__ = ['is_mea_experiment_file', 'is_single_cell_experiment_file']
+__all__ = [
+    'is_mea_experiment_file',
+    'is_single_cell_experiment_file',
+    'single_cell_json_stem',
+]

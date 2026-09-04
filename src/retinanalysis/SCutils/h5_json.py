@@ -9,6 +9,8 @@ import re
 import tempfile
 from typing import List, Optional, Sequence, Tuple, Union
 
+from retinanalysis.utils.experiment_files import single_cell_json_stem
+
 
 PathLike = Union[str, Path]
 _UUID_AT_END = re.compile(
@@ -193,7 +195,9 @@ def update_single_cell_json(
     into place only after parsing succeeds. Set ``dry_run=True`` to report the
     missing mappings without writing anything. H5 response/stimulus paths are
     retained by default because database ingestion and raw-trace loading need
-    them.
+    them. When both a canonical H5 and its ``.auisql.h5`` counterpart exist,
+    the canonical H5 is used. An AUISQL file is used only as a fallback when
+    the canonical H5 is absent, and still produces the canonical JSON name.
 
     Typical use::
 
@@ -230,7 +234,7 @@ def update_single_cell_json(
     failed: List[Tuple[Path, str]] = []
 
     for h5_path in pending:
-        output_json = json_dir / f'{h5_path.stem}.json'
+        output_json = json_dir / f'{single_cell_json_stem(h5_path)}.json'
         if output_json.exists():
             continue
         if verbose:

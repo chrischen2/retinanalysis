@@ -1,6 +1,11 @@
 import h5py
+import json
 
-from retinanalysis.SCutils.h5_json import repair_h5_paths
+from retinanalysis.SCutils.h5_json import (
+    repair_h5_paths,
+    update_single_cell_json,
+)
+from retinanalysis.utils.parse_data import find_new_h5_files
 
 
 def test_repair_h5_paths_restores_response_and_stimulus_paths(tmp_path):
@@ -24,3 +29,67 @@ def test_repair_h5_paths_restores_response_and_stimulus_paths(tmp_path):
     assert epoch['responses']['Amp1']['h5path'].endswith(response_uuid)
     assert epoch['stimuli']['UV LED']['h5path'].endswith(stimulus_uuid)
     assert repair_h5_paths(metadata, h5_path) == 0
+
+
+def test_find_new_h5_files_prefers_primary_over_auisql(tmp_path):
+    h5_dir = tmp_path / 'h5'
+    json_dir = tmp_path / 'json'
+    h5_dir.mkdir()
+    json_dir.mkdir()
+    primary = h5_dir / '2026-09-04_G.h5'
+    auisql = h5_dir / '2026-09-04_G.auisql.h5'
+    primary.touch()
+    auisql.touch()
+
+    assert find_new_h5_files(h5_dir, json_dir) == [primary]
+
+
+def test_find_new_h5_files_uses_auisql_as_fallback(tmp_path):
+    h5_dir = tmp_path / 'h5'
+    json_dir = tmp_path / 'json'
+    h5_dir.mkdir()
+    json_dir.mkdir()
+    auisql = h5_dir / '2026-09-04_G.auisql.h5'
+    auisql.touch()
+
+    assert find_new_h5_files(h5_dir, json_dir) == [auisql]
+
+    (json_dir / '2026-09-04_G.json').write_text('{}')
+    assert find_new_h5_files(h5_dir, json_dir) == []
+
+
+def test_update_single_cell_json_publishes_canonical_auisql_name(
+        tmp_path, monkeypatch):
+    volume = tmp_path / 'SingleCellSSD'
+    h5_dir = volume / 'single_cell' / 'chris_data' / 'h5'
+    json_dir = volume / 'single_cell' / 'chris_data' / 'json'
+    h5_dir.mkdir(parents=True)
+    json_dir.mkdir()
+    auisql = h5_dir / '2026-09-04_G.auisql.h5'
+    auisql.touch()
+
+    class FakeReader:
+        def __init__(self, *, h5_path, out_path, **kwargs):
+            self.h5_path = h5_path
+            self.out_path = out_path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def read_write(self):
+            with open(self.out_path, 'w') as stream:
+                json.dump({'source': self.h5_path}, stream)
+
+    monkeypatch.setattr(
+        'retinanalysis.utils.parse_data.Symphony2Reader', FakeReader)
+
+    report = update_single_cell_json(volume=volume, verbose=False)
+
+    canonical_json = json_dir / '2026-09-04_G.json'
+    assert report.pending == (auisql,)
+    assert report.created == (canonical_json,)
+    assert canonical_json.is_file()
+    assert not (json_dir / '2026-09-04_G.auisql.json').exists()
