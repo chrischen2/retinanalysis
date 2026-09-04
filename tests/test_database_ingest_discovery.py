@@ -28,6 +28,11 @@ def test_complete_auisql_bundle_is_ingestible_fallback(tmp_path):
                      str(tags_dir / f'{stem}.json')]]
 
 
+def test_auisql_response_path_has_canonical_experiment_name():
+    assert database_pop.exp_name_from_data(
+        '/data/2022-09-09_B.auisql.h5') == '2022-09-09_B'
+
+
 def test_primary_h5_wins_over_complete_auisql_bundle(tmp_path):
     h5_dir = tmp_path / 'h5'
     meta_dir = tmp_path / 'meta'

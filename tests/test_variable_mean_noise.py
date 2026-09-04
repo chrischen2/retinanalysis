@@ -104,6 +104,23 @@ def test_a2_and_aii_cell_type_aliases_match():
     assert vmn._match_cell_type('AII')
 
 
+def test_discovery_species_gate_is_independent_of_rig_suffix():
+    import pandas as pd
+
+    rigs = ['B', 'E', 'F', 'G', 'Z']
+    frame = pd.DataFrame({
+        'exp_name': [f'2026-08-01_{rig}' for rig in rigs],
+        'experiment_label': ['Primate'] * len(rigs),
+        'cell_type_short': ['ON-parasol'] * len(rigs),
+    })
+
+    keep = vmn._species_cell_keep_mask(
+        frame, vmn.PRIMATE_EXPERIMENT_LABELS, vmn.PRIMATE_CELL_TYPES)
+
+    assert keep.tolist() == [True] * len(rigs)
+    assert frame.exp_name.map(vmn._experiment_rig_suffix).tolist() == rigs
+
+
 def test_stable_cell_indices_keep_old_ids_and_append_recovered_cells(tmp_path):
     import pandas as pd
 

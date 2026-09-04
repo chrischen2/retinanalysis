@@ -59,6 +59,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
+import re
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -373,6 +374,35 @@ def _match_cell_type(value, allowed=PRIMATE_CELL_TYPES) -> bool:
     return any(text == canonical(one) for one in allowed)
 
 
+def _experiment_rig_suffix(exp_name) -> str:
+    """Return the recorded rig suffix for display, never for selection."""
+    match = re.match(r'^\d{4}-\d{2}-\d{2}_([A-Za-z])(?:[_.-].*)?$',
+                     str(exp_name or '').strip())
+    return match.group(1).upper() if match else 'Unknown'
+
+
+def _species_cell_keep_mask(frame: pd.DataFrame,
+                            experiment_labels: Optional[Sequence[str]],
+                            include_cell_types: Optional[Sequence[str]]) -> pd.Series:
+    """Species/cell annotation gate used by discovery.
+
+    This deliberately does not inspect ``exp_name`` or its rig suffix, so an
+    otherwise eligible recording is treated identically on every rig.
+    """
+    if experiment_labels is None:
+        return pd.Series(True, index=frame.index, dtype=bool)
+    allowed_labels = {str(value).strip().lower()
+                      for value in experiment_labels}
+    keep_experiment = frame.experiment_label.astype(
+        str).str.strip().str.lower().isin(allowed_labels)
+    keep_named = (pd.Series(False, index=frame.index, dtype=bool)
+                  if include_cell_types is None else
+                  frame.cell_type_short.map(
+                      lambda value: _match_cell_type(
+                          value, include_cell_types)))
+    return keep_experiment | keep_named
+
+
 def _stable_cell_indices(cells: pd.DataFrame,
                          path: Optional[Path] = None) -> pd.DataFrame:
     """Assign stable Section 1 IDs without renumbering previously listed cells.
@@ -572,6 +602,10 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None,
     recordings are stored under ``Mouse``). Optional ``cell_types`` is a final
     additional subtype restriction.
 
+    Discovery never filters on the experiment-name rig suffix. ``rig_suffix``
+    is returned only as provenance and all retained suffixes are reported when
+    ``show=True``.
+
     The two package copies of the protocol are searched together and
     ``protocol_name`` says which one each block came from.
     """
@@ -615,6 +649,7 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None,
                     on='cell_id', how='left'))
     frame['cell_type_short'] = (frame['cell_type'].astype(str)
                                 .str.split('\\').str[-1].replace('nan', 'Unknown'))
+    frame['rig_suffix'] = frame.exp_name.map(_experiment_rig_suffix)
     if exp_names is not None:
         frame = frame[frame.exp_name.isin(list(exp_names))]
     if frame.empty:
@@ -666,17 +701,8 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None,
         dropped = int((~keep).sum())
         frame = frame[keep]
     if experiment_labels is not None:
-        allowed_labels = {str(value).strip().lower()
-                          for value in experiment_labels}
-        keep_experiment = frame.experiment_label.astype(
-            str).str.strip().str.lower().isin(
-            allowed_labels)
-        keep_named = (pd.Series(False, index=frame.index)
-                      if include_cell_types is None else
-                      frame.cell_type_short.map(
-                          lambda value: _match_cell_type(
-                              value, include_cell_types)))
-        keep = keep_experiment | keep_named
+        keep = _species_cell_keep_mask(
+            frame, experiment_labels, include_cell_types)
         dropped_experiment = int((~keep).sum())
         excluded_recording_types = (frame.loc[~keep]
                                     .groupby(['experiment_label',
@@ -692,6 +718,10 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None,
     if show:
         print(f'{len(frame)} blocks | {frame.exp_name.nunique()} experiments | '
               f'{frame.groupby(["exp_name", "cell_label"]).ngroups} cells')
+        rig_counts = frame.groupby('rig_suffix', dropna=False).size()
+        print('  rig suffixes retained (provenance only; no rig filter): ' +
+              ', '.join(f'{rig} ({count})'
+                        for rig, count in rig_counts.items()))
         if dropped:
             print(f'  dropped {dropped} block(s) with stimTime < '
                   f'{min_stim_time_ms / 1e3:g} s')
@@ -704,7 +734,8 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None,
         print('  by protocol: ' + ', '.join(
             f'{n.rsplit(".", 1)[-1]} ({c})' if False else f'{n} {c}'
             for n, c in frame.protocol_name.value_counts().items()))
-        columns = [c for c in ('exp_name', 'experiment_label', 'cell_label', 'cell_type_short',
+        columns = [c for c in ('exp_name', 'rig_suffix', 'experiment_label',
+                               'cell_label', 'cell_type_short',
                                'block_id', 'stim_seconds', 'led', 'ndfs',
                                'frequencyCutoff', 'numberOfFilters', 'Contrast',
                                'n_epochs', 'protocol_name') if c in frame]

@@ -503,9 +503,14 @@ def exp_name_from_data(data: str) -> str:
     the bare experiment name (there is no .h5 — the data is a sorted-output
     directory). Stripping a fixed three characters works for the first and
     silently eats three characters of the second, which is how experiments
-    landed in the database as ``202605`` instead of ``20260506C``.
+    landed in the database as ``202605`` instead of ``20260506C``. AUISQL
+    response files use ``<exp>.auisql.h5`` and must map back to the same
+    canonical ``<exp>`` name as their JSON metadata.
     """
     base = os.path.basename(str(data))
+    canonical_single_cell = single_cell_json_stem(base)
+    if canonical_single_cell is not None:
+        return canonical_single_cell
     return base[:-3] if base.lower().endswith('.h5') else base
 
 
