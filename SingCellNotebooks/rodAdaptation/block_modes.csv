@@ -389,3 +389,18 @@ cache_version,exp_name,block_id,n_epochs,rec_type,rec_note,online_analysis_recor
 3,2026-02-27_G,37107,10,extracellular,resolved to 'extracellular': recordingTechnique is cell-attached and series resistance is 0,,cell-attached,,
 3,2026-02-27_G,37110,8,exc,"'none' resolved to 'exc': series resistance is 4.9 MOhm, so whole-cell; polarity from the sign of the current; series resistance from epoch parameters (raw H5 unavailable)",,,4.8930292700129305,-1368.5778713524421
 3,2026-02-27_G,37082,2,exc,'None' resolved to 'exc': recordingTechnique is whole-cell; polarity from the sign of the current,,whole-cell,,
+3,2026-09-04_G,37936,14,extracellular,resolved to 'extracellular': recordingTechnique is cell-attached and series resistance is 0,,cell-attached,,
+3,2026-09-04_G,37937,1,extracellular,resolved to 'extracellular': recordingTechnique is cell-attached and series resistance is 0,,cell-attached,,
+3,2026-09-04_G,37938,3,extracellular,resolved to 'extracellular': recordingTechnique is cell-attached and series resistance is 0,,cell-attached,,
+3,2026-09-04_G,37939,6,extracellular,resolved to 'extracellular': recordingTechnique is cell-attached and series resistance is 0,,cell-attached,,
+3,2026-09-04_G,37940,4,extracellular,resolved to 'extracellular': recordingTechnique is cell-attached and series resistance is 0,,cell-attached,,
+3,2026-09-04_G,37941,7,extracellular,resolved to 'extracellular': recordingTechnique is cell-attached and series resistance is 0,,cell-attached,,
+3,2026-09-04_G,37930,13,extracellular,resolved to 'extracellular': recordingTechnique is cell-attached and series resistance is 0,,cell-attached,,
+3,2026-09-04_G,37931,7,exc,'None' resolved to 'exc': recordingTechnique is whole-cell; polarity from the sign of the current,,whole-cell,,
+3,2026-09-04_G,37942,15,extracellular,resolved to 'extracellular': recordingTechnique is cell-attached and series resistance is 0,,cell-attached,,
+3,2026-09-04_G,37934,10,extracellular,resolved to 'extracellular': recordingTechnique is cell-attached and series resistance is 0,,cell-attached,,
+3,2026-09-04_G,37935,12,exc,"'none' resolved to 'exc': series resistance is 8.6 MOhm, so whole-cell; polarity from the sign of the current; series resistance from epoch parameters (raw H5 unavailable)",,,8.556891766882517,-477.9683259304207
+3,2026-09-04_G,37943,19,extracellular,resolved to 'extracellular': recordingTechnique is cell-attached and series resistance is 0,,cell-attached,,
+3,2026-09-04_G,37932,10,extracellular,resolved to 'extracellular': recordingTechnique is cell-attached and series resistance is 0,,cell-attached,,
+3,2026-09-04_G,37933,9,exc,'None' resolved to 'exc': recordingTechnique is whole-cell; polarity from the sign of the current,,whole-cell,,
+3,2026-09-04_G,37945,12,extracellular,resolved to 'extracellular': recordingTechnique is cell-attached and series resistance is 0,,cell-attached,,
