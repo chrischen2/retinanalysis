@@ -22,6 +22,19 @@ if str(NOTEBOOK_DIR) not in sys.path:
 
 vmn = pytest.importorskip('variable_mean_noise')
 
+
+def test_notebook_pins_named_retinanalysis_kernel():
+    import json
+
+    notebook_path = NOTEBOOK_DIR / 'analyzeVariableMeanNoise.ipynb'
+    kernelspec = json.loads(notebook_path.read_text())['metadata']['kernelspec']
+
+    assert kernelspec == {
+        'display_name': 'retinanalysis (Python 3.11)',
+        'language': 'python',
+        'name': 'retinanalysis',
+    }
+
 # RandStream('mt19937ar', 'Seed', 42).randn(1, 64), from MATLAB R2025b.
 MATLAB_RANDN_SEED42 = np.array([
     -0.53824389372926962, 0.86723215762957329, 0.97598646347253948, 0.33739025237921211,
