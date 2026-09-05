@@ -323,21 +323,115 @@ def test_apply_epoch_range_exclusions_is_duration_specific(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ('series_resistance', 'mean_trace', 'expected'),
-    [(0.0, -10.0, 'exc'),
-     (20e6, -10.0, 'exc'),
-     (20e6, 10.0, 'inh')])
-def test_resolve_block_mode_requires_spikes_then_uses_trace_sign(
-        monkeypatch, series_resistance, mean_trace, expected):
+    ('technique', 'online', 'expected'),
+    [('cell-attached', 'exc', 'extracellular'),
+     ('whole-cell', 'exc', 'exc'),
+     ('whole-cell', 'inh', 'inh'),
+     ('whole-cell', None, ''),
+     (None, 'extracellular', 'extracellular')])
+def test_recording_type_uses_epoch_group_technique_as_primary_anchor(
+        technique, online, expected):
+    mode, _ = vmn.recording_type_from_metadata(technique, online)
+    assert mode == expected
+
+
+def test_resolve_block_mode_ignores_series_resistance_and_trace(monkeypatch):
     import pandas as pd
 
     monkeypatch.setattr(
         vmn, 'epoch_parameters',
-        lambda block: pd.DataFrame({'seriesResistance': [series_resistance]}))
+        lambda block: pd.DataFrame({
+            'onlineAnalysis': ['exc'], 'seriesResistance': [0.]}))
     result = vmn.resolve_block_mode(
-        'synthetic', 11, amp_data=np.full((2, 20), mean_trace))
+        'synthetic', 11, amp_data=np.full((2, 20), 10_000.),
+        recording_technique='cell-attached')
 
-    assert result['rec_type'] == expected
+    assert result['rec_type'] == 'extracellular'
+    assert np.isnan(result['series_resistance_mohm'])
+
+
+def test_manual_recording_override_is_scoped_and_mutually_exclusive():
+    import pandas as pd
+
+    modes = pd.DataFrame({
+        'block_id': [10, 11, 12],
+        'rec_type': ['extracellular', '', 'inh'],
+        'rec_note': ['metadata', 'unresolved', 'metadata'],
+    })
+    forced = vmn.apply_recording_type_override(
+        modes, [10, 11], force_whole_cell_flag=True,
+        whole_cell_rec_type='exc', show=False)
+
+    assert forced.rec_type.tolist() == ['exc', 'exc', 'inh']
+    assert modes.rec_type.tolist() == ['extracellular', '', 'inh']
+    with pytest.raises(ValueError, match='cannot both be true'):
+        vmn.apply_recording_type_override(
+            modes, [10], force_spike_flag=True,
+            force_whole_cell_flag=True, show=False)
+
+
+def test_epoch_catalog_and_removal_use_cell_wide_chronological_indices(
+        monkeypatch):
+    import pandas as pd
+
+    params = {
+        10: pd.DataFrame({
+            'epoch_id': [100, 101],
+            'start_time': pd.to_datetime(['2026-01-01 10:00:00',
+                                          '2026-01-01 10:02:00']),
+            'stimTime': [30_000., 60_000.], 'lightMean': [1., 1.],
+            'stdv': [.5, .5]}),
+        11: pd.DataFrame({
+            'epoch_id': [90],
+            'start_time': pd.to_datetime(['2026-01-01 09:59:00']),
+            'stimTime': [30_000.], 'lightMean': [1.], 'stdv': [.5]}),
+    }
+    monkeypatch.setattr(vmn, 'epoch_parameters', lambda block: params[block])
+    catalog = vmn.epoch_catalog([10, 11])
+    assert catalog[['epoch_number', 'block_id', 'block_epoch']].values.tolist() == [
+        [0, 11, 0], [1, 10, 0], [2, 10, 1]]
+
+    conditions = pd.DataFrame({
+        'rec_type': ['extracellular', 'extracellular'],
+        'stim_time_ms': [30_000., 60_000.],
+        'light_contrast': [.5, .5], 'n_epochs': [2, 1],
+        'block_ids': [[10, 11], [10]], 'included': [True, True],
+        'reason': ['', ''],
+    })
+    filtered = vmn.apply_epoch_exclusions(
+        conditions, catalog, remove_epochs=[0, 2], min_epochs=1, show=False)
+    assert filtered.excluded_epochs.tolist() == [[(11, 0)], [(10, 1)]]
+    assert filtered.excluded_epoch_numbers.tolist() == [[0], [2]]
+    assert filtered.n_epochs_retained.tolist() == [1, 0]
+    assert filtered.included.tolist() == [True, False]
+
+
+def test_raw_epoch_plot_has_one_unprocessed_row_per_epoch(monkeypatch):
+    import matplotlib.pyplot as plt
+    import pandas as pd
+
+    catalog = pd.DataFrame({
+        'epoch_number': [0, 1], 'block_id': [10, 10],
+        'block_epoch': [0, 1], 'stimTime': [4., 4.], 'preTime': [0., 0.],
+    })
+    amp = np.array([[1., 2., 3., 4.], [8., 7., 6., 5.]])
+    calls = []
+
+    def fake_load(exp_name, block_id, spiking):
+        calls.append(spiking)
+        return amp, 1000., None
+
+    monkeypatch.setattr(vmn, 'load_block', fake_load)
+    figure = vmn.plot_raw_epoch_traces(
+        'synthetic', catalog, remove_epochs=[1], downsample=1)
+
+    assert len(figure.axes) == 2
+    np.testing.assert_array_equal(figure.axes[0].lines[0].get_ydata(), amp[0])
+    np.testing.assert_array_equal(figure.axes[1].lines[0].get_ydata(), amp[1])
+    assert figure.axes[0].get_ylabel().startswith('0 |')
+    assert 'REMOVE' in figure.axes[1].get_ylabel()
+    assert calls == [False]
+    plt.close(figure)
 
 
 def test_analyze_condition_refuses_implicit_mixed_durations(monkeypatch):
