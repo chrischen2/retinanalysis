@@ -353,7 +353,7 @@ CELL_INDEX_REGISTRY_PATH = (
 # Where the per-block recording-mode cache lives. Resolving a mode can need the
 # block's raw trace, which is seconds per block, so it is done once and stored.
 MODE_CACHE_PATH = Path(__file__).resolve().parent / 'block_modes.csv'
-MODE_CACHE_VERSION = 3
+MODE_CACHE_VERSION = 4
 RECORDING_TYPES = ('extracellular', 'exc', 'inh')
 
 
@@ -449,9 +449,9 @@ def build_mode_cache(protocol_blocks: pd.DataFrame,
     This delegates the actual decision to the shared
     :func:`retinanalysis.SCutils.recording_mode.check_series_resistance`
     resolver. It preserves the experimenter's ``onlineAnalysis`` label,
-    incorporates epoch-group ``recordingTechnique`` metadata, reads the raw
-    amplifier series resistance, and samples the trace only where those
-    sources do not settle the mode. Results are written to
+    keeps epoch-group ``recordingTechnique`` as provenance, reads each block's
+    raw amplifier resistance (epoch parameters are the legacy fallback), and
+    samples each ambiguous block independently. Results are written to
     :data:`MODE_CACHE_PATH` with a rule version; stale caches are rejected and
     rebuilt by the notebook.
 
@@ -465,9 +465,14 @@ def build_mode_cache(protocol_blocks: pd.DataFrame,
     if missing:
         raise ValueError('protocol_blocks is missing columns required by the '
                          f'shared recording-mode resolver: {sorted(missing)}')
+    block_evidence = protocol_blocks.copy()
+    block_evidence['epoch_series_resistance'] = [
+        pd.to_numeric(epoch_parameters(int(b)).get(
+            'seriesResistance', pd.Series(dtype=float)), errors='coerce').median()
+        for b in block_evidence.block_id]
     resolved = check_series_resistance(
-        protocol_blocks, drop=False, show=verbose,
-        sample_series_resistance=False)
+        block_evidence, drop=False, show=verbose,
+        sample_series_resistance=False, block_level_evidence=True)
     modes = resolved['onlineAnalysis'].astype(str).str.strip().str.lower()
     modes = modes.where(modes.isin(RECORDING_TYPES), '')
     resistance = pd.to_numeric(resolved['series_resistance'], errors='coerce')
@@ -483,6 +488,7 @@ def build_mode_cache(protocol_blocks: pd.DataFrame,
         'recording_technique': resolved.get(
             'recording_technique', pd.Series('', index=resolved.index)).astype(str),
         'series_resistance_mohm': resistance / 1e6,
+        'series_resistance_source': resolved['series_resistance_source'],
         # Kept for cache-schema compatibility. The shared resolver samples a
         # trace only when needed and intentionally does not retain its mean.
         'mean_current_pa': np.nan,

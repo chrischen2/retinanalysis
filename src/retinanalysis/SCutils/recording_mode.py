@@ -138,11 +138,19 @@ def _epoch_series_resistance(epoch_group, amp: str = 'Amp1') -> float:
     Symphony writes the amplifier's device configuration into
     ``stimuli/<amp>-<uuid>/dataConfigurationSpans/span_0/<amp>``, which is what
     ``epoch.protocolSettings('stimulus:Amp1:seriesResistance')`` returns in the
-    MATLAB. NaN when the attribute is absent (older rigs never wrote it).
+    MATLAB. Amplifier backgrounds and responses are fallbacks for protocols
+    with no amplifier stimulus. NaN when all three lack the attribute.
     """
-    stimuli = epoch_group.get('stimuli')
-    if stimuli is None:
-        return np.nan
+    # LED protocols can carry only a constant amplifier background, with no
+    # amplifier stimulus. Read that same epoch's background/response config
+    # as a fallback, without traversing device links to the whole experiment.
+    stimuli = {}
+    for section in ('stimuli', 'backgrounds', 'responses'):
+        container = epoch_group.get(section)
+        if container is not None:
+            for name in container:
+                if name not in stimuli:
+                    stimuli[name] = container[name]
     for dev in stimuli:
         if str(dev).split('-')[0] != amp:
             continue
@@ -236,6 +244,37 @@ def trace_is_spiking(amp_data, sample_rate: float, n_trials: int = 12,
     return float(np.mean([len(s) > 0 for s in spike_times])) >= min_fraction
 
 
+def prominent_event_width_ms(amp_data, sample_rate: float) -> float:
+    """Lower-quartile half-prominence width of prominent raw events.
+
+    Check both polarities without high-pass filtering: broad synaptic currents
+    can ring through the spike detector's high-pass filter. This independent
+    shape check is used only by the block-level discovery policy. Use the
+    lower quartile of the 20 largest events per trial so real narrow spikes
+    can coexist with slower fluctuations without being voted away.
+    """
+    from scipy.signal import find_peaks, peak_widths
+
+    widths = []
+    for trace in np.asarray(amp_data, dtype=float):
+        candidates = []
+        for sign in (-1, 1):
+            peaks, props = find_peaks(sign * trace, prominence=0,
+                                     wlen=max(3, int(.02 * sample_rate)))
+            if not len(peaks):
+                continue
+            selected = np.argsort(props['prominences'])[-20:]
+            prominence_data = tuple(props[k][selected] for k in (
+                'prominences', 'left_bases', 'right_bases'))
+            w = peak_widths(sign * trace, peaks[selected],
+                            prominence_data=prominence_data)[0]
+            candidates.extend(zip(props['prominences'][selected], w))
+        if candidates:
+            strongest = sorted(candidates, reverse=True)[:20]
+            widths.extend(width for _, width in strongest)
+    return float(np.quantile(widths, .25) * 1000 / sample_rate) if widths else np.nan
+
+
 def resolve_recording_mode(online_analysis, series_resistance, amp_data=None,
                            sample_rate: float = 1e4,
                            detector_kwargs: Optional[dict] = None) -> Tuple[str, str]:
@@ -268,7 +307,7 @@ def resolve_recording_mode(online_analysis, series_resistance, amp_data=None,
     and ``note`` is empty when the recorded label stood, else what was decided
     or changed and on what evidence.
     """
-    recorded = str(online_analysis or 'extracellular').strip().lower()
+    recorded = str(online_analysis or 'none').strip().lower()
     family = mode_family(recorded)
     rs = np.nan if series_resistance is None else float(series_resistance)
 
@@ -384,7 +423,9 @@ def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
                             max_series_resistance: float = MAX_SERIES_RESISTANCE,
                             drop: bool = True, show: bool = True,
                             sample_series_resistance: bool = False,
-                            detector_kwargs: Optional[dict] = None) -> pd.DataFrame:
+                            detector_kwargs: Optional[dict] = None,
+                            block_level_evidence: bool = False,
+                            max_spike_width_ms: float = 1.5) -> pd.DataFrame:
     """Cross-check every block's ``onlineAnalysis`` label against the amplifier.
 
     ``onlineAnalysis`` is a menu item the experimenter picks; the amplifier's
@@ -426,6 +467,12 @@ def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
     Resolving a contradiction can need the block's raw trace, so this reads it
     only when the label, series resistance, and epoch-group
     ``recordingTechnique`` metadata do not already settle the mode.
+
+    ``block_level_evidence=True`` disables epoch-group shortcuts and shared
+    trace decisions. Unlabelled blocks are sampled independently even when
+    resistance is missing; group annotations remain provenance only.
+    A spike classification must also have prominent raw events narrower than
+    ``max_spike_width_ms``; broader events are treated as synaptic current.
     """
     out = df.copy()
     response_table = _amp_response_table(out['block_id'], amp=amp)
@@ -437,6 +484,14 @@ def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
         sample_one_per_block=sample_series_resistance,
         groups_by_block=groups_by_block)
     out = out.merge(table, on='block_id', how='left')
+
+    out['series_resistance_source'] = np.where(
+        out.series_resistance.notna(), 'raw H5', 'unavailable')
+    if block_level_evidence and 'epoch_series_resistance' in out:
+        fallback = pd.to_numeric(out.epoch_series_resistance, errors='coerce')
+        use_fallback = out.series_resistance.isna() & fallback.notna()
+        out.loc[use_fallback, 'series_resistance'] = fallback[use_fallback]
+        out.loc[use_fallback, 'series_resistance_source'] = 'epoch parameters'
 
     rs = out['series_resistance'].to_numpy(dtype=float)
     out['rs_mode'] = np.where(np.isnan(rs), '', np.where(rs > 0, 'whole-cell', 'cell-attached'))
@@ -455,12 +510,16 @@ def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
     else:
         technique = pd.Series('', index=out.index)
     technique = technique.astype(str).str.strip().str.lower()
+    if block_level_evidence:
+        technique = pd.Series('', index=out.index)
     contested = (out['rs_mode'].ne('') & out['label_mode'].ne('')
                  & out['rs_mode'].ne(out['label_mode']))
     unlabelled = (out['label_mode'].eq('')
                   & (out['rs_mode'].ne('')
                      | technique.isin(['cell-attached', 'whole-cell'])))
     needs_resolving = contested | unlabelled
+    if block_level_evidence:
+        needs_resolving |= out['label_mode'].eq('')
     all_high = (out['n_epochs_rs'] > 0) & out['n_epochs_high_rs'].eq(out['n_epochs_rs'])
 
     # When epoch-group metadata says cell-attached and the amplifier does not
@@ -489,7 +548,7 @@ def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
     representatives = {}
     for i in out.index[needs_resolving]:
         row = out.loc[i]
-        if row['rs_mode'] == 'whole-cell' or 'group_id' not in out:
+        if block_level_evidence or row['rs_mode'] == 'whole-cell' or 'group_id' not in out:
             key = ('block', int(row['block_id']))
         else:
             group_id = row['group_id']
@@ -523,9 +582,27 @@ def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
                     'recordingTechnique is whole-cell; polarity from the sign '
                     'of the current')
         else:
+            resistance = row['series_resistance']
+            missing_resistance = not np.isfinite(resistance)
+            # The zero-Rs branch tests spikes rather than assuming attachment.
+            # Use that same trace decision when Rs is unavailable, while
+            # retaining NaN in the audit and explicitly reporting its absence.
+            if block_level_evidence and missing_resistance:
+                resistance = 0.0
             mode, note = resolve_recording_mode(
-                row['onlineAnalysis'], row['series_resistance'], amp_data=amp_data,
+                row['onlineAnalysis'], resistance, amp_data=amp_data,
                 sample_rate=sample_rate, detector_kwargs=detector_kwargs)
+            if block_level_evidence and missing_resistance:
+                note = (f"resolved to '{mode}' from this block's trace "
+                        '(series resistance unavailable; epoch-group label ignored)')
+            if block_level_evidence and mode == 'extracellular':
+                width = prominent_event_width_ms(amp_data, sample_rate)
+                if np.isfinite(width) and width > max_spike_width_ms:
+                    mode = 'exc' if float(np.mean(amp_data)) < 0 else 'inh'
+                    note = (f"resolved to '{mode}': prominent raw events have "
+                            f'lower-quartile width {width:.2f} ms > {max_spike_width_ms:g} ms; '
+                            'broad currents triggered the spike detector; '
+                            'polarity from the sign of the current')
         resolved_groups[key] = (mode, note)
 
     for i, key in resolution_keys.items():
