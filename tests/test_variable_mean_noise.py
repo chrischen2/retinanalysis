@@ -722,6 +722,65 @@ def test_epoch_response_summary_reports_exact_mean_firing_rate(monkeypatch):
     assert summary.mean_firing_rate_hz.tolist() == [10.0, 20.0]
 
 
+def test_epoch_response_window_uses_pre_time_and_defaults_missing_to_zero():
+    import pandas as pd
+
+    assert vmn.epoch_response_window(
+        pd.Series({'preTime': 500.0, 'stimTime': 1000.0}),
+        sample_rate=1000.0, n_samples=1800) == (500, 1500, 500.0)
+    assert vmn.epoch_response_window(
+        pd.Series({'stimTime': 1000.0}),
+        sample_rate=1000.0, n_samples=1200) == (0, 1000, 0.0)
+    assert vmn.epoch_response_window(
+        pd.Series({'preTime': None, 'stimTime': 1000.0}),
+        sample_rate=1000.0, n_samples=1200) == (0, 1000, 0.0)
+
+
+def test_epoch_response_summary_excludes_pre_and_tail_spikes(monkeypatch):
+    import pandas as pd
+
+    params = pd.DataFrame({
+        'preTime': [100.0], 'stimTime': [1000.0], 'tailTime': [100.0],
+        'lightMean': [1.0]})
+    amp = np.zeros((1, 1200))
+    spikes = [np.r_[np.arange(10), np.arange(100, 120), np.arange(1100, 1130)]]
+    monkeypatch.setattr(vmn, 'epoch_parameters', lambda _block: params)
+    monkeypatch.setattr(
+        vmn, 'load_block',
+        lambda _exp, _block, _spiking: (amp, 1000.0, spikes))
+
+    summary = vmn.epoch_response_summary(
+        'synthetic', [1], 'extracellular', show=False)
+
+    assert summary.n_spikes.tolist() == [20]
+    assert summary.mean_firing_rate_hz.tolist() == [20.0]
+    assert summary.pre_time_ms.tolist() == [100.0]
+
+
+def test_analyze_condition_aligns_response_after_pre_time(monkeypatch):
+    import pandas as pd
+
+    params = pd.DataFrame({
+        'preTime': [2.0], 'stimTime': [4.0], 'tailTime': [2.0],
+        'lightMean': [1.0], 'frequencyCutoff': [20.0]})
+    amp = np.array([[100.0, 101.0, 1.0, 2.0, 3.0, 4.0, 200.0, 201.0]])
+    monkeypatch.setattr(vmn, 'epoch_parameters', lambda _block: params)
+    monkeypatch.setattr(
+        vmn, 'load_block',
+        lambda _exp, _block, _spiking: (amp, 1000.0, None))
+    monkeypatch.setattr(
+        vmn, 'epoch_stimulus',
+        lambda row, sample_rate: np.arange(4.0))
+
+    analysis = vmn.analyze_condition(
+        'synthetic', [1], rec_type='exc', stim_time_ms=4.0,
+        skip_seconds=0.0, downsample=1, align_epoch_means=False,
+        fit=False, verbose=False)
+
+    np.testing.assert_array_equal(analysis.response[1.0], [[1., 2., 3., 4.]])
+    np.testing.assert_array_equal(analysis.stimulus[1.0], [[0., 1., 2., 3.]])
+
+
 def test_epoch_response_summary_reports_whole_cell_modulation_in_pa(monkeypatch):
     import pandas as pd
 

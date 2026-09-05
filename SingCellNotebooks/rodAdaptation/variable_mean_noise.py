@@ -313,7 +313,9 @@ def load_cell(index, path=None) -> Dict[str, object]:
 # assumed. `lightMean`, `stdv` and `seed` are written per epoch rather than
 # once per block, so they are summarised separately.
 PROTOCOL_PARAMETERS = (
+    'preTime',           # response samples before stimulus onset (ms)
     'stimTime',          # noise duration (ms) -- the analysis gate
+    'tailTime',          # response samples after stimulus offset (ms)
     'led',               # which LED delivered it
     'ndfs',              # that LED's own filters (no filter wheel in this path)
     'frequencyCutoff',   # noise smoothing cutoff (Hz)
@@ -733,7 +735,8 @@ def find_blocks(exp_names: Optional[Sequence[str]] = None,
             for n, c in frame.protocol_name.value_counts().items()))
         columns = [c for c in ('exp_name', 'rig_suffix', 'experiment_label',
                                'cell_label', 'cell_type_short',
-                               'block_id', 'stim_seconds', 'led', 'ndfs',
+                               'block_id', 'preTime', 'stim_seconds', 'tailTime',
+                               'led', 'ndfs',
                                'frequencyCutoff', 'numberOfFilters', 'Contrast',
                                'n_epochs', 'protocol_name') if c in frame]
         sc.scroll_table(frame[columns], height=height,
@@ -1247,6 +1250,30 @@ def _spike_rate(spike_samples, n_samples: int, sample_rate: float,
     return rate_hz
 
 
+def epoch_response_window(params, sample_rate: float,
+                          n_samples: int) -> Tuple[int, int, float]:
+    """Response sample bounds for the stimulus interval of one epoch.
+
+    Symphony responses contain pre, stimulus, and tail samples, while
+    :func:`epoch_stimulus` reconstructs only ``stimTime``. ``preTime`` was not
+    assigned by one protocol version; missing, null, or nonnumeric values
+    therefore mean 0 ms. Returns ``(start, stop, pre_time_ms)`` with bounds
+    clipped to the available response.
+    """
+    pre_time_ms = _numeric(params.get('preTime', 0.0))
+    if not np.isfinite(pre_time_ms) or pre_time_ms < 0:
+        pre_time_ms = 0.0
+    stim_time_ms = _numeric(params.get('stimTime', np.nan))
+    start = min(max(int(round(pre_time_ms / 1e3 * sample_rate)), 0),
+                int(n_samples))
+    if np.isfinite(stim_time_ms) and stim_time_ms >= 0:
+        stop = min(start + int(round(stim_time_ms / 1e3 * sample_rate)),
+                   int(n_samples))
+    else:
+        stop = int(n_samples)
+    return start, stop, float(pre_time_ms)
+
+
 def epoch_response_summary(
         exp_name: str,
         block_ids: Sequence[int],
@@ -1259,8 +1286,8 @@ def epoch_response_summary(
         show: bool = True) -> pd.DataFrame:
     """One intuitive response-size measurement for every recorded epoch.
 
-    Extracellular epochs report the exact spike count divided by the recorded
-    epoch duration, in Hz. Whole-cell epochs report both their mean current and
+    Extracellular epochs report the exact spike count divided by the stimulus
+    duration, in Hz. Whole-cell epochs report both their mean current and
     their modulation SD in pA. The latter is the RMS distance from that
     epoch's own mean, so holding-current offsets do not masquerade as response
     modulation; variance is intentionally avoided because its pA-squared unit
@@ -1291,15 +1318,18 @@ def epoch_response_summary(
                 continue
             if max_epochs is not None and len(rows) >= max_epochs:
                 break
-            n_samples = int(amp.shape[1])
+            epoch_start, epoch_stop, pre_time_ms = epoch_response_window(
+                params.iloc[epoch], sample_rate, amp.shape[1])
+            n_samples = epoch_stop - epoch_start
             duration_s = n_samples / float(sample_rate)
             row = {
                 'block_id': int(block_id), 'epoch': int(epoch),
                 'lightMean': float(params.iloc[epoch].get('lightMean', np.nan)),
-                'duration_s': duration_s,
+                'pre_time_ms': pre_time_ms, 'duration_s': duration_s,
             }
             if spiking:
-                samples = np.asarray(spike_times[epoch], dtype=np.int64)
+                samples = (np.asarray(spike_times[epoch], dtype=np.int64)
+                           - epoch_start)
                 n_spikes = int(np.sum((samples >= 0) & (samples < n_samples)))
                 row.update({
                     'n_spikes': n_spikes,
@@ -1307,7 +1337,8 @@ def epoch_response_summary(
                                             if duration_s > 0 else np.nan),
                 })
             else:
-                trace = np.asarray(amp[epoch], dtype=float)
+                trace = np.asarray(
+                    amp[epoch, epoch_start:epoch_stop], dtype=float)
                 if subtract_baseline:
                     baseline = min(int(0.1 * sample_rate), trace.size)
                     if baseline:
@@ -1323,7 +1354,7 @@ def epoch_response_summary(
         if frame.empty:
             print('no epochs to summarize')
         elif spiking:
-            print('per-epoch response (mean firing rate over the recorded epoch):')
+            print('per-epoch response (mean firing rate over stimTime):')
             print(frame[['block_id', 'epoch', 'lightMean', 'n_spikes',
                          'mean_firing_rate_hz']].round(3).to_string(index=False))
         else:
@@ -1376,12 +1407,17 @@ def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
             if max_epochs is not None and len(traces) >= max_epochs:
                 break
             factor = max(int(downsample), 1)
+            epoch_start, epoch_stop, _ = epoch_response_window(
+                params.iloc[index], rate, amp.shape[1])
+            n_samples = epoch_stop - epoch_start
             if spiking:
                 # Already at the reduced rate: binned, then smoothed.
-                reduced = _spike_rate(spike_times[index], amp.shape[1], rate,
+                samples = (np.asarray(spike_times[index], dtype=np.int64)
+                           - epoch_start)
+                reduced = _spike_rate(samples, n_samples, rate,
                                       factor, 10.0)
             else:
-                trace = amp[index]
+                trace = amp[index, epoch_start:epoch_stop]
                 if subtract_baseline:
                     trace = trace - float(np.mean(trace[:int(0.1 * rate)]))
                 # Block-average, not slicing: a whole-cell trace is unsmoothed
@@ -3171,14 +3207,13 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
     about it. Removing it leaves the within-epoch modulation, which is the part
     the filter is fitted to, untouched.
 
-    ``subtract_baseline`` defaults to False because this protocol has no
-    baseline to subtract: ``preTime`` and ``tailTime`` are zero -- neither is
-    even written to the epoch -- so the noise runs from the first sample and
-    the leading 100 ms is stimulus-driven like every other stretch. Removing
-    its mean would subtract a response, not a resting level, and would also
-    discard the holding current, which is the part of a voltage-clamp trace
-    that says how much excitation or inhibition the cell is receiving. Nothing
-    downstream needs it removed: ``compute_filter`` zeroes the DC bin,
+    ``subtract_baseline`` defaults to False. The response is first cropped to
+    ``preTime : preTime + stimTime``; a missing/unassigned ``preTime`` means
+    zero. The pre-period is therefore used for alignment, not automatically
+    subtracted from the stimulus-driven response. Removing the response mean
+    would also discard the holding current, which is the part of a
+    voltage-clamp trace that says how much excitation or inhibition the cell
+    is receiving. Nothing downstream needs it removed: ``compute_filter`` zeroes the DC bin,
     ``convolve_filter_with_stim`` mean-subtracts the stimulus, and the
     sigmoid's ``epsilon`` absorbs a constant offset in the response.
 
@@ -3340,24 +3375,29 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                     print(f'  block {block_id} epoch {index}: '
                           f'stimulus not rebuilt ({exc})')
                 continue
-            width = min(stimulus.size, amp.shape[1])
+            epoch_start, epoch_stop, pre_time_ms = epoch_response_window(
+                row, sample_rate, amp.shape[1])
+            n_samples = epoch_stop - epoch_start
             if spiking:
                 # Built at the reduced rate directly -- see `_spike_rate`. It
                 # is upsampled back by repetition only so the trimming and
                 # alignment below stay in amplifier samples like the stimulus;
                 # `_block_average` then returns exactly these values.
-                reduced = _spike_rate(spike_times[index], amp.shape[1],
+                samples = (np.asarray(spike_times[index], dtype=np.int64)
+                           - epoch_start)
+                reduced = _spike_rate(samples, n_samples,
                                       sample_rate, downsample, psth_sigma_ms)
                 trace = np.repeat(reduced, max(int(downsample), 1))
-                if trace.size < amp.shape[1]:
+                if trace.size < n_samples:
                     trace = np.concatenate(
-                        [trace, np.full(amp.shape[1] - trace.size,
+                        [trace, np.full(n_samples - trace.size,
                                         trace[-1] if trace.size else 0.0)])
             else:
-                trace = amp[index]
+                trace = amp[index, epoch_start:epoch_stop]
                 if subtract_baseline:
-                    baseline = int(min(0.1 * sample_rate, amp.shape[1]))
+                    baseline = int(min(0.1 * sample_rate, trace.size))
                     trace = trace - float(np.mean(trace[:baseline]))
+            width = min(stimulus.size, trace.size)
             # The stimulus stays in raw intensity units: its contrast is
             # sigma/mean, and fit_ln_model normalises the filter by the ratio
             # of that to the generator signal's own contrast.
@@ -3383,7 +3423,7 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
             recorded_order.append((mean_level, len(stimuli[mean_level]) - 1))
             sources.setdefault(mean_level, []).append(
                 {'block_id': int(block_id), 'epoch': index,
-                 'light_mean': mean_level,
+                 'light_mean': mean_level, 'pre_time_ms': pre_time_ms,
                  'series_resistance_mohm': (series_resistance / 1e6
                                             if np.isfinite(series_resistance)
                                             else np.nan)})
