@@ -44,6 +44,51 @@ def test_get_rebounds_handles_empty_candidates():
     assert result['Right'].shape == (0,)
 
 
+def test_detector_removes_moving_median_before_high_pass(monkeypatch):
+    """Match MATLAB's 100-sample movmedian preprocessing of spike traces."""
+    trace = np.r_[np.full(150, 4.0), np.full(150, 40.0)]
+    captured = {}
+
+    def capture_high_pass(values, cutoff, interval):
+        captured['values'] = np.asarray(values).copy()
+        return np.zeros_like(values, dtype=float)
+
+    monkeypatch.setattr(spike_detector, 'high_pass_filter', capture_high_pass)
+    spike_detector.detector(trace, sample_rate=1000.0)
+
+    detrended = captured['values'][0]
+    np.testing.assert_allclose(detrended[:100], 0.0)
+    np.testing.assert_allclose(detrended[-100:], 0.0)
+    assert np.max(np.abs(detrended)) <= 36.0
+
+
+def test_detector_can_disable_moving_median(monkeypatch):
+    trace = np.arange(20.0)
+    captured = {}
+
+    def capture_high_pass(values, cutoff, interval):
+        captured['values'] = np.asarray(values).copy()
+        return np.zeros_like(values, dtype=float)
+
+    monkeypatch.setattr(spike_detector, 'high_pass_filter', capture_high_pass)
+    spike_detector.detector(trace, sample_rate=1000.0,
+                            median_window_samples=None)
+
+    np.testing.assert_array_equal(captured['values'][0], trace)
+
+
+def test_moving_median_prevents_baseline_step_false_spikes():
+    trace = np.random.default_rng(1).normal(0.0, 0.3, 20_000)
+    trace[10_000:] += 100.0
+
+    uncorrected, _, _ = spike_detector.detector(
+        trace, sample_rate=10_000.0, median_window_samples=None)
+    corrected, _, _ = spike_detector.detector(trace, sample_rate=10_000.0)
+
+    assert len(uncorrected[0]) > 0
+    assert len(corrected[0]) == 0
+
+
 def test_pooled_clustering_rejects_small_events_promoted_by_empty_epochs(monkeypatch):
     """A shared boundary rejects contamination that wins a local two-cluster fit."""
     traces = np.zeros((3, 40), dtype=float)

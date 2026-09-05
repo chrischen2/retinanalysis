@@ -22,11 +22,10 @@ meaningful), and the fit is over *every epoch* rather than the per-size means,
 so sizes with more repeats carry more weight. sigma_c / sigma_s come back in µm
 and are unaffected by the normalization.
 
-Spike detection differs from the MATLAB in mechanism but not intent:
-``SpikeDetectorNew`` is preceded there by a ``movmedian`` detrend, while
-``utils.spike_detector.detector`` high-pass filters at 500 Hz internally
-(``spike_detector.py`` line ~80). Both remove slow drift before clustering
-peak amplitudes, so no extra detrending is applied here.
+Spike preprocessing matches the MATLAB: ``SpikeDetectorNew`` is preceded there
+by a 100-sample ``movmedian`` detrend, and
+``utils.spike_detector.detector`` performs the same detrending before its
+internal high-pass filter. No extra detrending is applied here.
 """
 from __future__ import annotations
 

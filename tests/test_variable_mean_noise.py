@@ -311,10 +311,10 @@ def test_apply_epoch_range_exclusions_is_duration_specific(monkeypatch):
 
 @pytest.mark.parametrize(
     ('series_resistance', 'mean_trace', 'expected'),
-    [(0.0, -10.0, 'extracellular'),
+    [(0.0, -10.0, 'exc'),
      (20e6, -10.0, 'exc'),
      (20e6, 10.0, 'inh')])
-def test_resolve_block_mode_uses_resistance_then_trace_sign(
+def test_resolve_block_mode_requires_spikes_then_uses_trace_sign(
         monkeypatch, series_resistance, mean_trace, expected):
     import pandas as pd
 

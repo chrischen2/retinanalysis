@@ -90,15 +90,20 @@ def detector(data_matrix, check_detection=False, sample_rate=1e4, refractory_per
              search_window=1.2e-3, cutoff_frequency=300, global_polarity=False,
              min_peak_amplitude=0, n_clusters=2, threshold_spike_factor=3,
              remove_refractory_violations=True, max_trial_length_s=1, str_save_dir=None,
-             verbose=False, cluster_across_trials=False):
+             verbose=False, cluster_across_trials=False,
+             median_window_samples=100):
     """Detect spikes in extracellular / cell-attached traces; port of SpikeDetectorNew.m.
 
-    Each row of ``data_matrix`` is one trial. The trace is high-pass filtered,
-    every local extremum is taken as a *candidate*, and k-means on (peak
-    amplitude, left rebound, right rebound) splits those candidates into a spike
-    and a noise cluster. A trial only counts as spiking when its spike cluster
-    stands ``threshold_spike_factor`` noise standard deviations clear of the
-    noise cluster; otherwise it is returned with zero spikes.
+    Each row of ``data_matrix`` is one trial. Before high-pass filtering, a
+    100-sample moving median is subtracted from each trace, matching the
+    VariableMeanNoise MATLAB preprocessing and preventing abrupt baseline
+    shifts from becoming candidate spikes. Set ``median_window_samples`` to 0
+    or ``None`` to disable that detrending. Every remaining local extremum is
+    taken as a *candidate*, and k-means on (peak amplitude, left rebound, right
+    rebound) splits those candidates into a spike and a noise cluster. A trial
+    only counts as spiking when its spike cluster stands
+    ``threshold_spike_factor`` noise standard deviations clear of the noise
+    cluster; otherwise it is returned with zero spikes.
 
     The candidate pool is large by construction — a local minimum occurs at
     roughly every third sample of band-passed noise, so a 1 s trial at 10 kHz
@@ -140,6 +145,17 @@ def detector(data_matrix, check_detection=False, sample_rate=1e4, refractory_per
     search_window_dp = search_window * sample_rate  # datapoints
     max_trial_length_dp = int(max_trial_length_s * sample_rate)  # Convert seconds to datapoints
 
+    data_matrix = np.asarray(data_matrix, dtype=float)
+    if data_matrix.ndim == 1:
+        data_matrix = data_matrix[np.newaxis, :]
+    if median_window_samples:
+        from scipy.ndimage import median_filter
+
+        window = int(median_window_samples)
+        if window < 1:
+            raise ValueError('median_window_samples must be positive, 0, or None')
+        baseline = median_filter(data_matrix, size=(1, window), mode='nearest')
+        data_matrix = data_matrix - baseline
     data_matrix = high_pass_filter(data_matrix, cutoff_frequency, 1/sample_rate)
 
     n_traces = data_matrix.shape[0]

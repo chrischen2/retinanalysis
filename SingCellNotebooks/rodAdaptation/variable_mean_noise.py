@@ -355,7 +355,7 @@ CELL_INDEX_REGISTRY_PATH = (
 # Where the per-block recording-mode cache lives. Resolving a mode can need the
 # block's raw trace, which is seconds per block, so it is done once and stored.
 MODE_CACHE_PATH = Path(__file__).resolve().parent / 'block_modes.csv'
-MODE_CACHE_VERSION = 5
+MODE_CACHE_VERSION = 6
 RECORDING_TYPES = ('extracellular', 'exc', 'inh')
 
 
