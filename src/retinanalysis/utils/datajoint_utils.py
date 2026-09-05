@@ -1134,7 +1134,8 @@ def get_h5_file(exp_name: str) -> str:
                                 f'Tried {str_h5_in_config} and {str_h5_from_db}')
 
 
-def read_h5_response_trace(h5_file: h5py.File, h5path: str) -> np.ndarray:
+def read_h5_response_trace(h5_file: h5py.File, h5path: str,
+                           sample_slice=None) -> np.ndarray:
     """Read one response trace from Symphony or AUISQL H5 storage.
 
     Original Symphony files store each response below a group as
@@ -1144,9 +1145,10 @@ def read_h5_response_trace(h5_file: h5py.File, h5path: str) -> np.ndarray:
     """
     node = h5_file[h5path]
     if isinstance(node, h5py.Dataset):
-        return np.asarray(node[()])
+        return np.asarray(node[() if sample_slice is None else sample_slice])
     try:
-        return np.asarray(node['data']['quantity'][()])
+        return np.asarray(node['data']['quantity'][
+            () if sample_slice is None else sample_slice])
     except (KeyError, TypeError) as error:
         raise KeyError(
             f'Response path {h5path!r} is neither an AUISQL dataset nor a '

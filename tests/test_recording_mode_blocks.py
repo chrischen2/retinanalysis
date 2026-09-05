@@ -38,6 +38,15 @@ def test_unlabelled_blocks_in_one_group_use_their_own_trace(monkeypatch):
     assert result.series_resistance_source.tolist() == ['epoch parameters'] * 3
     assert result.onlineAnalysis_recorded.isna().all()
 
+    def no_raw_reads(*args, **kwargs):
+        raise AssertionError('metadata-only mode must not sample raw responses')
+
+    monkeypatch.setattr(rm, '_amp_trace_samples', no_raw_reads)
+    metadata = rm.check_series_resistance(
+        blocks, block_level_evidence=True, infer_from_raw_trace=False,
+        drop=False, show=False)
+    assert metadata.onlineAnalysis.tolist() == ['extracellular'] * 3
+
 
 def test_missing_label_does_not_default_to_extracellular(monkeypatch):
     monkeypatch.setattr(rm, 'trace_is_spiking', lambda *a, **k: False)
@@ -63,3 +72,23 @@ def test_resistance_can_be_stored_in_amplifier_background(tmp_path):
         node = f.create_group('backgrounds/Amp1-id/dataConfigurationSpans/span_0/Amp1')
         node.attrs['seriesResistance'] = 8e6
         assert rm._epoch_series_resistance(f) == 8e6
+
+
+def test_trace_sampler_reads_only_requested_seconds(tmp_path, monkeypatch):
+    import h5py
+    from retinanalysis.utils import datajoint_utils as djutils
+
+    path = tmp_path / 'traces.h5'
+    with h5py.File(path, 'w') as f:
+        f.create_dataset('uuid', data=np.arange(10000))
+        f.create_dataset('response/data/quantity', data=np.arange(10000))
+    monkeypatch.setattr(djutils, 'get_h5_file', lambda exp: str(path))
+    paths = pd.DataFrame({'block_id': [1, 1], 'sample_rate': [1000., 1000.],
+                          'h5path': ['uuid', 'response']})
+    result = rm._amp_trace_samples(
+        pd.DataFrame({'exp_name': ['test'], 'block_id': [1]}),
+        response_table=paths, trace_seconds=3.)
+    traces, rate = result[1]
+    assert traces.shape == (2, 3000)
+    assert traces[0, -1] == 2999
+    assert rate == 1000.

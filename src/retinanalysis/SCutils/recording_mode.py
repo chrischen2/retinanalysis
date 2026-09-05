@@ -85,7 +85,8 @@ def _amp_epoch_groups_by_block(block_ids: Sequence[int],
 def _amp_trace_samples(df: pd.DataFrame, amp: str = 'Amp1', n_trials: int = 12,
                        verbose: bool = True,
                        response_table: Optional[pd.DataFrame] = None,
-                       n_trials_by_block: Optional[Dict[int, int]] = None
+                       n_trials_by_block: Optional[Dict[int, int]] = None,
+                       trace_seconds: Optional[float] = None
                        ) -> Dict[int, Tuple[np.ndarray, float]]:
     """Load a small raw-trace sample per block without constructing StimBlocks.
 
@@ -121,7 +122,9 @@ def _amp_trace_samples(df: pd.DataFrame, amp: str = 'Amp1', n_trials: int = 12,
                     rates = rows['sample_rate'].dropna().astype(float).unique()
                     if len(rates) != 1:
                         raise ValueError(f'expected one sample rate, found {len(rates)}')
-                    traces = [read_h5_response_trace(h5, path)
+                    sample_slice = (None if trace_seconds is None else
+                                    slice(0, max(1, int(trace_seconds * rates[0]))))
+                    traces = [read_h5_response_trace(h5, path, sample_slice=sample_slice)
                               for path in rows['h5path']]
                     if traces:
                         out[int(block_id)] = (np.asarray(traces), float(rates[0]))
@@ -425,7 +428,9 @@ def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
                             sample_series_resistance: bool = False,
                             detector_kwargs: Optional[dict] = None,
                             block_level_evidence: bool = False,
-                            max_spike_width_ms: float = 1.5) -> pd.DataFrame:
+                            max_spike_width_ms: float = 1.5,
+                            infer_from_raw_trace: bool = True,
+                            trace_seconds: Optional[float] = None) -> pd.DataFrame:
     """Cross-check every block's ``onlineAnalysis`` label against the amplifier.
 
     ``onlineAnalysis`` is a menu item the experimenter picks; the amplifier's
@@ -473,7 +478,13 @@ def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
     resistance is missing; group annotations remain provenance only.
     A spike classification must also have prominent raw events narrower than
     ``max_spike_width_ms``; broader events are treated as synaptic current.
+
+    ``infer_from_raw_trace=False`` uses metadata only and never samples raw
+    responses. Unresolved labels remain explicit. ``trace_seconds`` limits
+    each sampled epoch to its first seconds; None reads the full epoch.
     """
+    if trace_seconds is not None and (not np.isfinite(trace_seconds) or trace_seconds <= 0):
+        raise ValueError('trace_seconds must be positive or None (full epoch)')
     out = df.copy()
     response_table = _amp_response_table(out['block_id'], amp=amp)
     groups_by_block = _amp_epoch_groups_by_block(
@@ -510,7 +521,7 @@ def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
     else:
         technique = pd.Series('', index=out.index)
     technique = technique.astype(str).str.strip().str.lower()
-    if block_level_evidence:
+    if block_level_evidence and infer_from_raw_trace:
         technique = pd.Series('', index=out.index)
     contested = (out['rs_mode'].ne('') & out['label_mode'].ne('')
                  & out['rs_mode'].ne(out['label_mode']))
@@ -530,7 +541,7 @@ def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
     out.loc[metadata_cell_attached, 'onlineAnalysis'] = 'extracellular'
     needs_resolving = (needs_resolving | metadata_cell_attached) & ~metadata_cell_attached
 
-    if show and needs_resolving.any():
+    if show and infer_from_raw_trace and needs_resolving.any():
         print(f'reading the trace for {int(needs_resolving.sum())} block(s) whose mode the '
               f'label does not settle ({int((unlabelled & needs_resolving).sum())} '
               f'never labelled, {int((contested & needs_resolving).sum())} contradicted)')
@@ -538,7 +549,14 @@ def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
     flags = pd.Series('', index=out.index, dtype=object)
     flags.loc[metadata_cell_attached] = (
         "resolved to 'extracellular': recordingTechnique is cell-attached "
-        'and series resistance is 0')
+        'and no positive series resistance contradicts it')
+
+    if not infer_from_raw_trace:
+        flags.loc[needs_resolving] = 'raw-trace inference disabled; metadata cannot resolve mode'
+        # Positive resistance establishes whole-cell, but cannot distinguish
+        # excitation from inhibition without a block label or current trace.
+        out.loc[contested & out.rs_mode.eq('whole-cell'), 'onlineAnalysis'] = 'none'
+        needs_resolving[:] = False
 
     # Blocks in one epoch group belong to the same recording. Resolve a zero-Rs
     # ambiguity from one representative trace, then reuse that decision across
@@ -567,7 +585,8 @@ def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
     trace_samples = _amp_trace_samples(
         out.loc[representative_indices, ['exp_name', 'block_id']], amp=amp,
         verbose=show, response_table=response_table,
-        n_trials_by_block=n_trials_by_block)
+        n_trials_by_block=n_trials_by_block,
+        trace_seconds=trace_seconds) if infer_from_raw_trace and representative_indices else {}
     resolved_groups = {}
     for key, i in representatives.items():
         row = out.loc[i]

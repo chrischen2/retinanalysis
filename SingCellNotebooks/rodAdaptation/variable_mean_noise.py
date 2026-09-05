@@ -353,7 +353,7 @@ CELL_INDEX_REGISTRY_PATH = (
 # Where the per-block recording-mode cache lives. Resolving a mode can need the
 # block's raw trace, which is seconds per block, so it is done once and stored.
 MODE_CACHE_PATH = Path(__file__).resolve().parent / 'block_modes.csv'
-MODE_CACHE_VERSION = 4
+MODE_CACHE_VERSION = 5
 RECORDING_TYPES = ('extracellular', 'exc', 'inh')
 
 
@@ -443,7 +443,9 @@ def _stable_cell_indices(cells: pd.DataFrame,
 
 def build_mode_cache(protocol_blocks: pd.DataFrame,
                      path: Optional[Path] = None,
-                     verbose: bool = True) -> pd.DataFrame:
+                     verbose: bool = True,
+                     infer_from_raw_trace: bool = False,
+                     trace_seconds: Optional[float] = 3.0) -> pd.DataFrame:
     """Resolve every block's recording type and write the cache.
 
     This delegates the actual decision to the shared
@@ -456,6 +458,10 @@ def build_mode_cache(protocol_blocks: pd.DataFrame,
     rebuilt by the notebook.
 
     Was a loop in the notebook. Returns the frame it wrote.
+
+    Raw-trace inference is off by default: use recorded metadata, leaving
+    ambiguities unresolved. Enable ``infer_from_raw_trace`` for exceptions;
+    ``trace_seconds`` defaults to the first 3 seconds per sampled epoch.
     """
     from retinanalysis.SCutils.recording_mode import check_series_resistance
 
@@ -472,12 +478,15 @@ def build_mode_cache(protocol_blocks: pd.DataFrame,
         for b in block_evidence.block_id]
     resolved = check_series_resistance(
         block_evidence, drop=False, show=verbose,
-        sample_series_resistance=False, block_level_evidence=True)
+        sample_series_resistance=False, block_level_evidence=True,
+        infer_from_raw_trace=infer_from_raw_trace, trace_seconds=trace_seconds)
     modes = resolved['onlineAnalysis'].astype(str).str.strip().str.lower()
     modes = modes.where(modes.isin(RECORDING_TYPES), '')
     resistance = pd.to_numeric(resolved['series_resistance'], errors='coerce')
     frame = pd.DataFrame({
         'cache_version': MODE_CACHE_VERSION,
+        'infer_from_raw_trace': bool(infer_from_raw_trace),
+        'trace_seconds': np.nan if trace_seconds is None else float(trace_seconds),
         'exp_name': resolved['exp_name'].astype(str),
         'block_id': pd.to_numeric(resolved['block_id'], errors='coerce'),
         'n_epochs': pd.to_numeric(resolved.get('n_epochs', np.nan), errors='coerce'),
@@ -493,26 +502,6 @@ def build_mode_cache(protocol_blocks: pd.DataFrame,
         # trace only when needed and intentionally does not retain its mean.
         'mean_current_pa': np.nan,
     })
-    # Some older VariableMeanNoise files expose seriesResistance through the
-    # DataJoint epoch parameters even though the shared raw-H5 reader cannot
-    # find the corresponding configuration span. Preserve the shared resolver
-    # as the decision maker, but give these still-unresolved blocks that
-    # protocol-specific fallback rather than losing a previously available
-    # measurement.
-    for i in frame.index[frame['rec_type'].eq('')]:
-        block_id = int(frame.loc[i, 'block_id'])
-        params = epoch_parameters(block_id)
-        epoch_rs = pd.to_numeric(
-            params.get('seriesResistance', pd.Series(dtype=float)),
-            errors='coerce').dropna()
-        if epoch_rs.empty:
-            continue
-        decision = resolve_block_mode(str(frame.loc[i, 'exp_name']), block_id)
-        frame.loc[i, 'rec_type'] = decision['rec_type']
-        frame.loc[i, 'rec_note'] = decision['rec_note']
-        frame.loc[i, 'series_resistance_mohm'] = decision[
-            'series_resistance_mohm']
-        frame.loc[i, 'mean_current_pa'] = decision['mean_current_pa']
     frame.to_csv(path, index=False)
     if verbose:
         print(f'wrote {len(frame)} blocks to {path.name}')
