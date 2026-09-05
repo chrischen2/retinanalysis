@@ -1,15 +1,14 @@
-"""Which kind of recording a single-cell block actually is, from the amplifier.
+"""Shared recording-mode parsing and amplifier metadata for single-cell data.
 
-``onlineAnalysis`` is a menu item the experimenter picks before a block runs,
-and it is wrong often enough to matter: mislabelled, or left at ``'none'``
-entirely. Symphony records what the rig actually did in
-``stimulus:Amp1:seriesResistance`` — exactly 0 for a cell-attached patch, which
-has no access resistance, and positive for whole-cell — and that reading, with
-the trace itself as a tie-breaker, is enough to settle it.
+:func:`parse_single_cell_recording_modes` is the protocol-independent parser.
+It treats the normally reliable epoch-group ``recordingTechnique`` as the
+primary anchor, positive series resistance as definitive whole-cell evidence,
+and the cell's acquisition order as a one-way cell-attached -> whole-cell
+sequence. It deliberately does not interpret zero resistance or failure to
+detect spikes as proof of a recording family.
 
-Shared by the single-cell protocol modules so they all resolve the mode the
-same way. :func:`resolve_recording_mode` is the decision;
-:func:`check_series_resistance` applies it across a block table.
+The older :func:`resolve_recording_mode` and :func:`check_series_resistance`
+APIs remain for protocol modules that perform a block-local amplifier audit.
 
 Also here because it is read from the same place in the h5:
 :func:`read_stage_ndfs`, the fixed neutral-density filters in the light path,
@@ -150,24 +149,38 @@ def _epoch_series_resistance(epoch_group, amp: str = 'Amp1') -> float:
     MATLAB. Amplifier backgrounds and responses are fallbacks for protocols
     with no amplifier stimulus. NaN when all three lack the attribute.
     """
+    # AUISQL response paths can point directly at a root-level trace dataset,
+    # not at a Symphony epoch group. Such a node has no configuration tree.
+    if not hasattr(epoch_group, 'get'):
+        return np.nan
     # LED protocols can carry only a constant amplifier background, with no
     # amplifier stimulus. Read that same epoch's background/response config
     # as a fallback, without traversing device links to the whole experiment.
-    stimuli = {}
+    device_nodes = []
     for section in ('stimuli', 'backgrounds', 'responses'):
         container = epoch_group.get(section)
         if container is not None:
             for name in container:
-                if name not in stimuli:
-                    stimuli[name] = container[name]
-    for dev in stimuli:
+                device_nodes.append((name, container[name]))
+    for dev, device_node in device_nodes:
         if str(dev).split('-')[0] != amp:
             continue
-        spans = stimuli[dev].get('dataConfigurationSpans')
+        # Some legacy responses are stored directly as datasets. They have no
+        # configuration children, so continue to a matching stimulus or
+        # background rather than failing the entire block.
+        if not hasattr(device_node, 'get'):
+            continue
+        spans = device_node.get('dataConfigurationSpans')
         if spans is None:
             continue
         for span in spans:
-            node = spans[span].get(amp)
+            span_node = spans[span]
+            # A few legacy files store a response or configuration span as a
+            # dataset. Like a dataset-valued device node above, it cannot have
+            # an amplifier child and should not abort the rest of the scan.
+            if not hasattr(span_node, 'get'):
+                continue
+            node = span_node.get(amp)
             if node is not None and 'seriesResistance' in node.attrs:
                 return float(node.attrs['seriesResistance'])
     return np.nan
@@ -220,6 +233,276 @@ def mode_family(online_analysis) -> str:
     if m in ('exc', 'inh'):
         return 'whole-cell'
     return ''
+
+
+def _recording_technique_family(value) -> str:
+    """Normalize an epoch-group recording-technique label to one family."""
+    if value is None or (np.isscalar(value) and pd.isna(value)):
+        return ''
+    text = str(value).strip().lower().replace('_', '-').replace(' ', '-')
+    if text in ('cell-attached', 'cellattached'):
+        return 'cell-attached'
+    if text in ('whole-cell', 'wholecell'):
+        return 'whole-cell'
+    return ''
+
+
+def parse_single_cell_recording_modes(
+        records: pd.DataFrame, *,
+        cell_columns: Sequence[str] = ('exp_name', 'cell_label'),
+        block_column: str = 'block_id',
+        time_column: str = 'start_time',
+        technique_column: str = 'recording_technique',
+        online_analysis_column: str = 'onlineAnalysis',
+        series_resistance_column: str = 'series_resistance',
+        mean_current_column: str = 'mean_current',
+        spike_evidence_column: Optional[str] = None,
+        classifier_family_column: Optional[str] = None) -> pd.DataFrame:
+    """Parse recording mode once per epoch block, in acquisition order.
+
+    This is the protocol-independent parser for single-cell block/epoch tables.
+    It uses the information that is normally documented correctly, while
+    making the two acquisition invariants explicit:
+
+    * every epoch in an epoch block has one recording family; and
+    * when one cell has both families, cell-attached recording comes first and
+      whole-cell recording follows after a single irreversible transition.
+
+    Evidence is applied in this order:
+
+    1. any positive series-resistance reading forces the whole-cell family;
+    2. epoch-group ``recordingTechnique`` supplies the family;
+    3. an optional high-confidence block classifier can correct or fill the
+       family;
+    4. a valid ``onlineAnalysis`` label is a fallback when both technique and
+       classifier evidence are absent; and
+    5. remaining gaps inherit the cell's chronological family/transition.
+
+    The caller should pass classifier families only after applying its desired
+    confidence threshold. For blocks used to train that classifier, these must
+    be out-of-fold predictions made without that cell in the training fold.
+
+    Zero or missing resistance never establishes cell-attached, and absence of
+    detected spikes never establishes whole-cell. Once whole-cell is known,
+    ``onlineAnalysis`` supplies ``exc``/``inh`` when documented; otherwise the
+    sign of ``mean_current`` does (negative -> ``exc``, nonnegative -> ``inh``).
+
+    The returned frame has the same rows and order as ``records``. A decision
+    is made on the pooled evidence for a block and broadcast to every one of
+    its rows, so per-epoch callers cannot split one block across modes. Added
+    columns are ``recording_order``, ``recording_family``,
+    ``recording_family_source``, ``rec_type``, and ``rec_note``.
+    """
+    frame = records.copy()
+    cell_columns = tuple(cell_columns)
+    required = set(cell_columns) | {block_column}
+    missing = required.difference(frame.columns)
+    if missing:
+        raise ValueError(f'records is missing identity columns: {sorted(missing)}')
+
+    output_columns = (
+        'recording_order', 'recording_family', 'recording_family_source',
+        'rec_type', 'rec_note')
+    frame = frame.drop(columns=[c for c in output_columns if c in frame],
+                       errors='ignore')
+    if frame.empty:
+        for column in output_columns:
+            frame[column] = pd.Series(dtype='Int64' if column == 'recording_order'
+                                      else object)
+        return frame
+
+    work = frame.copy()
+    if technique_column not in work:
+        if 'group_properties' in work:
+            work[technique_column] = work['group_properties'].apply(
+                lambda value: value.get('recordingTechnique', '')
+                if isinstance(value, dict) else '')
+        else:
+            work[technique_column] = ''
+    for column, default in ((online_analysis_column, ''),
+                            (series_resistance_column, np.nan),
+                            (mean_current_column, np.nan)):
+        if column not in work:
+            work[column] = default
+    if spike_evidence_column is not None and spike_evidence_column not in work:
+        raise ValueError(f'records is missing spike evidence column '
+                         f'{spike_evidence_column!r}')
+    if (classifier_family_column is not None
+            and classifier_family_column not in work):
+        raise ValueError(f'records is missing classifier family column '
+                         f'{classifier_family_column!r}')
+
+    keys = list(cell_columns) + [block_column]
+
+    def unique_nonempty(values, normalize):
+        return sorted({normalized for value in values
+                       if (normalized := normalize(value))})
+
+    def normalized_online_label(value):
+        if value is None or (np.isscalar(value) and pd.isna(value)):
+            return ''
+        label = str(value).strip().lower()
+        return label if label in ('extracellular', 'exc', 'inh') else ''
+
+    rows = []
+    for key, block in work.groupby(keys, dropna=False, sort=False):
+        key = key if isinstance(key, tuple) else (key,)
+        techniques = unique_nonempty(
+            block[technique_column], _recording_technique_family)
+        labels = unique_nonempty(
+            block[online_analysis_column], normalized_online_label)
+        label_families = sorted({mode_family(value) for value in labels})
+        resistance = pd.to_numeric(block[series_resistance_column], errors='coerce')
+        means = pd.to_numeric(block[mean_current_column], errors='coerce').dropna()
+        positive_rs = resistance[resistance.gt(0)]
+        classifier_families = (
+            [] if classifier_family_column is None else
+            unique_nonempty(block[classifier_family_column],
+                            _recording_technique_family))
+        if (spike_evidence_column is not None
+                and block[spike_evidence_column].fillna(False).astype(bool).any()
+                and 'cell-attached' not in classifier_families):
+            classifier_families.append('cell-attached')
+            classifier_families.sort()
+        notes = []
+
+        if len(techniques) > 1:
+            notes.append('conflicting recordingTechnique values within one block')
+        if len(label_families) > 1:
+            notes.append('conflicting onlineAnalysis families within one block')
+        elif len(labels) > 1:
+            notes.append('conflicting whole-cell polarities within one block')
+
+        if not positive_rs.empty:
+            family = 'whole-cell'
+            source = 'positive series resistance'
+            notes.append(f'positive series resistance '
+                         f'({float(positive_rs.median()) / 1e6:.2f} MOhm) '
+                         'forces whole-cell')
+            if techniques == ['cell-attached']:
+                notes.append('overrides recordingTechnique=cell-attached')
+        elif len(techniques) == 1:
+            if (len(classifier_families) == 1
+                    and classifier_families[0] != techniques[0]):
+                family = classifier_families[0]
+                source = 'high-confidence block classifier'
+                notes.append(f'high-confidence block classifier corrects '
+                             f'recordingTechnique={techniques[0]} to {family}')
+            else:
+                family = techniques[0]
+                source = 'recordingTechnique'
+                notes.append(f'recordingTechnique is {family}')
+        elif len(classifier_families) == 1:
+            family = classifier_families[0]
+            source = 'high-confidence block classifier'
+            notes.append(f'high-confidence block classifier establishes {family}')
+        elif len(techniques) == 0 and len(label_families) == 1:
+            family = label_families[0]
+            source = 'onlineAnalysis fallback'
+            notes.append(f'recordingTechnique missing; onlineAnalysis '
+                         f'establishes {family}')
+        else:
+            family = ''
+            source = ''
+
+        start = (pd.to_datetime(block[time_column], errors='coerce').min()
+                 if time_column in block else pd.NaT)
+        numeric_block = pd.to_numeric(
+            pd.Series([key[-1]]), errors='coerce').iloc[0]
+        rows.append({
+            **dict(zip(keys, key)), '_recording_time': start,
+            '_numeric_block': numeric_block,
+            '_text_block': str(key[-1]),
+            '_labels': labels,
+            '_mean_current': float(means.mean()) if not means.empty else np.nan,
+            'recording_family': family,
+            'recording_family_source': source,
+            '_notes': notes,
+        })
+
+    blocks = pd.DataFrame(rows)
+    blocks['_numeric_block_missing'] = blocks['_numeric_block'].isna()
+    sort_columns = list(cell_columns) + [
+        '_recording_time', '_numeric_block_missing', '_numeric_block', '_text_block']
+    blocks = (blocks.sort_values(sort_columns, na_position='last', kind='stable')
+              .reset_index(drop=True))
+    blocks['recording_order'] = blocks.groupby(
+        list(cell_columns), dropna=False, sort=False).cumcount()
+
+    for _, positions in blocks.groupby(
+            list(cell_columns), dropna=False, sort=False).groups.items():
+        ordered = list(positions)
+        families = blocks.loc[ordered, 'recording_family']
+        whole_positions = [position for position in ordered
+                           if families.loc[position] == 'whole-cell']
+        cell_positions = [position for position in ordered
+                          if families.loc[position] == 'cell-attached']
+        if whole_positions:
+            first_whole = whole_positions[0]
+            transition_order = int(blocks.loc[first_whole, 'recording_order'])
+            has_cell_before = any(
+                int(blocks.loc[position, 'recording_order']) < transition_order
+                for position in cell_positions)
+            for position in ordered:
+                order = int(blocks.loc[position, 'recording_order'])
+                previous = blocks.loc[position, 'recording_family']
+                if order >= transition_order:
+                    if previous != 'whole-cell':
+                        blocks.at[position, 'recording_family'] = 'whole-cell'
+                        blocks.at[position, 'recording_family_source'] = (
+                            'chronology after whole-cell transition')
+                        blocks.at[position, '_notes'].append(
+                            'whole-cell transition already occurred; '
+                            'a later block cannot be cell-attached')
+                elif not previous:
+                    inferred = 'cell-attached' if has_cell_before else 'whole-cell'
+                    blocks.at[position, 'recording_family'] = inferred
+                    blocks.at[position, 'recording_family_source'] = (
+                        'chronology before whole-cell transition' if has_cell_before
+                        else 'single documented family in cell')
+                    blocks.at[position, '_notes'].append(
+                        f'chronology infers {inferred}')
+        elif cell_positions:
+            for position in ordered:
+                if not blocks.loc[position, 'recording_family']:
+                    blocks.at[position, 'recording_family'] = 'cell-attached'
+                    blocks.at[position, 'recording_family_source'] = (
+                        'single documented family in cell')
+                    blocks.at[position, '_notes'].append(
+                        'all documented blocks for this cell are cell-attached')
+
+    rec_types, notes = [], []
+    for _, row in blocks.iterrows():
+        family = row['recording_family']
+        labels = row['_labels']
+        note_parts = list(row['_notes'])
+        if family == 'cell-attached':
+            rec_type = 'extracellular'
+        elif family == 'whole-cell':
+            subtypes = sorted({value for value in labels if value in ('exc', 'inh')})
+            if len(subtypes) == 1:
+                rec_type = subtypes[0]
+                note_parts.append(f'polarity from onlineAnalysis={rec_type}')
+            elif np.isfinite(row['_mean_current']):
+                rec_type = 'exc' if row['_mean_current'] < 0 else 'inh'
+                note_parts.append(
+                    f"polarity from mean current ({row['_mean_current']:.3g})")
+            else:
+                rec_type = ''
+                note_parts.append('whole-cell polarity unresolved')
+        else:
+            rec_type = ''
+            note_parts.append('recording family unresolved')
+        rec_types.append(rec_type)
+        notes.append('; '.join(dict.fromkeys(note_parts)))
+    blocks['rec_type'] = rec_types
+    blocks['rec_note'] = notes
+
+    decision_columns = keys + list(output_columns)
+    decisions = blocks[decision_columns]
+    result = frame.merge(decisions, on=keys, how='left', validate='many_to_one',
+                         sort=False)
+    return result
 
 
 

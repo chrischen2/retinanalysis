@@ -335,6 +335,60 @@ def test_recording_type_uses_epoch_group_technique_as_primary_anchor(
     assert mode == expected
 
 
+def test_mode_cache_uses_shared_chronological_parser(tmp_path, monkeypatch):
+    import pandas as pd
+
+    from retinanalysis.SCutils import recording_mode as rm
+
+    blocks = pd.DataFrame({
+        'exp_name': ['test'] * 3,
+        'cell_label': ['cell1'] * 3,
+        'block_id': [1, 2, 3],
+        'start_time': pd.to_datetime([
+            '2026-01-01 10:00', '2026-01-01 10:10',
+            '2026-01-01 10:20']),
+        'recording_technique': ['cell-attached', '', 'whole-cell'],
+        'onlineAnalysis': ['', '', ''],
+        'n_epochs': [3, 3, 3],
+    })
+    monkeypatch.setattr(
+        rm, '_amp_response_table',
+        lambda *args, **kwargs: pd.DataFrame(columns=['block_id', 'h5path']))
+    monkeypatch.setattr(rm, '_amp_epoch_groups_by_block',
+                        lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        rm, 'series_resistance_table',
+        lambda *args, **kwargs: pd.DataFrame({
+            'block_id': [1, 2, 3],
+            'series_resistance': [0., 0., 8e6],
+        }))
+
+    from retinanalysis.SCutils import recording_classifier as rc
+    monkeypatch.setattr(
+        rc, 'recording_block_feature_table',
+        lambda *args, **kwargs: pd.DataFrame({
+            'block_id': [1, 2, 3], 'raw_mean': [-5., -5., -25.]}))
+    monkeypatch.setattr(
+        rc, 'load_recording_technique_classifier',
+        lambda: {'model_version': 'test-model'})
+    monkeypatch.setattr(
+        rc, 'predict_recording_techniques',
+        lambda features, bundle, **kwargs: features.assign(
+            classifier_p_whole_cell=[0., 0., 1.],
+            classifier_confidence=[1., 1., 1.],
+            classifier_prediction=['cell-attached', 'cell-attached', 'whole-cell'],
+            classifier_family=['cell-attached', 'cell-attached', 'whole-cell'],
+            classifier_source=['cell-held-out prediction'] * 3))
+    cache = vmn.build_mode_cache(
+        blocks, path=tmp_path / 'modes.csv', verbose=False)
+
+    assert cache.rec_type.tolist() == ['extracellular', 'extracellular', 'exc']
+    assert cache.recording_order.tolist() == [0, 1, 2]
+    assert cache.series_resistance_mohm.tolist() == [0., 0., 8.]
+    assert cache.loc[2, 'mean_current_pa'] == -25.
+    assert cache.cache_version.eq(vmn.MODE_CACHE_VERSION).all()
+
+
 def test_resolve_block_mode_ignores_series_resistance_and_trace(monkeypatch):
     import pandas as pd
 
@@ -368,6 +422,71 @@ def test_manual_recording_override_is_scoped_and_mutually_exclusive():
         vmn.apply_recording_type_override(
             modes, [10], force_spike_flag=True,
             force_whole_cell_flag=True, show=False)
+
+
+def test_epoch_ranges_assign_one_type_per_block_and_exclude_the_rest():
+    import pandas as pd
+
+    modes = pd.DataFrame({
+        'block_id': [10, 11, 12],
+        'rec_type': ['extracellular', 'extracellular', 'exc'],
+        'rec_note': ['auto'] * 3,
+    })
+    catalog = pd.DataFrame({
+        'epoch_number': [0, 1, 2, 3, 4],
+        'block_id': [10, 10, 11, 11, 12],
+        'automatic_rec_type': [
+            'extracellular', 'extracellular', 'extracellular',
+            'extracellular', 'exc'],
+    })
+
+    assigned_modes, assigned_epochs, excluded = (
+        vmn.apply_epoch_recording_type_ranges(
+            modes, catalog,
+            {'extracellular': range(0, 2), 'exc': range(2, 4)},
+            show=False))
+
+    assert assigned_modes.rec_type.tolist() == ['extracellular', 'exc', 'exc']
+    assert assigned_epochs.assigned_rec_type.tolist() == [
+        'extracellular', 'extracellular', 'exc', 'exc', '']
+    assert assigned_epochs.selected_for_analysis.tolist() == [
+        True, True, True, True, False]
+    assert excluded == (4,)
+
+
+def test_epoch_ranges_refuse_to_split_one_block_across_types():
+    import pandas as pd
+
+    modes = pd.DataFrame({
+        'block_id': [10], 'rec_type': ['extracellular'],
+        'rec_note': ['auto']})
+    catalog = pd.DataFrame({
+        'epoch_number': [0, 1], 'block_id': [10, 10],
+        'automatic_rec_type': ['extracellular', 'extracellular']})
+
+    with pytest.raises(ValueError, match='one epoch block'):
+        vmn.apply_epoch_recording_type_ranges(
+            modes, catalog,
+            {'extracellular': [0], 'exc': [1]}, show=False)
+
+
+def test_raw_epoch_figures_are_grouped_by_assigned_type(monkeypatch):
+    import pandas as pd
+
+    catalog = pd.DataFrame({
+        'epoch_number': [0, 1, 2], 'block_id': [10, 11, 12],
+        'assigned_rec_type': ['extracellular', 'exc', 'extracellular']})
+    calls = []
+
+    def plot(exp_name, subset, **kwargs):
+        calls.append((kwargs['group_label'], subset.epoch_number.tolist()))
+        return kwargs['group_label']
+
+    monkeypatch.setattr(vmn, 'plot_raw_epoch_traces', plot)
+    figures = vmn.plot_raw_epoch_traces_by_recording_type('test', catalog)
+
+    assert calls == [('extracellular', [0, 2]), ('exc', [1])]
+    assert figures == {'extracellular': 'extracellular', 'exc': 'exc'}
 
 
 def test_epoch_catalog_and_removal_use_cell_wide_chronological_indices(

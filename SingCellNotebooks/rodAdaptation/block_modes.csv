@@ -1,406 +1,406 @@
-cache_version,exp_name,block_id,n_epochs,rec_type,rec_note,online_analysis_recorded,recording_technique,series_resistance_mohm,series_resistance_source,mean_current_pa
-7,2020-06-11_B,30238,14,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-06-11_B,30209,2,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-06-11_B,30210,20,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-06-11_B,30188,15,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-06-11_B,30174,19,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-06-11_B,30177,6,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-06-11_B,30216,14,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-06-11_B,30218,27,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-06-16_B,30318,10,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-06-16_B,30319,11,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-06-16_B,30325,4,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-06-16_B,30326,7,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-06-16_B,30331,10,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-06-16_B,30332,8,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-06-16_B,30333,16,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-06-16_B,30336,8,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-06-23_B,30406,10,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-06-23_B,30420,10,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-06-23_B,30421,10,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-07-13_G,10059,20,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-07-13_G,10062,15,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-07-13_G,10064,7,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-07-14_G,10090,6,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-07-14_G,10099,5,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-07-14_G,10100,2,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-07-14_G,10101,5,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-07-14_G,10072,7,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-07-14_G,10074,10,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-07-14_G,10078,2,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-07-14_G,10080,6,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-07-29_G,10123,8,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-07-29_G,10114,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-07-29_G,10117,8,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-07-29_G,10119,6,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-07-29_G,10121,7,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-07-29_G,10103,2,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-07-29_G,10104,7,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-07-29_G,10105,3,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-07-29_G,10110,2,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-07-29_G,10111,6,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-07-29_G,10112,2,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-07-29_G,10107,12,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-07-29_G,10125,12,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-07-29_G,10129,7,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-07-29_G,10130,2,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-07-29_G,10132,7,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-07-29_G,10134,2,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-07-29_G,10135,1,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-08-11_G,10159,12,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-08-11_G,10153,12,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-08-11_G,10156,2,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-08-11_G,10157,7,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-08-11_G,10175,13,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-08-11_G,10184,16,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-08-11_G,10187,2,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-08-11_G,10188,4,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-08-11_G,10145,1,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-08-11_G,10146,10,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-08-11_G,10149,2,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-08-11_G,10151,6,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-08-11_G,10152,12,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-08-11_G,10137,14,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-08-11_G,10168,14,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-08-11_G,10171,15,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-08-11_G,10179,8,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-08-25_G,10273,9,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-08-25_G,10275,12,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-08-25_G,10267,6,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2020-08-25_G,10262,6,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2020-08-25_G,10263,8,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2020-08-25_G,10270,6,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2020-08-25_G,10260,14,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-08-25_G,10256,14,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-08-25_G_scotopic,10252,14,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-08-25_G_scotopic,10246,14,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-08-25_G_scotopic,10248,8,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-08-25_G_scotopic,10249,7,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-10-20_G,10544,11,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-10-20_G,10545,5,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-10-20_G,10550,12,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-10-20_G,10552,11,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-10-20_G,10553,11,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-10-20_G,10557,6,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-12-03_G,10940,12,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2020-12-03_G,10948,8,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-12-03_G,10949,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-12-03_G,10942,12,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-12-03_G,10944,12,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-12-03_G,10945,2,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-12-03_G,10946,8,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-12-03_G,10930,11,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-12-03_G,10931,2,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-12-03_G,10934,6,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2020-12-03_G,10936,12,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2020-12-03_G,10937,2,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-02-01_B,11401,12,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-02-01_B,11402,50,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-02-01_B,11392,31,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-03-02_B,11537,9,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-03-02_B,11548,10,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2021-03-02_B,11528,10,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-03-02_B,11562,9,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-04-27_B,12017,12,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-04-27_B,12018,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-04-27_B,12019,7,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-04-27_B,12005,12,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-04-27_B,12013,12,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-04-27_B,12009,12,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-04-27_B,12011,11,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-04-27_B,12021,7,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-04-27_B,12024,7,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-04-27_B,12026,12,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-04-27_B,12015,7,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-05-05_B,12034,10,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2021-05-05_B,12031,13,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2021-05-25_B,12260,10,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-05-25_B,12261,5,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-05-25_B,12262,10,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2021-05-25_B,12265,13,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-05-25_B,12249,9,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2021-05-25_B,12247,12,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2021-05-25_B,12248,3,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2021-05-25_B,12243,11,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-05-25_B,12253,11,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-05-25_B,12252,13,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-05-25_B,12256,11,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-05-25_B,12258,6,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2021-05-25_B,12245,13,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-05-25_B,12254,13,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-06-22_B,12536,12,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-06-22_B,12503,2,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-06-22_B,12513,10,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-06-22_B,12499,10,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-06-22_B,12519,10,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-06-22_B,12527,12,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-07-13_B,12619,6,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-07-19_B,12689,14,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-07-19_B,12690,12,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-07-19_B,12684,14,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-07-19_B,12685,13,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-07-27_B,12699,15,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-07-27_B,12716,2,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-07-27_B,12721,14,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-07-27_B,12722,5,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-08-18_B,12748,18,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-08-18_B,12753,12,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-08-18_B,12726,1,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-08-18_B,12757,10,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-08-18_B,12758,3,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-08-18_B,12743,13,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-08-18_B,12736,13,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-08-19_B,12777,6,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-08-19_B,12778,3,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2021-08-19_B,12771,9,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-08-19_B,12763,10,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-09-07_B,12789,12,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-09-07_B,12791,12,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-09-07_B,12796,4,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-09-21_B,12869,14,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2021-09-21_B,12880,12,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2021-09-23_B,12906,10,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2021-09-28_B,12910,10,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2021-09-28_B,12930,14,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-09-28_B,12931,9,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-10-07_B,12935,12,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2021-10-07_B,12937,12,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2022-04-06_B,4686,10,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2022-05-10_B,4734,9,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2022-05-10_B,4730,13,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2022-05-10_B,4732,7,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2022-05-10_B,4722,10,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2022-05-10_B,4723,10,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2022-05-10_B,4724,10,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2022-05-10_B,4728,13,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2022-05-10_B,4736,7,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2022-05-10_B,4720,7,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2022-05-18_B,4781,11,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2022-05-18_B,4784,10,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2022-05-18_B,4794,10,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2022-05-18_B,4795,12,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2022-05-18_B,4782,10,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2022-05-18_B,4786,9,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2022-05-18_B,4788,9,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2022-05-18_B,4789,7,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2022-05-18_B,4791,11,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2022-05-18_B,4796,10,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2022-05-18_B,4793,9,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2022-05-31_B,4800,11,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2022-05-31_B,4801,27,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2022-05-31_B,4803,24,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2022-05-31_B,4805,12,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2022-05-31_B,4806,4,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2022-05-31_B,4798,21,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2022-06-07_B,4813,19,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2022-06-07_B,4816,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2022-06-07_B,4817,8,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2022-06-07_B,4818,11,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2022-06-07_B,4809,21,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2022-06-07_B,4811,23,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2022-09-09_B,37920,12,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2022-09-09_B,37925,10,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2022-09-09_B,37926,3,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2022-09-09_B,37928,12,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2022-09-09_B,37929,12,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2023-05-17_B,4346,30,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2023-05-17_B,4340,22,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2023-05-17_B,4342,29,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-01-21_G,13726,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-01-21_G,13730,3,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-01-21_G,13735,6,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-01-21_G,13720,6,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-01-21_G,13721,6,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-01-21_G,13722,10,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-01-21_G,13723,6,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-01-21_G,13714,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-01-28_G,13746,5,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-01-28_G,13747,3,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-01-28_G,13748,3,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-01-28_G,13736,1,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-01-28_G,13737,3,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-01-28_G,13738,5,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-01-28_G,13740,4,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-01-28_G,13741,8,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-01-28_G,13742,8,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-01-28_G,13745,6,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-02-12_G,13781,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-12_G,13782,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-12_G,13783,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-12_G,13784,1,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-12_G,13785,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-12_G,13786,3,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-12_G,13787,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-12_G,13788,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-12_G,13789,4,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-02-12_G,13790,3,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-02-12_G,13791,1,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-02-12_G,13792,4,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-02-12_G,13793,4,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-02-12_G,13777,3,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-12_G,13778,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-12_G,13779,2,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-12_G,13773,4,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-02-12_G,13774,4,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-02-12_G,13797,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-12_G,13798,3,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-12_G,13799,3,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-19_G,13809,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-19_G,13810,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-19_G,13811,1,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-19_G,13812,3,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-19_G,13813,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-19_G,13814,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-19_G,13815,6,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-19_G,13816,2,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-19_G,13818,4,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-02-19_G,13819,2,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-02-19_G,13820,5,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-02-19_G,13821,6,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-02-19_G,13822,6,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-02-19_G,13807,6,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-19_G,13824,2,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-19_G,13825,6,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-19_G,13826,6,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-19_G,13827,3,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-19_G,13831,3,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-02-19_G,13800,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-19_G,13801,1,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-19_G,13802,1,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-19_G,13803,2,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-19_G,13804,3,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-19_G,13805,6,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-02-19_G,13806,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13854,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13855,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13856,6,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13857,5,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13858,5,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13859,6,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2025-03-06_G,13836,6,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13837,6,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13838,2,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13839,5,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13840,5,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13841,3,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13842,3,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13843,4,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-03-06_G,13844,4,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-03-06_G,13845,3,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-03-06_G,13846,5,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-03-06_G,13847,2,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-03-06_G,13848,1,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-03-06_G,13849,2,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-03-06_G,13850,6,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-03-06_G,13851,6,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-03-06_G,13832,5,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13833,5,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13834,5,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13835,5,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13866,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13867,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13868,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13869,1,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13870,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13871,5,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-03-06_G,13872,4,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-03-06_G,13873,4,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-03-06_G,13864,6,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13865,6,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13860,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13861,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13862,5,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-03-06_G,13863,2,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-05-06_E,16969,15,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-05-06_E,16970,4,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-05-06_E,16971,16,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-05-06_E,16983,32,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-09-11_E,18177,10,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-09-11_E,18178,10,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-09-11_E,18193,10,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-09-11_E,18194,10,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-09-11_E,18195,10,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-09-11_E,18196,10,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-09-11_E,18199,10,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-09-11_E,18200,10,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-09-11_E,18202,10,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-09-11_E,18203,10,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-09-24_E,18372,8,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2025-12-16_G,14136,12,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-12-16_G,14126,12,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-12-16_G,14119,17,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-12-16_G,14128,5,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-12-16_G,14129,12,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-12-16_G,14132,11,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-12-16_G,14140,9,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2025-12-16_G,14123,10,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-02_G,14235,12,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-02_G,14219,11,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-02_G,14223,12,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2026-01-02_G,14224,12,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2026-01-02_G,14210,3,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-02_G,14211,12,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-02_G,14212,12,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-02_G,14215,10,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2026-01-02_G,14216,12,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2026-01-02_G,14228,9,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2026-01-02_G,14229,2,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2026-01-02_G,14204,20,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-02_G,14205,11,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-13_G,14238,12,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-13_G,14248,12,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-13_G,14249,8,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-13_G,14266,12,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-13_G,14265,12,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-13_G,14256,12,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-13_G,14243,12,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-13_G,14242,10,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-13_G,14260,10,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-13_G,14263,3,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2026-01-13_G,14264,4,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2026-01-14_G,14272,10,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-14_G,14276,4,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2026-01-14_G,14284,11,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-14_G,14268,19,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-14_G,14280,5,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2026-01-28_G,14618,5,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-28_G,14619,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-28_G,14620,6,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2026-01-28_G,14627,8,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2026-01-28_G,14630,10,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2026-01-28_G,14631,6,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2026-01-28_G,14608,10,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-28_G,14609,8,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-28_G,14613,8,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2026-01-28_G,14615,10,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2026-01-28_G,14638,8,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-28_G,14641,6,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2026-01-28_G,14600,2,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-01-28_G,14603,7,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2026-02-05_G,14645,8,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-02-05_G,14649,7,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2026-02-05_G,14653,8,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2026-02-05_G,14654,8,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2026-02-05_G,14657,8,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2026-02-05_G,14661,3,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2026-02-27_G,37101,10,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2026-02-27_G,37104,5,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2026-02-27_G,37090,6,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2026-02-27_G,37107,10,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-02-27_G,37110,8,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2026-02-27_G,37082,2,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2026-09-04_G,37936,14,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-09-04_G,37937,1,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-09-04_G,37938,3,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-09-04_G,37939,6,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-09-04_G,37940,4,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-09-04_G,37941,7,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-09-04_G,37930,13,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-09-04_G,37931,7,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2026-09-04_G,37942,15,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-09-04_G,37934,10,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-09-04_G,37935,12,,recordingTechnique and onlineAnalysis do not resolve mode; use a Section 2 force flag if inspection supports it,,,,not used,
-7,2026-09-04_G,37943,19,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-09-04_G,37932,10,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
-7,2026-09-04_G,37933,9,,"recordingTechnique is whole-cell, but current polarity is not labelled; set forceWholeCellFlag in Section 2",,whole-cell,,not used,
-7,2026-09-04_G,37945,12,extracellular,recordingTechnique is cell-attached (primary metadata anchor),,cell-attached,,not used,
+cache_version,exp_name,block_id,n_epochs,recording_order,recording_family,recording_family_source,rec_type,rec_note,online_analysis_recorded,recording_technique,series_resistance_mohm,series_resistance_source,mean_current_pa,classifier_p_whole_cell,classifier_confidence,classifier_prediction,classifier_family,classifier_source,classifier_model_version,classifier_min_confidence
+8,2020-06-11_B,30238,14,0,whole-cell,positive series resistance,exc,positive series resistance (4.50 MOhm) forces whole-cell; polarity from mean current (-4.62e+03),,whole-cell,4.5027214250371115,raw H5,-4621.724039583334,0.9894071282931833,0.9894071282931833,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-06-11_B,30209,2,0,whole-cell,positive series resistance,exc,positive series resistance (8.44 MOhm) forces whole-cell; polarity from mean current (-834),,whole-cell,8.439716312056738,raw H5,-833.51645125,0.9855945912951076,0.9855945912951076,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-06-11_B,30210,20,1,whole-cell,positive series resistance,exc,positive series resistance (10.94 MOhm) forces whole-cell; polarity from mean current (-2.24e+03),,whole-cell,10.935180603661554,raw H5,-2236.2137177083337,0.9629600345302973,0.9629600345302973,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-06-11_B,30188,15,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-11.5606115,0.010398369084395714,0.9896016309156043,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-06-11_B,30174,19,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-58.491477895833334,0.0009238578680203045,0.9990761421319797,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-06-11_B,30177,6,1,whole-cell,positive series resistance,exc,positive series resistance (2.99 MOhm) forces whole-cell; polarity from mean current (-1.35e+04),,whole-cell,2.989545287649526,raw H5,-13548.7634375,0.7262307004346864,0.7262307004346864,whole-cell,,cell-held-out prediction,1,0.9
+8,2020-06-11_B,30216,14,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-160.26941937499998,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-06-11_B,30218,27,1,whole-cell,positive series resistance,exc,positive series resistance (7.51 MOhm) forces whole-cell; overrides recordingTechnique=cell-attached; polarity from mean current (-1.96e+03),,cell-attached,7.514815894297095,raw H5,-1964.02548125,0.7947824051152825,0.7947824051152825,whole-cell,,cell-held-out prediction,1,0.9
+8,2020-06-16_B,30318,10,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,74.41822395833334,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-06-16_B,30319,11,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,42.90820879166666,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-06-16_B,30325,4,2,whole-cell,positive series resistance,exc,positive series resistance (7.97 MOhm) forces whole-cell; polarity from mean current (-633),,whole-cell,7.969707897583845,raw H5,-632.694903125,0.9886285001273967,0.9886285001273967,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-06-16_B,30326,7,3,whole-cell,positive series resistance,exc,positive series resistance (7.97 MOhm) forces whole-cell; polarity from mean current (-880),,whole-cell,7.969707897583845,raw H5,-880.0315479166666,0.9900504572909865,0.9900504572909865,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-06-16_B,30331,10,4,whole-cell,positive series resistance,exc,positive series resistance (14.89 MOhm) forces whole-cell; polarity from mean current (-727),,whole-cell,14.893617021276597,raw H5,-727.48480875,0.9939075259697215,0.9939075259697215,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-06-16_B,30332,8,5,whole-cell,positive series resistance,exc,positive series resistance (14.89 MOhm) forces whole-cell; polarity from mean current (-846),,whole-cell,14.893617021276597,raw H5,-846.1981116666667,0.9931732602354558,0.9931732602354558,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-06-16_B,30333,16,6,whole-cell,positive series resistance,exc,positive series resistance (14.89 MOhm) forces whole-cell; polarity from mean current (-656),,whole-cell,14.893617021276597,raw H5,-656.1623129166666,0.9967938949186955,0.9967938949186955,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-06-16_B,30336,8,7,whole-cell,positive series resistance,exc,positive series resistance (14.89 MOhm) forces whole-cell; polarity from mean current (-840),,whole-cell,14.893617021276597,raw H5,-840.1906933333335,0.9890413239521051,0.9890413239521051,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-06-23_B,30406,10,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-12.629186374999998,0.007498396759586215,0.9925016032404138,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-06-23_B,30420,10,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,106.66452970833335,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-06-23_B,30421,10,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,131.60690154166667,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-07-13_G,10059,20,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,5.103131875,0.006945588076466141,0.9930544119235338,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-07-13_G,10062,15,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,-172.52644145833335,0.03685335898479274,0.9631466410152073,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-07-13_G,10064,7,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,-67.7288153125,0.0012657342657342659,0.9987342657342657,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-07-14_G,10090,6,0,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-414),,whole-cell,,unavailable,-413.8076604166667,0.9876648673984079,0.9876648673984079,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-07-14_G,10099,5,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,24.662681125,0.08831386345505997,0.91168613654494,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-07-14_G,10100,2,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,-41.894608000000005,0.0006006600660066006,0.9993993399339934,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-07-14_G,10101,5,2,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,-21.52156625,0.06615536489307793,0.9338446351069221,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-07-14_G,10072,7,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,-343.13133166666665,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-07-14_G,10074,10,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,408.7362570833333,0.010177108605680035,0.98982289139432,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-07-14_G,10078,2,1,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-577),,whole-cell,,unavailable,-576.5131375,0.987476340911605,0.987476340911605,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-07-14_G,10080,6,2,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-515),,whole-cell,,unavailable,-514.5149862499999,0.9883075495932638,0.9883075495932638,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-07-29_G,10123,8,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,55.319495874999994,0.06885711757396717,0.9311428824260328,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-07-29_G,10114,4,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,3.5046764999999995,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-07-29_G,10117,8,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,98.57516489583334,0.0028128250591016543,0.9971871749408984,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-07-29_G,10119,6,2,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,134.30642291666666,0.13058907326384595,0.869410926736154,cell-attached,,cell-held-out prediction,1,0.9
+8,2020-07-29_G,10121,7,3,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,-69.17675,0.005126482271564953,0.994873517728435,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-07-29_G,10103,2,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,7.577844875,0.010500479422685826,0.9894995205773142,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-07-29_G,10104,7,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,126.75838968750001,0.007990128927309902,0.9920098710726901,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-07-29_G,10105,3,2,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,-127.363096875,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-07-29_G,10110,2,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,70.81562625000001,0.009110552567425066,0.9908894474325749,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-07-29_G,10111,6,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,190.92985354166663,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-07-29_G,10112,2,2,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,685.657893125,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-07-29_G,10107,12,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,78.33560697916667,0.13372489196119533,0.8662751080388047,cell-attached,,cell-held-out prediction,1,0.9
+8,2020-07-29_G,10125,12,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,-14.230086749999998,0.009588196764502285,0.9904118032354977,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-07-29_G,10129,7,1,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-1.58e+03),,whole-cell,,unavailable,-1578.5890739583335,0.9862094058537932,0.9862094058537932,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-07-29_G,10130,2,2,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-1.81e+03),,whole-cell,,unavailable,-1805.999603125,0.9778076997936638,0.9778076997936638,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-07-29_G,10132,7,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,-198.60320666666667,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-07-29_G,10134,2,1,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-5.47e+03),,whole-cell,,unavailable,-5471.57625625,0.9992657342657343,0.9992657342657343,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-07-29_G,10135,1,2,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-6.49e+03),,whole-cell,,unavailable,-6489.547275,0.9772613423969799,0.9772613423969799,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-08-11_G,10159,12,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,1.6394551249999996,0.02452689450675926,0.9754731054932407,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-08-11_G,10153,12,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,-323.37378291666664,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-08-11_G,10156,2,1,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-1.74e+03),,whole-cell,,unavailable,-1739.17613125,0.9137042808563706,0.9137042808563706,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-08-11_G,10157,7,2,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-1.45e+03),,whole-cell,,unavailable,-1449.379225,0.9314298450664593,0.9314298450664593,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-08-11_G,10175,13,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,-210.8479984375,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-08-11_G,10184,16,0,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-1.29e+03),,whole-cell,,unavailable,-1292.2564104166668,0.9556396948218315,0.9556396948218315,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-08-11_G,10187,2,1,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-848),,whole-cell,,unavailable,-848.1010437499999,0.9694982274991248,0.9694982274991248,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-08-11_G,10188,4,2,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-746),,whole-cell,,unavailable,-746.1145468750001,0.9502311924521412,0.9502311924521412,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-08-11_G,10145,1,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,45.73646,0.10892246044871567,0.8910775395512843,cell-attached,,cell-held-out prediction,1,0.9
+8,2020-08-11_G,10146,10,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,157.33449,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-08-11_G,10149,2,2,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-2.55e+03),,whole-cell,,unavailable,-2545.9536875,0.9182556995452078,0.9182556995452078,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-08-11_G,10151,6,3,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-3.65e+03),,whole-cell,,unavailable,-3648.0943291666667,0.9364499782228813,0.9364499782228813,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-08-11_G,10152,12,4,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-3.91e+03),,whole-cell,,unavailable,-3914.87691875,0.9251622939070274,0.9251622939070274,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-08-11_G,10137,14,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,-368.7090229166667,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-08-11_G,10168,14,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,-359.49097395833337,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-08-11_G,10171,15,1,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-2.35e+03),,whole-cell,,unavailable,-2350.597658333333,0.8887926264765907,0.8887926264765907,whole-cell,,cell-held-out prediction,1,0.9
+8,2020-08-11_G,10179,8,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,-187.6726725,0.007784719878527359,0.9922152801214726,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-08-25_G,10273,9,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,287.03038125,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-08-25_G,10275,12,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,339.8502470833334,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-08-25_G,10267,6,0,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,,unavailable,249.977169375,0.0,1.0,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2020-08-25_G,10262,6,0,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,,unavailable,311.81316062499997,0.0,1.0,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2020-08-25_G,10263,8,1,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,,unavailable,242.80986270833333,0.0,1.0,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2020-08-25_G,10270,6,0,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,,unavailable,259.2406085416667,0.0,1.0,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2020-08-25_G,10260,14,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,234.04119312499998,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-08-25_G,10256,14,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,284.5355608333333,0.0047590997663374025,0.9952409002336626,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-08-25_G_scotopic,10252,14,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,104.74683625,0.07046493679298742,0.9295350632070126,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-08-25_G_scotopic,10246,14,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,181.69441083333334,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-08-25_G_scotopic,10248,8,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,-69.20026874999999,0.003012417016035834,0.9969875829839642,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-08-25_G_scotopic,10249,7,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,-134.160150625,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-10-20_G,10544,11,0,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-1.18e+03),,whole-cell,,unavailable,-1179.20178,0.9985314685314686,0.9985314685314686,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-10-20_G,10545,5,1,whole-cell,recordingTechnique,inh,recordingTechnique is whole-cell; polarity from mean current (1.14e+03),,whole-cell,,unavailable,1135.2177585,0.9511431665518261,0.9511431665518261,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-10-20_G,10550,12,0,whole-cell,recordingTechnique,inh,recordingTechnique is whole-cell; polarity from mean current (858),,whole-cell,,unavailable,858.1494791666668,0.9599781095988686,0.9599781095988686,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-10-20_G,10552,11,1,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-155),,whole-cell,,unavailable,-154.8011,0.9964886750785275,0.9964886750785275,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-10-20_G,10553,11,2,whole-cell,recordingTechnique,inh,recordingTechnique is whole-cell; polarity from mean current (1.25e+03),,whole-cell,,unavailable,1248.5901041666668,0.8929511056082738,0.8929511056082738,whole-cell,,cell-held-out prediction,1,0.9
+8,2020-10-20_G,10557,6,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,-14.799231458333333,0.0012587412587412587,0.9987412587412587,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-12-03_G,10940,12,0,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,,unavailable,153.96895020833333,0.008925726407043574,0.9910742735929564,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2020-12-03_G,10948,8,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,144.4422080208333,0.1900883055210089,0.8099116944789911,cell-attached,,cell-held-out prediction,1,0.9
+8,2020-12-03_G,10949,4,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,725.4245840625,0.007981632825006319,0.9920183671749937,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-12-03_G,10942,12,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,-96.86235104166666,0.4583545085371307,0.5416454914628692,cell-attached,,cell-held-out prediction,1,0.9
+8,2020-12-03_G,10944,12,1,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-858),,whole-cell,,unavailable,-857.6431854166667,0.9498119745286278,0.9498119745286278,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-12-03_G,10945,2,2,whole-cell,recordingTechnique,inh,recordingTechnique is whole-cell; polarity from mean current (2.1e+03),,whole-cell,,unavailable,2100.467009375,0.828099222829091,0.828099222829091,whole-cell,,cell-held-out prediction,1,0.9
+8,2020-12-03_G,10946,8,3,whole-cell,recordingTechnique,inh,recordingTechnique is whole-cell; polarity from mean current (1.89e+03),,whole-cell,,unavailable,1893.5964385416664,0.8264422054038194,0.8264422054038194,whole-cell,,cell-held-out prediction,1,0.9
+8,2020-12-03_G,10930,11,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,-86.71239954166667,0.30935968630092375,0.6906403136990762,cell-attached,,cell-held-out prediction,1,0.9
+8,2020-12-03_G,10931,2,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,-185.622901125,0.04550863417740849,0.9544913658225915,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-12-03_G,10934,6,2,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-775),,whole-cell,,unavailable,-774.79085,0.9742504320211538,0.9742504320211538,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2020-12-03_G,10936,12,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,-55.52880991666666,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2020-12-03_G,10937,2,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,,unavailable,-121.840514,0.004487671684868526,0.9955123283151315,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-02-01_B,11401,12,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-34.88822229166667,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-02-01_B,11402,50,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-99.52569406250001,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-02-01_B,11392,31,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,28.127870166666664,0.02226773531510317,0.9777322646848968,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-03-02_B,11537,9,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-453.1149808333333,0.003550321199143469,0.9964496788008566,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-03-02_B,11548,10,1,whole-cell,positive series resistance,exc,positive series resistance (16.33 MOhm) forces whole-cell; polarity from mean current (-431),,whole-cell,16.33493479752917,raw H5,-430.5790458333333,0.998925831202046,0.998925831202046,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2021-03-02_B,11528,10,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-43.97861166666667,0.028072784312987202,0.9719272156870128,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-03-02_B,11562,9,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-125.80538270833334,0.08878072536329287,0.9112192746367072,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-04-27_B,12017,12,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,44.37141729166666,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-04-27_B,12018,4,1,whole-cell,positive series resistance,exc,positive series resistance (6.56 MOhm) forces whole-cell; overrides recordingTechnique=cell-attached; polarity from mean current (-1.25e+03),,cell-attached,6.556751716538104,raw H5,-1250.787525,1.0,1.0,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2021-04-27_B,12019,7,2,whole-cell,positive series resistance,exc,positive series resistance (6.56 MOhm) forces whole-cell; overrides recordingTechnique=cell-attached; polarity from mean current (-2.81e+03),,cell-attached,6.556751716538104,raw H5,-2807.3442270833334,0.9919735856367282,0.9919735856367282,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2021-04-27_B,12005,12,0,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,0.0,raw H5,-42.06217408333334,0.0,1.0,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2021-04-27_B,12013,12,0,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,0.0,raw H5,-110.14147091666666,0.0,1.0,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2021-04-27_B,12009,12,0,whole-cell,single documented family in cell,exc,chronology infers whole-cell; polarity from mean current (-42.1),,,0.0,raw H5,-42.05760775000001,0.15394435183598756,0.8460556481640125,cell-attached,,model fitted to labelled blocks,1,0.9
+8,2021-04-27_B,12011,11,1,whole-cell,positive series resistance,exc,positive series resistance (9.04 MOhm) forces whole-cell; polarity from mean current (-2.02e+03),,,9.042553191489361,raw H5,-2018.6356833333332,0.8384709429222328,0.8384709429222328,whole-cell,,model fitted to labelled blocks,1,0.9
+8,2021-04-27_B,12021,7,0,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,0.0,raw H5,24.706273145833336,0.032183264928025826,0.9678167350719742,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2021-04-27_B,12024,7,1,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,0.0,raw H5,-264.10708875,0.0032625698324022343,0.9967374301675977,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2021-04-27_B,12026,12,0,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,0.0,raw H5,-45.134677843750005,0.09490377157208309,0.9050962284279169,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2021-04-27_B,12015,7,0,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,0.0,raw H5,-320.83672583333333,0.011722221952769648,0.9882777780472304,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2021-05-05_B,12034,10,0,whole-cell,positive series resistance,exc,positive series resistance (2.89 MOhm) forces whole-cell; polarity from mean current (-2.54e+03),,whole-cell,2.8923456605466855,raw H5,-2538.772795833333,0.9183832462333936,0.9183832462333936,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2021-05-05_B,12031,13,0,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-1.06e+03),,whole-cell,0.0,raw H5,-1059.9035916666667,0.9602991452746925,0.9602991452746925,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2021-05-25_B,12260,10,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-99.57355333333332,0.0024662329706234137,0.9975337670293766,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-05-25_B,12261,5,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-159.17098374999998,0.10648771014253886,0.8935122898574611,cell-attached,,cell-held-out prediction,1,0.9
+8,2021-05-25_B,12262,10,2,whole-cell,positive series resistance,exc,positive series resistance (4.33 MOhm) forces whole-cell; polarity from mean current (-4.8e+03),,whole-cell,4.330907054871221,raw H5,-4798.695658333333,0.7618438354119776,0.7618438354119776,whole-cell,,cell-held-out prediction,1,0.9
+8,2021-05-25_B,12265,13,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-57.027877895833335,0.08564969035532616,0.9143503096446739,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-05-25_B,12249,9,0,whole-cell,positive series resistance,exc,positive series resistance (5.18 MOhm) forces whole-cell; polarity from mean current (-4.8e+03),,whole-cell,5.175297738525358,raw H5,-4804.738308333333,0.8146170996483335,0.8146170996483335,whole-cell,,cell-held-out prediction,1,0.9
+8,2021-05-25_B,12247,12,0,whole-cell,positive series resistance,exc,positive series resistance (15.75 MOhm) forces whole-cell; polarity from mean current (-1.61e+03),,whole-cell,15.74875292680444,raw H5,-1610.6664354166667,0.9992657342657343,0.9992657342657343,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2021-05-25_B,12248,3,1,whole-cell,positive series resistance,exc,positive series resistance (15.75 MOhm) forces whole-cell; polarity from mean current (-2.57e+03),,whole-cell,15.74875292680444,raw H5,-2567.468225,0.9977972027972029,0.9977972027972029,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2021-05-25_B,12243,11,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-269.93422791666666,0.0114146962482425,0.9885853037517575,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-05-25_B,12253,11,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-254.8210852916667,0.034117534856045253,0.9658824651439547,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-05-25_B,12252,13,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-149.75643925,0.11313940573932788,0.8868605942606721,cell-attached,,cell-held-out prediction,1,0.9
+8,2021-05-25_B,12256,11,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-185.3000465,0.1378407620819741,0.8621592379180258,cell-attached,,cell-held-out prediction,1,0.9
+8,2021-05-25_B,12258,6,1,whole-cell,positive series resistance,exc,positive series resistance (7.25 MOhm) forces whole-cell; polarity from mean current (-663),,whole-cell,7.249976567625833,raw H5,-663.2124,0.866061310553802,0.866061310553802,whole-cell,,cell-held-out prediction,1,0.9
+8,2021-05-25_B,12245,13,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,4.921852895833333,0.0426222728748079,0.9573777271251921,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-05-25_B,12254,13,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-304.5833389583333,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-06-22_B,12536,12,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-356.8501445833333,0.029006972883667884,0.9709930271163321,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-06-22_B,12503,2,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-65.222570625,0.00436176122931442,0.9956382387706856,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-06-22_B,12513,10,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-211.56455658333334,0.005321288153906179,0.9946787118460938,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-06-22_B,12499,10,0,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,0.0,raw H5,79.69593416666667,0.0009224489795918367,0.9990775510204082,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2021-06-22_B,12519,10,0,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,0.0,raw H5,5.8893491875000015,0.0059064054488405906,0.9940935945511594,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2021-06-22_B,12527,12,1,whole-cell,positive series resistance,exc,positive series resistance (8.97 MOhm) forces whole-cell; polarity from mean current (-249),,,8.968635862948577,raw H5,-248.77471,0.9974070380915476,0.9974070380915476,whole-cell,whole-cell,model fitted to labelled blocks,1,0.9
+8,2021-07-13_B,12619,6,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-47.01853083333333,0.008921404177457721,0.9910785958225423,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-07-19_B,12689,14,0,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,0.0,raw H5,-496.68292312500006,0.00479900175332258,0.9952009982466774,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2021-07-19_B,12690,12,1,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,0.0,raw H5,-462.1156764583334,0.0012625698324022344,0.9987374301675978,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2021-07-19_B,12684,14,0,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,0.0,raw H5,-81.70273541666667,0.0,1.0,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2021-07-19_B,12685,13,1,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,0.0,raw H5,-131.92663156249998,0.003547945205479452,0.9964520547945206,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2021-07-27_B,12699,15,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-281.8475327083333,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-07-27_B,12716,2,0,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,0.0,raw H5,-98.00475975,0.014930462321104131,0.9850695376788958,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2021-07-27_B,12721,14,1,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,0.0,raw H5,647.31336125,0.000510158013544018,0.999489841986456,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2021-07-27_B,12722,5,2,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,0.0,raw H5,608.699278375,0.00205810321902347,0.9979418967809766,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2021-08-18_B,12748,18,0,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,0.0,raw H5,18.5044766875,0.031470537933590274,0.9685294620664098,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2021-08-18_B,12753,12,0,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,0.0,raw H5,-111.11707629166665,0.007238396885283786,0.9927616031147162,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2021-08-18_B,12726,1,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-150.04593899999998,0.07424505540041344,0.9257549445995865,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-08-18_B,12757,10,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-106.85626354166668,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-08-18_B,12758,3,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-108.18822916666666,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-08-18_B,12743,13,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-310.07959208333335,0.006081789730612,0.993918210269388,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-08-18_B,12736,13,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-398.83047052083333,0.003550321199143469,0.9964496788008566,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-08-19_B,12777,6,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-46.796674583333335,0.011682682191179499,0.9883173178088205,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-08-19_B,12778,3,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-1.9161359999999998,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2021-08-19_B,12771,9,0,whole-cell,positive series resistance,exc,positive series resistance (12.47 MOhm) forces whole-cell; polarity from mean current (-630),,,12.467762733720182,raw H5,-630.1024152083334,1.0,1.0,whole-cell,whole-cell,model fitted to labelled blocks,1,0.9
+8,2021-08-19_B,12763,10,0,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,0.0,raw H5,-136.73293666666666,0.04603784089795629,0.9539621591020437,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2021-09-07_B,12789,12,0,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,0.0,raw H5,-110.67175666666664,0.01290157659332852,0.9870984234066715,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2021-09-07_B,12791,12,0,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,0.0,raw H5,-67.2412985625,0.05208945479897504,0.9479105452010249,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2021-09-07_B,12796,4,0,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,0.0,raw H5,-180.62901640625,0.008868618256905157,0.9911313817430949,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2021-09-21_B,12869,14,0,whole-cell,positive series resistance,exc,positive series resistance (10.69 MOhm) forces whole-cell; polarity from mean current (-728),,whole-cell,10.686653771760156,raw H5,-728.2108991666668,0.8864372490795663,0.8864372490795663,whole-cell,,cell-held-out prediction,1,0.9
+8,2021-09-21_B,12880,12,0,whole-cell,positive series resistance,exc,positive series resistance (6.52 MOhm) forces whole-cell; polarity from mean current (-888),,whole-cell,6.517800716241838,raw H5,-888.4173760416667,0.9483942188428397,0.9483942188428397,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2021-09-23_B,12906,10,0,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-624),,whole-cell,0.0,raw H5,-624.1296174999999,0.9957657835122624,0.9957657835122624,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2021-09-28_B,12910,10,0,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-2.29e+03),,whole-cell,0.0,raw H5,-2293.2073645833334,0.8419184872091205,0.8419184872091205,whole-cell,,cell-held-out prediction,1,0.9
+8,2021-09-28_B,12930,14,0,whole-cell,high-confidence block classifier,exc,high-confidence block classifier establishes whole-cell; polarity from mean current (-852),,,0.0,raw H5,-851.8621908333333,0.9674963918595713,0.9674963918595713,whole-cell,whole-cell,model fitted to labelled blocks,1,0.9
+8,2021-09-28_B,12931,9,1,whole-cell,high-confidence block classifier,exc,high-confidence block classifier establishes whole-cell; polarity from mean current (-1.03e+03),,,0.0,raw H5,-1028.2323383333332,0.9578394823236079,0.9578394823236079,whole-cell,whole-cell,model fitted to labelled blocks,1,0.9
+8,2021-10-07_B,12935,12,0,whole-cell,positive series resistance,exc,positive series resistance (9.85 MOhm) forces whole-cell; polarity from mean current (-264),,,9.854758567970444,raw H5,-264.1410727083333,0.9347394879292803,0.9347394879292803,whole-cell,whole-cell,model fitted to labelled blocks,1,0.9
+8,2021-10-07_B,12937,12,0,,,,recording family unresolved,,,0.0,raw H5,-599.8162729166667,0.8598514024013257,0.8598514024013257,whole-cell,,model fitted to labelled blocks,1,0.9
+8,2022-04-06_B,4686,10,0,whole-cell,positive series resistance,exc,positive series resistance (13.27 MOhm) forces whole-cell; polarity from mean current (-4.01e+03),,,13.27213452299245,raw H5,-4013.5183802083334,0.9800117100692219,0.9800117100692219,whole-cell,whole-cell,model fitted to labelled blocks,1,0.9
+8,2022-05-10_B,4734,9,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-401.9841380208333,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2022-05-10_B,4730,13,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-51.46080366666666,0.049667023431574295,0.9503329765684257,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2022-05-10_B,4732,7,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-68.60431374999999,0.0025987044937871755,0.9974012955062128,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2022-05-10_B,4722,10,0,whole-cell,positive series resistance,exc,positive series resistance (11.55 MOhm) forces whole-cell; polarity from mean current (-3.17e+03),,whole-cell,11.549085479656588,raw H5,-3167.119797916667,0.8611370957072806,0.8611370957072806,whole-cell,,cell-held-out prediction,1,0.9
+8,2022-05-10_B,4723,10,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-129.44752787500002,0.19958981558479302,0.800410184415207,cell-attached,,cell-held-out prediction,1,0.9
+8,2022-05-10_B,4724,10,1,whole-cell,positive series resistance,exc,positive series resistance (6.64 MOhm) forces whole-cell; polarity from mean current (-2.58e+03),,whole-cell,6.636067261496225,raw H5,-2577.896440625,0.891201025170973,0.891201025170973,whole-cell,,cell-held-out prediction,1,0.9
+8,2022-05-10_B,4728,13,0,whole-cell,positive series resistance,exc,positive series resistance (6.27 MOhm) forces whole-cell; polarity from mean current (-889),,whole-cell,6.2695035460992905,raw H5,-888.5501145833332,0.8233906778565351,0.8233906778565351,whole-cell,,cell-held-out prediction,1,0.9
+8,2022-05-10_B,4736,7,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-109.67103125000001,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2022-05-10_B,4720,7,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-124.01139570833334,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2022-05-18_B,4781,11,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,254.3338715,0.05807789486778212,0.9419221051322179,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2022-05-18_B,4784,10,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-188.0849929166667,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2022-05-18_B,4794,10,0,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,0.0,raw H5,-39.19713541666666,0.034604870391594975,0.965395129608405,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2022-05-18_B,4795,12,1,whole-cell,positive series resistance,exc,positive series resistance (12.37 MOhm) forces whole-cell; polarity from mean current (-1.2e+03),,,12.374020156774918,raw H5,-1200.04888125,0.743971634757939,0.743971634757939,whole-cell,,model fitted to labelled blocks,1,0.9
+8,2022-05-18_B,4782,10,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-8.428666145833331,0.0028038056364236624,0.9971961943635763,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2022-05-18_B,4786,9,0,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,0.0,raw H5,-77.92107895833334,0.09712125310905881,0.9028787468909412,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2022-05-18_B,4788,9,1,whole-cell,positive series resistance,exc,positive series resistance (7.43 MOhm) forces whole-cell; polarity from mean current (-1.35e+03),,,7.429998559147014,raw H5,-1347.1751958333334,0.7281140348064707,0.7281140348064707,whole-cell,,model fitted to labelled blocks,1,0.9
+8,2022-05-18_B,4789,7,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,281.9508875000001,0.012055489337777742,0.9879445106622222,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2022-05-18_B,4791,11,1,whole-cell,positive series resistance,exc,positive series resistance (7.22 MOhm) forces whole-cell; polarity from mean current (-1.65e+03),,whole-cell,7.218178424785369,raw H5,-1652.9499333333333,0.8570720311222827,0.8570720311222827,whole-cell,,cell-held-out prediction,1,0.9
+8,2022-05-18_B,4796,10,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,32.993976645833335,0.024223992263209503,0.9757760077367905,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2022-05-18_B,4793,9,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,38.61037422916666,0.23034734797309583,0.7696526520269041,cell-attached,,cell-held-out prediction,1,0.9
+8,2022-05-31_B,4800,11,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,51.77744783333333,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2022-05-31_B,4801,27,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,104.66023479166665,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2022-05-31_B,4803,24,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,31.449504041666668,0.028938008005508817,0.9710619919944912,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2022-05-31_B,4805,12,1,whole-cell,positive series resistance,exc,positive series resistance (8.90 MOhm) forces whole-cell; polarity from mean current (-830),,whole-cell,8.895917193789534,raw H5,-829.6927145833332,0.8037785214856654,0.8037785214856654,whole-cell,,cell-held-out prediction,1,0.9
+8,2022-05-31_B,4806,4,2,whole-cell,positive series resistance,exc,positive series resistance (8.90 MOhm) forces whole-cell; polarity from mean current (-676),,whole-cell,8.895917193789534,raw H5,-675.898625,0.8334735115886647,0.8334735115886647,whole-cell,,cell-held-out prediction,1,0.9
+8,2022-05-31_B,4798,21,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,3.498393375000004,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2022-06-07_B,4813,19,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-35.96819229166667,0.07015337263300228,0.9298466273669977,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2022-06-07_B,4816,4,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,58.815253,0.006660540795142264,0.9933394592048578,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2022-06-07_B,4817,8,2,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,54.047141083333344,0.001548936170212766,0.9984510638297872,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2022-06-07_B,4818,11,3,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-49.88864866666665,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2022-06-07_B,4809,21,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-165.099816875,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2022-06-07_B,4811,23,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-99.66682516666667,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2022-09-09_B,37920,12,0,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-1.49e+03),,whole-cell,,unavailable,-1492.7238802083332,0.9109000592240944,0.9109000592240944,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2022-09-09_B,37925,10,0,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-1.19e+03),,whole-cell,,unavailable,-1185.90355125,0.78628175479409,0.78628175479409,whole-cell,,cell-held-out prediction,1,0.9
+8,2022-09-09_B,37926,3,1,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-1.12e+03),,whole-cell,,unavailable,-1124.2267958333334,0.7921192009256861,0.7921192009256861,whole-cell,,cell-held-out prediction,1,0.9
+8,2022-09-09_B,37928,12,0,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-1.6e+03),,whole-cell,,unavailable,-1599.2020197916665,0.5774474984615039,0.5774474984615039,whole-cell,,cell-held-out prediction,1,0.9
+8,2022-09-09_B,37929,12,0,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-883),,whole-cell,,unavailable,-882.7620216666666,0.9621620956974165,0.9621620956974165,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2023-05-17_B,4346,30,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,255.66417254166666,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2023-05-17_B,4340,22,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-4.331409124999998,0.09378620065326948,0.9062137993467305,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2023-05-17_B,4342,29,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-112.71492552083333,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-01-21_G,13726,4,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,186.8223834375,0.0032638888888888887,0.9967361111111112,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-01-21_G,13730,3,1,whole-cell,positive series resistance,exc,positive series resistance (7.16 MOhm) forces whole-cell; polarity from mean current (-308),,whole-cell,7.156673114119923,raw H5,-307.65810416666665,0.996728,0.996728,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-01-21_G,13735,6,2,whole-cell,positive series resistance,exc,positive series resistance (5.15 MOhm) forces whole-cell; polarity from mean current (-101),,whole-cell,5.149059871350817,raw H5,-100.68319666666666,0.9548669683796864,0.9548669683796864,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-01-21_G,13720,6,0,whole-cell,positive series resistance,exc,positive series resistance (7.03 MOhm) forces whole-cell; polarity from mean current (-752),,whole-cell,7.02887537993921,raw H5,-752.4239166666667,0.9992587412587413,0.9992587412587413,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-01-21_G,13721,6,1,whole-cell,positive series resistance,exc,positive series resistance (7.03 MOhm) forces whole-cell; polarity from mean current (-717),,whole-cell,7.02887537993921,raw H5,-716.8170291666667,0.9936435883777031,0.9936435883777031,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-01-21_G,13722,10,2,whole-cell,positive series resistance,exc,positive series resistance (7.03 MOhm) forces whole-cell; polarity from mean current (-855),,whole-cell,7.02887537993921,raw H5,-854.8902562500001,0.9520707669562759,0.9520707669562759,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-01-21_G,13723,6,3,whole-cell,positive series resistance,exc,positive series resistance (7.03 MOhm) forces whole-cell; polarity from mean current (-1.5e+03),,whole-cell,7.02887537993921,raw H5,-1503.5996374999997,0.9257084050666045,0.9257084050666045,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-01-21_G,13714,4,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-283.99726999999996,0.022729143632021696,0.9772708563679783,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-01-28_G,13746,5,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,150.09518875,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-01-28_G,13747,3,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,122.60284775000001,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-01-28_G,13748,3,2,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,137.91529125,0.00709547595261881,0.9929045240473812,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-01-28_G,13736,1,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-41.186598249999996,0.13435506192360597,0.865644938076394,cell-attached,,cell-held-out prediction,1,0.9
+8,2025-01-28_G,13737,3,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-57.01863608333334,0.004872020077187251,0.9951279799228128,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-01-28_G,13738,5,2,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-68.08860855,0.015015454181154343,0.9849845458188456,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-01-28_G,13740,4,3,whole-cell,positive series resistance,exc,positive series resistance (6.66 MOhm) forces whole-cell; polarity from mean current (-742),,whole-cell,6.658934570468726,raw H5,-742.335009375,0.979550441991411,0.979550441991411,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-01-28_G,13741,8,4,whole-cell,positive series resistance,exc,positive series resistance (6.66 MOhm) forces whole-cell; polarity from mean current (-621),,whole-cell,6.658934570468726,raw H5,-620.5937697916667,0.8688949076001885,0.8688949076001885,whole-cell,,cell-held-out prediction,1,0.9
+8,2025-01-28_G,13742,8,5,whole-cell,positive series resistance,exc,positive series resistance (6.66 MOhm) forces whole-cell; polarity from mean current (-709),,whole-cell,6.658934570468726,raw H5,-708.6482093750001,0.977157920809332,0.977157920809332,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-01-28_G,13745,6,6,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-359),,whole-cell,0.0,raw H5,-359.39810416666666,1.0,1.0,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-02-12_G,13781,4,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-259.7649090625,0.0895571371814135,0.9104428628185866,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-12_G,13782,4,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-221.5585759375,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-12_G,13783,4,2,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-153.34290375,0.033808747598852336,0.9661912524011477,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-12_G,13784,1,3,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-6.765499375,0.1779092515034373,0.8220907484965627,cell-attached,,cell-held-out prediction,1,0.9
+8,2025-02-12_G,13785,4,4,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,40.33892828125,0.008724255646462049,0.9912757443535379,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-12_G,13786,3,5,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-292.81293708333334,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-12_G,13787,4,6,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,305.89151937500003,0.3421758520775077,0.6578241479224922,cell-attached,,cell-held-out prediction,1,0.9
+8,2025-02-12_G,13788,4,7,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,29.4681328125,0.003061946902654867,0.9969380530973452,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-12_G,13789,4,8,whole-cell,positive series resistance,exc,positive series resistance (6.96 MOhm) forces whole-cell; polarity from mean current (-430),,whole-cell,6.959829452827823,raw H5,-430.46090625,0.7913460267634591,0.7913460267634591,whole-cell,,cell-held-out prediction,1,0.9
+8,2025-02-12_G,13790,3,9,whole-cell,positive series resistance,exc,positive series resistance (9.68 MOhm) forces whole-cell; polarity from mean current (-587),,whole-cell,9.679107080572026,raw H5,-587.1154041666667,0.8819154471212585,0.8819154471212585,whole-cell,,cell-held-out prediction,1,0.9
+8,2025-02-12_G,13791,1,10,whole-cell,positive series resistance,exc,positive series resistance (9.68 MOhm) forces whole-cell; polarity from mean current (-741),,whole-cell,9.679107080572026,raw H5,-740.6346375,0.8550577060274769,0.8550577060274769,whole-cell,,cell-held-out prediction,1,0.9
+8,2025-02-12_G,13792,4,11,whole-cell,positive series resistance,exc,positive series resistance (9.68 MOhm) forces whole-cell; polarity from mean current (-691),,whole-cell,9.679107080572026,raw H5,-691.1495468749999,0.8855410744647971,0.8855410744647971,whole-cell,,cell-held-out prediction,1,0.9
+8,2025-02-12_G,13793,4,12,whole-cell,positive series resistance,exc,positive series resistance (9.68 MOhm) forces whole-cell; polarity from mean current (-700),,whole-cell,9.679107080572026,raw H5,-699.8555687500001,0.7927055233395108,0.7927055233395108,whole-cell,,cell-held-out prediction,1,0.9
+8,2025-02-12_G,13777,3,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,116.09692354166667,0.19369118067684782,0.8063088193231522,cell-attached,,cell-held-out prediction,1,0.9
+8,2025-02-12_G,13778,4,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,92.1924040625,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-12_G,13779,2,2,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,64.0263109375,0.0006006600660066006,0.9993993399339934,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-12_G,13773,4,0,whole-cell,positive series resistance,exc,positive series resistance (9.60 MOhm) forces whole-cell; polarity from mean current (-749),,whole-cell,9.600415153087702,raw H5,-748.863190625,0.97282974218674,0.97282974218674,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-02-12_G,13774,4,1,whole-cell,positive series resistance,exc,positive series resistance (9.60 MOhm) forces whole-cell; polarity from mean current (-939),,whole-cell,9.600415153087702,raw H5,-938.729009375,0.9402870675156337,0.9402870675156337,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-02-12_G,13797,4,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-64.3390656875,0.005321288153906179,0.9946787118460938,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-12_G,13798,3,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-78.70776316666667,0.023436011804884558,0.9765639881951155,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-12_G,13799,3,2,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,8.995117583333332,0.06437437091716926,0.9356256290828308,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13809,4,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,85.5050610625,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13810,4,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,47.31270249999999,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13811,1,2,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,88.60567800000001,0.004688342941961759,0.9953116570580383,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13812,3,3,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,66.92085275,0.0015503211991434692,0.9984496788008566,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13813,4,4,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,70.81777525,0.009785971062185898,0.9902140289378141,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13814,4,5,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,65.1740625625,0.013342290929202093,0.9866577090707979,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13815,6,6,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,66.50111804166666,0.016251367859708727,0.9837486321402913,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13816,2,7,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,66.5320285,0.0037972027972027977,0.9962027972027973,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13818,4,8,whole-cell,positive series resistance,exc,positive series resistance (10.67 MOhm) forces whole-cell; polarity from mean current (-190),,whole-cell,10.67034093822097,raw H5,-190.48516,0.9244819818129784,0.9244819818129784,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13819,2,9,whole-cell,positive series resistance,exc,positive series resistance (10.67 MOhm) forces whole-cell; polarity from mean current (-191),,whole-cell,10.67034093822097,raw H5,-191.3091225,0.918894389531615,0.918894389531615,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13820,5,10,whole-cell,positive series resistance,exc,positive series resistance (10.67 MOhm) forces whole-cell; polarity from mean current (-160),,whole-cell,10.67034093822097,raw H5,-160.23929300000003,0.9071541458119756,0.9071541458119756,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13821,6,11,whole-cell,positive series resistance,exc,positive series resistance (10.67 MOhm) forces whole-cell; polarity from mean current (-140),,whole-cell,10.67034093822097,raw H5,-140.27979791666667,0.9974572997335147,0.9974572997335147,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13822,6,12,whole-cell,positive series resistance,exc,positive series resistance (10.67 MOhm) forces whole-cell; polarity from mean current (-137),,whole-cell,10.67034093822097,raw H5,-136.62773583333333,0.9959887682649833,0.9959887682649833,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13807,6,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-21.022706770833334,0.10679282173053531,0.8932071782694647,cell-attached,,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13824,2,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,74.932241875,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13825,6,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,269.05753458333334,0.030532105414557306,0.9694678945854427,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13826,6,2,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,203.1894041666667,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13827,3,3,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,157.00760583333332,0.05315777503792514,0.9468422249620748,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13831,3,4,whole-cell,positive series resistance,exc,positive series resistance (0.63 MOhm) forces whole-cell; polarity from mean current (-565),,whole-cell,0.6291085840058694,raw H5,-565.0053416666666,0.8358543985530988,0.8358543985530988,whole-cell,,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13800,4,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,34.9878809375,0.0015450643776824037,0.9984549356223176,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13801,1,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,197.04252375,0.008507611444792418,0.9914923885552076,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13802,1,2,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,179.2352525,0.014696920587661932,0.9853030794123381,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13803,2,3,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,242.179599375,0.006652740867490694,0.9933472591325093,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13804,3,4,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,312.84428333333335,0.0029183673469387753,0.9970816326530613,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13805,6,5,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,303.319304375,0.007447147212727111,0.9925528527872729,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-02-19_G,13806,4,6,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,273.76463578125,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13854,4,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,189.2548475,0.010897845195489737,0.9891021548045102,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13855,4,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,242.6149396875,0.025795004097598665,0.9742049959024013,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13856,6,2,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,224.41041677083334,0.0012657342657342659,0.9987342657342657,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13857,5,3,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,350.580741125,0.055290255498587765,0.9447097445014122,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13858,5,4,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,423.09497375,0.01764886520129487,0.9823511347987052,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13859,6,5,whole-cell,positive series resistance,exc,positive series resistance (13.07 MOhm) forces whole-cell; polarity from mean current (-1.03e+03),,,13.072151998115725,raw H5,-1034.1415822916667,0.9891617636611918,0.9891617636611918,whole-cell,whole-cell,model fitted to labelled blocks,1,0.9
+8,2025-03-06_G,13836,6,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-50.27646104166667,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13837,6,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-87.20496502083331,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13838,2,2,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-124.68601312499999,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13839,5,3,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-119.1387091,0.0012657342657342659,0.9987342657342657,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13840,5,4,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-110.18948705,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13841,3,5,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-162.02429908333332,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13842,3,6,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-253.59274833333336,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13843,4,7,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-392),,whole-cell,0.0,raw H5,-392.07111625000005,1.0,1.0,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13844,4,8,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-421),,whole-cell,0.0,raw H5,-421.057290625,0.9782534277012825,0.9782534277012825,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13845,3,9,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-436),,whole-cell,0.0,raw H5,-436.1597316666667,0.9699485598660779,0.9699485598660779,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13846,5,10,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-266),,whole-cell,0.0,raw H5,-266.42262,1.0,1.0,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13847,2,11,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-302),,whole-cell,0.0,raw H5,-302.42345124999997,0.9948113105960228,0.9948113105960228,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13848,1,12,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-266),,whole-cell,0.0,raw H5,-265.7167675,0.9807419796679308,0.9807419796679308,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13849,2,13,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-246),,whole-cell,0.0,raw H5,-246.37231749999998,0.9928377841963557,0.9928377841963557,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13850,6,14,whole-cell,chronology after whole-cell transition,exc,high-confidence block classifier corrects recordingTechnique=whole-cell to cell-attached; whole-cell transition already occurred; a later block cannot be cell-attached; polarity from mean current (-142),,whole-cell,0.0,raw H5,-142.27034645833334,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13851,6,15,whole-cell,chronology after whole-cell transition,exc,high-confidence block classifier corrects recordingTechnique=whole-cell to cell-attached; whole-cell transition already occurred; a later block cannot be cell-attached; polarity from mean current (-168),,whole-cell,0.0,raw H5,-168.450120625,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13832,5,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-27.761048375,0.19735063222721755,0.8026493677727824,cell-attached,,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13833,5,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-38.874182875,0.11131380545075151,0.8886861945492485,cell-attached,,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13834,5,2,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-95.5713489,0.006517482517482517,0.9934825174825175,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13835,5,3,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-132.50173394999996,0.037221282566558704,0.9627787174334413,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13866,4,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-33.37737375,0.023398831628750907,0.9766011683712491,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13867,4,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-63.397223749999995,0.018430229608885528,0.9815697703911145,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13868,4,2,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-128.608380625,0.01345545982138703,0.9865445401786129,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13869,1,3,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-166.1255775,0.07302720473784192,0.926972795262158,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13870,4,4,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-208.6244675,0.024502468725627214,0.9754975312743728,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13871,5,5,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-261),,whole-cell,0.0,raw H5,-261.18611899999996,0.9899380493893014,0.9899380493893014,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13872,4,6,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-247),,whole-cell,0.0,raw H5,-247.1059225,0.9966132582620807,0.9966132582620807,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13873,4,7,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-252),,whole-cell,0.0,raw H5,-251.798210625,0.9868653181939075,0.9868653181939075,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13864,6,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-61.50874572916666,0.013070145670705014,0.986929854329295,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13865,6,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-77.450884875,0.028498925708438445,0.9715010742915615,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13860,4,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-36.966186750000006,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13861,4,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-223.5933496875,0.001671826625386997,0.998328173374613,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13862,5,2,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-384.25664362500004,0.001671826625386997,0.998328173374613,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-03-06_G,13863,2,3,whole-cell,positive series resistance,exc,positive series resistance (3.18 MOhm) forces whole-cell; polarity from mean current (-254),,whole-cell,3.1771777502146743,raw H5,-254.2276875,0.9978657525390785,0.9978657525390785,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-05-06_E,16969,15,0,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-39.2),,whole-cell,0.0,raw H5,-39.24252453125,0.7554032191432217,0.7554032191432217,whole-cell,,cell-held-out prediction,1,0.9
+8,2025-05-06_E,16970,4,1,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-39.8),,whole-cell,0.0,raw H5,-39.76580828125,0.7312165342672473,0.7312165342672473,whole-cell,,cell-held-out prediction,1,0.9
+8,2025-05-06_E,16971,16,2,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-38.7),,whole-cell,0.0,raw H5,-38.650294260416665,0.8901922284374458,0.8901922284374458,whole-cell,,cell-held-out prediction,1,0.9
+8,2025-05-06_E,16983,32,0,whole-cell,high-confidence block classifier,exc,high-confidence block classifier corrects recordingTechnique=cell-attached to whole-cell; polarity from mean current (-40.4),,cell-attached,0.0,raw H5,-40.42614552083333,0.9639602540656008,0.9639602540656008,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-09-11_E,18177,10,0,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-36.4),,whole-cell,0.0,raw H5,-36.37456029166667,0.9961771086056801,0.9961771086056801,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-09-11_E,18178,10,1,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-33.2),,whole-cell,0.0,raw H5,-33.15758277083333,0.9969183673469388,0.9969183673469388,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-09-11_E,18193,10,0,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-41.4),,whole-cell,0.0,raw H5,-41.37406760416666,0.9837891246690956,0.9837891246690956,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-09-11_E,18194,10,1,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-37.4),,whole-cell,0.0,raw H5,-37.35687396875001,0.9827307848607558,0.9827307848607558,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-09-11_E,18195,10,2,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-36.7),,whole-cell,0.0,raw H5,-36.70978625,0.963879223780888,0.963879223780888,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-09-11_E,18196,10,3,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-34.9),,whole-cell,0.0,raw H5,-34.897397958333336,0.9690365215081783,0.9690365215081783,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-09-11_E,18199,10,0,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-44.3),,whole-cell,0.0,raw H5,-44.25117520833333,0.9566844887366399,0.9566844887366399,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-09-11_E,18200,10,1,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-44.6),,whole-cell,0.0,raw H5,-44.580084229166665,0.9584310304321557,0.9584310304321557,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-09-11_E,18202,10,2,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-51.7),,whole-cell,0.0,raw H5,-51.73589097916667,0.9508557963144818,0.9508557963144818,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-09-11_E,18203,10,3,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-43.1),,whole-cell,0.0,raw H5,-43.09017852083334,0.9684152559424699,0.9684152559424699,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-09-24_E,18372,8,0,whole-cell,positive series resistance,exc,positive series resistance (25.01 MOhm) forces whole-cell; polarity from mean current (-71.7),,whole-cell,25.00793902826294,raw H5,-71.70287270833333,0.919909963695447,0.919909963695447,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2025-12-16_G,14136,12,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,104.666971,0.43265743355624814,0.5673425664437519,cell-attached,,cell-held-out prediction,1,0.9
+8,2025-12-16_G,14126,12,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-208.07173145833335,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-12-16_G,14119,17,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-131.08963920833335,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-12-16_G,14128,5,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,0.6189989499999996,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-12-16_G,14129,12,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,46.380103541666664,0.005862593382676065,0.994137406617324,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-12-16_G,14132,11,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,42.050454625,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-12-16_G,14140,9,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-109.27394358333332,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2025-12-16_G,14123,10,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-39.683350000000004,0.16096974905983907,0.8390302509401609,cell-attached,,cell-held-out prediction,1,0.9
+8,2026-01-02_G,14235,12,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-0.14238172916666672,0.056137695174648665,0.9438623048253514,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-01-02_G,14219,11,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,1.1633622,0.2788155998512314,0.7211844001487686,cell-attached,,cell-held-out prediction,1,0.9
+8,2026-01-02_G,14223,12,1,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-254),,whole-cell,0.0,raw H5,-254.22145,0.8393767016122704,0.8393767016122704,whole-cell,,cell-held-out prediction,1,0.9
+8,2026-01-02_G,14224,12,2,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-194),,whole-cell,0.0,raw H5,-194.27711791666664,0.9937285718160109,0.9937285718160109,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2026-01-02_G,14210,3,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,84.10277333333333,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-01-02_G,14211,12,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,205.28785552083335,0.0009183673469387757,0.9990816326530613,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-01-02_G,14212,12,2,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,380.3638828125,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-01-02_G,14215,10,3,whole-cell,positive series resistance,exc,positive series resistance (15.61 MOhm) forces whole-cell; polarity from mean current (-47.6),,whole-cell,15.60596119598838,raw H5,-47.621045,0.9538119703191269,0.9538119703191269,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2026-01-02_G,14216,12,4,whole-cell,positive series resistance,exc,positive series resistance (20.45 MOhm) forces whole-cell; polarity from mean current (-67.3),,whole-cell,20.453540366566756,raw H5,-67.33144395833334,0.983846447333142,0.983846447333142,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2026-01-02_G,14228,9,0,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier corrects recordingTechnique=whole-cell to cell-attached,,whole-cell,0.0,raw H5,-41.783100687499996,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-01-02_G,14229,2,1,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier corrects recordingTechnique=whole-cell to cell-attached,,whole-cell,0.0,raw H5,-60.2923776875,0.017036693053687667,0.9829633069463123,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-01-02_G,14204,20,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,35.08306504166667,0.1400797148748625,0.8599202851251375,cell-attached,,cell-held-out prediction,1,0.9
+8,2026-01-02_G,14205,11,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-4.071167875,0.019171073489971498,0.9808289265100285,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-01-13_G,14238,12,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,202.499608375,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-01-13_G,14248,12,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,96.22223541666669,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-01-13_G,14249,8,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,86.70983270833334,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-01-13_G,14266,12,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-19.388732333333337,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-01-13_G,14265,12,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,12.61066283333333,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-01-13_G,14256,12,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-20.480808333333332,0.009948427760858799,0.9900515722391412,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-01-13_G,14243,12,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,17.916984249999995,0.12041040547685797,0.879589594523142,cell-attached,,cell-held-out prediction,1,0.9
+8,2026-01-13_G,14242,10,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-45.939415749999995,0.004556113116532042,0.995443886883468,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-01-13_G,14260,10,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,200.48360854166665,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-01-13_G,14263,3,1,whole-cell,positive series resistance,exc,positive series resistance (28.07 MOhm) forces whole-cell; polarity from mean current (-768),,whole-cell,28.07094446505041,raw H5,-768.2825295833333,0.9819828454720451,0.9819828454720451,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2026-01-13_G,14264,4,2,whole-cell,positive series resistance,exc,positive series resistance (28.07 MOhm) forces whole-cell; polarity from mean current (-835),,whole-cell,28.07094446505041,raw H5,-834.783273125,1.0,1.0,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2026-01-14_G,14272,10,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,69.52383920833333,0.10468536810687287,0.8953146318931271,cell-attached,,cell-held-out prediction,1,0.9
+8,2026-01-14_G,14276,4,1,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-808),,whole-cell,0.0,raw H5,-808.05391875,0.9679296760885272,0.9679296760885272,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2026-01-14_G,14284,11,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-37.69561783333334,0.20683045616061804,0.793169543839382,cell-attached,,cell-held-out prediction,1,0.9
+8,2026-01-14_G,14268,19,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,47.13667591666666,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-01-14_G,14280,5,0,,,,recording family unresolved,,,0.0,raw H5,-5.3274484,0.18392274438194262,0.8160772556180573,cell-attached,,model fitted to labelled blocks,1,0.9
+8,2026-01-28_G,14618,5,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-26.305314,0.07505219337307242,0.9249478066269275,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-01-28_G,14619,4,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-14.22485019375,0.18756103569338906,0.812438964306611,cell-attached,,cell-held-out prediction,1,0.9
+8,2026-01-28_G,14620,6,2,whole-cell,positive series resistance,exc,positive series resistance (10.57 MOhm) forces whole-cell; polarity from mean current (-30.5),,whole-cell,10.574785646236903,raw H5,-30.518490000000003,0.9828469504967752,0.9828469504967752,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2026-01-28_G,14627,8,0,cell-attached,high-confidence block classifier,extracellular,high-confidence block classifier establishes cell-attached,,,0.0,raw H5,-10.3601834375,0.028172708011499063,0.9718272919885009,cell-attached,cell-attached,model fitted to labelled blocks,1,0.9
+8,2026-01-28_G,14630,10,1,whole-cell,positive series resistance,exc,positive series resistance (7.75 MOhm) forces whole-cell; polarity from mean current (-191),,,7.751757530611295,raw H5,-190.92575364583334,0.9969366439064763,0.9969366439064763,whole-cell,whole-cell,model fitted to labelled blocks,1,0.9
+8,2026-01-28_G,14631,6,2,whole-cell,positive series resistance,exc,positive series resistance (7.75 MOhm) forces whole-cell; polarity from mean current (-234),,,7.751757530611295,raw H5,-233.5819129166667,0.9591327770025659,0.9591327770025659,whole-cell,whole-cell,model fitted to labelled blocks,1,0.9
+8,2026-01-28_G,14608,10,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,193.96619708333333,0.006320688161396125,0.9936793118386039,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-01-28_G,14609,8,1,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,205.1061808333333,0.019776223776223772,0.9802237762237762,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-01-28_G,14613,8,2,whole-cell,positive series resistance,exc,positive series resistance (8.79 MOhm) forces whole-cell; polarity from mean current (-271),,whole-cell,8.79045456945251,raw H5,-271.10411041666663,0.9443636430471958,0.9443636430471958,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2026-01-28_G,14615,10,3,whole-cell,positive series resistance,exc,positive series resistance (8.79 MOhm) forces whole-cell; polarity from mean current (-185),,whole-cell,8.79045456945251,raw H5,-185.007809375,0.9212897800477993,0.9212897800477993,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2026-01-28_G,14638,8,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,171.69134020833334,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-01-28_G,14641,6,1,whole-cell,positive series resistance,exc,positive series resistance (10.51 MOhm) forces whole-cell; polarity from mean current (-139),,whole-cell,10.512027274449146,raw H5,-138.55659916666667,0.5984176140310505,0.5984176140310505,whole-cell,,cell-held-out prediction,1,0.9
+8,2026-01-28_G,14600,2,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,9.468670687500001,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-01-28_G,14603,7,1,cell-attached,single documented family in cell,extracellular,all documented blocks for this cell are cell-attached,,,0.0,raw H5,-72.22027906250001,0.7420294997290585,0.7420294997290585,whole-cell,,model fitted to labelled blocks,1,0.9
+8,2026-02-05_G,14645,8,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,1028.8594939583334,0.11869880806815211,0.8813011919318479,cell-attached,,cell-held-out prediction,1,0.9
+8,2026-02-05_G,14649,7,1,whole-cell,positive series resistance,exc,positive series resistance (14.40 MOhm) forces whole-cell; polarity from mean current (-176),,whole-cell,14.400622729631552,raw H5,-176.04420229166666,0.9698896288262454,0.9698896288262454,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2026-02-05_G,14653,8,2,whole-cell,positive series resistance,exc,positive series resistance (14.40 MOhm) forces whole-cell; polarity from mean current (-201),,whole-cell,14.400622729631552,raw H5,-201.09678645833333,0.9483964781193163,0.9483964781193163,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2026-02-05_G,14654,8,3,whole-cell,positive series resistance,exc,positive series resistance (14.40 MOhm) forces whole-cell; polarity from mean current (-209),,whole-cell,14.400622729631552,raw H5,-208.59885604166666,0.9516552193780574,0.9516552193780574,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2026-02-05_G,14657,8,0,whole-cell,positive series resistance,exc,positive series resistance (6.58 MOhm) forces whole-cell; polarity from mean current (-94.7),,whole-cell,6.584671359645655,raw H5,-94.74878166666666,0.9899244296840313,0.9899244296840313,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2026-02-05_G,14661,3,1,whole-cell,positive series resistance,exc,positive series resistance (5.05 MOhm) forces whole-cell; polarity from mean current (-94.3),,whole-cell,5.05357088657541,raw H5,-94.32368187499999,0.9685890935350684,0.9685890935350684,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2026-02-27_G,37101,10,0,whole-cell,positive series resistance,exc,positive series resistance (8.20 MOhm) forces whole-cell; polarity from mean current (-357),,whole-cell,8.200354609929079,raw H5,-357.07843645833333,0.9677218940667689,0.9677218940667689,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2026-02-27_G,37104,5,1,whole-cell,positive series resistance,exc,positive series resistance (8.20 MOhm) forces whole-cell; polarity from mean current (-242),,whole-cell,8.200354609929079,raw H5,-241.60884375,0.9520718335776889,0.9520718335776889,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2026-02-27_G,37090,6,0,whole-cell,positive series resistance,exc,positive series resistance (11.11 MOhm) forces whole-cell; polarity from mean current (-229),,whole-cell,11.105182418461949,raw H5,-229.20611625,0.98217710860568,0.98217710860568,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2026-02-27_G,37107,10,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-556.57597625,0.006980914242103698,0.9930190857578963,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-02-27_G,37110,8,1,whole-cell,positive series resistance,exc,positive series resistance (4.89 MOhm) forces whole-cell; polarity from mean current (-1.42e+03),,,4.8930292700129305,raw H5,-1423.3905958333335,0.8644398608441312,0.8644398608441312,whole-cell,,model fitted to labelled blocks,1,0.9
+8,2026-02-27_G,37082,2,0,whole-cell,positive series resistance,exc,positive series resistance (8.26 MOhm) forces whole-cell; polarity from mean current (-1.26e+03),,whole-cell,8.25769974706145,raw H5,-1255.9766,0.9992657342657343,0.9992657342657343,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2026-09-04_G,37936,14,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-42.296799166666666,0.0,1.0,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-09-04_G,37937,1,1,whole-cell,high-confidence block classifier,exc,high-confidence block classifier corrects recordingTechnique=cell-attached to whole-cell; polarity from mean current (-813),,cell-attached,0.0,raw H5,-812.92518,0.9705104700391289,0.9705104700391289,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2026-09-04_G,37938,3,2,whole-cell,high-confidence block classifier,exc,high-confidence block classifier corrects recordingTechnique=cell-attached to whole-cell; polarity from mean current (-1.48e+03),,cell-attached,0.0,raw H5,-1478.2606641666669,1.0,1.0,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2026-09-04_G,37939,6,3,whole-cell,high-confidence block classifier,exc,high-confidence block classifier corrects recordingTechnique=cell-attached to whole-cell; polarity from mean current (-1.83e+03),,cell-attached,0.0,raw H5,-1827.6272783333334,1.0,1.0,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2026-09-04_G,37940,4,4,whole-cell,high-confidence block classifier,exc,high-confidence block classifier corrects recordingTechnique=cell-attached to whole-cell; polarity from mean current (-2.22e+03),,cell-attached,0.0,raw H5,-2220.716424375,0.9988160554648777,0.9988160554648777,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2026-09-04_G,37941,7,5,whole-cell,high-confidence block classifier,exc,high-confidence block classifier corrects recordingTechnique=cell-attached to whole-cell; polarity from mean current (-2.67e+03),,cell-attached,0.0,raw H5,-2669.981504166667,0.9992657342657343,0.9992657342657343,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2026-09-04_G,37930,13,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-153.47805770833335,0.025608856830852858,0.9743911431691471,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-09-04_G,37931,7,1,whole-cell,positive series resistance,exc,positive series resistance (9.13 MOhm) forces whole-cell; polarity from mean current (-3.88e+03),,whole-cell,9.130291730642686,raw H5,-3883.875716666667,0.9712947183635973,0.9712947183635973,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2026-09-04_G,37942,15,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-150.815245625,0.003265734265734266,0.9967342657342657,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-09-04_G,37934,10,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-319.65294562500003,0.0012587412587412587,0.9987412587412587,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-09-04_G,37935,12,1,whole-cell,positive series resistance,exc,positive series resistance (8.56 MOhm) forces whole-cell; polarity from mean current (-354),,,8.556891766882517,raw H5,-354.14787916666666,0.9732613347611959,0.9732613347611959,whole-cell,whole-cell,model fitted to labelled blocks,1,0.9
+8,2026-09-04_G,37943,19,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-382.7872216666667,0.017621248253528052,0.9823787517464719,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-09-04_G,37932,10,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-101.74688614583333,0.00926388888888889,0.9907361111111112,cell-attached,cell-attached,cell-held-out prediction,1,0.9
+8,2026-09-04_G,37933,9,1,whole-cell,recordingTechnique,exc,recordingTechnique is whole-cell; polarity from mean current (-695),,whole-cell,0.0,raw H5,-694.6926212499999,0.9538075511911349,0.9538075511911349,whole-cell,whole-cell,cell-held-out prediction,1,0.9
+8,2026-09-04_G,37945,12,0,cell-attached,recordingTechnique,extracellular,recordingTechnique is cell-attached,,cell-attached,0.0,raw H5,-126.18093291666668,0.08289033316811002,0.91710966683189,cell-attached,cell-attached,cell-held-out prediction,1,0.9

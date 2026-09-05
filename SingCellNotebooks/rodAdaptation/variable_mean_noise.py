@@ -352,12 +352,13 @@ PRIMATE_EXPERIMENT_LABELS = ('Primate',)
 CELL_INDEX_REGISTRY_PATH = (
     Path(__file__).resolve().parent / 'variable_mean_noise_cell_index.csv')
 
-# Where the per-block recording-mode cache lives. Recording mode is resolved
-# only from acquisition metadata: epoch-group ``recordingTechnique`` is the
-# primary anchor and ``onlineAnalysis`` supplies whole-cell polarity when it is
-# available. Series resistance and response traces are deliberately excluded.
+# Where the per-block recording-mode cache lives. The shared SCutils parser
+# resolves one mode per block from epoch-group metadata, positive series
+# resistance, and the cell's chronological cell-attached -> whole-cell order.
+# Raw response means are consulted only after whole-cell is established, to
+# distinguish excitation from inhibition.
 MODE_CACHE_PATH = Path(__file__).resolve().parent / 'block_modes.csv'
-MODE_CACHE_VERSION = 7
+MODE_CACHE_VERSION = 8
 RECORDING_TYPES = ('extracellular', 'exc', 'inh')
 
 
@@ -480,12 +481,29 @@ def recording_type_from_metadata(recording_technique, online_analysis=None
 def build_mode_cache(protocol_blocks: pd.DataFrame,
                      path: Optional[Path] = None,
                      verbose: bool = True) -> pd.DataFrame:
-    """Resolve every block from recording metadata and write the cache.
+    """Resolve every block with the trained SCutils block classifier/parser.
 
-    No amplifier trace or series-resistance value is read. This intentionally
-    keeps acquisition metadata and response inspection separate: raw traces
-    are displayed in Section 2 for the analyst, never used by the parser.
+    Epoch-group ``recordingTechnique`` remains the normal anchor. Positive
+    series resistance is a hard whole-cell override. The classifier pools six
+    raw epochs into one feature vector per block. New/unlabelled blocks use the
+    model trained on all labelled blocks; labelled training blocks use their
+    cell-held-out probabilities so retroactive corrections have no same-cell
+    leakage. Only >=90% confidence calls participate, followed by the cell's
+    one-way cell-attached -> whole-cell acquisition sequence. Mean current is
+    used for ``exc``/``inh`` only after whole-cell has been established.
     """
+    from retinanalysis.SCutils.recording_mode import (
+        _amp_epoch_groups_by_block,
+        _amp_response_table,
+        parse_single_cell_recording_modes,
+        series_resistance_table,
+    )
+    from retinanalysis.SCutils.recording_classifier import (
+        load_recording_technique_classifier,
+        predict_recording_techniques,
+        recording_block_feature_table,
+    )
+
     path = MODE_CACHE_PATH if path is None else Path(path)
     required = {'exp_name', 'block_id', 'recording_technique', 'onlineAnalysis'}
     missing = required.difference(protocol_blocks.columns)
@@ -493,23 +511,58 @@ def build_mode_cache(protocol_blocks: pd.DataFrame,
         raise ValueError('protocol_blocks is missing recording metadata: '
                          f'{sorted(missing)}')
     resolved = protocol_blocks.copy()
-    decisions = [recording_type_from_metadata(technique, label)
-                 for technique, label in zip(
-                     resolved['recording_technique'], resolved['onlineAnalysis'])]
+    response_table = _amp_response_table(resolved['block_id'])
+    groups_by_block = _amp_epoch_groups_by_block(
+        resolved['block_id'], response_table=response_table)
+    resistance = series_resistance_table(
+        resolved[['exp_name', 'block_id']].drop_duplicates(),
+        verbose=verbose, sample_one_per_block=True,
+        groups_by_block=groups_by_block)
+    resolved = resolved.merge(
+        resistance[['block_id', 'series_resistance']], on='block_id',
+        how='left', validate='one_to_one')
+    resolved['series_resistance_source'] = np.where(
+        resolved.series_resistance.notna(), 'raw H5', 'unavailable')
+    feature_table = recording_block_feature_table(
+        resolved, n_trials=6, trace_seconds=5.0, verbose=verbose)
+    classifier_bundle = load_recording_technique_classifier()
+    predictions = predict_recording_techniques(
+        feature_table, classifier_bundle, min_confidence=.90)
+    prediction_columns = [
+        'block_id', 'raw_mean', 'classifier_p_whole_cell',
+        'classifier_confidence', 'classifier_prediction',
+        'classifier_family', 'classifier_source']
+    resolved = resolved.merge(
+        predictions[prediction_columns], on='block_id', how='left',
+        validate='one_to_one')
+    resolved['mean_current_pa'] = resolved['raw_mean']
+    resolved['classifier_family'] = resolved.classifier_family.fillna('')
+    resolved = parse_single_cell_recording_modes(
+        resolved, mean_current_column='mean_current_pa',
+        classifier_family_column='classifier_family')
+
     frame = pd.DataFrame({
         'cache_version': MODE_CACHE_VERSION,
         'exp_name': resolved['exp_name'].astype(str),
         'block_id': pd.to_numeric(resolved['block_id'], errors='coerce'),
         'n_epochs': pd.to_numeric(resolved.get('n_epochs', np.nan), errors='coerce'),
-        'rec_type': [decision[0] for decision in decisions],
-        'rec_note': [decision[1] for decision in decisions],
+        'recording_order': resolved['recording_order'],
+        'recording_family': resolved['recording_family'],
+        'recording_family_source': resolved['recording_family_source'],
+        'rec_type': resolved['rec_type'],
+        'rec_note': resolved['rec_note'],
         'online_analysis_recorded': resolved['onlineAnalysis'].astype(str),
         'recording_technique': resolved['recording_technique'].astype(str),
-        # Legacy audit columns remain so old downstream table selections work;
-        # they are blank because neither source participates in classification.
-        'series_resistance_mohm': np.nan,
-        'series_resistance_source': 'not used',
-        'mean_current_pa': np.nan,
+        'series_resistance_mohm': resolved['series_resistance'] / 1e6,
+        'series_resistance_source': resolved['series_resistance_source'],
+        'mean_current_pa': resolved['mean_current_pa'],
+        'classifier_p_whole_cell': resolved['classifier_p_whole_cell'],
+        'classifier_confidence': resolved['classifier_confidence'],
+        'classifier_prediction': resolved['classifier_prediction'],
+        'classifier_family': resolved['classifier_family'],
+        'classifier_source': resolved['classifier_source'],
+        'classifier_model_version': classifier_bundle['model_version'],
+        'classifier_min_confidence': .90,
     })
     frame.to_csv(path, index=False)
     if verbose:
@@ -1154,7 +1207,8 @@ def apply_recording_type_override(
     return frame
 
 
-def epoch_catalog(block_ids: Sequence[int]) -> pd.DataFrame:
+def epoch_catalog(block_ids: Sequence[int],
+                  modes: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     """Every selected epoch in chronological order with a cell-wide index.
 
     ``epoch_number`` is the zero-based label displayed in Section 2 and used
@@ -1183,7 +1237,93 @@ def epoch_catalog(block_ids: Sequence[int]) -> pd.DataFrame:
         ['start_time', 'epoch_id', 'block_id', 'block_epoch'],
         na_position='last', kind='stable').reset_index(drop=True))
     frame.insert(0, 'epoch_number', np.arange(len(frame), dtype=int))
+    if modes is not None:
+        mode_lookup = (modes.drop_duplicates('block_id')
+                       .set_index('block_id')['rec_type'])
+        frame['automatic_rec_type'] = (
+            frame.block_id.map(mode_lookup).fillna('').astype(str))
+        frame['assigned_rec_type'] = frame['automatic_rec_type']
+        frame['selected_for_analysis'] = True
     return frame
+
+
+def apply_epoch_recording_type_ranges(
+        modes: pd.DataFrame,
+        catalog: pd.DataFrame,
+        ranges_by_rec_type: Optional[Dict[str, Sequence[int]]] = None,
+        show: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame, Tuple[int, ...]]:
+    """Manually select chronological epochs and assign their recording type.
+
+    ``ranges_by_rec_type`` maps an analysis type to cell-wide ``epoch_number``
+    labels, with Python ``range`` objects being the most convenient input. For
+    example ``{'extracellular': range(0, 14), 'exc': range(14, 35)}`` selects
+    and routes the two portions of a cell that changed recording technique.
+
+    An empty mapping keeps every automatic block assignment. With a non-empty
+    mapping, epochs not named in any range are returned as exclusions. Because
+    recording technique is invariant within an epoch block, assigning two
+    types to epochs from one block raises rather than silently splitting it.
+    """
+    ranges_by_rec_type = dict(ranges_by_rec_type or {})
+    invalid = sorted(set(ranges_by_rec_type) - set(RECORDING_TYPES))
+    if invalid:
+        raise ValueError(
+            f'Unknown recording type(s) {invalid}; choose from {RECORDING_TYPES}')
+    frame = catalog.copy()
+    if 'automatic_rec_type' not in frame:
+        lookup = (modes.drop_duplicates('block_id')
+                  .set_index('block_id')['rec_type'])
+        frame['automatic_rec_type'] = (
+            frame.block_id.map(lookup).fillna('').astype(str))
+    frame['assigned_rec_type'] = frame['automatic_rec_type']
+    frame['selected_for_analysis'] = True
+    if not ranges_by_rec_type:
+        if show:
+            print('manual epoch-range assignments: none; using automatic block modes')
+        return modes.copy(), frame, ()
+
+    assignments = {}
+    for rec_type, epoch_numbers in ranges_by_rec_type.items():
+        for epoch_number in epoch_numbers:
+            epoch_number = int(epoch_number)
+            if epoch_number in assignments:
+                raise ValueError(
+                    f'epoch {epoch_number} is assigned to both '
+                    f'{assignments[epoch_number]!r} and {rec_type!r}')
+            assignments[epoch_number] = rec_type
+    available = set(pd.to_numeric(
+        frame.epoch_number, errors='coerce').dropna().astype(int))
+    unknown = sorted(set(assignments) - available)
+    if unknown:
+        raise ValueError(f'epoch ranges contain unknown epoch numbers {unknown}')
+
+    frame['assigned_rec_type'] = frame.epoch_number.map(assignments).fillna('')
+    frame['selected_for_analysis'] = frame.assigned_rec_type.ne('')
+    selected = frame[frame.selected_for_analysis]
+    block_types = selected.groupby('block_id').assigned_rec_type.nunique()
+    split_blocks = sorted(int(value) for value in block_types[block_types.gt(1)].index)
+    if split_blocks:
+        raise ValueError(
+            f'epoch ranges assign multiple recording types within block(s) '
+            f'{split_blocks}; one epoch block must have one recording technique')
+
+    updated_modes = modes.copy()
+    assignments_by_block = (selected.drop_duplicates('block_id')
+                            .set_index('block_id').assigned_rec_type)
+    for block_id, rec_type in assignments_by_block.items():
+        match = updated_modes.block_id.eq(int(block_id))
+        updated_modes.loc[match, 'rec_type'] = rec_type
+        updated_modes.loc[match, 'rec_note'] = (
+            f'manual Section 2 epoch-range assignment: {rec_type}')
+    excluded = tuple(frame.loc[
+        ~frame.selected_for_analysis, 'epoch_number'].astype(int))
+    if show:
+        counts = selected.assigned_rec_type.value_counts()
+        print('manual epoch-range assignments: ' + ', '.join(
+            f'{rec_type}={int(count)} epoch(s)'
+            for rec_type, count in counts.items()))
+        print(f'epochs outside the selected ranges: {len(excluded)}')
+    return updated_modes, frame, excluded
 
 
 def apply_epoch_exclusions(
@@ -1614,7 +1754,8 @@ def plot_raw_epoch_traces(
         downsample: int = 20,
         max_points: Optional[int] = None,
         row_height: float = 1.15,
-        width: float = 12.0):
+        width: float = 12.0,
+        group_label: str = ''):
     """Plot the unprocessed amplifier response in one row per epoch.
 
     Rows follow the cell-wide chronological ``epoch_number`` labels. No spike
@@ -1672,11 +1813,38 @@ def plot_raw_epoch_traces(
         ax.tick_params(axis='y', labelsize=6)
         ax.spines[['top', 'right']].set_visible(False)
     axes[-1].set_xlabel('time during stimulus (s)')
+    group_text = f' | assigned {group_label}' if group_label else ''
+    first_epoch = int(catalog.epoch_number.min())
+    last_epoch = int(catalog.epoch_number.max())
     fig.suptitle(
-        f'{exp_name} | raw amplifier traces in acquisition order | '
-        f'epochs 0–{n_rows - 1}', fontsize=10, y=1.0)
+        f'{exp_name}{group_text} | raw amplifier traces in acquisition order | '
+        f'epoch labels {first_epoch}–{last_epoch}', fontsize=10, y=1.0)
     fig.tight_layout()
     return fig
+
+
+def plot_raw_epoch_traces_by_recording_type(
+        exp_name: str,
+        catalog: pd.DataFrame,
+        remove_epochs: Sequence[int] = (),
+        **plot_kwargs) -> Dict[str, object]:
+    """Separate raw-trace figures by assigned type, chronological within type."""
+    if 'assigned_rec_type' not in catalog:
+        raise ValueError(
+            'catalog has no assigned_rec_type; call epoch_catalog(..., modes=...)')
+    labels = catalog.assigned_rec_type.fillna('').astype(str)
+    order = [value for value in (*RECORDING_TYPES, '') if value in set(labels)]
+    figures = {}
+    for rec_type in order:
+        subset = (catalog[labels.eq(rec_type)]
+                  .sort_values('epoch_number', kind='stable'))
+        if subset.empty:
+            continue
+        display_label = rec_type or 'unselected/unresolved'
+        figures[display_label] = plot_raw_epoch_traces(
+            exp_name, subset, remove_epochs=remove_epochs,
+            group_label=display_label, **plot_kwargs)
+    return figures
 
 
 @lru_cache(maxsize=128)
@@ -9682,9 +9850,11 @@ __all__ = [
     'find_blocks', 'find_protocol_cells', 'cell_blocks', 'duration_conditions',
     'recording_duration_conditions', 'recording_type_from_metadata',
     'apply_recording_type_exclusions', 'apply_recording_type_override',
+    'apply_epoch_recording_type_ranges',
     'epoch_catalog', 'apply_epoch_exclusions',
     'apply_epoch_range_exclusions',
     'epoch_response_summary', 'plot_traces', 'plot_raw_epoch_traces',
+    'plot_raw_epoch_traces_by_recording_type',
     'epoch_parameters', 'normalize_epoch_light_means',
     'resolve_block_mode', 'load_block_modes',
     'PROTOCOL_PARAMETERS', 'MIN_STIM_TIME_MS', 'MIN_EPOCHS_PER_DURATION',
