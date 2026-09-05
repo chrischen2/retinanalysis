@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+from tqdm.auto import tqdm
 
 # Whole-cell epochs whose access resistance exceeds this are discarded: the
 # series resistance sits between the amplifier and the cell, so above ~20 MOhm
@@ -104,6 +105,8 @@ def _amp_trace_samples(df: pd.DataFrame, amp: str = 'Amp1', n_trials: int = 12,
     paths = (_amp_response_table(df['block_id'], amp=amp)
              if response_table is None else response_table)
     out: Dict[int, Tuple[np.ndarray, float]] = {}
+    progress = tqdm(total=len(df), desc='Sampling block traces', unit='block',
+                    disable=not verbose or df.empty)
     for exp_name, blocks in df.groupby('exp_name', sort=False):
         try:
             h5 = h5py.File(get_h5_file(str(exp_name)), 'r')
@@ -111,6 +114,7 @@ def _amp_trace_samples(df: pd.DataFrame, amp: str = 'Amp1', n_trials: int = 12,
             if verbose:
                 print(f'  {exp_name}: cannot open the h5 for trace sampling '
                       f'({type(e).__name__})')
+            progress.update(len(blocks))
             continue
         with h5:
             for block_id in blocks['block_id']:
@@ -132,6 +136,8 @@ def _amp_trace_samples(df: pd.DataFrame, amp: str = 'Amp1', n_trials: int = 12,
                     if verbose:
                         print(f'  {exp_name} block {int(block_id)}: cannot sample the trace '
                               f'({type(e).__name__}: {e})')
+                progress.update(1)
+    progress.close()
     return out
 
 
@@ -380,6 +386,8 @@ def series_resistance_table(df: pd.DataFrame, amp: str = 'Amp1',
     if groups_by_block is None:
         groups_by_block = _amp_epoch_groups_by_block(df['block_id'], amp=amp)
     rows = []
+    progress = tqdm(total=len(df), desc='Reading block metadata', unit='block',
+                    disable=not verbose)
     for exp, sub in df.groupby('exp_name', sort=True):
         try:
             f = h5py.File(get_h5_file(str(exp)), 'r')
@@ -417,8 +425,10 @@ def series_resistance_table(df: pd.DataFrame, amp: str = 'Amp1',
                 'n_epochs_rs': n_read,
                 'n_epochs_high_rs': n_high,
             })
+            progress.update(1)
         if f is not None:
             f.close()
+    progress.close()
     return pd.DataFrame(rows)
 
 
@@ -588,7 +598,9 @@ def check_series_resistance(df: pd.DataFrame, amp: str = 'Amp1',
         n_trials_by_block=n_trials_by_block,
         trace_seconds=trace_seconds) if infer_from_raw_trace and representative_indices else {}
     resolved_groups = {}
-    for key, i in representatives.items():
+    for key, i in tqdm(representatives.items(), total=len(representatives),
+                       desc='Inferring recording mode', unit='block',
+                       disable=not show or not representatives):
         row = out.loc[i]
         sample = trace_samples.get(int(row['block_id']))
         if sample is None:

@@ -464,6 +464,7 @@ def build_mode_cache(protocol_blocks: pd.DataFrame,
     ``trace_seconds`` defaults to the first 3 seconds per sampled epoch.
     """
     from retinanalysis.SCutils.recording_mode import check_series_resistance
+    from tqdm.auto import tqdm
 
     path = MODE_CACHE_PATH if path is None else Path(path)
     required = {'exp_name', 'block_id', 'onlineAnalysis'}
@@ -475,7 +476,8 @@ def build_mode_cache(protocol_blocks: pd.DataFrame,
     block_evidence['epoch_series_resistance'] = [
         pd.to_numeric(epoch_parameters(int(b)).get(
             'seriesResistance', pd.Series(dtype=float)), errors='coerce').median()
-        for b in block_evidence.block_id]
+        for b in tqdm(block_evidence.block_id, desc='Reading epoch parameters',
+                      unit='block', disable=not verbose)]
     resolved = check_series_resistance(
         block_evidence, drop=False, show=verbose,
         sample_series_resistance=False, block_level_evidence=True,
