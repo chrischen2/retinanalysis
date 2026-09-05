@@ -1326,6 +1326,71 @@ def apply_epoch_recording_type_ranges(
     return updated_modes, frame, excluded
 
 
+def epoch_numbers_for_light_mean_exclusions(
+        catalog: pd.DataFrame, remove_mean_condition=None,
+        show: bool = True) -> Tuple[int, ...]:
+    """Chronological epoch labels belonging to selected light-mean values.
+
+    ``remove_mean_condition`` may be one numeric mean (for example ``0.3``),
+    a sequence of means, or ``None``/an empty sequence for no exclusion.
+    Matching uses :func:`numpy.isclose` so harmless floating-point storage
+    differences do not leave some epochs behind. Unknown or non-finite means
+    raise rather than silently changing nothing.
+
+    The returned labels are intended to be combined with ``REMOVE_EPOCHS``
+    before :func:`apply_epoch_exclusions`; this makes the removal propagate to
+    response QC, fitting, reconstruction, and persisted condition output.
+    """
+    if remove_mean_condition is None:
+        requested = ()
+    elif (isinstance(remove_mean_condition, (str, bytes))
+          or np.isscalar(remove_mean_condition)):
+        requested = (remove_mean_condition,)
+    else:
+        requested = tuple(remove_mean_condition)
+    if not requested:
+        if show:
+            print('removed light-mean conditions: none')
+        return ()
+    if 'lightMean' not in catalog or 'epoch_number' not in catalog:
+        raise ValueError('epoch catalog must contain lightMean and epoch_number')
+
+    means = []
+    for value in requested:
+        try:
+            mean = float(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f'remove_mean_condition contains non-numeric value {value!r}') from error
+        if not np.isfinite(mean):
+            raise ValueError('remove_mean_condition values must be finite')
+        if not any(np.isclose(mean, prior, rtol=1e-6, atol=1e-12)
+                   for prior in means):
+            means.append(mean)
+
+    recorded = pd.to_numeric(catalog['lightMean'], errors='coerce')
+    available = sorted(float(value) for value in recorded.dropna().unique())
+    missing = [mean for mean in means if not any(
+        np.isclose(mean, value, rtol=1e-6, atol=1e-12)
+        for value in available)]
+    if missing:
+        raise ValueError(
+            f'remove_mean_condition contains unavailable light mean(s) {missing}; '
+            f'available means are {available}')
+    selected = np.zeros(len(catalog), dtype=bool)
+    for mean in means:
+        selected |= np.isclose(
+            recorded.to_numpy(dtype=float), mean, rtol=1e-6, atol=1e-12,
+            equal_nan=False)
+    epoch_numbers = tuple(catalog.loc[
+        selected, 'epoch_number'].astype(int).tolist())
+    if show:
+        labels = ', '.join(f'{mean:g}' for mean in means)
+        print(f'removed light-mean conditions: {labels} '
+              f'({len(epoch_numbers)} epoch(s))')
+    return epoch_numbers
+
+
 def apply_epoch_exclusions(
         conditions: pd.DataFrame,
         catalog: pd.DataFrame,
@@ -9851,7 +9916,8 @@ __all__ = [
     'recording_duration_conditions', 'recording_type_from_metadata',
     'apply_recording_type_exclusions', 'apply_recording_type_override',
     'apply_epoch_recording_type_ranges',
-    'epoch_catalog', 'apply_epoch_exclusions',
+    'epoch_catalog', 'epoch_numbers_for_light_mean_exclusions',
+    'apply_epoch_exclusions',
     'apply_epoch_range_exclusions',
     'epoch_response_summary', 'plot_traces', 'plot_raw_epoch_traces',
     'plot_raw_epoch_traces_by_recording_type',

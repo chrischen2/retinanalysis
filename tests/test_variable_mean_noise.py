@@ -470,6 +470,47 @@ def test_epoch_ranges_refuse_to_split_one_block_across_types():
             {'extracellular': [0], 'exc': [1]}, show=False)
 
 
+def test_light_mean_exclusion_accepts_scalar_and_propagates_as_epochs():
+    import pandas as pd
+
+    catalog = pd.DataFrame({
+        'epoch_number': [0, 1, 2, 3],
+        'block_id': [10, 10, 11, 11],
+        'block_epoch': [0, 1, 0, 1],
+        'stimTime': [30_000.] * 4,
+        'lightMean': [0.03, 0.3, 0.03, 0.30000000001],
+        'stdv': [0.015, 0.15, 0.015, 0.15],
+    })
+    conditions = pd.DataFrame({
+        'rec_type': ['extracellular'], 'stim_time_ms': [30_000.],
+        'light_contrast': [.5], 'n_epochs': [4],
+        'block_ids': [[10, 11]], 'included': [True], 'reason': [''],
+    })
+
+    epoch_numbers = vmn.epoch_numbers_for_light_mean_exclusions(
+        catalog, remove_mean_condition=0.3, show=False)
+    filtered = vmn.apply_epoch_exclusions(
+        conditions, catalog, remove_epochs=epoch_numbers,
+        min_epochs=1, show=False)
+
+    assert epoch_numbers == (1, 3)
+    assert filtered.loc[0, 'excluded_epochs'] == [(10, 1), (11, 1)]
+    assert filtered.loc[0, 'n_epochs_retained'] == 2
+
+
+def test_light_mean_exclusion_accepts_multiple_means_and_rejects_unknown():
+    import pandas as pd
+
+    catalog = pd.DataFrame({
+        'epoch_number': [0, 1, 2], 'lightMean': [0.03, 0.3, 0.05]})
+
+    assert vmn.epoch_numbers_for_light_mean_exclusions(
+        catalog, (0.3, 0.05), show=False) == (1, 2)
+    with pytest.raises(ValueError, match='available means'):
+        vmn.epoch_numbers_for_light_mean_exclusions(
+            catalog, 999, show=False)
+
+
 def test_raw_epoch_figures_are_grouped_by_assigned_type(monkeypatch):
     import pandas as pd
 
