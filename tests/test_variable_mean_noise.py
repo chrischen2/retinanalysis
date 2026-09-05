@@ -1048,6 +1048,42 @@ def test_analyze_condition_aligns_response_after_pre_time(monkeypatch):
     np.testing.assert_array_equal(analysis.stimulus[1.0], [[0., 1., 2., 3.]])
 
 
+def test_whole_cell_baseline_alignment_is_separate_within_each_light_mean(
+        monkeypatch):
+    import pandas as pd
+
+    params = pd.DataFrame({
+        'stimTime': [4.0] * 4,
+        'lightMean': [0.1, 0.1, 1.0, 1.0],
+        'frequencyCutoff': [20.0] * 4,
+    })
+    modulation = np.array([-1.0, 1.0, -1.0, 1.0])
+    amp = np.vstack([
+        10.0 + modulation, 30.0 + modulation,
+        100.0 + modulation, 140.0 + modulation,
+    ])
+    monkeypatch.setattr(vmn, 'epoch_parameters', lambda _block: params)
+    monkeypatch.setattr(
+        vmn, 'load_block',
+        lambda _exp, _block, _spiking: (amp, 1000.0, None))
+    monkeypatch.setattr(
+        vmn, 'epoch_stimulus',
+        lambda row, sample_rate: np.arange(int(row.stimTime), dtype=float))
+
+    analysis = vmn.analyze_condition(
+        'synthetic', [1], rec_type='exc', stim_time_ms=4.0,
+        skip_seconds=0.0, downsample=1, align_epoch_means=True,
+        fit=False, verbose=False)
+
+    low_means = analysis.response[0.1].mean(axis=1)
+    high_means = analysis.response[1.0].mean(axis=1)
+    np.testing.assert_allclose(low_means, [20.0, 20.0])
+    np.testing.assert_allclose(high_means, [120.0, 120.0])
+    assert high_means[0] - low_means[0] == 100.0
+    adjustments = analysis.epoch_adjustments
+    assert adjustments.groupby('light_mean').mean_after_pa.nunique().eq(1).all()
+
+
 def test_epoch_response_summary_reports_whole_cell_modulation_in_pa(monkeypatch):
     import pandas as pd
 

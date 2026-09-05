@@ -3758,8 +3758,9 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
             gate = ('off' if max_series_resistance is None
                     else f'{max_series_resistance / 1e6:g} MOhm')
             print(f'{rec_type}: whole-cell drift guards apply -- '
-                  f'series-resistance limit {gate}, align epoch means '
-                  f'{"on" if align_epoch_means else "off"}')
+                  f'series-resistance limit {gate}, baseline alignment '
+                  f'{"on" if align_epoch_means else "off"} '
+                  '(separately within each lightMean; between-mean levels preserved)')
         else:
             print(f'{rec_type}: spike rate, so the whole-cell drift guards do '
                   f'not apply -- nothing to drift and no series resistance')
@@ -3938,8 +3939,9 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                       f'(lightMean {record["light_mean"]:g}): {detail}')
         if adjustments:
             frame = analysis.epoch_adjustments
-            print(f'\n  aligned {len(frame)} epoch(s) to the median holding '
-                  f'current of their light mean:')
+            print(f'\n  baseline-aligned {len(frame)} epoch(s) to the median '
+                  'holding current within each lightMean; between-mean '
+                  'baselines were preserved:')
             for mean_level, group in frame.groupby('light_mean'):
                 print(f'    lightMean {mean_level:g}: target '
                       f'{group.mean_after_pa.iloc[0]:+.0f} pA | offsets '
