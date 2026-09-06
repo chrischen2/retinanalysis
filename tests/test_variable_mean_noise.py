@@ -35,6 +35,19 @@ def test_notebook_pins_named_retinanalysis_kernel():
         'name': 'retinanalysis',
     }
 
+
+def test_visual_browser_ln_menu_uses_measured_vs_predicted_figure():
+    import json
+
+    notebook_path = NOTEBOOK_DIR / 'analyzeVariableMeanNoise.ipynb'
+    notebook = json.loads(notebook_path.read_text())
+    source = ''.join(next(
+        cell['source'] for cell in notebook['cells']
+        if cell.get('id') == 'load-batch-cell'))
+
+    assert "figures.figure.eq('static-ln')" in source
+    assert "figures.figure.isin(('mean-response', 'static-ln'))" not in source
+
 # RandStream('mt19937ar', 'Seed', 42).randn(1, 64), from MATLAB R2025b.
 MATLAB_RANDN_SEED42 = np.array([
     -0.53824389372926962, 0.86723215762957329, 0.97598646347253948, 0.33739025237921211,
