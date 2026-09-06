@@ -566,7 +566,7 @@ def test_epoch_catalog_and_removal_use_cell_wide_chronological_indices(
     assert filtered.included.tolist() == [True, False]
 
 
-def test_raw_epoch_plot_has_one_unprocessed_row_per_epoch(monkeypatch):
+def test_raw_epoch_plot_has_one_preprocessed_row_per_epoch(monkeypatch):
     import matplotlib.pyplot as plt
     import pandas as pd
 
@@ -583,15 +583,113 @@ def test_raw_epoch_plot_has_one_unprocessed_row_per_epoch(monkeypatch):
 
     monkeypatch.setattr(vmn, 'load_block', fake_load)
     figure = vmn.plot_raw_epoch_traces(
-        'synthetic', catalog, remove_epochs=[1], downsample=1)
+        'synthetic', catalog, rec_type='exc', remove_epochs=[1],
+        downsample=1, whole_cell_bin_ms=2.0)
 
     assert len(figure.axes) == 2
-    np.testing.assert_array_equal(figure.axes[0].lines[0].get_ydata(), amp[0])
-    np.testing.assert_array_equal(figure.axes[1].lines[0].get_ydata(), amp[1])
+    np.testing.assert_array_equal(
+        figure.axes[0].lines[0].get_ydata(), [1.5, 3.5])
+    np.testing.assert_array_equal(
+        figure.axes[1].lines[0].get_ydata(), [7.5, 5.5])
     assert figure.axes[0].get_ylabel().startswith('0 |')
     assert 'REMOVE' in figure.axes[1].get_ylabel()
     assert calls == [False]
     plt.close(figure)
+
+
+def test_spike_raw_plot_shows_shared_detector_preprocessing(monkeypatch):
+    import matplotlib.pyplot as plt
+    import pandas as pd
+
+    sample_rate = 1000.0
+    time = np.arange(1200) / sample_rate
+    amp = (4.0 * time + np.sin(2 * np.pi * 180 * time))[None, :]
+    catalog = pd.DataFrame({
+        'epoch_number': [0], 'block_id': [10], 'block_epoch': [0],
+        'stimTime': [1000.0], 'preTime': [100.0],
+    })
+    monkeypatch.setattr(
+        vmn, 'load_block',
+        lambda _exp, _block, _spiking: (amp, sample_rate, None))
+
+    figure = vmn.plot_raw_epoch_traces(
+        'synthetic', catalog, rec_type='extracellular', downsample=1,
+        spike_median_window_ms=7.0, spike_high_pass_hz=120.0)
+    expected = vmn.preprocess_spike_trace(
+        amp[0], sample_rate, median_window_ms=7.0,
+        high_pass_hz=120.0)[100:1100]
+
+    np.testing.assert_allclose(figure.axes[0].lines[0].get_ydata(), expected)
+    assert '7 ms median subtraction + 120 Hz high-pass' in (
+        figure._suptitle.get_text())
+    plt.close(figure)
+
+
+def test_whole_cell_bin_is_identical_in_raw_plot_and_ln_input(monkeypatch):
+    import matplotlib.pyplot as plt
+    import pandas as pd
+
+    params = pd.DataFrame({
+        'stimTime': [10.0], 'preTime': [0.0], 'lightMean': [1.0],
+        'frequencyCutoff': [20.0],
+    })
+    amp = np.arange(10.0)[None, :]
+    catalog = pd.DataFrame({
+        'epoch_number': [0], 'block_id': [1], 'block_epoch': [0],
+        'stimTime': [10.0], 'preTime': [0.0],
+    })
+    monkeypatch.setattr(vmn, 'epoch_parameters', lambda _block: params)
+    monkeypatch.setattr(
+        vmn, 'load_block',
+        lambda _exp, _block, _spiking, **_kwargs: (amp, 1000.0, None))
+    monkeypatch.setattr(
+        vmn, 'epoch_stimulus',
+        lambda row, sample_rate: np.arange(int(row.stimTime), dtype=float))
+
+    figure = vmn.plot_raw_epoch_traces(
+        'synthetic', catalog, rec_type='exc', whole_cell_bin_ms=2.0)
+    analysis = vmn.analyze_condition(
+        'synthetic', [1], rec_type='exc', stim_time_ms=10.0,
+        skip_seconds=0.0, whole_cell_bin_ms=2.0,
+        align_epoch_means=False, fit=False, verbose=False)
+    expected = np.array([0.5, 2.5, 4.5, 6.5, 8.5])
+
+    np.testing.assert_array_equal(figure.axes[0].lines[0].get_ydata(), expected)
+    np.testing.assert_array_equal(analysis.response[1.0][0], expected)
+    np.testing.assert_array_equal(analysis.stimulus[1.0][0], expected)
+    assert analysis.sampling_interval == 0.002
+    assert analysis.whole_cell_bin_ms == 2.0
+    plt.close(figure)
+
+
+def test_load_block_converts_spike_preprocessing_ms_to_detector_samples(
+        monkeypatch):
+    import retinanalysis as ra
+
+    calls = []
+
+    class FakeResponseBlock:
+        def __init__(self, *args, **kwargs):
+            assert kwargs['b_spiking'] is False
+            self.amp_data = np.zeros((2, 40))
+            self.amp_sample_rate = 2000.0
+            self.spike_times = None
+
+        def get_spike_times(self, **kwargs):
+            calls.append(kwargs)
+            self.spike_times = [np.array([], dtype=int)] * 2
+
+    vmn.clear_caches()
+    monkeypatch.setattr(ra, 'SCResponseBlock', FakeResponseBlock)
+    vmn.load_block(
+        'synthetic', 1, True, spike_median_window_ms=7.5,
+        spike_high_pass_hz=250.0)
+    vmn.clear_caches()
+
+    assert calls == [{
+        'cutoff_frequency': 250.0,
+        'median_window_samples': 15,
+    }]
 
 
 def test_analyze_condition_refuses_implicit_mixed_durations(monkeypatch):
@@ -617,8 +715,8 @@ def test_analyze_condition_filters_epochs_to_requested_duration(monkeypatch):
     monkeypatch.setattr(vmn, 'epoch_parameters', lambda block: params)
     monkeypatch.setattr(
         vmn, 'load_block',
-        lambda exp_name, block_id, spiking: (np.arange(240).reshape(4, 60),
-                                             1000.0, None))
+        lambda exp_name, block_id, spiking, **_kwargs: (
+            np.arange(240).reshape(4, 60), 1000.0, None))
     monkeypatch.setattr(
         vmn, 'epoch_stimulus',
         lambda row, sample_rate: np.ones(int(row.stimTime)))
@@ -626,6 +724,7 @@ def test_analyze_condition_filters_epochs_to_requested_duration(monkeypatch):
     analysis = vmn.analyze_condition(
         'synthetic', [11], rec_type='exc', stim_time_ms=30.0,
         skip_seconds=0.0, downsample=1, align_epoch_means=False,
+        whole_cell_bin_ms=1.0,
         fit=False, verbose=False)
 
     assert analysis.stim_time_ms == 30.0
@@ -635,6 +734,7 @@ def test_analyze_condition_filters_epochs_to_requested_duration(monkeypatch):
     selected = vmn.analyze_condition(
         'synthetic', [11], rec_type='exc', stim_time_ms=30.0,
         light_means=[3.0], skip_seconds=0.0, downsample=1,
+        whole_cell_bin_ms=1.0,
         align_epoch_means=False, fit=False, verbose=False)
     assert selected.light_means == [3.0]
     assert selected.n_epochs == {3.0: 1}
@@ -651,7 +751,7 @@ def test_analyze_condition_omits_manually_excluded_epochs(monkeypatch):
     monkeypatch.setattr(vmn, 'epoch_parameters', lambda _block: params)
     monkeypatch.setattr(
         vmn, 'load_block',
-        lambda _exp, _block, _spiking: (
+        lambda _exp, _block, _spiking, **_kwargs: (
             np.arange(90).reshape(3, 30), 1000.0, None))
     monkeypatch.setattr(
         vmn, 'epoch_stimulus',
@@ -660,6 +760,7 @@ def test_analyze_condition_omits_manually_excluded_epochs(monkeypatch):
     analysis = vmn.analyze_condition(
         'synthetic', [11], rec_type='exc', stim_time_ms=30.0,
         skip_seconds=0.0, downsample=1, align_epoch_means=False,
+        whole_cell_bin_ms=1.0,
         excluded_epochs=[(11, 1)], activity_excluded_epochs=[(11, 1)],
         fit=False, verbose=False)
 
@@ -980,7 +1081,7 @@ def test_epoch_response_summary_reports_exact_mean_firing_rate(monkeypatch):
     monkeypatch.setattr(vmn, 'epoch_parameters', lambda _block: params)
     monkeypatch.setattr(
         vmn, 'load_block',
-        lambda _exp, _block, _spiking: (amp, 1000.0, spikes))
+        lambda _exp, _block, _spiking, **_kwargs: (amp, 1000.0, spikes))
 
     summary = vmn.epoch_response_summary(
         'synthetic', [1], 'extracellular', show=False)
@@ -1014,7 +1115,7 @@ def test_epoch_response_summary_excludes_pre_and_tail_spikes(monkeypatch):
     monkeypatch.setattr(vmn, 'epoch_parameters', lambda _block: params)
     monkeypatch.setattr(
         vmn, 'load_block',
-        lambda _exp, _block, _spiking: (amp, 1000.0, spikes))
+        lambda _exp, _block, _spiking, **_kwargs: (amp, 1000.0, spikes))
 
     summary = vmn.epoch_response_summary(
         'synthetic', [1], 'extracellular', show=False)
@@ -1034,7 +1135,7 @@ def test_analyze_condition_aligns_response_after_pre_time(monkeypatch):
     monkeypatch.setattr(vmn, 'epoch_parameters', lambda _block: params)
     monkeypatch.setattr(
         vmn, 'load_block',
-        lambda _exp, _block, _spiking: (amp, 1000.0, None))
+        lambda _exp, _block, _spiking, **_kwargs: (amp, 1000.0, None))
     monkeypatch.setattr(
         vmn, 'epoch_stimulus',
         lambda row, sample_rate: np.arange(4.0))
@@ -1042,6 +1143,7 @@ def test_analyze_condition_aligns_response_after_pre_time(monkeypatch):
     analysis = vmn.analyze_condition(
         'synthetic', [1], rec_type='exc', stim_time_ms=4.0,
         skip_seconds=0.0, downsample=1, align_epoch_means=False,
+        whole_cell_bin_ms=1.0,
         fit=False, verbose=False)
 
     np.testing.assert_array_equal(analysis.response[1.0], [[1., 2., 3., 4.]])
@@ -1065,7 +1167,7 @@ def test_whole_cell_baseline_alignment_is_separate_within_each_light_mean(
     monkeypatch.setattr(vmn, 'epoch_parameters', lambda _block: params)
     monkeypatch.setattr(
         vmn, 'load_block',
-        lambda _exp, _block, _spiking: (amp, 1000.0, None))
+        lambda _exp, _block, _spiking, **_kwargs: (amp, 1000.0, None))
     monkeypatch.setattr(
         vmn, 'epoch_stimulus',
         lambda row, sample_rate: np.arange(int(row.stimTime), dtype=float))
@@ -1073,6 +1175,7 @@ def test_whole_cell_baseline_alignment_is_separate_within_each_light_mean(
     analysis = vmn.analyze_condition(
         'synthetic', [1], rec_type='exc', stim_time_ms=4.0,
         skip_seconds=0.0, downsample=1, align_epoch_means=True,
+        whole_cell_bin_ms=1.0,
         fit=False, verbose=False)
 
     low_means = analysis.response[0.1].mean(axis=1)
@@ -1096,10 +1199,10 @@ def test_epoch_response_summary_reports_whole_cell_modulation_in_pa(monkeypatch)
     monkeypatch.setattr(vmn, 'epoch_parameters', lambda _block: params)
     monkeypatch.setattr(
         vmn, 'load_block',
-        lambda _exp, _block, _spiking: (amp, 1000.0, None))
+        lambda _exp, _block, _spiking, **_kwargs: (amp, 1000.0, None))
 
     summary = vmn.epoch_response_summary(
-        'synthetic', [1], 'exc', show=False)
+        'synthetic', [1], 'exc', whole_cell_bin_ms=1.0, show=False)
 
     np.testing.assert_allclose(summary.mean_current_pA, [10.0, -5.0])
     np.testing.assert_allclose(summary.modulation_sd_pA, [3.0, 4.0])
@@ -2244,6 +2347,10 @@ def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
         assert stored.attrs['n_epochs'] == 4
         assert stored.attrs['cell_index'] == 19
         assert stored.attrs['mean_rate_hz'] == pytest.approx(39.5)
+        assert stored.attrs['spike_median_window_ms'] == 5.0
+        assert stored.attrs['spike_high_pass_hz'] == 300.0
+        assert stored.attrs['psth_sigma_ms'] == 10.0
+        assert stored.attrs['whole_cell_bin_ms'] == 5.0
         assert stored['excluded_epochs'][:].tolist() == [[11, 1]]
         assert stored['activity_excluded_epochs'][:].tolist() == [[11, 1]]
         assert stored.attrs['decode_window_s'] == 2.5
@@ -2257,6 +2364,9 @@ def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
 
     index = vmn.load_condition_index(tmp_path)
     assert 'output_version' not in index
+    assert index.loc[0, [
+        'spike_median_window_ms', 'spike_high_pass_hz',
+        'psth_sigma_ms', 'whole_cell_bin_ms']].tolist() == [5.0, 300.0, 10.0, 5.0]
     assert index[['date', 'cell_index', 'cell_label', 'cell_type', 'rec_type',
                   'mean_rate_hz',
                   'stim_seconds', 'n_epochs_total', 'rig',
@@ -2451,7 +2561,9 @@ def test_condition_batch_helpers_preserve_mode_duration_keys(monkeypatch):
     inspection = vmn.inspect_recording_conditions(
         'example', [11, 12], conditions, max_epochs=None,
         min_firing_rate_hz=30., min_whole_cell_modulation_pa=100.,
-        low_response_epoch_fraction=.8, verbose=False)
+        low_response_epoch_fraction=.8,
+        spike_median_window_ms=7., spike_high_pass_hz=250.,
+        psth_sigma_ms=12., whole_cell_bin_ms=4., verbose=False)
     assert set(inspection.summaries) == {
         ('extracellular', 30_000.), ('exc', 60_000.)}
 
@@ -2461,7 +2573,10 @@ def test_condition_batch_helpers_preserve_mode_duration_keys(monkeypatch):
     def fake_core(exp_name, block_ids, rec_type, **kwargs):
         calls.append((rec_type, kwargs['stim_time_ms'],
                       tuple(kwargs['excluded_epochs']),
-                      tuple(kwargs['light_means'])))
+                      tuple(kwargs['light_means']),
+                      kwargs['spike_median_window_ms'],
+                      kwargs['spike_high_pass_hz'], kwargs['psth_sigma_ms'],
+                      kwargs['whole_cell_bin_ms']))
         current = analysis
         current.rec_type = rec_type
         current.stim_time_ms = kwargs['stim_time_ms']
@@ -2472,11 +2587,13 @@ def test_condition_batch_helpers_preserve_mode_duration_keys(monkeypatch):
     cores = vmn.run_core_condition_analyses(
         'example', [11, 12], retained, qc_signature=inspection.signature,
         min_firing_rate_hz=30., min_whole_cell_modulation_pa=100.,
-        low_response_epoch_fraction=.8, verbose=False)
+        low_response_epoch_fraction=.8,
+        spike_median_window_ms=7., spike_high_pass_hz=250.,
+        psth_sigma_ms=12., whole_cell_bin_ms=4., verbose=False)
     assert list(cores) == [('extracellular', 30_000.), ('exc', 60_000.)]
     assert calls == [
-        ('extracellular', 30_000., ((11, 1),), (.1,)),
-        ('exc', 60_000., (), (.1,))]
+        ('extracellular', 30_000., ((11, 1),), (.1,), 7., 250., 12., 4.),
+        ('exc', 60_000., (), (.1,), 7., 250., 12., 4.)]
 
 
 def test_inspection_excludes_only_failed_activity_conditions(monkeypatch):
@@ -2589,10 +2706,16 @@ def test_reconstruction_batch_helper_returns_save_ready_bundle(monkeypatch):
         decode_window_candidates_s=(1., 2.), decode_bin_ms=50.,
         steady_state_s=10., min_phase_ms=100.,
         direction_min_change_quantile=.25, trace_seconds=(10., 15.),
+        spike_median_window_ms=7., spike_high_pass_hz=250.,
+        psth_sigma_ms=12., whole_cell_bin_ms=4.,
         verbose=False)
 
     bundle = result[('extracellular', 30_000.)]
     assert reload_calls[0]['light_means'] == analysis.light_means
+    assert reload_calls[0]['spike_median_window_ms'] == 7.
+    assert reload_calls[0]['spike_high_pass_hz'] == 250.
+    assert reload_calls[0]['psth_sigma_ms'] == 12.
+    assert reload_calls[0]['whole_cell_bin_ms'] == 4.
     assert bundle['decode_window_s'] == 2.0
     assert bundle['directional_decoding'] is directional
     assert bundle['transfer_figure'] == 'figure'

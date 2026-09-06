@@ -1572,6 +1572,48 @@ def _excluded_epoch_set(excluded_epochs) -> set:
     return {(int(block_id), int(epoch)) for block_id, epoch in excluded_epochs}
 
 
+def _milliseconds_to_samples(value_ms: Optional[float], sample_rate: float,
+                             parameter_name: str, *, allow_zero: bool) -> Optional[int]:
+    """Convert a user-facing millisecond window to amplifier samples."""
+    if value_ms is None:
+        return None
+    value = float(value_ms)
+    rate = float(sample_rate)
+    invalid = (not np.isfinite(value) or value < 0
+               or (not allow_zero and value == 0))
+    if invalid:
+        qualifier = 'non-negative' if allow_zero else 'positive'
+        raise ValueError(f'{parameter_name} must be finite and {qualifier}')
+    if not np.isfinite(rate) or rate <= 0:
+        raise ValueError('sample_rate must be finite and positive')
+    if value == 0:
+        return 0
+    return max(int(round(value / 1e3 * rate)), 1)
+
+
+def preprocess_spike_trace(trace: np.ndarray, sample_rate: float,
+                           median_window_ms: Optional[float] = 5.0,
+                           high_pass_hz: float = 300.0) -> np.ndarray:
+    """Median-detrend and high-pass one trace exactly as the detector does."""
+    from retinanalysis.utils.spike_detector import preprocess_spike_traces
+
+    median_samples = _milliseconds_to_samples(
+        median_window_ms, sample_rate, 'spike_median_window_ms',
+        allow_zero=True)
+    return preprocess_spike_traces(
+        trace, sample_rate=sample_rate,
+        median_window_samples=median_samples,
+        cutoff_frequency=float(high_pass_hz))[0]
+
+
+def preprocess_whole_cell_trace(trace: np.ndarray, sample_rate: float,
+                                bin_ms: float = 5.0) -> Tuple[np.ndarray, float]:
+    """Smooth and reduce a current trace by non-overlapping bin averages."""
+    factor = _milliseconds_to_samples(
+        bin_ms, sample_rate, 'whole_cell_bin_ms', allow_zero=False)
+    return _block_average(trace, factor), float(sample_rate) / factor
+
+
 def _spike_rate(spike_samples, n_samples: int, sample_rate: float,
                 downsample: int, sigma_ms: float) -> np.ndarray:
     """A smoothed PSTH at the *reduced* rate, in Hz.
@@ -1639,6 +1681,9 @@ def epoch_response_summary(
         stim_time_ms: Optional[float] = None,
         light_contrast: Optional[float] = None,
         excluded_epochs=(),
+        spike_median_window_ms: Optional[float] = 5.0,
+        spike_high_pass_hz: float = 300.0,
+        whole_cell_bin_ms: float = 5.0,
         show: bool = True) -> pd.DataFrame:
     """One intuitive response-size measurement for every recorded epoch.
 
@@ -1660,7 +1705,9 @@ def epoch_response_summary(
         if params.empty:
             continue
         amp, sample_rate, spike_times = load_block(
-            exp_name, int(block_id), spiking)
+            exp_name, int(block_id), spiking,
+            spike_median_window_ms=spike_median_window_ms,
+            spike_high_pass_hz=spike_high_pass_hz)
         for epoch in range(min(len(params), amp.shape[0])):
             if (int(block_id), int(epoch)) in excluded:
                 continue
@@ -1699,6 +1746,8 @@ def epoch_response_summary(
                     baseline = min(int(0.1 * sample_rate), trace.size)
                     if baseline:
                         trace = trace - float(np.nanmean(trace[:baseline]))
+                trace, _ = preprocess_whole_cell_trace(
+                    trace, sample_rate, bin_ms=whole_cell_bin_ms)
                 row.update({
                     'mean_current_pA': float(np.nanmean(trace)),
                     'modulation_sd_pA': float(np.nanstd(trace)),
@@ -1726,19 +1775,21 @@ def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
                 stim_time_ms: Optional[float] = None,
                 light_contrast: Optional[float] = None,
                 excluded_epochs=(),
+                spike_median_window_ms: Optional[float] = 5.0,
+                spike_high_pass_hz: float = 300.0,
+                psth_sigma_ms: float = 10.0,
+                whole_cell_bin_ms: float = 5.0,
                 figsize: Tuple[float, float] = (12.0, 5.0)):
     """Every epoch's response, coloured by the light mean it was recorded at.
 
     Drawn before any fitting: this is where a dead epoch, a lost patch or a
     mislabelled recording type shows up, and none of those are visible in a
-    filter. Whole-cell traces are drawn as recorded -- see
-    :func:`analyze_condition` for why there is no baseline to subtract -- so
-    the holding current is part of what is shown, and a patch that drifts over
-    the block is visible here.
+    filter. Whole-cell traces use the same configurable bin average as LN
+    fitting; their holding current remains visible unless baseline subtraction
+    was explicitly requested.
     """
     import matplotlib.pyplot as plt
     from retinanalysis.utils import style
-    from scipy.ndimage import gaussian_filter1d
 
     style.apply_publication_style()
     spiking = rec_type == 'extracellular'
@@ -1748,7 +1799,10 @@ def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
         params = epoch_parameters(int(block_id))
         if params.empty:
             continue
-        amp, rate, spike_times = load_block(exp_name, int(block_id), spiking)
+        amp, rate, spike_times = load_block(
+            exp_name, int(block_id), spiking,
+            spike_median_window_ms=spike_median_window_ms,
+            spike_high_pass_hz=spike_high_pass_hz)
         for index in range(min(len(params), amp.shape[0])):
             if (int(block_id), int(index)) in excluded:
                 continue
@@ -1762,25 +1816,24 @@ def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
                 continue
             if max_epochs is not None and len(traces) >= max_epochs:
                 break
-            factor = max(int(downsample), 1)
             epoch_start, epoch_stop, _ = epoch_response_window(
                 params.iloc[index], rate, amp.shape[1])
             n_samples = epoch_stop - epoch_start
             if spiking:
+                factor = max(int(downsample), 1)
                 # Already at the reduced rate: binned, then smoothed.
                 samples = (np.asarray(spike_times[index], dtype=np.int64)
                            - epoch_start)
                 reduced = _spike_rate(samples, n_samples, rate,
-                                      factor, 10.0)
+                                      factor, psth_sigma_ms)
+                reduced_rate = rate / factor
             else:
                 trace = amp[index, epoch_start:epoch_stop]
                 if subtract_baseline:
                     trace = trace - float(np.mean(trace[:int(0.1 * rate)]))
-                # Block-average, not slicing: a whole-cell trace is unsmoothed
-                # at the amplifier rate, so taking every nth sample folds fast
-                # events into the drawn line. Same reduction the analysis uses.
-                reduced = _block_average(trace, factor)
-            traces.append((reduced, rate / factor))
+                reduced, reduced_rate = preprocess_whole_cell_trace(
+                    trace, rate, bin_ms=whole_cell_bin_ms)
+            traces.append((reduced, reduced_rate))
             labels.append(float(params.iloc[index].get('lightMean', np.nan)))
 
     if not traces:
@@ -1815,18 +1868,25 @@ def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
 def plot_raw_epoch_traces(
         exp_name: str,
         catalog: pd.DataFrame,
+        rec_type: str,
         remove_epochs: Sequence[int] = (),
         downsample: int = 20,
+        spike_median_window_ms: Optional[float] = 5.0,
+        spike_high_pass_hz: float = 300.0,
+        whole_cell_bin_ms: float = 5.0,
         max_points: Optional[int] = None,
         row_height: float = 1.15,
         width: float = 12.0,
         group_label: str = ''):
-    """Plot the unprocessed amplifier response in one row per epoch.
+    """Plot the analysis-ready amplifier response in one row per epoch.
 
-    Rows follow the cell-wide chronological ``epoch_number`` labels. No spike
-    detection, PSTH construction, smoothing, centering, or recording-mode
-    inference occurs. Requested removals remain visible in gray with a
-    ``REMOVE`` label so the analyst can verify the edit before rerunning QC.
+    Rows follow the cell-wide chronological ``epoch_number`` labels. Spike
+    recordings show a display-reduced view of the median-subtracted,
+    high-pass-filtered voltage supplied to the detector (not a PSTH); the
+    reduction happens only after the shared detector preprocessing. Whole-cell
+    recordings show the same binned current supplied to LN fitting. Requested
+    removals remain visible in gray with a ``REMOVE`` label so the analyst can
+    verify the edit before rerunning QC.
     """
     import matplotlib.pyplot as plt
     from retinanalysis.utils import style
@@ -1836,7 +1896,9 @@ def plot_raw_epoch_traces(
         return None
     style.apply_publication_style()
     remove = {int(value) for value in remove_epochs}
-    factor = max(int(downsample), 1)
+    spiking = str(rec_type) == 'extracellular'
+    whole_cell = str(rec_type) in ('exc', 'inh')
+    display_factor = max(int(downsample), 1)
     n_rows = len(catalog)
     fig, axes = plt.subplots(
         n_rows, 1, sharex=False,
@@ -1847,8 +1909,8 @@ def plot_raw_epoch_traces(
     for ax, row in zip(axes, catalog.itertuples(index=False)):
         block_id, block_epoch = int(row.block_id), int(row.block_epoch)
         if block_id not in block_cache:
-            # Always load the amplifier as raw current/voltage data. In
-            # particular, ``spiking=False`` prevents spike detection here.
+            # Load amplifier values without running spike detection: the
+            # shared preprocessing helper below is the detector's exact input.
             block_cache[block_id] = load_block(exp_name, block_id, False)
         amp, rate, _ = block_cache[block_id]
         if block_epoch >= amp.shape[0]:
@@ -1857,14 +1919,23 @@ def plot_raw_epoch_traces(
             continue
         values = pd.Series(row._asdict())
         start, stop, _ = epoch_response_window(values, rate, amp.shape[1])
-        trace = np.asarray(amp[block_epoch, start:stop], dtype=float)
-        reduced = _block_average(trace, factor)
+        full_trace = np.asarray(amp[block_epoch], dtype=float)
+        if spiking:
+            processed = preprocess_spike_trace(
+                full_trace, rate, median_window_ms=spike_median_window_ms,
+                high_pass_hz=spike_high_pass_hz)[start:stop]
+            reduced = _block_average(processed, display_factor)
+            display_rate = rate / display_factor
+        elif whole_cell:
+            reduced, display_rate = preprocess_whole_cell_trace(
+                full_trace[start:stop], rate, bin_ms=whole_cell_bin_ms)
+        else:
+            reduced = _block_average(full_trace[start:stop], display_factor)
+            display_rate = rate / display_factor
         if max_points is not None and reduced.size > int(max_points):
             display_step = int(np.ceil(reduced.size / int(max_points)))
             reduced = _block_average(reduced, display_step)
-            display_rate = rate / factor / display_step
-        else:
-            display_rate = rate / factor
+            display_rate /= display_step
         time_s = np.arange(reduced.size) / display_rate
         removed = int(row.epoch_number) in remove
         color = '#999999' if removed else '#202020'
@@ -1879,10 +1950,18 @@ def plot_raw_epoch_traces(
         ax.spines[['top', 'right']].set_visible(False)
     axes[-1].set_xlabel('time during stimulus (s)')
     group_text = f' | assigned {group_label}' if group_label else ''
+    median_label = ('off' if spike_median_window_ms is None else
+                    f'{float(spike_median_window_ms):g} ms')
+    processing = (f'{median_label} median subtraction + '
+                  f'{float(spike_high_pass_hz):g} Hz high-pass + '
+                  f'{display_factor:g}-sample display average'
+                  if spiking else (f'{float(whole_cell_bin_ms):g} ms bin average'
+                                    if whole_cell else
+                                    f'raw, {display_factor:g}-sample display average'))
     first_epoch = int(catalog.epoch_number.min())
     last_epoch = int(catalog.epoch_number.max())
     fig.suptitle(
-        f'{exp_name}{group_text} | raw amplifier traces in acquisition order | '
+        f'{exp_name}{group_text} | preprocessed amplifier traces | {processing} | '
         f'epoch labels {first_epoch}–{last_epoch}', fontsize=10, y=1.0)
     fig.tight_layout()
     return fig
@@ -1907,7 +1986,8 @@ def plot_raw_epoch_traces_by_recording_type(
             continue
         display_label = rec_type or 'unselected/unresolved'
         figures[display_label] = plot_raw_epoch_traces(
-            exp_name, subset, remove_epochs=remove_epochs,
+            exp_name, subset, rec_type=rec_type,
+            remove_epochs=remove_epochs,
             group_label=display_label, **plot_kwargs)
     return figures
 
@@ -2731,28 +2811,38 @@ def clear_caches() -> None:
     _BLOCK_CACHE.clear()
 
 
-def load_block(exp_name: str, block_id: int, spiking: bool):
+def load_block(exp_name: str, block_id: int, spiking: bool,
+               spike_median_window_ms: Optional[float] = 5.0,
+               spike_high_pass_hz: float = 300.0):
     """``(amp, sample_rate, spike_times)`` for one block, memoised.
 
     The arrays are handed out as-is rather than copied -- they are large, and
-    every caller here reads them. Do not write into what this returns.
+    every caller here reads them. Spike detection uses the supplied median and
+    high-pass settings, which are part of the cache key. Do not write into what
+    this returns.
     """
     import retinanalysis as ra
 
-    key = (str(exp_name), int(block_id), bool(spiking))
+    spike_settings = ((None if spike_median_window_ms is None else
+                       float(spike_median_window_ms)),
+                      float(spike_high_pass_hz)) if spiking else (None, None)
+    key = (str(exp_name), int(block_id), bool(spiking), *spike_settings)
     hit = _cache_get(_BLOCK_CACHE, key)
     if hit is not None:
         return hit
-    block = ra.SCResponseBlock(exp_name, int(block_id), b_spiking=spiking,
+    detector_kwargs = {'cutoff_frequency': float(spike_high_pass_hz)}
+    block = ra.SCResponseBlock(exp_name, int(block_id), b_spiking=False,
                                b_LED=True, verbose=False)
     amp = np.asarray(block.amp_data, dtype=float)
     rate = float(block.amp_sample_rate)
     spike_times = None
     if spiking:
+        detector_kwargs['median_window_samples'] = _milliseconds_to_samples(
+            spike_median_window_ms, rate, 'spike_median_window_ms',
+            allow_zero=True)
         # SCResponseBlock.get_spike_times() populates block.spike_times and
         # returns None, so read the attribute rather than the return value.
-        if getattr(block, 'spike_times', None) is None:
-            block.get_spike_times()
+        block.get_spike_times(**detector_kwargs)
         spike_times = block.spike_times
     return _cache_put(_BLOCK_CACHE, key, (amp, rate, spike_times),
                       BLOCK_CACHE_MAX)
@@ -3350,6 +3440,10 @@ class ConditionAnalysis:
     # the group mean and the windowed models are built from exactly the same
     # data rather than reloaded and re-reduced.
     sampling_interval: float = np.nan
+    spike_median_window_ms: Optional[float] = 5.0
+    spike_high_pass_hz: float = 300.0
+    psth_sigma_ms: float = 10.0
+    whole_cell_bin_ms: float = 5.0
     skip_seconds: float = 0.0
     # Exact recorded protocol duration for this condition. Duration is a
     # condition dimension, never an array-truncation detail.
@@ -3576,6 +3670,9 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                       filter_length_s: float = 1.0,
                       downsample: int = 10,
                       psth_sigma_ms: float = 10.0,
+                      spike_median_window_ms: Optional[float] = 5.0,
+                      spike_high_pass_hz: float = 300.0,
+                      whole_cell_bin_ms: float = 5.0,
                       n_bins: int = 100,
                       frequency_cutoff: Optional[float] = None,
                       skip_seconds: float = 2.0,
@@ -3607,8 +3704,11 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
     1 kHz is already generous and the full rate makes the estimate slow without
     making it better.
 
-    For extracellular recordings the response is a smoothed spike rate; for
-    voltage clamp it is the recorded current, **not** baseline subtracted.
+    For extracellular recordings the response is a smoothed spike rate whose
+    spike times come from the same configurable median-subtracted and
+    high-pass-filtered voltage shown in Section 2. For voltage clamp it is the
+    current after a configurable non-overlapping bin average (5 ms by default),
+    **not** baseline subtracted.
 
     **Whole-cell drift -- ``exc`` and ``inh`` only.** Neither guard below runs
     for an ``extracellular`` recording, whatever its arguments say: that
@@ -3658,14 +3758,15 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
     responding to the step onto the epoch's first mean rather than to the
     noise.
 
-    **Downsampling.** Everything is built at the amplifier rate and reduced once,
-    at the end, by ``downsample`` (10, so 10 kHz to 1 kHz):
+    **Reduction.** Everything is built at the amplifier rate and reduced once.
+    Extracellular PSTHs use ``downsample`` (10, so 10 kHz to 1 kHz), while
+    whole-cell traces use ``whole_cell_bin_ms`` (5 ms by default):
 
     ==================  ==================================================
     stimulus            regenerated at the amplifier rate from the seed
     spiking response    spike times -> binary train -> Gaussian smoothed at
                         ``psth_sigma_ms`` (10 ms), all at the amplifier rate
-    whole-cell response the recorded current as-is
+    whole-cell response recorded current -> ``whole_cell_bin_ms`` averages
     ==================  ==================================================
 
     The reduction is a **block average** (:func:`_block_average`), never
@@ -3676,10 +3777,12 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
     into the band being fitted. It is also what ``parseData.m`` does.
 
     Stimulus and response are truncated to a common length *before* the
-    average, so they stay sample-aligned, and ``sampling_interval`` handed to
-    :func:`fit_ln_model` is ``downsample / sample_rate`` -- the reduced rate,
-    not the amplifier's. On top of this :func:`fit_ln_model` low-passes the
-    response at the stimulus's own ``frequencyCutoff`` before fitting.
+    appropriate average, so they stay sample-aligned. The
+    ``sampling_interval`` handed to :func:`fit_ln_model` is the realized
+    reduction step divided by ``sample_rate``: ``downsample`` for spikes or
+    the sample count represented by ``whole_cell_bin_ms`` for current. On top
+    of this :func:`fit_ln_model` low-passes the response at the stimulus's own
+    ``frequencyCutoff`` before fitting.
 
     ``frequency_cutoff`` defaults to the stimulus's own ``frequencyCutoff``
     (60 Hz here) and is **load-bearing**, not cosmetic. The noise is 4-pole
@@ -3689,8 +3792,6 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
     noise. Cutting the filter off at the same frequency the stimulus was cut
     off at is what ``computeLNmodel.m`` does through ``SETTINGS``.
     """
-    from scipy.ndimage import gaussian_filter1d
-
     duration_table = duration_conditions(
         block_ids, min_epochs=1, min_stim_time_ms=None, show=False)
     available_durations = sorted(
@@ -3769,8 +3870,10 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
         params = epoch_parameters(int(block_id))
         if params.empty:
             continue
-        amp, sample_rate, spike_times = load_block(exp_name, int(block_id),
-                                                   spiking)
+        amp, sample_rate, spike_times = load_block(
+            exp_name, int(block_id), spiking,
+            spike_median_window_ms=spike_median_window_ms,
+            spike_high_pass_hz=spike_high_pass_hz)
         for index in range(min(len(params), amp.shape[0])):
             if max_epochs is not None and used >= max_epochs:
                 break
@@ -3862,13 +3965,20 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                                             else np.nan)})
             used += 1
 
-    step = max(int(downsample), 1)
+    step = (max(int(downsample), 1) if spiking else
+            _milliseconds_to_samples(
+                whole_cell_bin_ms, sample_rate, 'whole_cell_bin_ms',
+                allow_zero=False))
     interval = step / sample_rate
     adjustments: List[dict] = []
     analysis = ConditionAnalysis(
         exp_name=exp_name, block_ids=[int(b) for b in block_ids],
         rec_type=rec_type, sample_rate=sample_rate,
         sampling_interval=interval, skip_seconds=float(skip_seconds),
+        spike_median_window_ms=spike_median_window_ms,
+        spike_high_pass_hz=float(spike_high_pass_hz),
+        psth_sigma_ms=float(psth_sigma_ms),
+        whole_cell_bin_ms=float(whole_cell_bin_ms),
         stim_time_ms=(float(stim_time_ms) if stim_time_ms is not None else np.nan),
         light_contrast=(float(light_contrast)
                         if light_contrast is not None else np.nan),
@@ -5933,6 +6043,12 @@ def save_condition_output(
         h5.attrs['decode_window_rule'] = str(decode_window_rule)
         h5.attrs['sample_rate'] = float(analysis.sample_rate)
         h5.attrs['sampling_interval'] = float(analysis.sampling_interval)
+        h5.attrs['spike_median_window_ms'] = (
+            np.nan if analysis.spike_median_window_ms is None else
+            float(analysis.spike_median_window_ms))
+        h5.attrs['spike_high_pass_hz'] = float(analysis.spike_high_pass_hz)
+        h5.attrs['psth_sigma_ms'] = float(analysis.psth_sigma_ms)
+        h5.attrs['whole_cell_bin_ms'] = float(analysis.whole_cell_bin_ms)
         h5.attrs['skip_seconds'] = float(analysis.skip_seconds)
         h5.attrs['stim_time_ms'] = float(analysis.stim_time_ms)
         h5.attrs['stim_seconds'] = float(analysis.stim_time_ms) / 1e3
@@ -6117,6 +6233,13 @@ def _output_metadata(path) -> dict:
             'stim_seconds': float(h5.attrs.get('stim_seconds', np.nan)),
             'light_contrast': float(h5.attrs.get('light_contrast', np.nan)),
             'n_epochs_total': int(h5.attrs.get('n_epochs', 0)),
+            'spike_median_window_ms': float(
+                h5.attrs.get('spike_median_window_ms', np.nan)),
+            'spike_high_pass_hz': float(
+                h5.attrs.get('spike_high_pass_hz', np.nan)),
+            'psth_sigma_ms': float(h5.attrs.get('psth_sigma_ms', np.nan)),
+            'whole_cell_bin_ms': float(
+                h5.attrs.get('whole_cell_bin_ms', np.nan)),
             'decode_window_s': float(h5.attrs.get('decode_window_s', np.nan)),
             'decode_window_rule': text(h5.attrs.get('decode_window_rule', '')),
             'protocols': text(h5.attrs.get('protocols', '')).replace('\n', ', '),
@@ -6149,6 +6272,8 @@ def load_condition_index(output_dir=None,
                'mean_rate_hz',
                'rec_type', 'rig', 'led', 'led_ndfs', 'optical_density',
                'stim_time_ms', 'stim_seconds', 'light_contrast', 'n_epochs_total',
+               'spike_median_window_ms', 'spike_high_pass_hz',
+               'psth_sigma_ms', 'whole_cell_bin_ms',
                'decode_window_s', 'decode_window_rule', 'protocols',
                'n_blocks', 'output_path']
     rows = [_output_metadata(path) for path in sorted(directory.glob('*.h5'))]
@@ -8846,6 +8971,10 @@ def subset_analysis(analysis: ConditionAnalysis,
         sample_rate=float(analysis.sample_rate) / int(decimate),
         units=analysis.units,
         sampling_interval=dt * int(decimate),
+        spike_median_window_ms=analysis.spike_median_window_ms,
+        spike_high_pass_hz=analysis.spike_high_pass_hz,
+        psth_sigma_ms=analysis.psth_sigma_ms,
+        whole_cell_bin_ms=analysis.whole_cell_bin_ms,
         skip_seconds=float(analysis.skip_seconds),
         stim_time_ms=float(analysis.stim_time_ms),
         light_contrast=float(analysis.light_contrast),
@@ -8886,6 +9015,10 @@ def save_analysis(analysis: ConditionAnalysis, path) -> Path:
         'units': str(analysis.units),
         'sample_rate': float(analysis.sample_rate),
         'sampling_interval': float(analysis.sampling_interval),
+        'spike_median_window_ms': analysis.spike_median_window_ms,
+        'spike_high_pass_hz': float(analysis.spike_high_pass_hz),
+        'psth_sigma_ms': float(analysis.psth_sigma_ms),
+        'whole_cell_bin_ms': float(analysis.whole_cell_bin_ms),
         'skip_seconds': float(analysis.skip_seconds),
         'stim_time_ms': float(analysis.stim_time_ms),
         'light_contrast': float(analysis.light_contrast),
@@ -8932,6 +9065,10 @@ def load_analysis(path) -> ConditionAnalysis:
         exp_name=meta['exp_name'], block_ids=list(meta['block_ids']),
         rec_type=meta['rec_type'], sample_rate=meta['sample_rate'],
         units=meta['units'], sampling_interval=meta['sampling_interval'],
+        spike_median_window_ms=meta.get('spike_median_window_ms', 5.0),
+        spike_high_pass_hz=meta.get('spike_high_pass_hz', 300.0),
+        psth_sigma_ms=meta.get('psth_sigma_ms', 10.0),
+        whole_cell_bin_ms=meta.get('whole_cell_bin_ms', 5.0),
         skip_seconds=meta['skip_seconds'],
         stim_time_ms=float(meta.get('stim_time_ms', np.nan)),
         light_contrast=float(meta.get('light_contrast', np.nan)),
@@ -9234,6 +9371,9 @@ def run_core_ln_analysis(
         frequency_cutoff: Optional[float] = None,
         n_bins: int = 100,
         psth_sigma_ms: float = 10.0,
+        spike_median_window_ms: Optional[float] = 5.0,
+        spike_high_pass_hz: float = 300.0,
+        whole_cell_bin_ms: float = 5.0,
         mean_window_s: float = 2.0,
         condition_window_s: float = 6.0,
         temporal_window_s: Optional[float] = None,
@@ -9264,6 +9404,9 @@ def run_core_ln_analysis(
         light_means=light_means,
         filter_length_s=filter_length_s, downsample=downsample,
         psth_sigma_ms=psth_sigma_ms, n_bins=n_bins,
+        spike_median_window_ms=spike_median_window_ms,
+        spike_high_pass_hz=spike_high_pass_hz,
+        whole_cell_bin_ms=whole_cell_bin_ms,
         frequency_cutoff=frequency_cutoff, skip_seconds=skip_seconds,
         subtract_baseline=subtract_baseline,
         max_series_resistance=max_series_resistance,
@@ -9315,7 +9458,11 @@ def response_qc_signature(
         max_epochs: Optional[int],
         min_firing_rate_hz: float,
         min_whole_cell_modulation_pa: float,
-        low_response_epoch_fraction: float) -> tuple:
+        low_response_epoch_fraction: float,
+        spike_median_window_ms: Optional[float] = 5.0,
+        spike_high_pass_hz: float = 300.0,
+        psth_sigma_ms: float = 10.0,
+        whole_cell_bin_ms: float = 5.0) -> tuple:
     """Immutable identity of the selected conditions and response-QC policy."""
     pairs = tuple((
         row.rec_type, float(row.stim_time_ms),
@@ -9329,7 +9476,11 @@ def response_qc_signature(
     return (str(exp_name), tuple(int(value) for value in block_ids), max_epochs,
             pairs, float(min_firing_rate_hz),
             float(min_whole_cell_modulation_pa),
-            float(low_response_epoch_fraction))
+            float(low_response_epoch_fraction),
+            (None if spike_median_window_ms is None else
+             float(spike_median_window_ms)),
+            float(spike_high_pass_hz), float(psth_sigma_ms),
+            float(whole_cell_bin_ms))
 
 
 def inspect_recording_conditions(
@@ -9341,6 +9492,10 @@ def inspect_recording_conditions(
         min_firing_rate_hz: float,
         min_whole_cell_modulation_pa: float,
         low_response_epoch_fraction: float,
+        spike_median_window_ms: Optional[float] = 5.0,
+        spike_high_pass_hz: float = 300.0,
+        psth_sigma_ms: float = 10.0,
+        whole_cell_bin_ms: float = 5.0,
         verbose: bool = True) -> ResponseInspection:
     """Plot conditions and automatically exclude failed mean-light groups.
 
@@ -9386,13 +9541,20 @@ def inspect_recording_conditions(
             max_epochs=max_epochs, stim_time_ms=condition.stim_time_ms,
             light_contrast=(contrast if np.isfinite(contrast) else None),
             excluded_epochs=excluded_epochs,
+            spike_median_window_ms=spike_median_window_ms,
+            spike_high_pass_hz=spike_high_pass_hz,
+            whole_cell_bin_ms=whole_cell_bin_ms,
             show=verbose)
         summaries[key] = summary
         figures[key] = plot_traces(
             exp_name, condition.block_ids, rec_type,
             max_epochs=max_epochs, stim_time_ms=condition.stim_time_ms,
             light_contrast=(contrast if np.isfinite(contrast) else None),
-            excluded_epochs=excluded_epochs)
+            excluded_epochs=excluded_epochs,
+            spike_median_window_ms=spike_median_window_ms,
+            spike_high_pass_hz=spike_high_pass_hz,
+            psth_sigma_ms=psth_sigma_ms,
+            whole_cell_bin_ms=whole_cell_bin_ms)
 
         retained_means, failed_reasons, activity_excluded = [], [], []
         n_retained_active = 0
@@ -9476,7 +9638,8 @@ def inspect_recording_conditions(
     signature = response_qc_signature(
         exp_name, block_ids, retained, max_epochs,
         min_firing_rate_hz, min_whole_cell_modulation_pa,
-        low_response_epoch_fraction)
+        low_response_epoch_fraction, spike_median_window_ms,
+        spike_high_pass_hz, psth_sigma_ms, whole_cell_bin_ms)
     condition_audit = pd.DataFrame(audit_rows)
     if verbose:
         print('\nSection 2 activity-QC condition audit:')
@@ -9505,6 +9668,10 @@ def run_core_condition_analyses(
         low_response_epoch_fraction: float,
         skip_seconds: float = 1.0,
         downsample: int = 10,
+        spike_median_window_ms: Optional[float] = 5.0,
+        spike_high_pass_hz: float = 300.0,
+        psth_sigma_ms: float = 10.0,
+        whole_cell_bin_ms: float = 5.0,
         max_series_resistance: Optional[float] = 30e6,
         align_epoch_means: bool = True,
         mean_window_s: float = 2.0,
@@ -9515,7 +9682,8 @@ def run_core_condition_analyses(
     expected = response_qc_signature(
         exp_name, block_ids, conditions, max_epochs,
         min_firing_rate_hz, min_whole_cell_modulation_pa,
-        low_response_epoch_fraction)
+        low_response_epoch_fraction, spike_median_window_ms,
+        spike_high_pass_hz, psth_sigma_ms, whole_cell_bin_ms)
     if qc_signature != expected:
         raise RuntimeError(
             'Section 2 activity QC has not run for the current retained '
@@ -9542,6 +9710,10 @@ def run_core_condition_analyses(
             light_means=included_light_means,
             skip_seconds=skip_seconds,
             downsample=downsample, max_epochs=max_epochs,
+            spike_median_window_ms=spike_median_window_ms,
+            spike_high_pass_hz=spike_high_pass_hz,
+            psth_sigma_ms=psth_sigma_ms,
+            whole_cell_bin_ms=whole_cell_bin_ms,
             max_series_resistance=max_series_resistance,
             align_epoch_means=align_epoch_means,
             excluded_epochs=excluded_epochs,
@@ -9576,6 +9748,10 @@ def run_reconstruction_analyses(
         direction_min_change_quantile: float,
         trace_seconds: Tuple[float, float],
         downsample: int = 10,
+        spike_median_window_ms: Optional[float] = 5.0,
+        spike_high_pass_hz: float = 300.0,
+        psth_sigma_ms: float = 10.0,
+        whole_cell_bin_ms: float = 5.0,
         max_epochs: Optional[int] = None,
         max_series_resistance: Optional[float] = 30e6,
         align_epoch_means: bool = True,
@@ -9596,6 +9772,10 @@ def run_reconstruction_analyses(
             light_means=core.analysis.light_means,
             skip_seconds=decode_skip_s,
             downsample=downsample, max_epochs=max_epochs,
+            spike_median_window_ms=spike_median_window_ms,
+            spike_high_pass_hz=spike_high_pass_hz,
+            psth_sigma_ms=psth_sigma_ms,
+            whole_cell_bin_ms=whole_cell_bin_ms,
             max_series_resistance=max_series_resistance,
             align_epoch_means=align_epoch_means,
             excluded_epochs=core.analysis.excluded_epochs,
@@ -9923,6 +10103,7 @@ __all__ = [
     'apply_epoch_range_exclusions',
     'epoch_response_summary', 'plot_traces', 'plot_raw_epoch_traces',
     'plot_raw_epoch_traces_by_recording_type',
+    'preprocess_spike_trace', 'preprocess_whole_cell_trace',
     'epoch_parameters', 'normalize_epoch_light_means',
     'resolve_block_mode', 'load_block_modes',
     'PROTOCOL_PARAMETERS', 'MIN_STIM_TIME_MS', 'MIN_EPOCHS_PER_DURATION',

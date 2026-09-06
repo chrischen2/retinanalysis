@@ -145,18 +145,10 @@ def detector(data_matrix, check_detection=False, sample_rate=1e4, refractory_per
     search_window_dp = search_window * sample_rate  # datapoints
     max_trial_length_dp = int(max_trial_length_s * sample_rate)  # Convert seconds to datapoints
 
-    data_matrix = np.asarray(data_matrix, dtype=float)
-    if data_matrix.ndim == 1:
-        data_matrix = data_matrix[np.newaxis, :]
-    if median_window_samples:
-        from scipy.ndimage import median_filter
-
-        window = int(median_window_samples)
-        if window < 1:
-            raise ValueError('median_window_samples must be positive, 0, or None')
-        baseline = median_filter(data_matrix, size=(1, window), mode='nearest')
-        data_matrix = data_matrix - baseline
-    data_matrix = high_pass_filter(data_matrix, cutoff_frequency, 1/sample_rate)
+    data_matrix = preprocess_spike_traces(
+        data_matrix, sample_rate=sample_rate,
+        median_window_samples=median_window_samples,
+        cutoff_frequency=cutoff_frequency)
 
     n_traces = data_matrix.shape[0]
     spike_times = [[] for _ in range(n_traces)]
@@ -565,6 +557,38 @@ def get_rebounds(peaks_ind, trace, search_interval):
     assign_first(peaks > 0, minima)
 
     return r
+
+def preprocess_spike_traces(data_matrix, sample_rate=1e4,
+                            median_window_samples=50,
+                            cutoff_frequency=300):
+    """Return the exact voltage traces consumed by :func:`detector`.
+
+    The moving-median baseline is removed first, then the shared FFT high-pass
+    is applied. Keeping this as a public preprocessing step lets inspection
+    plots show the detector input rather than a visually different raw trace.
+    The result is always a two-dimensional ``trials x samples`` array.
+    """
+    traces = np.asarray(data_matrix, dtype=float)
+    if traces.ndim == 1:
+        traces = traces[np.newaxis, :]
+    if traces.ndim != 2:
+        raise ValueError('data_matrix must be one- or two-dimensional')
+    rate = float(sample_rate)
+    cutoff = float(cutoff_frequency)
+    if not np.isfinite(rate) or rate <= 0:
+        raise ValueError('sample_rate must be finite and positive')
+    if not np.isfinite(cutoff) or not 0 < cutoff < rate / 2:
+        raise ValueError('cutoff_frequency must lie between 0 and Nyquist')
+    if median_window_samples:
+        from scipy.ndimage import median_filter
+
+        window = int(median_window_samples)
+        if window < 1:
+            raise ValueError('median_window_samples must be positive, 0, or None')
+        baseline = median_filter(traces, size=(1, window), mode='nearest')
+        traces = traces - baseline
+    return high_pass_filter(traces, cutoff, 1 / rate)
+
 
 def high_pass_filter(X, F, SampleInterval):
     L = X.shape[1] if X.ndim > 1 else len(X)

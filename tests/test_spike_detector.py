@@ -82,6 +82,32 @@ def test_detector_default_median_window_is_50_samples(monkeypatch):
     assert captured == {'size': (1, 50), 'mode': 'nearest'}
 
 
+def test_detector_consumes_shared_preprocessed_trace(monkeypatch):
+    captured = {}
+
+    def preprocess(values, sample_rate, median_window_samples, cutoff_frequency):
+        captured.update({
+            'values': np.asarray(values).copy(),
+            'sample_rate': sample_rate,
+            'median_window_samples': median_window_samples,
+            'cutoff_frequency': cutoff_frequency,
+        })
+        return np.zeros((1, np.asarray(values).size), dtype=float)
+
+    monkeypatch.setattr(spike_detector, 'preprocess_spike_traces', preprocess)
+    source = np.arange(20.0)
+    spike_detector.detector(
+        source, sample_rate=2000.0, median_window_samples=10,
+        cutoff_frequency=250.0)
+
+    np.testing.assert_array_equal(captured.pop('values'), source)
+    assert captured == {
+        'sample_rate': 2000.0,
+        'median_window_samples': 10,
+        'cutoff_frequency': 250.0,
+    }
+
+
 def test_detector_can_disable_moving_median(monkeypatch):
     trace = np.arange(20.0)
     captured = {}
