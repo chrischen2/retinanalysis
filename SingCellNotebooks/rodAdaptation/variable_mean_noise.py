@@ -94,9 +94,9 @@ CONDITION_TABLES = (
 )
 
 # Whole-cell epochs are aligned only within an otherwise identical analysis
-# condition.  The default anchors that condition to its earliest stable level;
-# ``median`` remains available for reproducing the previous behavior.
-WHOLE_CELL_BASELINE_TARGETS = ('first_two_mean', 'median')
+# condition. The default anchors that condition to its first retained epoch;
+# older target policies remain available for reproducibility.
+WHOLE_CELL_BASELINE_TARGETS = ('first_epoch', 'first_two_mean', 'median')
 
 
 def _normalize_whole_cell_baseline_target(value) -> str:
@@ -3461,7 +3461,7 @@ class ConditionAnalysis:
     psth_sigma_ms: float = 10.0
     whole_cell_bin_ms: float = 5.0
     align_epoch_means: bool = True
-    whole_cell_baseline_target: str = 'first_two_mean'
+    whole_cell_baseline_target: str = 'first_epoch'
     skip_seconds: float = 0.0
     # Exact recorded protocol duration for this condition. Duration is a
     # condition dimension, never an array-truncation detail.
@@ -3697,7 +3697,7 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                       subtract_baseline: bool = False,
                       max_series_resistance: Optional[float] = 30e6,
                       align_epoch_means: bool = True,
-                      whole_cell_baseline_target: str = 'first_two_mean',
+                      whole_cell_baseline_target: str = 'first_epoch',
                       max_epochs: Optional[int] = None,
                       excluded_epochs=(),
                       activity_excluded_epochs=(),
@@ -3749,10 +3749,9 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
         shifts each epoch to a common holding-current target within its own
         light mean. Per light mean, not globally -- the two means genuinely
         differ in holding current and that difference is signal. The default
-        ``'first_two_mean'`` target is the mean holding current of the first
-        two retained trials in acquisition order. If only one remains, no
-        between-trial alignment is needed. Choose ``'median'`` to reproduce
-        the previous target.
+        ``'first_epoch'`` target is the mean holding current of the first
+        retained epoch in acquisition order. Choose ``'first_two_mean'`` or
+        ``'median'`` to reproduce an older target policy.
         The shifts are printed and kept in
         ``ConditionAnalysis.epoch_adjustments``.
 
@@ -4027,15 +4026,20 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
         resp = np.vstack([_block_average(r[:width], step)
                           for r in responses[mean_level]])
 
-        # Bring the epochs of this light mean onto a common holding level. Rows
-        # are in acquisition order, so the default reference is the first two
-        # retained trials of this exact condition.
+        # Bring epochs of this light mean onto a common holding level. Rows are
+        # in acquisition order, so the default reference is the first retained
+        # epoch of this exact condition. The outer call already fixes recording
+        # type, duration and contrast; this loop additionally fixes light mean.
         if whole_cell and align_epoch_means and resp.shape[0] > 1:
             epoch_means = resp.mean(axis=1)
-            reference_n = min(2, len(epoch_means))
-            if baseline_target_method == 'first_two_mean':
+            if baseline_target_method == 'first_epoch':
+                reference_n = 1
+                target = float(epoch_means[0])
+            elif baseline_target_method == 'first_two_mean':
+                reference_n = min(2, len(epoch_means))
                 target = float(np.mean(epoch_means[:reference_n]))
             else:
+                reference_n = len(epoch_means)
                 target = float(np.median(epoch_means))
             offsets = target - epoch_means
             resp = resp + offsets[:, None]
@@ -4044,9 +4048,7 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                 adjustments.append({**record,
                                     'baseline_target_method': baseline_target_method,
                                     'baseline_reference_n': reference_n,
-                                    'baseline_reference_epoch': (
-                                        baseline_target_method == 'first_two_mean'
-                                        and rank < reference_n),
+                                    'baseline_reference_epoch': rank < reference_n,
                                     'mean_before_pa': float(before),
                                     'offset_pa': float(offset),
                                     'mean_after_pa': float(target)})
@@ -4090,9 +4092,11 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                       f'(lightMean {record["light_mean"]:g}): {detail}')
         if adjustments:
             frame = analysis.epoch_adjustments
-            target_label = ('mean of the first two retained trials'
-                            if baseline_target_method == 'first_two_mean'
-                            else 'median of all retained trials')
+            target_label = {
+                'first_epoch': 'mean of the first retained epoch',
+                'first_two_mean': 'mean of the first two retained epochs',
+                'median': 'median of all retained epochs',
+            }[baseline_target_method]
             print(f'\n  baseline-aligned {len(frame)} epoch(s) to the '
                   f'{target_label} within each lightMean; between-mean '
                   'baselines were preserved:')
@@ -9176,7 +9180,7 @@ def build_fixture(exp_name: str, block_ids: Sequence[int],
                   max_epochs: Optional[int] = None,
                   max_series_resistance: Optional[float] = 30e6,
                   align_epoch_means: bool = True,
-                  whole_cell_baseline_target: str = 'first_two_mean',
+                  whole_cell_baseline_target: str = 'first_epoch',
                   verbose: bool = True) -> Path:
     """Load one real recording and cache it as a fixture. Run once, off-line.
 
@@ -9426,7 +9430,7 @@ def run_core_ln_analysis(
         max_epochs: Optional[int] = None,
         max_series_resistance: Optional[float] = 30e6,
         align_epoch_means: bool = True,
-        whole_cell_baseline_target: str = 'first_two_mean',
+        whole_cell_baseline_target: str = 'first_epoch',
         excluded_epochs=(),
         activity_excluded_epochs=(),
         min_firing_rate_hz: Optional[float] = None,
@@ -9531,7 +9535,7 @@ def response_qc_signature(
         psth_sigma_ms: float = 10.0,
         whole_cell_bin_ms: float = 5.0,
         align_epoch_means: bool = True,
-        whole_cell_baseline_target: str = 'first_two_mean') -> tuple:
+        whole_cell_baseline_target: str = 'first_epoch') -> tuple:
     """Immutable identity of the selected conditions and response-QC policy."""
     baseline_target_method = _normalize_whole_cell_baseline_target(
         whole_cell_baseline_target)
@@ -9569,7 +9573,7 @@ def inspect_recording_conditions(
         psth_sigma_ms: float = 10.0,
         whole_cell_bin_ms: float = 5.0,
         align_epoch_means: bool = True,
-        whole_cell_baseline_target: str = 'first_two_mean',
+        whole_cell_baseline_target: str = 'first_epoch',
         make_response_trace_figures: bool = True,
         verbose: bool = True) -> ResponseInspection:
     """Plot conditions and automatically exclude failed mean-light groups.
@@ -9755,7 +9759,7 @@ def run_core_condition_analyses(
         whole_cell_bin_ms: float = 5.0,
         max_series_resistance: Optional[float] = 30e6,
         align_epoch_means: bool = True,
-        whole_cell_baseline_target: str = 'first_two_mean',
+        whole_cell_baseline_target: str = 'first_epoch',
         mean_window_s: float = 2.0,
         condition_window_s: float = 6.0,
         temporal_window_s: Optional[float] = None,
@@ -9839,7 +9843,7 @@ def run_reconstruction_analyses(
         max_epochs: Optional[int] = None,
         max_series_resistance: Optional[float] = 30e6,
         align_epoch_means: bool = True,
-        whole_cell_baseline_target: str = 'first_two_mean',
+        whole_cell_baseline_target: str = 'first_epoch',
         verbose: bool = True) -> Dict[Tuple[str, float, float], dict]:
     """Run all held-out reconstruction analyses for every saved condition."""
     results = {}

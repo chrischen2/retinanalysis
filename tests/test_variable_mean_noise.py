@@ -1181,17 +1181,21 @@ def test_whole_cell_baseline_alignment_is_separate_within_each_light_mean(
 
     low_means = analysis.response[0.1].mean(axis=1)
     high_means = analysis.response[1.0].mean(axis=1)
-    np.testing.assert_allclose(low_means, [20.0, 20.0, 20.0])
-    np.testing.assert_allclose(high_means, [120.0, 120.0, 120.0])
-    assert high_means[0] - low_means[0] == 100.0
+    np.testing.assert_allclose(low_means, [10.0, 10.0, 10.0])
+    np.testing.assert_allclose(high_means, [100.0, 100.0, 100.0])
+    assert high_means[0] - low_means[0] == 90.0
     adjustments = analysis.epoch_adjustments
     assert adjustments.groupby('light_mean').mean_after_pa.nunique().eq(1).all()
-    assert set(adjustments.baseline_target_method) == {'first_two_mean'}
-    assert set(adjustments.baseline_reference_n) == {2}
-    assert adjustments.groupby('light_mean').baseline_reference_epoch.sum().eq(2).all()
+    assert set(adjustments.baseline_target_method) == {'first_epoch'}
+    assert set(adjustments.baseline_reference_n) == {1}
+    assert adjustments.groupby('light_mean').baseline_reference_epoch.sum().eq(1).all()
 
 
-def test_whole_cell_baseline_alignment_can_use_legacy_median(monkeypatch):
+@pytest.mark.parametrize(
+    ('target_method', 'expected_target', 'reference_n'),
+    [('first_two_mean', 20.0, 2), ('median', 30.0, 3)])
+def test_whole_cell_baseline_alignment_supports_older_policies(
+        monkeypatch, target_method, expected_target, reference_n):
     import pandas as pd
 
     params = pd.DataFrame({
@@ -1213,13 +1217,16 @@ def test_whole_cell_baseline_alignment_can_use_legacy_median(monkeypatch):
     analysis = vmn.analyze_condition(
         'synthetic', [1], rec_type='exc', stim_time_ms=4.0,
         skip_seconds=0.0, downsample=1, align_epoch_means=True,
-        whole_cell_baseline_target='median', whole_cell_bin_ms=1.0,
+        whole_cell_baseline_target=target_method, whole_cell_bin_ms=1.0,
         fit=False, verbose=False)
 
-    np.testing.assert_allclose(analysis.response[0.1].mean(axis=1), 30.0)
-    assert analysis.whole_cell_baseline_target == 'median'
-    assert set(analysis.epoch_adjustments.baseline_target_method) == {'median'}
-    assert not analysis.epoch_adjustments.baseline_reference_epoch.any()
+    np.testing.assert_allclose(
+        analysis.response[0.1].mean(axis=1), expected_target)
+    assert analysis.whole_cell_baseline_target == target_method
+    adjustments = analysis.epoch_adjustments
+    assert set(adjustments.baseline_target_method) == {target_method}
+    assert set(adjustments.baseline_reference_n) == {reference_n}
+    assert adjustments.baseline_reference_epoch.sum() == reference_n
 
 
 def test_whole_cell_baseline_target_rejects_unknown_policy(monkeypatch):
@@ -1236,7 +1243,7 @@ def test_whole_cell_baseline_target_rejects_unknown_policy(monkeypatch):
             fit=False, verbose=False)
 
 
-def test_first_two_baseline_trials_follow_acquisition_time_across_blocks(
+def test_first_baseline_epoch_follows_acquisition_time_across_blocks(
         monkeypatch):
     import pandas as pd
 
@@ -1270,10 +1277,10 @@ def test_first_two_baseline_trials_follow_acquisition_time_across_blocks(
         skip_seconds=0.0, downsample=1, whole_cell_bin_ms=1.0,
         fit=False, verbose=False)
 
-    np.testing.assert_allclose(analysis.response[0.1].mean(axis=1), 20.0)
+    np.testing.assert_allclose(analysis.response[0.1].mean(axis=1), 10.0)
     adjustments = analysis.epoch_adjustments
     assert adjustments.block_id.tolist() == [20, 30, 10]
-    assert adjustments.baseline_reference_epoch.tolist() == [True, True, False]
+    assert adjustments.baseline_reference_epoch.tolist() == [True, False, False]
 
 
 def test_epoch_response_summary_reports_whole_cell_modulation_in_pa(monkeypatch):
@@ -2441,7 +2448,7 @@ def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
         assert stored.attrs['psth_sigma_ms'] == 10.0
         assert stored.attrs['whole_cell_bin_ms'] == 5.0
         assert bool(stored.attrs['align_epoch_means'])
-        assert stored.attrs['whole_cell_baseline_target'] == 'first_two_mean'
+        assert stored.attrs['whole_cell_baseline_target'] == 'first_epoch'
         assert stored['excluded_epochs'][:].tolist() == [[11, 1]]
         assert stored['activity_excluded_epochs'][:].tolist() == [[11, 1]]
         assert stored.attrs['decode_window_s'] == 2.5
@@ -2458,7 +2465,7 @@ def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
     assert index.loc[0, [
         'spike_median_window_ms', 'spike_high_pass_hz',
         'psth_sigma_ms', 'whole_cell_bin_ms']].tolist() == [5.0, 300.0, 10.0, 5.0]
-    assert index.loc[0, 'whole_cell_baseline_target'] == 'first_two_mean'
+    assert index.loc[0, 'whole_cell_baseline_target'] == 'first_epoch'
     assert bool(index.loc[0, 'align_epoch_means'])
     assert index[['date', 'cell_index', 'cell_label', 'cell_type', 'rec_type',
                   'mean_rate_hz',
