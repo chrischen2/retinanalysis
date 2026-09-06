@@ -91,14 +91,14 @@ def detector(data_matrix, check_detection=False, sample_rate=1e4, refractory_per
              min_peak_amplitude=0, n_clusters=2, threshold_spike_factor=3,
              remove_refractory_violations=True, max_trial_length_s=1, str_save_dir=None,
              verbose=False, cluster_across_trials=False,
-             median_window_samples=100):
+             median_window_samples=50):
     """Detect spikes in extracellular / cell-attached traces; port of SpikeDetectorNew.m.
 
     Each row of ``data_matrix`` is one trial. Before high-pass filtering, a
-    100-sample moving median is subtracted from each trace, matching the
-    VariableMeanNoise MATLAB preprocessing and preventing abrupt baseline
-    shifts from becoming candidate spikes. Set ``median_window_samples`` to 0
-    or ``None`` to disable that detrending. Every remaining local extremum is
+    50-sample moving median is subtracted from each trace (5 ms at the default
+    10 kHz sample rate), preventing abrupt baseline shifts from becoming
+    candidate spikes. Set ``median_window_samples`` to 0 or ``None`` to
+    disable that detrending. Every remaining local extremum is
     taken as a *candidate*, and k-means on (peak amplitude, left rebound, right
     rebound) splits those candidates into a spike and a noise cluster. A trial
     only counts as spiking when its spike cluster stands

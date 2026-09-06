@@ -45,7 +45,7 @@ def test_get_rebounds_handles_empty_candidates():
 
 
 def test_detector_removes_moving_median_before_high_pass(monkeypatch):
-    """Match MATLAB's 100-sample movmedian preprocessing of spike traces."""
+    """The default 50-sample moving median removes slow baseline offsets."""
     trace = np.r_[np.full(150, 4.0), np.full(150, 40.0)]
     captured = {}
 
@@ -60,6 +60,26 @@ def test_detector_removes_moving_median_before_high_pass(monkeypatch):
     np.testing.assert_allclose(detrended[:100], 0.0)
     np.testing.assert_allclose(detrended[-100:], 0.0)
     assert np.max(np.abs(detrended)) <= 36.0
+
+
+def test_detector_default_median_window_is_50_samples(monkeypatch):
+    import scipy.ndimage
+
+    captured = {}
+
+    def capture_median(values, size, mode):
+        captured['size'] = size
+        captured['mode'] = mode
+        return np.zeros_like(values)
+
+    monkeypatch.setattr(scipy.ndimage, 'median_filter', capture_median)
+    monkeypatch.setattr(
+        spike_detector, 'high_pass_filter',
+        lambda values, cutoff, interval: np.zeros_like(values))
+
+    spike_detector.detector(np.zeros(100), sample_rate=10_000.0)
+
+    assert captured == {'size': (1, 50), 'mode': 'nearest'}
 
 
 def test_detector_can_disable_moving_median(monkeypatch):

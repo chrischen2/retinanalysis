@@ -22,10 +22,9 @@ meaningful), and the fit is over *every epoch* rather than the per-size means,
 so sizes with more repeats carry more weight. sigma_c / sigma_s come back in µm
 and are unaffected by the normalization.
 
-Spike preprocessing matches the MATLAB: ``SpikeDetectorNew`` is preceded there
-by a 100-sample ``movmedian`` detrend, and
-``utils.spike_detector.detector`` performs the same detrending before its
-internal high-pass filter. No extra detrending is applied here.
+Spike preprocessing uses the shared detector's 50-sample (5 ms at 10 kHz)
+``movmedian`` detrend before its internal high-pass filter. No extra
+detrending is applied here.
 """
 from __future__ import annotations
 
