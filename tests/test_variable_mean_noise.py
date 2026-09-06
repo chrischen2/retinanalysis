@@ -1155,14 +1155,15 @@ def test_whole_cell_baseline_alignment_is_separate_within_each_light_mean(
     import pandas as pd
 
     params = pd.DataFrame({
-        'stimTime': [4.0] * 4,
-        'lightMean': [0.1, 0.1, 1.0, 1.0],
-        'frequencyCutoff': [20.0] * 4,
+        'stimTime': [4.0] * 6,
+        'lightMean': [0.1, 1.0, 0.1, 1.0, 0.1, 1.0],
+        'frequencyCutoff': [20.0] * 6,
     })
     modulation = np.array([-1.0, 1.0, -1.0, 1.0])
     amp = np.vstack([
-        10.0 + modulation, 30.0 + modulation,
-        100.0 + modulation, 140.0 + modulation,
+        10.0 + modulation, 100.0 + modulation,
+        30.0 + modulation, 140.0 + modulation,
+        100.0 + modulation, 300.0 + modulation,
     ])
     monkeypatch.setattr(vmn, 'epoch_parameters', lambda _block: params)
     monkeypatch.setattr(
@@ -1180,11 +1181,99 @@ def test_whole_cell_baseline_alignment_is_separate_within_each_light_mean(
 
     low_means = analysis.response[0.1].mean(axis=1)
     high_means = analysis.response[1.0].mean(axis=1)
-    np.testing.assert_allclose(low_means, [20.0, 20.0])
-    np.testing.assert_allclose(high_means, [120.0, 120.0])
+    np.testing.assert_allclose(low_means, [20.0, 20.0, 20.0])
+    np.testing.assert_allclose(high_means, [120.0, 120.0, 120.0])
     assert high_means[0] - low_means[0] == 100.0
     adjustments = analysis.epoch_adjustments
     assert adjustments.groupby('light_mean').mean_after_pa.nunique().eq(1).all()
+    assert set(adjustments.baseline_target_method) == {'first_two_mean'}
+    assert set(adjustments.baseline_reference_n) == {2}
+    assert adjustments.groupby('light_mean').baseline_reference_epoch.sum().eq(2).all()
+
+
+def test_whole_cell_baseline_alignment_can_use_legacy_median(monkeypatch):
+    import pandas as pd
+
+    params = pd.DataFrame({
+        'stimTime': [4.0] * 3,
+        'lightMean': [0.1] * 3,
+        'frequencyCutoff': [20.0] * 3,
+    })
+    modulation = np.array([-1.0, 1.0, -1.0, 1.0])
+    amp = np.vstack([
+        10.0 + modulation, 30.0 + modulation, 100.0 + modulation])
+    monkeypatch.setattr(vmn, 'epoch_parameters', lambda _block: params)
+    monkeypatch.setattr(
+        vmn, 'load_block',
+        lambda _exp, _block, _spiking, **_kwargs: (amp, 1000.0, None))
+    monkeypatch.setattr(
+        vmn, 'epoch_stimulus',
+        lambda row, sample_rate: np.arange(int(row.stimTime), dtype=float))
+
+    analysis = vmn.analyze_condition(
+        'synthetic', [1], rec_type='exc', stim_time_ms=4.0,
+        skip_seconds=0.0, downsample=1, align_epoch_means=True,
+        whole_cell_baseline_target='median', whole_cell_bin_ms=1.0,
+        fit=False, verbose=False)
+
+    np.testing.assert_allclose(analysis.response[0.1].mean(axis=1), 30.0)
+    assert analysis.whole_cell_baseline_target == 'median'
+    assert set(analysis.epoch_adjustments.baseline_target_method) == {'median'}
+    assert not analysis.epoch_adjustments.baseline_reference_epoch.any()
+
+
+def test_whole_cell_baseline_target_rejects_unknown_policy(monkeypatch):
+    import pandas as pd
+
+    monkeypatch.setattr(
+        vmn, 'epoch_parameters',
+        lambda _block: pd.DataFrame({'stimTime': [4.0], 'lightMean': [0.1]}))
+
+    with pytest.raises(ValueError, match='whole_cell_baseline_target'):
+        vmn.analyze_condition(
+            'synthetic', [1], rec_type='exc', stim_time_ms=4.0,
+            whole_cell_baseline_target='first_three_mean',
+            fit=False, verbose=False)
+
+
+def test_first_two_baseline_trials_follow_acquisition_time_across_blocks(
+        monkeypatch):
+    import pandas as pd
+
+    starts = {
+        10: '2021-01-01 12:03:00',
+        20: '2021-01-01 12:01:00',
+        30: '2021-01-01 12:02:00',
+    }
+    levels = {10: 100.0, 20: 10.0, 30: 30.0}
+
+    def fake_params(block_id):
+        return pd.DataFrame({
+            'stimTime': [4.0], 'lightMean': [0.1],
+            'frequencyCutoff': [20.0],
+            'start_time': [pd.Timestamp(starts[block_id])],
+            'epoch_id': [block_id * 10],
+        })
+
+    modulation = np.array([-1.0, 1.0, -1.0, 1.0])
+    monkeypatch.setattr(vmn, 'epoch_parameters', fake_params)
+    monkeypatch.setattr(
+        vmn, 'load_block',
+        lambda _exp, block, _spiking, **_kwargs: (
+            (levels[block] + modulation)[None, :], 1000.0, None))
+    monkeypatch.setattr(
+        vmn, 'epoch_stimulus',
+        lambda row, sample_rate: np.arange(int(row.stimTime), dtype=float))
+
+    analysis = vmn.analyze_condition(
+        'synthetic', [10, 20, 30], rec_type='exc', stim_time_ms=4.0,
+        skip_seconds=0.0, downsample=1, whole_cell_bin_ms=1.0,
+        fit=False, verbose=False)
+
+    np.testing.assert_allclose(analysis.response[0.1].mean(axis=1), 20.0)
+    adjustments = analysis.epoch_adjustments
+    assert adjustments.block_id.tolist() == [20, 30, 10]
+    assert adjustments.baseline_reference_epoch.tolist() == [True, True, False]
 
 
 def test_epoch_response_summary_reports_whole_cell_modulation_in_pa(monkeypatch):
@@ -2351,6 +2440,8 @@ def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
         assert stored.attrs['spike_high_pass_hz'] == 300.0
         assert stored.attrs['psth_sigma_ms'] == 10.0
         assert stored.attrs['whole_cell_bin_ms'] == 5.0
+        assert bool(stored.attrs['align_epoch_means'])
+        assert stored.attrs['whole_cell_baseline_target'] == 'first_two_mean'
         assert stored['excluded_epochs'][:].tolist() == [[11, 1]]
         assert stored['activity_excluded_epochs'][:].tolist() == [[11, 1]]
         assert stored.attrs['decode_window_s'] == 2.5
@@ -2367,6 +2458,8 @@ def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
     assert index.loc[0, [
         'spike_median_window_ms', 'spike_high_pass_hz',
         'psth_sigma_ms', 'whole_cell_bin_ms']].tolist() == [5.0, 300.0, 10.0, 5.0]
+    assert index.loc[0, 'whole_cell_baseline_target'] == 'first_two_mean'
+    assert bool(index.loc[0, 'align_epoch_means'])
     assert index[['date', 'cell_index', 'cell_label', 'cell_type', 'rec_type',
                   'mean_rate_hz',
                   'stim_seconds', 'n_epochs_total', 'rig',
@@ -2563,7 +2656,9 @@ def test_condition_batch_helpers_preserve_mode_duration_keys(monkeypatch):
         min_firing_rate_hz=30., min_whole_cell_modulation_pa=100.,
         low_response_epoch_fraction=.8,
         spike_median_window_ms=7., spike_high_pass_hz=250.,
-        psth_sigma_ms=12., whole_cell_bin_ms=4., verbose=False)
+        psth_sigma_ms=12., whole_cell_bin_ms=4.,
+        align_epoch_means=False, whole_cell_baseline_target='median',
+        verbose=False)
     assert set(inspection.summaries) == {
         ('extracellular', 30_000.), ('exc', 60_000.)}
 
@@ -2576,7 +2671,8 @@ def test_condition_batch_helpers_preserve_mode_duration_keys(monkeypatch):
                       tuple(kwargs['light_means']),
                       kwargs['spike_median_window_ms'],
                       kwargs['spike_high_pass_hz'], kwargs['psth_sigma_ms'],
-                      kwargs['whole_cell_bin_ms']))
+                      kwargs['whole_cell_bin_ms'], kwargs['align_epoch_means'],
+                      kwargs['whole_cell_baseline_target']))
         current = analysis
         current.rec_type = rec_type
         current.stim_time_ms = kwargs['stim_time_ms']
@@ -2589,11 +2685,14 @@ def test_condition_batch_helpers_preserve_mode_duration_keys(monkeypatch):
         min_firing_rate_hz=30., min_whole_cell_modulation_pa=100.,
         low_response_epoch_fraction=.8,
         spike_median_window_ms=7., spike_high_pass_hz=250.,
-        psth_sigma_ms=12., whole_cell_bin_ms=4., verbose=False)
+        psth_sigma_ms=12., whole_cell_bin_ms=4.,
+        align_epoch_means=False, whole_cell_baseline_target='median',
+        verbose=False)
     assert list(cores) == [('extracellular', 30_000.), ('exc', 60_000.)]
     assert calls == [
-        ('extracellular', 30_000., ((11, 1),), (.1,), 7., 250., 12., 4.),
-        ('exc', 60_000., (), (.1,), 7., 250., 12., 4.)]
+        ('extracellular', 30_000., ((11, 1),), (.1,), 7., 250., 12., 4.,
+         False, 'median'),
+        ('exc', 60_000., (), (.1,), 7., 250., 12., 4., False, 'median')]
 
 
 def test_inspection_excludes_only_failed_activity_conditions(monkeypatch):
@@ -2708,6 +2807,7 @@ def test_reconstruction_batch_helper_returns_save_ready_bundle(monkeypatch):
         direction_min_change_quantile=.25, trace_seconds=(10., 15.),
         spike_median_window_ms=7., spike_high_pass_hz=250.,
         psth_sigma_ms=12., whole_cell_bin_ms=4.,
+        whole_cell_baseline_target='median',
         verbose=False)
 
     bundle = result[('extracellular', 30_000.)]
@@ -2716,6 +2816,7 @@ def test_reconstruction_batch_helper_returns_save_ready_bundle(monkeypatch):
     assert reload_calls[0]['spike_high_pass_hz'] == 250.
     assert reload_calls[0]['psth_sigma_ms'] == 12.
     assert reload_calls[0]['whole_cell_bin_ms'] == 4.
+    assert reload_calls[0]['whole_cell_baseline_target'] == 'median'
     assert bundle['decode_window_s'] == 2.0
     assert bundle['directional_decoding'] is directional
     assert bundle['transfer_figure'] == 'figure'

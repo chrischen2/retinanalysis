@@ -93,6 +93,22 @@ CONDITION_TABLES = (
     'dropped_epochs', 'epoch_adjustments',
 )
 
+# Whole-cell epochs are aligned only within an otherwise identical analysis
+# condition.  The default anchors that condition to its earliest stable level;
+# ``median`` remains available for reproducing the previous behavior.
+WHOLE_CELL_BASELINE_TARGETS = ('first_two_mean', 'median')
+
+
+def _normalize_whole_cell_baseline_target(value) -> str:
+    method = str(value).strip().lower()
+    if method not in WHOLE_CELL_BASELINE_TARGETS:
+        choices = ', '.join(repr(choice)
+                            for choice in WHOLE_CELL_BASELINE_TARGETS)
+        raise ValueError(
+            f'whole_cell_baseline_target must be one of {choices}; got '
+            f'{value!r}')
+    return method
+
 STEP_DIRECTIONS = ('low', 'high')
 STEP_LABELS = {'low': 'high → low', 'high': 'low → high'}
 
@@ -3444,6 +3460,8 @@ class ConditionAnalysis:
     spike_high_pass_hz: float = 300.0
     psth_sigma_ms: float = 10.0
     whole_cell_bin_ms: float = 5.0
+    align_epoch_means: bool = True
+    whole_cell_baseline_target: str = 'first_two_mean'
     skip_seconds: float = 0.0
     # Exact recorded protocol duration for this condition. Duration is a
     # condition dimension, never an array-truncation detail.
@@ -3679,6 +3697,7 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                       subtract_baseline: bool = False,
                       max_series_resistance: Optional[float] = 30e6,
                       align_epoch_means: bool = True,
+                      whole_cell_baseline_target: str = 'first_two_mean',
                       max_epochs: Optional[int] = None,
                       excluded_epochs=(),
                       activity_excluded_epochs=(),
@@ -3726,13 +3745,16 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
         drops voltage-clamp epochs whose recorded series resistance is above it
         (30 MOhm by default); what was dropped is printed and kept in
         ``ConditionAnalysis.dropped_epochs``.
-    ``align_epoch_means``
-        shifts each epoch so its mean matches the **median of the epoch means
-        within its own light mean**. Per light mean, not globally -- the two
-        means genuinely differ in holding current and that difference is
-        signal. The median rather than the mean, so one badly drifted epoch
-        does not drag the level it is being compared against. The shifts are
-        printed and kept in ``ConditionAnalysis.epoch_adjustments``.
+    ``align_epoch_means`` / ``whole_cell_baseline_target``
+        shifts each epoch to a common holding-current target within its own
+        light mean. Per light mean, not globally -- the two means genuinely
+        differ in holding current and that difference is signal. The default
+        ``'first_two_mean'`` target is the mean holding current of the first
+        two retained trials in acquisition order. If only one remains, no
+        between-trial alignment is needed. Choose ``'median'`` to reproduce
+        the previous target.
+        The shifts are printed and kept in
+        ``ConditionAnalysis.epoch_adjustments``.
 
     A constant offset per epoch is not something the model can explain: it adds
     between-epoch variance to the response while the stimulus says nothing
@@ -3831,6 +3853,9 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
             f'light_contrast={light_contrast:g} is not present; available values are '
             + ', '.join(f'{value:g}' for value in available_contrasts))
 
+    baseline_target_method = _normalize_whole_cell_baseline_target(
+        whole_cell_baseline_target)
+
     spiking = rec_type == 'extracellular'
     activity_excluded = _excluded_epoch_set(activity_excluded_epochs)
     excluded = _excluded_epoch_set(excluded_epochs) | activity_excluded
@@ -3861,12 +3886,19 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
             print(f'{rec_type}: whole-cell drift guards apply -- '
                   f'series-resistance limit {gate}, baseline alignment '
                   f'{"on" if align_epoch_means else "off"} '
-                  '(separately within each lightMean; between-mean levels preserved)')
+                  f'(target {baseline_target_method}; '
+                  'separately within each lightMean; between-mean levels preserved)')
         else:
             print(f'{rec_type}: spike rate, so the whole-cell drift guards do '
                   f'not apply -- nothing to drift and no series resistance')
 
-    for block_id in block_ids:
+    # Respect acquisition time even when callers supply block ids in another
+    # order. Epoch rows are already chronological within each block, and
+    # acquisition blocks do not overlap.
+    catalog = epoch_catalog(block_ids)
+    chronological_blocks = list(dict.fromkeys(
+        int(value) for value in catalog.get('block_id', pd.Series(dtype=int))))
+    for block_id in chronological_blocks:
         params = epoch_parameters(int(block_id))
         if params.empty:
             continue
@@ -3979,6 +4011,8 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
         spike_high_pass_hz=float(spike_high_pass_hz),
         psth_sigma_ms=float(psth_sigma_ms),
         whole_cell_bin_ms=float(whole_cell_bin_ms),
+        align_epoch_means=bool(align_epoch_means),
+        whole_cell_baseline_target=baseline_target_method,
         stim_time_ms=(float(stim_time_ms) if stim_time_ms is not None else np.nan),
         light_contrast=(float(light_contrast)
                         if light_contrast is not None else np.nan),
@@ -3993,19 +4027,26 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
         resp = np.vstack([_block_average(r[:width], step)
                           for r in responses[mean_level]])
 
-        # Bring the epochs of this light mean onto a common holding level. The
-        # target is the median of the epoch means, so a single badly drifted
-        # epoch cannot drag the level the others are judged against, and it is
-        # taken within the light mean because the two means genuinely differ
-        # in holding current.
+        # Bring the epochs of this light mean onto a common holding level. Rows
+        # are in acquisition order, so the default reference is the first two
+        # retained trials of this exact condition.
         if whole_cell and align_epoch_means and resp.shape[0] > 1:
             epoch_means = resp.mean(axis=1)
-            target = float(np.median(epoch_means))
+            reference_n = min(2, len(epoch_means))
+            if baseline_target_method == 'first_two_mean':
+                target = float(np.mean(epoch_means[:reference_n]))
+            else:
+                target = float(np.median(epoch_means))
             offsets = target - epoch_means
             resp = resp + offsets[:, None]
-            for record, before, offset in zip(sources.get(mean_level, []),
-                                              epoch_means, offsets):
+            for rank, (record, before, offset) in enumerate(zip(
+                    sources.get(mean_level, []), epoch_means, offsets)):
                 adjustments.append({**record,
+                                    'baseline_target_method': baseline_target_method,
+                                    'baseline_reference_n': reference_n,
+                                    'baseline_reference_epoch': (
+                                        baseline_target_method == 'first_two_mean'
+                                        and rank < reference_n),
                                     'mean_before_pa': float(before),
                                     'offset_pa': float(offset),
                                     'mean_after_pa': float(target)})
@@ -4049,8 +4090,11 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                       f'(lightMean {record["light_mean"]:g}): {detail}')
         if adjustments:
             frame = analysis.epoch_adjustments
-            print(f'\n  baseline-aligned {len(frame)} epoch(s) to the median '
-                  'holding current within each lightMean; between-mean '
+            target_label = ('mean of the first two retained trials'
+                            if baseline_target_method == 'first_two_mean'
+                            else 'median of all retained trials')
+            print(f'\n  baseline-aligned {len(frame)} epoch(s) to the '
+                  f'{target_label} within each lightMean; between-mean '
                   'baselines were preserved:')
             for mean_level, group in frame.groupby('light_mean'):
                 print(f'    lightMean {mean_level:g}: target '
@@ -6049,6 +6093,9 @@ def save_condition_output(
         h5.attrs['spike_high_pass_hz'] = float(analysis.spike_high_pass_hz)
         h5.attrs['psth_sigma_ms'] = float(analysis.psth_sigma_ms)
         h5.attrs['whole_cell_bin_ms'] = float(analysis.whole_cell_bin_ms)
+        h5.attrs['align_epoch_means'] = bool(analysis.align_epoch_means)
+        h5.attrs['whole_cell_baseline_target'] = str(
+            analysis.whole_cell_baseline_target)
         h5.attrs['skip_seconds'] = float(analysis.skip_seconds)
         h5.attrs['stim_time_ms'] = float(analysis.stim_time_ms)
         h5.attrs['stim_seconds'] = float(analysis.stim_time_ms) / 1e3
@@ -6240,6 +6287,10 @@ def _output_metadata(path) -> dict:
             'psth_sigma_ms': float(h5.attrs.get('psth_sigma_ms', np.nan)),
             'whole_cell_bin_ms': float(
                 h5.attrs.get('whole_cell_bin_ms', np.nan)),
+            'align_epoch_means': bool(
+                h5.attrs.get('align_epoch_means', True)),
+            'whole_cell_baseline_target': text(
+                h5.attrs.get('whole_cell_baseline_target', 'median')),
             'decode_window_s': float(h5.attrs.get('decode_window_s', np.nan)),
             'decode_window_rule': text(h5.attrs.get('decode_window_rule', '')),
             'protocols': text(h5.attrs.get('protocols', '')).replace('\n', ', '),
@@ -6274,6 +6325,8 @@ def load_condition_index(output_dir=None,
                'stim_time_ms', 'stim_seconds', 'light_contrast', 'n_epochs_total',
                'spike_median_window_ms', 'spike_high_pass_hz',
                'psth_sigma_ms', 'whole_cell_bin_ms',
+               'align_epoch_means',
+               'whole_cell_baseline_target',
                'decode_window_s', 'decode_window_rule', 'protocols',
                'n_blocks', 'output_path']
     rows = [_output_metadata(path) for path in sorted(directory.glob('*.h5'))]
@@ -8975,6 +9028,8 @@ def subset_analysis(analysis: ConditionAnalysis,
         spike_high_pass_hz=analysis.spike_high_pass_hz,
         psth_sigma_ms=analysis.psth_sigma_ms,
         whole_cell_bin_ms=analysis.whole_cell_bin_ms,
+        align_epoch_means=analysis.align_epoch_means,
+        whole_cell_baseline_target=analysis.whole_cell_baseline_target,
         skip_seconds=float(analysis.skip_seconds),
         stim_time_ms=float(analysis.stim_time_ms),
         light_contrast=float(analysis.light_contrast),
@@ -9019,6 +9074,9 @@ def save_analysis(analysis: ConditionAnalysis, path) -> Path:
         'spike_high_pass_hz': float(analysis.spike_high_pass_hz),
         'psth_sigma_ms': float(analysis.psth_sigma_ms),
         'whole_cell_bin_ms': float(analysis.whole_cell_bin_ms),
+        'align_epoch_means': bool(analysis.align_epoch_means),
+        'whole_cell_baseline_target': str(
+            analysis.whole_cell_baseline_target),
         'skip_seconds': float(analysis.skip_seconds),
         'stim_time_ms': float(analysis.stim_time_ms),
         'light_contrast': float(analysis.light_contrast),
@@ -9069,6 +9127,9 @@ def load_analysis(path) -> ConditionAnalysis:
         spike_high_pass_hz=meta.get('spike_high_pass_hz', 300.0),
         psth_sigma_ms=meta.get('psth_sigma_ms', 10.0),
         whole_cell_bin_ms=meta.get('whole_cell_bin_ms', 5.0),
+        align_epoch_means=meta.get('align_epoch_means', True),
+        whole_cell_baseline_target=meta.get(
+            'whole_cell_baseline_target', 'median'),
         skip_seconds=meta['skip_seconds'],
         stim_time_ms=float(meta.get('stim_time_ms', np.nan)),
         light_contrast=float(meta.get('light_contrast', np.nan)),
@@ -9115,6 +9176,7 @@ def build_fixture(exp_name: str, block_ids: Sequence[int],
                   max_epochs: Optional[int] = None,
                   max_series_resistance: Optional[float] = 30e6,
                   align_epoch_means: bool = True,
+                  whole_cell_baseline_target: str = 'first_two_mean',
                   verbose: bool = True) -> Path:
     """Load one real recording and cache it as a fixture. Run once, off-line.
 
@@ -9137,7 +9199,9 @@ def build_fixture(exp_name: str, block_ids: Sequence[int],
         skip_seconds=skip_seconds,
         downsample=downsample, max_epochs=max_epochs,
         max_series_resistance=max_series_resistance,
-        align_epoch_means=align_epoch_means, fit=False, verbose=verbose)
+        align_epoch_means=align_epoch_means,
+        whole_cell_baseline_target=whole_cell_baseline_target,
+        fit=False, verbose=verbose)
     small = subset_analysis(analysis, epochs_per_level=epochs_per_level,
                             decimate=decimate, seconds=seconds)
     save_analysis(small, path)
@@ -9362,6 +9426,7 @@ def run_core_ln_analysis(
         max_epochs: Optional[int] = None,
         max_series_resistance: Optional[float] = 30e6,
         align_epoch_means: bool = True,
+        whole_cell_baseline_target: str = 'first_two_mean',
         excluded_epochs=(),
         activity_excluded_epochs=(),
         min_firing_rate_hz: Optional[float] = None,
@@ -9410,7 +9475,9 @@ def run_core_ln_analysis(
         frequency_cutoff=frequency_cutoff, skip_seconds=skip_seconds,
         subtract_baseline=subtract_baseline,
         max_series_resistance=max_series_resistance,
-        align_epoch_means=align_epoch_means, max_epochs=max_epochs,
+        align_epoch_means=align_epoch_means,
+        whole_cell_baseline_target=whole_cell_baseline_target,
+        max_epochs=max_epochs,
         excluded_epochs=excluded_epochs,
         activity_excluded_epochs=activity_excluded_epochs,
         fit=False, verbose=verbose)
@@ -9462,8 +9529,12 @@ def response_qc_signature(
         spike_median_window_ms: Optional[float] = 5.0,
         spike_high_pass_hz: float = 300.0,
         psth_sigma_ms: float = 10.0,
-        whole_cell_bin_ms: float = 5.0) -> tuple:
+        whole_cell_bin_ms: float = 5.0,
+        align_epoch_means: bool = True,
+        whole_cell_baseline_target: str = 'first_two_mean') -> tuple:
     """Immutable identity of the selected conditions and response-QC policy."""
+    baseline_target_method = _normalize_whole_cell_baseline_target(
+        whole_cell_baseline_target)
     pairs = tuple((
         row.rec_type, float(row.stim_time_ms),
         (float(row.light_contrast)
@@ -9480,7 +9551,8 @@ def response_qc_signature(
             (None if spike_median_window_ms is None else
              float(spike_median_window_ms)),
             float(spike_high_pass_hz), float(psth_sigma_ms),
-            float(whole_cell_bin_ms))
+            float(whole_cell_bin_ms), bool(align_epoch_means),
+            baseline_target_method)
 
 
 def inspect_recording_conditions(
@@ -9496,6 +9568,8 @@ def inspect_recording_conditions(
         spike_high_pass_hz: float = 300.0,
         psth_sigma_ms: float = 10.0,
         whole_cell_bin_ms: float = 5.0,
+        align_epoch_means: bool = True,
+        whole_cell_baseline_target: str = 'first_two_mean',
         verbose: bool = True) -> ResponseInspection:
     """Plot conditions and automatically exclude failed mean-light groups.
 
@@ -9504,6 +9578,8 @@ def inspect_recording_conditions(
     the same mode/duration row continue. If every mean fails, the whole row is
     excluded. The returned condition table is the sole input to later stages.
     """
+    whole_cell_baseline_target = _normalize_whole_cell_baseline_target(
+        whole_cell_baseline_target)
     summaries, figures, qc = {}, {}, {}
     updated = conditions.copy()
     if 'light_contrast' not in updated:
@@ -9639,7 +9715,8 @@ def inspect_recording_conditions(
         exp_name, block_ids, retained, max_epochs,
         min_firing_rate_hz, min_whole_cell_modulation_pa,
         low_response_epoch_fraction, spike_median_window_ms,
-        spike_high_pass_hz, psth_sigma_ms, whole_cell_bin_ms)
+        spike_high_pass_hz, psth_sigma_ms, whole_cell_bin_ms,
+        align_epoch_means, whole_cell_baseline_target)
     condition_audit = pd.DataFrame(audit_rows)
     if verbose:
         print('\nSection 2 activity-QC condition audit:')
@@ -9674,6 +9751,7 @@ def run_core_condition_analyses(
         whole_cell_bin_ms: float = 5.0,
         max_series_resistance: Optional[float] = 30e6,
         align_epoch_means: bool = True,
+        whole_cell_baseline_target: str = 'first_two_mean',
         mean_window_s: float = 2.0,
         condition_window_s: float = 6.0,
         temporal_window_s: Optional[float] = None,
@@ -9683,7 +9761,8 @@ def run_core_condition_analyses(
         exp_name, block_ids, conditions, max_epochs,
         min_firing_rate_hz, min_whole_cell_modulation_pa,
         low_response_epoch_fraction, spike_median_window_ms,
-        spike_high_pass_hz, psth_sigma_ms, whole_cell_bin_ms)
+        spike_high_pass_hz, psth_sigma_ms, whole_cell_bin_ms,
+        align_epoch_means, whole_cell_baseline_target)
     if qc_signature != expected:
         raise RuntimeError(
             'Section 2 activity QC has not run for the current retained '
@@ -9716,6 +9795,7 @@ def run_core_condition_analyses(
             whole_cell_bin_ms=whole_cell_bin_ms,
             max_series_resistance=max_series_resistance,
             align_epoch_means=align_epoch_means,
+            whole_cell_baseline_target=whole_cell_baseline_target,
             excluded_epochs=excluded_epochs,
             activity_excluded_epochs=activity_excluded_epochs,
             mean_window_s=mean_window_s,
@@ -9755,6 +9835,7 @@ def run_reconstruction_analyses(
         max_epochs: Optional[int] = None,
         max_series_resistance: Optional[float] = 30e6,
         align_epoch_means: bool = True,
+        whole_cell_baseline_target: str = 'first_two_mean',
         verbose: bool = True) -> Dict[Tuple[str, float, float], dict]:
     """Run all held-out reconstruction analyses for every saved condition."""
     results = {}
@@ -9778,6 +9859,7 @@ def run_reconstruction_analyses(
             whole_cell_bin_ms=whole_cell_bin_ms,
             max_series_resistance=max_series_resistance,
             align_epoch_means=align_epoch_means,
+            whole_cell_baseline_target=whole_cell_baseline_target,
             excluded_epochs=core.analysis.excluded_epochs,
             activity_excluded_epochs=core.analysis.activity_excluded_epochs,
             fit=False, verbose=False)
