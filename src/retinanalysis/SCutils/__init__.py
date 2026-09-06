@@ -11,7 +11,7 @@ single-cell path.
 
 _MODULES = {
     "auisql_json", "dataprocessor", "protocols", "explore", "h5_json",
-    "recording_classifier",
+    "recording_classifier", "trace_processing",
 }
 _ATTRIBUTES = {
     "AuisqlReader": ("auisql_json", "AuisqlReader"),
@@ -28,6 +28,21 @@ _ATTRIBUTES = {
         "recording_classifier", "predict_recording_techniques"),
     "retrain_recording_technique_classifier": (
         "recording_classifier", "retrain_recording_technique_classifier"),
+    "align_epoch_group_baselines": (
+        "trace_processing", "align_epoch_group_baselines"),
+    "EPOCH_BASELINE_TARGETS": (
+        "trace_processing", "EPOCH_BASELINE_TARGETS"),
+    "EpochBaselineAlignment": (
+        "trace_processing", "EpochBaselineAlignment"),
+    "block_average": ("trace_processing", "block_average"),
+    "milliseconds_to_samples": (
+        "trace_processing", "milliseconds_to_samples"),
+    "normalize_epoch_baseline_target": (
+        "trace_processing", "normalize_epoch_baseline_target"),
+    "preprocess_spike_trace": (
+        "trace_processing", "preprocess_spike_trace"),
+    "preprocess_whole_cell_trace": (
+        "trace_processing", "preprocess_whole_cell_trace"),
 }
 
 __all__ = sorted(_MODULES | set(_ATTRIBUTES))

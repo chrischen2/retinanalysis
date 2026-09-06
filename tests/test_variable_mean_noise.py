@@ -1236,7 +1236,7 @@ def test_whole_cell_baseline_target_rejects_unknown_policy(monkeypatch):
         vmn, 'epoch_parameters',
         lambda _block: pd.DataFrame({'stimTime': [4.0], 'lightMean': [0.1]}))
 
-    with pytest.raises(ValueError, match='whole_cell_baseline_target'):
+    with pytest.raises(ValueError, match='baseline target'):
         vmn.analyze_condition(
             'synthetic', [1], rec_type='exc', stim_time_ms=4.0,
             whole_cell_baseline_target='first_three_mean',

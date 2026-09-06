@@ -65,6 +65,16 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
+from retinanalysis.SCutils.trace_processing import (
+    EPOCH_BASELINE_TARGETS as WHOLE_CELL_BASELINE_TARGETS,
+    align_epoch_group_baselines,
+    block_average as _block_average,
+    milliseconds_to_samples as _milliseconds_to_samples,
+    normalize_epoch_baseline_target as _normalize_whole_cell_baseline_target,
+    preprocess_spike_trace,
+    preprocess_whole_cell_trace,
+)
+
 # Both packages carry the same protocol; the recorded parameters are identical.
 PROTOCOLS = (
     'edu.washington.riekelab.rieke.protocols.VariableMeanNoise',
@@ -92,22 +102,6 @@ CONDITION_TABLES = (
     'early_late',
     'dropped_epochs', 'epoch_adjustments',
 )
-
-# Whole-cell epochs are aligned only within an otherwise identical analysis
-# condition. The default anchors that condition to its first retained epoch;
-# older target policies remain available for reproducibility.
-WHOLE_CELL_BASELINE_TARGETS = ('first_epoch', 'first_two_mean', 'median')
-
-
-def _normalize_whole_cell_baseline_target(value) -> str:
-    method = str(value).strip().lower()
-    if method not in WHOLE_CELL_BASELINE_TARGETS:
-        choices = ', '.join(repr(choice)
-                            for choice in WHOLE_CELL_BASELINE_TARGETS)
-        raise ValueError(
-            f'whole_cell_baseline_target must be one of {choices}; got '
-            f'{value!r}')
-    return method
 
 STEP_DIRECTIONS = ('low', 'high')
 STEP_LABELS = {'low': 'high → low', 'high': 'low → high'}
@@ -1586,48 +1580,6 @@ def _excluded_epoch_set(excluded_epochs) -> set:
     if excluded_epochs is None:
         return set()
     return {(int(block_id), int(epoch)) for block_id, epoch in excluded_epochs}
-
-
-def _milliseconds_to_samples(value_ms: Optional[float], sample_rate: float,
-                             parameter_name: str, *, allow_zero: bool) -> Optional[int]:
-    """Convert a user-facing millisecond window to amplifier samples."""
-    if value_ms is None:
-        return None
-    value = float(value_ms)
-    rate = float(sample_rate)
-    invalid = (not np.isfinite(value) or value < 0
-               or (not allow_zero and value == 0))
-    if invalid:
-        qualifier = 'non-negative' if allow_zero else 'positive'
-        raise ValueError(f'{parameter_name} must be finite and {qualifier}')
-    if not np.isfinite(rate) or rate <= 0:
-        raise ValueError('sample_rate must be finite and positive')
-    if value == 0:
-        return 0
-    return max(int(round(value / 1e3 * rate)), 1)
-
-
-def preprocess_spike_trace(trace: np.ndarray, sample_rate: float,
-                           median_window_ms: Optional[float] = 5.0,
-                           high_pass_hz: float = 300.0) -> np.ndarray:
-    """Median-detrend and high-pass one trace exactly as the detector does."""
-    from retinanalysis.utils.spike_detector import preprocess_spike_traces
-
-    median_samples = _milliseconds_to_samples(
-        median_window_ms, sample_rate, 'spike_median_window_ms',
-        allow_zero=True)
-    return preprocess_spike_traces(
-        trace, sample_rate=sample_rate,
-        median_window_samples=median_samples,
-        cutoff_frequency=float(high_pass_hz))[0]
-
-
-def preprocess_whole_cell_trace(trace: np.ndarray, sample_rate: float,
-                                bin_ms: float = 5.0) -> Tuple[np.ndarray, float]:
-    """Smooth and reduce a current trace by non-overlapping bin averages."""
-    factor = _milliseconds_to_samples(
-        bin_ms, sample_rate, 'whole_cell_bin_ms', allow_zero=False)
-    return _block_average(trace, factor), float(sample_rate) / factor
 
 
 def _spike_rate(spike_samples, n_samples: int, sample_rate: float,
@@ -3422,21 +3374,6 @@ def fit_ln_model(stimulus, response, sampling_interval: float,
         example_predicted=np.asarray(np.atleast_2d(predicted_all)[0], dtype=float))
 
 
-def _block_average(trace: np.ndarray, factor: int) -> np.ndarray:
-    """Downsample by averaging within each window, as ``parseData.m`` does.
-
-    Slicing every nth sample would alias: the response is smoothed but the
-    stimulus carries power right up to its 60 Hz cutoff, and decimating a
-    10 kHz trace to 1 kHz without averaging folds that back in.
-    """
-    factor = max(int(factor), 1)
-    if factor == 1:
-        return np.asarray(trace, dtype=float)
-    trace = np.asarray(trace, dtype=float)
-    width = (trace.size // factor) * factor
-    return trace[:width].reshape(-1, factor).mean(axis=1)
-
-
 # --------------------------------------------------------------------------
 # 6. the analysis: raw epochs -> stimulus -> LN model, split by light mean
 # --------------------------------------------------------------------------
@@ -4031,27 +3968,20 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
         # epoch of this exact condition. The outer call already fixes recording
         # type, duration and contrast; this loop additionally fixes light mean.
         if whole_cell and align_epoch_means and resp.shape[0] > 1:
-            epoch_means = resp.mean(axis=1)
-            if baseline_target_method == 'first_epoch':
-                reference_n = 1
-                target = float(epoch_means[0])
-            elif baseline_target_method == 'first_two_mean':
-                reference_n = min(2, len(epoch_means))
-                target = float(np.mean(epoch_means[:reference_n]))
-            else:
-                reference_n = len(epoch_means)
-                target = float(np.median(epoch_means))
-            offsets = target - epoch_means
-            resp = resp + offsets[:, None]
+            alignment = align_epoch_group_baselines(
+                resp, target=baseline_target_method)
+            resp = alignment.traces
             for rank, (record, before, offset) in enumerate(zip(
-                    sources.get(mean_level, []), epoch_means, offsets)):
+                    sources.get(mean_level, []), alignment.epoch_means,
+                    alignment.offsets)):
                 adjustments.append({**record,
-                                    'baseline_target_method': baseline_target_method,
-                                    'baseline_reference_n': reference_n,
-                                    'baseline_reference_epoch': rank < reference_n,
+                                    'baseline_target_method': alignment.method,
+                                    'baseline_reference_n': alignment.reference_n,
+                                    'baseline_reference_epoch': bool(
+                                        alignment.reference_mask[rank]),
                                     'mean_before_pa': float(before),
                                     'offset_pa': float(offset),
-                                    'mean_after_pa': float(target)})
+                                    'mean_after_pa': alignment.target})
 
         analysis.light_means.append(mean_level)
         analysis.n_epochs[mean_level] = int(stim.shape[0])
