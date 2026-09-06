@@ -9570,6 +9570,7 @@ def inspect_recording_conditions(
         whole_cell_bin_ms: float = 5.0,
         align_epoch_means: bool = True,
         whole_cell_baseline_target: str = 'first_two_mean',
+        make_response_trace_figures: bool = True,
         verbose: bool = True) -> ResponseInspection:
     """Plot conditions and automatically exclude failed mean-light groups.
 
@@ -9577,6 +9578,8 @@ def inspect_recording_conditions(
     and mean-light combination. A failed mean is removed while other means in
     the same mode/duration row continue. If every mean fails, the whole row is
     excluded. The returned condition table is the sole input to later stages.
+    Set ``make_response_trace_figures=False`` when the caller has already made
+    its raw-trace figures; summary/QC calculation is unchanged.
     """
     whole_cell_baseline_target = _normalize_whole_cell_baseline_target(
         whole_cell_baseline_target)
@@ -9622,15 +9625,16 @@ def inspect_recording_conditions(
             whole_cell_bin_ms=whole_cell_bin_ms,
             show=verbose)
         summaries[key] = summary
-        figures[key] = plot_traces(
-            exp_name, condition.block_ids, rec_type,
-            max_epochs=max_epochs, stim_time_ms=condition.stim_time_ms,
-            light_contrast=(contrast if np.isfinite(contrast) else None),
-            excluded_epochs=excluded_epochs,
-            spike_median_window_ms=spike_median_window_ms,
-            spike_high_pass_hz=spike_high_pass_hz,
-            psth_sigma_ms=psth_sigma_ms,
-            whole_cell_bin_ms=whole_cell_bin_ms)
+        if make_response_trace_figures:
+            figures[key] = plot_traces(
+                exp_name, condition.block_ids, rec_type,
+                max_epochs=max_epochs, stim_time_ms=condition.stim_time_ms,
+                light_contrast=(contrast if np.isfinite(contrast) else None),
+                excluded_epochs=excluded_epochs,
+                spike_median_window_ms=spike_median_window_ms,
+                spike_high_pass_hz=spike_high_pass_hz,
+                psth_sigma_ms=psth_sigma_ms,
+                whole_cell_bin_ms=whole_cell_bin_ms)
 
         retained_means, failed_reasons, activity_excluded = [], [], []
         n_retained_active = 0

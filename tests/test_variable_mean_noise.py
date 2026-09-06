@@ -2650,7 +2650,9 @@ def test_condition_batch_helpers_preserve_mode_duration_keys(monkeypatch):
                         pd.DataFrame({'lightMean': [.1],
                                       'mean_firing_rate_hz': [40.],
                                       'modulation_sd_pA': [200.]}))
-    monkeypatch.setattr(vmn, 'plot_traces', lambda *a, **k: 'figure')
+    monkeypatch.setattr(
+        vmn, 'plot_traces',
+        lambda *a, **k: pytest.fail('duplicate response trace was created'))
     inspection = vmn.inspect_recording_conditions(
         'example', [11, 12], conditions, max_epochs=None,
         min_firing_rate_hz=30., min_whole_cell_modulation_pa=100.,
@@ -2658,9 +2660,11 @@ def test_condition_batch_helpers_preserve_mode_duration_keys(monkeypatch):
         spike_median_window_ms=7., spike_high_pass_hz=250.,
         psth_sigma_ms=12., whole_cell_bin_ms=4.,
         align_epoch_means=False, whole_cell_baseline_target='median',
+        make_response_trace_figures=False,
         verbose=False)
     assert set(inspection.summaries) == {
         ('extracellular', 30_000.), ('exc', 60_000.)}
+    assert inspection.figures == {}
 
     calls = []
     analysis, temporal = _population_analysis()
