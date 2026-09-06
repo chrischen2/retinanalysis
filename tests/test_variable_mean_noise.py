@@ -2938,6 +2938,35 @@ def test_batch_continues_after_cell_error_and_records_it(monkeypatch, tmp_path,
     assert '[3/3] cell index 5: complete' in output
 
 
+def test_normalize_cell_indices_accepts_one_index_or_a_batch():
+    assert vmn.normalize_cell_indices(1) == (1,)
+    assert vmn.normalize_cell_indices(range(1, 4)) == (1, 2, 3)
+    assert vmn.normalize_cell_indices([3, 1, 3]) == (3, 1)
+
+
+def test_batch_accepts_one_scalar_cell_index(monkeypatch, tmp_path):
+    import pandas as pd
+    from types import SimpleNamespace
+
+    seen = []
+
+    def fake_run(cell_index, *_args, **_kwargs):
+        seen.append(cell_index)
+        return SimpleNamespace(
+            exp_name='2025-01-01_A', cell_label=f'cell{cell_index}',
+            saved_condition_outputs=[], figure_manifest=[],
+            output_dir=tmp_path / f'cell{cell_index}')
+
+    monkeypatch.setattr(vmn, 'run_cell_sections_2_to_5', fake_run)
+    summary = vmn.run_cell_analysis_batch(
+        1, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(),
+        output_dir=tmp_path)
+
+    assert seen == [1]
+    assert summary.cell_index.tolist() == [1]
+    assert summary.status.tolist() == ['complete']
+
+
 def test_cell_sections_wrapper_routes_outputs_to_date_cell_folder(monkeypatch,
                                                                   tmp_path):
     import pandas as pd

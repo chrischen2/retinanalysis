@@ -10224,8 +10224,17 @@ def run_cell_sections_2_to_5(
         figure_manifest=figure_manifest, table_paths=table_paths)
 
 
+def normalize_cell_indices(cell_indices) -> Tuple[int, ...]:
+    """Normalize one cell index or an iterable of indices for batch analysis."""
+    if isinstance(cell_indices, (str, bytes)):
+        raise TypeError('cell indices must be integers, not text')
+    values = ((cell_indices,) if np.isscalar(cell_indices)
+              else tuple(cell_indices))
+    return tuple(dict.fromkeys(int(value) for value in values))
+
+
 def run_cell_analysis_batch(
-        cell_indices: Sequence[int],
+        cell_indices,
         protocol_cells: pd.DataFrame,
         protocol_blocks: pd.DataFrame,
         block_modes: pd.DataFrame,
@@ -10240,7 +10249,7 @@ def run_cell_analysis_batch(
 
     settings = settings or CellAnalysisSettings()
     overrides_by_index = overrides_by_index or {}
-    indices = tuple(dict.fromkeys(int(value) for value in cell_indices))
+    indices = normalize_cell_indices(cell_indices)
     directory = condition_output_dir(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
     print(f'batch output: {directory}', flush=True)
@@ -10702,6 +10711,7 @@ __all__ = [
     'response_qc_signature', 'run_core_condition_analyses',
     'run_reconstruction_analyses', 'add_early_late_reconstruction',
     'run_cell_sections_2_to_5', 'run_cell_analysis_batch',
+    'normalize_cell_indices',
     'save_cell_analysis_figures', 'load_cell_analysis_batch_summary',
     'load_saved_cell_analysis',
     'cell_analysis_output_dir', 'high_quality_cells_path',
