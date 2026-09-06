@@ -2991,3 +2991,40 @@ def test_cell_sections_wrapper_routes_outputs_to_date_cell_folder(monkeypatch,
     assert result.output_dir == expected
     assert Path(saved_to['output_dir']) == expected
     assert (expected / 'run_manifest.json').is_file()
+
+
+def test_visual_inspection_keep_and_remove_updates_high_quality_csv(tmp_path):
+    import pandas as pd
+
+    conditions = pd.DataFrame({
+        'condition_id': ['spike-condition', 'whole-condition'],
+        'rec_type': ['extracellular', 'exc'],
+        'stim_seconds': [30., 30.],
+        'mean_rate_hz': [24.5, np.nan],
+    })
+    mean_response = pd.DataFrame({
+        'condition_id': ['whole-condition', 'whole-condition'],
+        'mean': [-100., -200.],
+    })
+    saved = vmn.SavedCellAnalysis(
+        cell_index=12, exp_name='2025-01-01_A', cell_label='Cell2',
+        output_dir=tmp_path / '2025-01-01_A__Cell2',
+        conditions=conditions, figures=pd.DataFrame(),
+        tables={'mean_response': mean_response})
+
+    line = vmn.saved_cell_review_line(saved)
+    assert line == ('cell id 12 | label Cell2 | date 2025-01-01_A | '
+                    'mean resp extracellular: 24.5 Hz; exc: -150 pA')
+
+    kept = vmn.set_cell_visual_inspection(saved, True, output_dir=tmp_path)
+    assert kept.cell_index.tolist() == [12]
+    assert vmn.high_quality_cell_indices(tmp_path) == (12,)
+    assert (tmp_path / 'high_quality_cells.csv').is_file()
+
+    # Keeping again updates the same row rather than duplicating the cell.
+    kept_again = vmn.set_cell_visual_inspection(saved, True, output_dir=tmp_path)
+    assert kept_again.cell_index.tolist() == [12]
+
+    removed = vmn.set_cell_visual_inspection(saved, False, output_dir=tmp_path)
+    assert removed.empty
+    assert vmn.high_quality_cell_indices(tmp_path) == ()

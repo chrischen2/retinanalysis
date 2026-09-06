@@ -10304,8 +10304,15 @@ def load_cell_analysis_batch_summary(output_dir=None) -> pd.DataFrame:
 
 def load_saved_cell_analysis(
         cell_index: int, protocol_cells: pd.DataFrame,
-        *, output_dir=None) -> SavedCellAnalysis:
-    """Load one batch cell's figures and tables for notebook inspection."""
+        *, output_dir=None,
+        table_names: Optional[Sequence[str]] = CONDITION_TABLES,
+        include_audit_tables: bool = True) -> SavedCellAnalysis:
+    """Load one batch cell's saved figures and selected compact tables.
+
+    ``table_names=('mean_response',)`` with ``include_audit_tables=False`` is
+    the lightweight path used by the visual-review browser. The figure
+    manifest is always loaded because it is the browser's index.
+    """
     matches = protocol_cells[
         pd.to_numeric(protocol_cells.cell_index, errors='coerce').eq(
             int(cell_index))]
@@ -10320,11 +10327,16 @@ def load_saved_cell_analysis(
         raise FileNotFoundError(
             f'no saved batch output for cell index {int(cell_index)} at {cell_dir}')
     table_dir = cell_dir / 'tables'
+    audit_paths = (sorted(table_dir.glob('*.csv')) if include_audit_tables else
+                   [table_dir / 'figure_manifest.csv'])
     tables = {
-        path.stem: pd.read_csv(path)
-        for path in sorted(table_dir.glob('*.csv'))
-    }
-    for name in CONDITION_TABLES:
+        path.stem: pd.read_csv(path) for path in audit_paths if path.exists()}
+    requested_tables = (() if table_names is None else tuple(table_names))
+    unknown = sorted(set(requested_tables) - set(CONDITION_TABLES))
+    if unknown:
+        raise ValueError(
+            f'unknown saved table(s) {unknown}; choose from {CONDITION_TABLES}')
+    for name in requested_tables:
         frame = load_population_table(name, output_dir=cell_dir)
         if not frame.empty:
             tables[name] = frame
@@ -10336,6 +10348,99 @@ def load_saved_cell_analysis(
         cell_index=int(cell_index), exp_name=exp_name,
         cell_label=cell_label, output_dir=cell_dir,
         conditions=conditions, figures=figures, tables=tables)
+
+
+HIGH_QUALITY_CELL_COLUMNS = (
+    'cell_index', 'date', 'cell_label', 'mean_response', 'reviewed_at')
+
+
+def high_quality_cells_path(output_dir=None) -> Path:
+    """CSV containing cells retained by the Section 6a image browser."""
+    return condition_output_dir(output_dir) / 'high_quality_cells.csv'
+
+
+def load_high_quality_cells(output_dir=None) -> pd.DataFrame:
+    """Load the visual-review pass list, or an empty typed table."""
+    path = high_quality_cells_path(output_dir)
+    if not path.exists():
+        return pd.DataFrame(columns=HIGH_QUALITY_CELL_COLUMNS)
+    frame = pd.read_csv(path)
+    missing = set(HIGH_QUALITY_CELL_COLUMNS) - set(frame.columns)
+    if missing:
+        raise ValueError(f'{path} is missing columns {sorted(missing)}')
+    frame = frame.loc[:, HIGH_QUALITY_CELL_COLUMNS].copy()
+    frame['cell_index'] = pd.to_numeric(
+        frame.cell_index, errors='raise').astype(int)
+    return (frame.drop_duplicates('cell_index', keep='last')
+            .sort_values('cell_index', ignore_index=True))
+
+
+def saved_cell_mean_response_text(saved: SavedCellAnalysis) -> str:
+    """Compact condition-aware response summary for visual inspection."""
+    conditions = saved.conditions.copy()
+    mean_response = saved.tables.get('mean_response', pd.DataFrame())
+    pieces = []
+    for condition in conditions.itertuples(index=False):
+        rec_type = str(condition.rec_type)
+        seconds = float(condition.stim_seconds)
+        same_type = conditions.rec_type.astype(str).eq(rec_type)
+        descriptor = rec_type
+        if int(same_type.sum()) > 1:
+            descriptor += f'/{seconds:g}s'
+        value = np.nan
+        unit = 'Hz' if rec_type == 'extracellular' else 'pA'
+        if rec_type == 'extracellular':
+            value = _numeric(getattr(condition, 'mean_rate_hz', np.nan))
+        if not np.isfinite(value) and not mean_response.empty:
+            rows = mean_response
+            if 'condition_id' in rows and hasattr(condition, 'condition_id'):
+                rows = rows[rows.condition_id.astype(str).eq(
+                    str(condition.condition_id))]
+            elif 'rec_type' in rows:
+                rows = rows[rows.rec_type.astype(str).eq(rec_type)]
+            values = pd.to_numeric(rows.get('mean'), errors='coerce')
+            if values is not None and values.notna().any():
+                value = float(values.mean())
+        text = f'{value:.3g} {unit}' if np.isfinite(value) else 'unavailable'
+        pieces.append(f'{descriptor}: {text}')
+    return '; '.join(pieces) if pieces else 'unavailable'
+
+
+def saved_cell_review_line(saved: SavedCellAnalysis) -> str:
+    """One-line identity and mean-response label for the image browser."""
+    return (f'cell id {int(saved.cell_index)} | label {saved.cell_label} | '
+            f'date {saved.exp_name} | mean resp '
+            f'{saved_cell_mean_response_text(saved)}')
+
+
+def set_cell_visual_inspection(
+        saved: SavedCellAnalysis, keep: bool, *, output_dir=None
+        ) -> pd.DataFrame:
+    """Add/remove one cell in the durable visual-inspection pass list."""
+    path = high_quality_cells_path(output_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frame = load_high_quality_cells(output_dir)
+    frame = frame[~frame.cell_index.eq(int(saved.cell_index))].copy()
+    if bool(keep):
+        row = pd.DataFrame([{
+            'cell_index': int(saved.cell_index), 'date': saved.exp_name,
+            'cell_label': saved.cell_label,
+            'mean_response': saved_cell_mean_response_text(saved),
+            'reviewed_at': pd.Timestamp.now(tz='UTC').isoformat(),
+        }])
+        frame = pd.concat([frame, row], ignore_index=True)
+    frame = frame.reindex(columns=HIGH_QUALITY_CELL_COLUMNS)
+    if len(frame):
+        frame = frame.sort_values('cell_index', ignore_index=True)
+    temporary = path.with_suffix('.csv.tmp')
+    frame.to_csv(temporary, index=False)
+    temporary.replace(path)
+    return frame
+
+
+def high_quality_cell_indices(output_dir=None) -> Tuple[int, ...]:
+    """Stable cell indices retained by Section 6a visual inspection."""
+    return tuple(load_high_quality_cells(output_dir).cell_index.astype(int))
 
 
 def select_population_rows(frame: pd.DataFrame,
@@ -10599,7 +10704,10 @@ __all__ = [
     'run_cell_sections_2_to_5', 'run_cell_analysis_batch',
     'save_cell_analysis_figures', 'load_cell_analysis_batch_summary',
     'load_saved_cell_analysis',
-    'cell_analysis_output_dir',
+    'cell_analysis_output_dir', 'high_quality_cells_path',
+    'load_high_quality_cells', 'saved_cell_mean_response_text',
+    'saved_cell_review_line', 'set_cell_visual_inspection',
+    'high_quality_cell_indices',
     'save_condition_output', 'save_duration_outputs',
     'save_condition_outputs',
     'load_condition_index', 'load_population_table', 'select_population_rows',
