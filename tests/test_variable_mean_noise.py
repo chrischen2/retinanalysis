@@ -2849,3 +2849,145 @@ def test_two_state_batch_helper_keeps_condition_key(monkeypatch):
     bundle = result[('extracellular', 30_000.)]
     assert bundle == {'model': model, 'curves': curves, 'figure': 'figure',
                       'change': {'gain_ratio': .5}}
+
+
+def test_nested_condition_paths_are_discovered_without_duplicate_names(tmp_path):
+    legacy = tmp_path / 'condition.h5'
+    nested = tmp_path / '2025-01-01_A__cell1' / 'condition.h5'
+    distinct = tmp_path / '2025-01-01_A__cell1' / 'other.h5'
+    nested.parent.mkdir()
+    legacy.touch()
+    nested.touch()
+    distinct.touch()
+
+    paths = vmn._condition_output_paths(tmp_path)
+
+    assert sorted(path.name for path in paths) == ['condition.h5', 'other.h5']
+    assert len(paths) == 2
+
+
+def test_save_cell_analysis_figures_writes_and_closes_every_plot(tmp_path):
+    import matplotlib.pyplot as plt
+    from types import SimpleNamespace
+
+    figure_names = (
+        'raw', 'mean', 'condition', 'temporal', 'kinetics', 'trace',
+        'transfer', 'phase', 'directional', 'decoding', 'early_late')
+    figures = {name: plt.figure() for name in figure_names}
+    core = SimpleNamespace(
+        mean_response_figure=figures['mean'],
+        condition_figure=figures['condition'],
+        temporal_figure=figures['temporal'],
+        kinetics_figure=figures['kinetics'])
+    reconstruction = {
+        'trace_figure': figures['trace'],
+        'transfer_figure': figures['transfer'],
+        'phase_figure': figures['phase'],
+        'directional_figure': figures['directional'],
+        'decoding_figure': figures['decoding'],
+        'early_late_figure': figures['early_late'],
+    }
+
+    manifest = vmn.save_cell_analysis_figures(
+        {'extracellular': figures['raw']},
+        {('extracellular', 30_000., .3): core},
+        {('extracellular', 30_000., .3): reconstruction},
+        tmp_path, close=True)
+
+    assert len(manifest) == 11
+    assert all(Path(path).is_file() for path in manifest.path)
+    assert all(not plt.fignum_exists(figure.number) for figure in figures.values())
+
+
+def test_batch_continues_after_cell_error_and_records_it(monkeypatch, tmp_path,
+                                                          capsys):
+    import pandas as pd
+    from types import SimpleNamespace
+
+    def fake_run(cell_index, *_args, **_kwargs):
+        if cell_index == 4:
+            raise RuntimeError('deliberate cell failure')
+        return SimpleNamespace(
+            exp_name='2025-01-01_A', cell_label=f'cell{cell_index}',
+            saved_condition_outputs=[object()], figure_manifest=[object(), object()],
+            output_dir=tmp_path / f'cell{cell_index}')
+
+    monkeypatch.setattr(vmn, 'run_cell_sections_2_to_5', fake_run)
+    summary = vmn.run_cell_analysis_batch(
+        [3, 4, 5], pd.DataFrame(), pd.DataFrame(), pd.DataFrame(),
+        output_dir=tmp_path)
+
+    assert summary.status.tolist() == ['complete', 'failed', 'complete']
+    assert 'RuntimeError: deliberate cell failure' == summary.loc[1, 'error']
+    assert (tmp_path / 'batch_summary.csv').is_file()
+    output = capsys.readouterr().out
+    assert '[2/3] cell index 4: FAILED | RuntimeError: deliberate cell failure' in output
+    assert '[3/3] cell index 5: complete' in output
+
+
+def test_cell_sections_wrapper_routes_outputs_to_date_cell_folder(monkeypatch,
+                                                                  tmp_path):
+    import pandas as pd
+
+    cells = pd.DataFrame({
+        'cell_index': [7], 'exp_name': ['2025-01-01_A'],
+        'cell_label': ['Cell2'], 'cell_type': ['ON-parasol'],
+        '_block_ids': [[11]],
+    })
+    modes = pd.DataFrame({'block_id': [11], 'rec_type': ['extracellular']})
+    epochs = pd.DataFrame({
+        'epoch_number': [0], 'block_id': [11], 'block_epoch': [0],
+        'assigned_rec_type': ['extracellular'], 'stimTime': [30_000.],
+    })
+    conditions = pd.DataFrame({
+        'rec_type': ['extracellular'], 'stim_time_ms': [30_000.],
+        'stim_seconds': [30.], 'light_contrast': [.3], 'n_epochs': [6],
+        'block_ids': [[11]], 'included': [True],
+    })
+    inspection = vmn.ResponseInspection(
+        {}, {}, {}, ('qc',), conditions, pd.DataFrame())
+    core = object()
+    reconstruction = {('extracellular', 30_000., .3): {}}
+
+    monkeypatch.setattr(vmn, 'apply_recording_type_override',
+                        lambda current, *_a, **_k: current)
+    monkeypatch.setattr(vmn, 'epoch_catalog', lambda *_a, **_k: epochs.copy())
+    monkeypatch.setattr(vmn, 'apply_epoch_recording_type_ranges',
+                        lambda current, catalog, *_a, **_k:
+                        (current, catalog, ()))
+    monkeypatch.setattr(vmn, 'epoch_numbers_for_light_mean_exclusions',
+                        lambda *_a, **_k: ())
+    monkeypatch.setattr(vmn, 'plot_raw_epoch_traces_by_recording_type',
+                        lambda *_a, **_k: {})
+    monkeypatch.setattr(vmn, 'recording_duration_conditions',
+                        lambda *_a, **_k: conditions.copy())
+    monkeypatch.setattr(vmn, 'apply_recording_type_exclusions',
+                        lambda current, **_k: current)
+    monkeypatch.setattr(vmn, 'apply_epoch_exclusions',
+                        lambda current, *_a, **_k: current)
+    monkeypatch.setattr(vmn, 'inspect_recording_conditions',
+                        lambda *_a, **_k: inspection)
+    monkeypatch.setattr(vmn, 'run_core_condition_analyses',
+                        lambda *_a, **_k:
+                        {('extracellular', 30_000., .3): core})
+    monkeypatch.setattr(vmn, 'run_reconstruction_analyses',
+                        lambda *_a, **_k: reconstruction)
+    monkeypatch.setattr(vmn, 'add_early_late_reconstruction',
+                        lambda current, **_k: current)
+
+    saved_to = {}
+    monkeypatch.setattr(
+        vmn, 'save_condition_outputs',
+        lambda *_a, **kwargs: saved_to.update(kwargs) or pd.DataFrame({
+            'output_path': [str(Path(kwargs['output_dir']) / 'condition.h5')]}))
+    monkeypatch.setattr(vmn, 'save_cell_analysis_figures',
+                        lambda *_a, **_k: pd.DataFrame(
+                            columns=['section', 'condition', 'figure', 'path']))
+
+    result = vmn.run_cell_sections_2_to_5(
+        7, cells, pd.DataFrame(), modes, output_dir=tmp_path, verbose=False)
+
+    expected = tmp_path / '2025-01-01_A__Cell2'
+    assert result.output_dir == expected
+    assert Path(saved_to['output_dir']) == expected
+    assert (expected / 'run_manifest.json').is_file()

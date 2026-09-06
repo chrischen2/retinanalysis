@@ -56,11 +56,11 @@ from __future__ import annotations
 
 import warnings
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 import re
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -5785,6 +5785,26 @@ def condition_output_dir(output_dir=None) -> Path:
     return Path(output_dir) if output_dir is not None else CONDITION_OUTPUT_DIR
 
 
+def cell_analysis_output_dir(exp_name: str, cell_label: str,
+                             output_dir=None) -> Path:
+    """Date/cell folder holding one batch run's figures, tables, and HDF5."""
+    return condition_output_dir(output_dir) / (
+        f'{_safe_output_token(exp_name)}__{_safe_output_token(cell_label)}')
+
+
+def _condition_output_paths(output_dir=None) -> List[Path]:
+    """Find flat legacy and nested batch HDF5 outputs without duplicates."""
+    directory = condition_output_dir(output_dir)
+    if not directory.exists():
+        return []
+    newest_by_name = {}
+    for path in directory.rglob('*.h5'):
+        prior = newest_by_name.get(path.name)
+        if prior is None or path.stat().st_mtime_ns >= prior.stat().st_mtime_ns:
+            newest_by_name[path.name] = path
+    return sorted(newest_by_name.values())
+
+
 def condition_light_settings(protocol_blocks: pd.DataFrame,
                              analysis: ConditionAnalysis) -> pd.DataFrame:
     """LED/NDF provenance for exactly the blocks in ``analysis``.
@@ -6250,7 +6270,6 @@ def load_condition_index(output_dir=None,
             dtype={'exp_name': str, 'cell_label': str})
         protocol_cells = registry[['exp_name', 'cell_label', 'cell_index']]
 
-    directory = condition_output_dir(output_dir)
     columns = ['condition_id', 'cell_id', 'date', 'cell_index',
                'current_cell_index', 'index_status',
                'cell_label', 'cell_type',
@@ -6263,7 +6282,7 @@ def load_condition_index(output_dir=None,
                'whole_cell_baseline_target',
                'decode_window_s', 'decode_window_rule', 'protocols',
                'n_blocks', 'output_path']
-    rows = [_output_metadata(path) for path in sorted(directory.glob('*.h5'))]
+    rows = [_output_metadata(path) for path in _condition_output_paths(output_dir)]
     frame = pd.DataFrame(rows)
     frame['current_cell_index'] = np.nan
     frame['index_status'] = ('saved index; current discovery not supplied'
@@ -6299,9 +6318,8 @@ def load_population_table(table: str, output_dir=None) -> pd.DataFrame:
 
     if table not in CONDITION_TABLES:
         raise ValueError(f'table must be one of {CONDITION_TABLES}')
-    directory = condition_output_dir(output_dir)
     frames = []
-    for path in sorted(directory.glob('*.h5')):
+    for path in _condition_output_paths(output_dir):
         metadata = _output_metadata(path)
         with h5py.File(path, 'r') as h5:
             if f'tables/{table}' not in h5:
@@ -9882,6 +9900,444 @@ def add_early_late_reconstruction(
     return reconstruction_by_condition
 
 
+@dataclass(frozen=True)
+class CellAnalysisSettings:
+    """Editable Sections 2--5 policy for one cell or a batch of cells."""
+
+    max_epochs: Optional[int] = None
+    min_epochs_per_condition: int = 5
+    recording_types_to_analyze: Tuple[str, ...] = RECORDING_TYPES
+    epoch_index_ranges_by_rec_type: Mapping[str, object] = field(
+        default_factory=dict)
+    remove_mean_condition: object = None
+    remove_epochs: Tuple[int, ...] = ()
+    force_spike_flag: bool = False
+    force_whole_cell_flag: bool = False
+    whole_cell_rec_type: str = 'exc'
+    align_epoch_means: bool = True
+    whole_cell_baseline_target: str = 'first_epoch'
+    spike_median_window_ms: Optional[float] = 5.0
+    spike_high_pass_hz: float = 300.0
+    psth_sigma_ms: float = 10.0
+    whole_cell_bin_ms: float = 5.0
+    min_firing_rate_hz: float = 10.0
+    min_whole_cell_modulation_pa: float = 10.0
+    low_response_epoch_fraction: float = 0.50
+    skip_seconds: float = 2.0
+    downsample: int = 10
+    mean_window_s: float = 3.0
+    condition_window_s: float = 15.0
+    temporal_window_s: Optional[float] = None
+    max_series_resistance: Optional[float] = 30e6
+    decode_skip_s: float = 2.0
+    decode_window_s: object = 'auto'
+    decode_window_candidates_s: Tuple[float, ...] = (1., 2., 3., 4., 5.)
+    decode_bin_ms: float = 10.0
+    steady_state_s: float = 10.0
+    min_phase_ms: float = 20.0
+    direction_min_change_quantile: float = 0.25
+    trace_seconds: Tuple[float, float] = (10.0, 15.0)
+    figure_dpi: int = 180
+
+
+@dataclass
+class CellAnalysisRun:
+    """In-memory and on-disk outputs from Sections 2--5 for one cell."""
+
+    cell_index: int
+    exp_name: str
+    cell_label: str
+    cell_type: str
+    output_dir: Path
+    settings: CellAnalysisSettings
+    epoch_table: pd.DataFrame
+    condition_table: pd.DataFrame
+    inspection: ResponseInspection
+    core_by_condition: Dict[Tuple[str, float, float], CoreLNAnalysis]
+    reconstruction_by_condition: Dict[Tuple[str, float, float], dict]
+    saved_condition_outputs: pd.DataFrame
+    figure_manifest: pd.DataFrame
+    table_paths: Dict[str, Path]
+
+
+@dataclass
+class SavedCellAnalysis:
+    """Lightweight review bundle loaded without repeating any model fits."""
+
+    cell_index: int
+    exp_name: str
+    cell_label: str
+    output_dir: Path
+    conditions: pd.DataFrame
+    figures: pd.DataFrame
+    tables: Dict[str, pd.DataFrame]
+
+
+def _condition_figure_token(key) -> str:
+    rec_type, duration = str(key[0]), float(key[1])
+    contrast = float(key[2]) if len(key) > 2 else np.nan
+    token = (f'{_safe_output_token(rec_type)}__duration-'
+             f'{_safe_output_token(f"{duration:g}ms")}')
+    if np.isfinite(contrast):
+        token += f'__contrast-{_safe_output_token(f"{contrast:g}")}'
+    return token
+
+
+def save_cell_analysis_figures(
+        raw_figures: Mapping[str, object],
+        core_by_condition: Mapping[tuple, CoreLNAnalysis],
+        reconstruction_by_condition: Mapping[tuple, dict],
+        output_dir,
+        *, dpi: int = 180, close: bool = True) -> pd.DataFrame:
+    """Save every Sections 2--4 figure and optionally close it immediately."""
+    import matplotlib.pyplot as plt
+
+    directory = Path(output_dir) / 'figures'
+    directory.mkdir(parents=True, exist_ok=True)
+    entries = []
+
+    def save(section, name, figure, condition=''):
+        if figure is None or not hasattr(figure, 'savefig'):
+            return
+        prefix = f'{condition}__' if condition else ''
+        path = directory / f'{section}__{prefix}{_safe_output_token(name)}.png'
+        figure.savefig(path, dpi=int(dpi), bbox_inches='tight')
+        entries.append({
+            'section': section, 'condition': condition, 'figure': name,
+            'path': str(path),
+        })
+        if close:
+            plt.close(figure)
+
+    for assigned_type, figure in raw_figures.items():
+        save('section2', f'raw-{assigned_type}', figure)
+    core_names = {
+        'mean_response_figure': 'mean-response',
+        'condition_figure': 'static-ln',
+        'temporal_figure': 'temporal-ln',
+        'kinetics_figure': 'temporal-kinetics',
+    }
+    for key, core in core_by_condition.items():
+        condition = _condition_figure_token(key)
+        for attribute, name in core_names.items():
+            save('section3', name, getattr(core, attribute, None), condition)
+    reconstruction_names = {
+        'trace_figure': 'reconstruction-trace',
+        'transfer_figure': 'reconstruction-transfer',
+        'phase_figure': 'phase-triggered',
+        'directional_figure': 'directional-decoding',
+        'decoding_figure': 'decoding-recovery',
+        'early_late_figure': 'early-late-transfer',
+    }
+    for key, result in reconstruction_by_condition.items():
+        condition = _condition_figure_token(key)
+        for field_name, name in reconstruction_names.items():
+            save('section4', name, result.get(field_name), condition)
+    return pd.DataFrame(
+        entries, columns=['section', 'condition', 'figure', 'path'])
+
+
+def _save_cell_run_tables(
+        output_dir: Path, epoch_table: pd.DataFrame,
+        condition_table: pd.DataFrame, inspection: ResponseInspection,
+        saved_outputs: pd.DataFrame, figure_manifest: pd.DataFrame
+        ) -> Dict[str, Path]:
+    """Save the selection/QC audit needed to review a batch result."""
+    directory = output_dir / 'tables'
+    directory.mkdir(parents=True, exist_ok=True)
+    frames = {
+        'epoch_catalog': epoch_table,
+        'conditions': condition_table,
+        'condition_audit': inspection.condition_audit,
+        'saved_conditions': saved_outputs,
+        'figure_manifest': figure_manifest,
+    }
+    paths = {}
+    for name, frame in frames.items():
+        path = directory / f'{name}.csv'
+        frame.to_csv(path, index=False)
+        paths[name] = path
+    return paths
+
+
+def run_cell_sections_2_to_5(
+        cell_index: int,
+        protocol_cells: pd.DataFrame,
+        protocol_blocks: pd.DataFrame,
+        block_modes: pd.DataFrame,
+        *,
+        settings: Optional[CellAnalysisSettings] = None,
+        output_dir=None,
+        close_figures: bool = True,
+        verbose: bool = True) -> CellAnalysisRun:
+    """Run, save, and return the notebook's complete Sections 2--5 workflow."""
+    import json
+
+    settings = settings or CellAnalysisSettings()
+    matches = protocol_cells[
+        pd.to_numeric(protocol_cells.cell_index, errors='coerce').eq(
+            int(cell_index))]
+    if len(matches) != 1:
+        raise ValueError(
+            f'cell_index {int(cell_index)} matched {len(matches)} rows; expected one')
+    row = matches.iloc[0]
+    exp_name, cell_label = str(row.exp_name), str(row.cell_label)
+    cell_type = str(row.get('cell_type', ''))
+    block_ids = [int(value) for value in row['_block_ids']]
+    if verbose:
+        print(f'cell {int(cell_index)} | {exp_name} | {cell_label} '
+              f'({cell_type}) | {len(block_ids)} blocks')
+
+    selected_modes = apply_recording_type_override(
+        block_modes, block_ids,
+        force_spike_flag=settings.force_spike_flag,
+        force_whole_cell_flag=settings.force_whole_cell_flag,
+        whole_cell_rec_type=settings.whole_cell_rec_type,
+        show=verbose)
+    epoch_table = epoch_catalog(block_ids, modes=selected_modes)
+    selected_modes, epoch_table, range_excluded = (
+        apply_epoch_recording_type_ranges(
+            selected_modes, epoch_table,
+            settings.epoch_index_ranges_by_rec_type, show=verbose))
+    mean_excluded = epoch_numbers_for_light_mean_exclusions(
+        epoch_table, settings.remove_mean_condition, show=verbose)
+    epoch_table['removed_mean_condition'] = epoch_table.epoch_number.isin(
+        mean_excluded)
+    effective_remove_epochs = tuple(dict.fromkeys(
+        [int(value) for value in settings.remove_epochs]
+        + list(range_excluded) + list(mean_excluded)))
+
+    raw_figures = plot_raw_epoch_traces_by_recording_type(
+        exp_name, epoch_table, remove_epochs=effective_remove_epochs,
+        spike_median_window_ms=settings.spike_median_window_ms,
+        spike_high_pass_hz=settings.spike_high_pass_hz,
+        whole_cell_bin_ms=settings.whole_cell_bin_ms)
+
+    requested_types = ((settings.recording_types_to_analyze,)
+                       if isinstance(settings.recording_types_to_analyze, str)
+                       else tuple(settings.recording_types_to_analyze))
+    invalid_types = sorted(set(requested_types) - set(RECORDING_TYPES))
+    if invalid_types:
+        raise ValueError(f'unknown recording types {invalid_types}')
+    excluded_types = tuple(value for value in RECORDING_TYPES
+                           if value not in requested_types)
+    conditions = recording_duration_conditions(
+        block_ids, modes=selected_modes,
+        min_epochs=settings.min_epochs_per_condition, show=False)
+    conditions = apply_recording_type_exclusions(
+        conditions, excluded=excluded_types, show=False)
+    conditions = apply_epoch_exclusions(
+        conditions, epoch_table, remove_epochs=effective_remove_epochs,
+        min_epochs=settings.min_epochs_per_condition, show=verbose)
+    inspection = inspect_recording_conditions(
+        exp_name, block_ids, conditions, max_epochs=settings.max_epochs,
+        min_firing_rate_hz=settings.min_firing_rate_hz,
+        min_whole_cell_modulation_pa=settings.min_whole_cell_modulation_pa,
+        low_response_epoch_fraction=settings.low_response_epoch_fraction,
+        spike_median_window_ms=settings.spike_median_window_ms,
+        spike_high_pass_hz=settings.spike_high_pass_hz,
+        psth_sigma_ms=settings.psth_sigma_ms,
+        whole_cell_bin_ms=settings.whole_cell_bin_ms,
+        align_epoch_means=settings.align_epoch_means,
+        whole_cell_baseline_target=settings.whole_cell_baseline_target,
+        make_response_trace_figures=False, verbose=verbose)
+    analysis_conditions = inspection.conditions[
+        inspection.conditions.included].copy()
+    if analysis_conditions.empty:
+        raise ValueError('no condition remains after Section 2 exclusions and QC')
+
+    core_by_condition = run_core_condition_analyses(
+        exp_name, block_ids, analysis_conditions,
+        qc_signature=inspection.signature, max_epochs=settings.max_epochs,
+        min_firing_rate_hz=settings.min_firing_rate_hz,
+        min_whole_cell_modulation_pa=settings.min_whole_cell_modulation_pa,
+        low_response_epoch_fraction=settings.low_response_epoch_fraction,
+        skip_seconds=settings.skip_seconds, downsample=settings.downsample,
+        spike_median_window_ms=settings.spike_median_window_ms,
+        spike_high_pass_hz=settings.spike_high_pass_hz,
+        psth_sigma_ms=settings.psth_sigma_ms,
+        whole_cell_bin_ms=settings.whole_cell_bin_ms,
+        max_series_resistance=settings.max_series_resistance,
+        align_epoch_means=settings.align_epoch_means,
+        whole_cell_baseline_target=settings.whole_cell_baseline_target,
+        mean_window_s=settings.mean_window_s,
+        condition_window_s=settings.condition_window_s,
+        temporal_window_s=settings.temporal_window_s, verbose=verbose)
+    reconstruction = run_reconstruction_analyses(
+        exp_name, core_by_condition,
+        decode_skip_s=settings.decode_skip_s,
+        decode_window_s=settings.decode_window_s,
+        decode_window_candidates_s=settings.decode_window_candidates_s,
+        decode_bin_ms=settings.decode_bin_ms,
+        steady_state_s=settings.steady_state_s,
+        min_phase_ms=settings.min_phase_ms,
+        direction_min_change_quantile=settings.direction_min_change_quantile,
+        trace_seconds=settings.trace_seconds, downsample=settings.downsample,
+        spike_median_window_ms=settings.spike_median_window_ms,
+        spike_high_pass_hz=settings.spike_high_pass_hz,
+        psth_sigma_ms=settings.psth_sigma_ms,
+        whole_cell_bin_ms=settings.whole_cell_bin_ms,
+        max_epochs=settings.max_epochs,
+        max_series_resistance=settings.max_series_resistance,
+        align_epoch_means=settings.align_epoch_means,
+        whole_cell_baseline_target=settings.whole_cell_baseline_target,
+        verbose=verbose)
+    reconstruction = add_early_late_reconstruction(
+        reconstruction, verbose=verbose)
+
+    cell_dir = cell_analysis_output_dir(
+        exp_name, cell_label, output_dir=output_dir)
+    cell_dir.mkdir(parents=True, exist_ok=True)
+    saved_outputs = save_condition_outputs(
+        core_by_condition, protocol_blocks,
+        reconstruction_by_condition=reconstruction,
+        cell_index=int(cell_index), mean_window_s=settings.mean_window_s,
+        output_dir=cell_dir, verbose=verbose)
+    figure_manifest = save_cell_analysis_figures(
+        raw_figures, core_by_condition, reconstruction, cell_dir,
+        dpi=settings.figure_dpi, close=close_figures)
+    table_paths = _save_cell_run_tables(
+        cell_dir, epoch_table, inspection.conditions,
+        inspection, saved_outputs, figure_manifest)
+    manifest = {
+        'status': 'complete', 'cell_index': int(cell_index),
+        'exp_name': exp_name, 'cell_label': cell_label,
+        'cell_type': cell_type, 'block_ids': block_ids,
+        'settings': asdict(settings),
+        'h5_outputs': saved_outputs.output_path.tolist(),
+        'figures': figure_manifest.path.tolist(),
+        'tables': {name: str(path) for name, path in table_paths.items()},
+    }
+    with (cell_dir / 'run_manifest.json').open('w') as stream:
+        json.dump(manifest, stream, indent=2, default=str)
+    if verbose:
+        print(f'saved {len(saved_outputs)} HDF5 condition(s) and '
+              f'{len(figure_manifest)} figure(s) under {cell_dir}')
+    return CellAnalysisRun(
+        cell_index=int(cell_index), exp_name=exp_name,
+        cell_label=cell_label, cell_type=cell_type, output_dir=cell_dir,
+        settings=settings, epoch_table=epoch_table,
+        condition_table=inspection.conditions, inspection=inspection,
+        core_by_condition=core_by_condition,
+        reconstruction_by_condition=reconstruction,
+        saved_condition_outputs=saved_outputs,
+        figure_manifest=figure_manifest, table_paths=table_paths)
+
+
+def run_cell_analysis_batch(
+        cell_indices: Sequence[int],
+        protocol_cells: pd.DataFrame,
+        protocol_blocks: pd.DataFrame,
+        block_modes: pd.DataFrame,
+        *,
+        settings: Optional[CellAnalysisSettings] = None,
+        overrides_by_index: Optional[Mapping[int, Mapping[str, object]]] = None,
+        output_dir=None,
+        continue_on_error: bool = True) -> pd.DataFrame:
+    """Run Sections 2--5 for selected indices with progress and no open plots."""
+    import time
+    import matplotlib.pyplot as plt
+
+    settings = settings or CellAnalysisSettings()
+    overrides_by_index = overrides_by_index or {}
+    indices = tuple(dict.fromkeys(int(value) for value in cell_indices))
+    directory = condition_output_dir(output_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    print(f'batch output: {directory}', flush=True)
+    rows = []
+    total = len(indices)
+    for position, cell_index in enumerate(indices, start=1):
+        started = time.perf_counter()
+        print(f'[{position}/{total}] cell index {cell_index}: '
+              'starting Sections 2--5', flush=True)
+        try:
+            cell_settings = replace(
+                settings, **dict(overrides_by_index.get(cell_index, {})))
+            with plt.ioff():
+                result = run_cell_sections_2_to_5(
+                    cell_index, protocol_cells, protocol_blocks, block_modes,
+                    settings=cell_settings, output_dir=output_dir,
+                    close_figures=True, verbose=False)
+            elapsed = time.perf_counter() - started
+            rows.append({
+                'cell_index': cell_index, 'date': result.exp_name,
+                'cell_label': result.cell_label, 'status': 'complete',
+                'n_conditions': len(result.saved_condition_outputs),
+                'n_figures': len(result.figure_manifest),
+                'elapsed_s': elapsed, 'output_dir': str(result.output_dir),
+                'error': '',
+            })
+            print(f'[{position}/{total}] cell index {cell_index}: complete | '
+                  f'{len(result.saved_condition_outputs)} condition(s), '
+                  f'{len(result.figure_manifest)} figure(s) | {elapsed:.1f} s',
+                  flush=True)
+        except Exception as error:
+            plt.close('all')
+            elapsed = time.perf_counter() - started
+            rows.append({
+                'cell_index': cell_index, 'date': '', 'cell_label': '',
+                'status': 'failed', 'n_conditions': 0, 'n_figures': 0,
+                'elapsed_s': elapsed, 'output_dir': '',
+                'error': f'{type(error).__name__}: {error}',
+            })
+            print(f'[{position}/{total}] cell index {cell_index}: FAILED | '
+                  f'{type(error).__name__}: {error}', flush=True)
+            if not continue_on_error:
+                raise
+    summary = pd.DataFrame(rows)
+    summary.to_csv(directory / 'batch_summary.csv', index=False)
+    complete = int(summary.status.eq('complete').sum()) if len(summary) else 0
+    print(f'batch finished: {complete}/{total} cells complete | '
+          f'{directory / "batch_summary.csv"}', flush=True)
+    return summary
+
+
+def load_cell_analysis_batch_summary(output_dir=None) -> pd.DataFrame:
+    """Load the latest batch audit, including per-cell failures."""
+    path = condition_output_dir(output_dir) / 'batch_summary.csv'
+    if not path.exists():
+        return pd.DataFrame(columns=[
+            'cell_index', 'date', 'cell_label', 'status', 'n_conditions',
+            'n_figures', 'elapsed_s', 'output_dir', 'error'])
+    return pd.read_csv(path)
+
+
+def load_saved_cell_analysis(
+        cell_index: int, protocol_cells: pd.DataFrame,
+        *, output_dir=None) -> SavedCellAnalysis:
+    """Load one batch cell's figures and tables for notebook inspection."""
+    matches = protocol_cells[
+        pd.to_numeric(protocol_cells.cell_index, errors='coerce').eq(
+            int(cell_index))]
+    if len(matches) != 1:
+        raise ValueError(
+            f'cell_index {int(cell_index)} matched {len(matches)} rows; expected one')
+    row = matches.iloc[0]
+    exp_name, cell_label = str(row.exp_name), str(row.cell_label)
+    cell_dir = cell_analysis_output_dir(
+        exp_name, cell_label, output_dir=output_dir)
+    if not cell_dir.exists():
+        raise FileNotFoundError(
+            f'no saved batch output for cell index {int(cell_index)} at {cell_dir}')
+    table_dir = cell_dir / 'tables'
+    tables = {
+        path.stem: pd.read_csv(path)
+        for path in sorted(table_dir.glob('*.csv'))
+    }
+    for name in CONDITION_TABLES:
+        frame = load_population_table(name, output_dir=cell_dir)
+        if not frame.empty:
+            tables[name] = frame
+    figures = tables.get('figure_manifest', pd.DataFrame(
+        columns=['section', 'condition', 'figure', 'path']))
+    conditions = load_condition_index(
+        output_dir=cell_dir, protocol_cells=protocol_cells)
+    return SavedCellAnalysis(
+        cell_index=int(cell_index), exp_name=exp_name,
+        cell_label=cell_label, output_dir=cell_dir,
+        conditions=conditions, figures=figures, tables=tables)
+
+
 def select_population_rows(frame: pd.DataFrame,
                            rec_types: Optional[Sequence[str]] = None,
                            cell_types: Optional[Sequence[str]] = None) -> pd.DataFrame:
@@ -10108,7 +10564,8 @@ def run_two_state_lnk_conditions(
 __all__ = [
     'PROTOCOLS', 'PROTOCOL_SEARCH', 'DEFAULT_SUMMARY_PATH', 'SUMMARY_DIR',
     'STEP_DIRECTIONS', 'STEP_LABELS', 'LNModel', 'ConditionAnalysis',
-    'CoreLNAnalysis', 'ResponseInspection',
+    'CoreLNAnalysis', 'ResponseInspection', 'CellAnalysisSettings',
+    'CellAnalysisRun', 'SavedCellAnalysis',
     'summary_path', 'load_summary', 'load_cell',
     'DATE_OFFSETS', 'SAVED_DATE_OFFSET_DAYS', 'FALLBACK_OFFSETS',
     'SINGLE_CELL_ROOT', 'metadata_files', 'corrected_dates',
@@ -10139,6 +10596,10 @@ __all__ = [
     'run_core_ln_analysis', 'inspect_recording_conditions',
     'response_qc_signature', 'run_core_condition_analyses',
     'run_reconstruction_analyses', 'add_early_late_reconstruction',
+    'run_cell_sections_2_to_5', 'run_cell_analysis_batch',
+    'save_cell_analysis_figures', 'load_cell_analysis_batch_summary',
+    'load_saved_cell_analysis',
+    'cell_analysis_output_dir',
     'save_condition_output', 'save_duration_outputs',
     'save_condition_outputs',
     'load_condition_index', 'load_population_table', 'select_population_rows',
