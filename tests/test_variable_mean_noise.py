@@ -68,6 +68,25 @@ def test_section_6b_contains_quality_summary_and_former_section_10():
     assert '085e4041' not in cells
 
 
+def test_section_6c_runs_high_quality_population_ln_analysis():
+    import json
+
+    notebook_path = NOTEBOOK_DIR / 'analyzeVariableMeanNoise.ipynb'
+    notebook = json.loads(notebook_path.read_text())
+    cells = {cell.get('id'): ''.join(cell.get('source', []))
+             for cell in notebook['cells']}
+
+    assert 'population-ln-heading' in cells
+    source = cells['population-ln-analysis']
+    assert "POPULATION_REC_TYPES = ('extracellular', 'exc')" in source
+    assert 'high_quality_population_ln_analysis' in source
+    assert 'plot_population_temporal_ln_curves' in source
+    assert 'plot_population_temporal_parameters' in source
+    ids = [cell.get('id') for cell in notebook['cells']]
+    assert ids.index('high-quality-indices') < ids.index('population-ln-heading')
+    assert ids.index('population-ln-analysis') < ids.index('ea098e58')
+
+
 def test_visual_browser_ln_menu_uses_measured_vs_predicted_figure():
     import json
 
@@ -2688,6 +2707,127 @@ def test_population_mean_sem_weights_each_cell_once():
     assert summary.r2_n_cells.iloc[0] == 2
 
 
+def _saved_ln_curve_rows(condition_id, rec_type, levels, temporal=False,
+                         date='2020-01-01_B', cell_label='Cell1'):
+    import pandas as pd
+
+    rows = []
+    windows = [(0, '0-1 s', 1.0), (1, '1-2 s', 2.0)] if temporal else [(-1, 'full', 1.0)]
+    for level in levels:
+        for order, window, window_scale in windows:
+            for curve, x, y in (
+                    ('filter', [0.0, .01], [0.0, level * window_scale]),
+                    ('nonlinearity', [-level, level],
+                     ([0.0, 2.0 * level * window_scale]
+                      if rec_type == 'extracellular'
+                      else [-level * window_scale, -3.0 * level * window_scale]))):
+                for point, (x_value, y_value) in enumerate(zip(x, y)):
+                    rows.append({
+                        'condition_id': condition_id,
+                        'date': date, 'cell_label': cell_label,
+                        'cell_id': f'{date}/{cell_label}/{rec_type}',
+                        'cell_type': 'OFF-parasol', 'rec_type': rec_type,
+                        'stim_seconds': 30.0, 'light_contrast': .3,
+                        'lightMean': level, 'order': order, 'window': window,
+                        'curve': curve, 'point': point,
+                        'x': x_value, 'y': y_value,
+                    })
+    return pd.DataFrame(rows)
+
+
+def test_population_ln_normalization_uses_joint_low_high_scale():
+    import pandas as pd
+
+    spike = _saved_ln_curve_rows('spike', 'extracellular', [.1, 1.0, 10.0])
+    exc = _saved_ln_curve_rows('exc', 'exc', [.1, 10.0],
+                               date='2020-01-02_B')
+    normalized = vmn.normalize_population_ln_curves(
+        pd.concat([spike, exc], ignore_index=True))
+
+    assert set(normalized.lightMean) == {.1, 10.0}
+    assert set(normalized.light_state) == {'low', 'high'}
+    spike_nl = normalized[
+        normalized.condition_id.eq('spike')
+        & normalized.curve.eq('nonlinearity')]
+    assert spike_nl.response_scale.unique().tolist() == [20.0]
+    assert spike_nl.y_normalized.max() == pytest.approx(1.0)
+    exc_nl = normalized[
+        normalized.condition_id.eq('exc')
+        & normalized.curve.eq('nonlinearity')]
+    assert exc_nl.response_scale.unique().tolist() == [30.0]
+    assert exc_nl.y_normalized.min() == pytest.approx(-1.0)
+
+
+def test_temporal_curve_normalization_preserves_change_between_windows():
+    temporal = _saved_ln_curve_rows(
+        'spike', 'extracellular', [1.0, 2.0], temporal=True)
+
+    normalized = vmn.normalize_population_ln_curves(
+        temporal, temporal=True)
+    low_filter = normalized[
+        normalized.light_state.eq('low')
+        & normalized.curve.eq('filter')]
+    early = low_filter[low_filter.order.eq(0)].y_normalized.max()
+    late = low_filter[low_filter.order.eq(1)].y_normalized.max()
+
+    assert normalized.filter_scale.unique().tolist() == [4.0]
+    assert early == pytest.approx(.25)
+    assert late == pytest.approx(.5)
+
+
+def test_temporal_nonlinearity_parameters_follow_normalized_axes():
+    import pandas as pd
+
+    temporal = _saved_ln_curve_rows(
+        'spike', 'extracellular', [1.0, 2.0], temporal=True)
+    curves = vmn.normalize_population_ln_curves(temporal, temporal=True)
+    params = pd.DataFrame({
+        'condition_id': ['spike'] * 4,
+        'date': ['2020-01-01_B'] * 4, 'cell_label': ['Cell1'] * 4,
+        'cell_id': ['2020-01-01_B/Cell1/extracellular'] * 4,
+        'cell_type': ['OFF-parasol'] * 4,
+        'rec_type': ['extracellular'] * 4,
+        'stim_seconds': [30.0] * 4, 'light_contrast': [.3] * 4,
+        'lightMean': [1.0, 1.0, 2.0, 2.0], 'order': [0, 1, 0, 1],
+        'centre_s': [.5, 1.5, .5, 1.5],
+        'time_to_peak_ms': [20., 21., 18., 19.],
+        'biphasic_index': [.2, .3, .4, .5],
+        'alpha': [8.] * 4, 'beta': [.5] * 4,
+        'gamma': [-.2] * 4, 'epsilon': [2.] * 4,
+    })
+
+    normalized = vmn.normalize_temporal_ln_parameters(params, curves)
+
+    # Joint temporal NL scales are max response=8 and max |generator|=2.
+    assert normalized.alpha_normalized.tolist() == pytest.approx([1.] * 4)
+    assert normalized.beta_normalized.tolist() == pytest.approx([1.] * 4)
+    assert normalized.gamma_normalized.tolist() == pytest.approx([-.2] * 4)
+    assert normalized.epsilon_normalized.tolist() == pytest.approx([.25] * 4)
+
+
+def test_population_ln_curve_summary_weights_each_physical_cell_once():
+    import pandas as pd
+
+    rows = []
+    for condition, date, label, amplitude in (
+            ('A1', '2020-01-01_B', 'Cell1', 1.0),
+            ('A2', '2020-01-01_B', 'Cell1', 3.0),
+            ('B1', '2020-01-02_B', 'Cell2', 6.0)):
+        for x in (0.0, 1.0):
+            rows.append({
+                'condition_id': condition, 'date': date, 'cell_label': label,
+                'cell_type': 'OFF-parasol', 'rec_type': 'extracellular',
+                'stim_seconds': 30., 'light_contrast': .3,
+                'light_state': 'low', 'curve': 'filter',
+                'x_population': x, 'y_normalized': amplitude,
+            })
+    summary = vmn.population_ln_curve_mean_sem(pd.DataFrame(rows), grid_points=2)
+
+    assert summary.n_cells.tolist() == [2, 2]
+    assert summary.y_mean.tolist() == pytest.approx([4.0, 4.0])
+    assert summary.y_sem.tolist() == pytest.approx([2.0, 2.0])
+
+
 def test_condition_batch_helpers_preserve_mode_duration_keys(monkeypatch):
     import pandas as pd
 
@@ -2811,15 +2951,22 @@ def test_inspection_excludes_only_failed_activity_conditions(monkeypatch):
 
 
 def test_population_wrappers_are_safe_before_any_records_exist(tmp_path):
+    import pandas as pd
+
     overview = vmn.population_overview_analysis(output_dir=tmp_path)
     temporal = vmn.population_temporal_analysis(output_dir=tmp_path)
     decoding = vmn.population_decoding_analysis(output_dir=tmp_path)
+    quality_ln = vmn.high_quality_population_ln_analysis(
+        pd.DataFrame(columns=['date', 'cell_label']), output_dir=tmp_path)
 
     assert overview['saved_cells'].empty
     assert overview['mean_figures'] == {}
     assert temporal['summary'].empty and temporal['figures'] == {}
     assert decoding['directional_contrast'].empty
     assert decoding['directional_contrast_figures'] == {}
+    assert quality_ln['static_summary'].empty
+    assert quality_ln['temporal_parameter_summary'].empty
+    assert quality_ln['static_figures'] == {}
 
 
 def test_condition_output_default_is_external_rod_noise_folder():
