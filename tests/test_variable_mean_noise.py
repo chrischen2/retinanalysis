@@ -36,6 +36,22 @@ def test_notebook_pins_named_retinanalysis_kernel():
     }
 
 
+def test_section_3_explicitly_displays_each_core_figure():
+    import json
+
+    notebook_path = NOTEBOOK_DIR / 'analyzeVariableMeanNoise.ipynb'
+    notebook = json.loads(notebook_path.read_text())
+    source = ''.join(next(
+        cell['source'] for cell in notebook['cells']
+        if cell.get('id') == 'c443d0c5'))
+
+    for field in ('mean_response_figure', 'condition_figure',
+                  'temporal_figure', 'kinetics_figure'):
+        assert repr(field) in source
+    assert 'display(figure)' in source
+    assert 'plt.close(figure)' in source
+
+
 def test_visual_browser_ln_menu_uses_measured_vs_predicted_figure():
     import json
 
