@@ -2967,6 +2967,28 @@ def test_batch_accepts_one_scalar_cell_index(monkeypatch, tmp_path):
     assert summary.status.tolist() == ['complete']
 
 
+def test_saved_cell_analysis_index_uses_independent_requested_range(tmp_path):
+    import pandas as pd
+
+    cells = pd.DataFrame({
+        'cell_index': [1, 2, 3],
+        'exp_name': ['2025-01-01_A', '2025-01-01_A', '2025-01-02_B'],
+        'cell_label': ['cell1', 'cell2', 'cell3'],
+    })
+    for cell_index in (1, 3):
+        row = cells[cells.cell_index.eq(cell_index)].iloc[0]
+        table_dir = (vmn.cell_analysis_output_dir(
+            row.exp_name, row.cell_label, output_dir=tmp_path) / 'tables')
+        table_dir.mkdir(parents=True)
+        (table_dir / 'figure_manifest.csv').touch()
+
+    saved = vmn.saved_cell_analysis_index(
+        cells, range(1, 4), output_dir=tmp_path)
+
+    assert saved.cell_index.tolist() == [1, 3]
+    assert saved.cell_label.tolist() == ['cell1', 'cell3']
+
+
 def test_cell_sections_wrapper_routes_outputs_to_date_cell_folder(monkeypatch,
                                                                   tmp_path):
     import pandas as pd

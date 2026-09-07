@@ -10311,6 +10311,32 @@ def load_cell_analysis_batch_summary(output_dir=None) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
+def saved_cell_analysis_index(
+        protocol_cells: pd.DataFrame, cell_indices=None, *, output_dir=None
+        ) -> pd.DataFrame:
+    """List saved per-cell analyses independently of the latest batch run."""
+    columns = ('cell_index', 'date', 'cell_label', 'output_dir')
+    cells = protocol_cells.copy()
+    cells['review_index'] = pd.to_numeric(cells.cell_index, errors='coerce')
+    cells = cells[cells.review_index.notna()].copy()
+    cells['review_index'] = cells.review_index.astype(int)
+    if cell_indices is not None:
+        cells = cells[cells.review_index.isin(
+            normalize_cell_indices(cell_indices))]
+    rows = []
+    for row in cells.sort_values('review_index').itertuples(index=False):
+        cell_dir = cell_analysis_output_dir(
+            str(row.exp_name), str(row.cell_label), output_dir=output_dir)
+        if not (cell_dir / 'tables' / 'figure_manifest.csv').is_file():
+            continue
+        rows.append({
+            'cell_index': int(row.review_index), 'date': str(row.exp_name),
+            'cell_label': str(row.cell_label), 'output_dir': str(cell_dir),
+        })
+    return pd.DataFrame(rows, columns=columns).drop_duplicates(
+        'cell_index', keep='last').reset_index(drop=True)
+
+
 def load_saved_cell_analysis(
         cell_index: int, protocol_cells: pd.DataFrame,
         *, output_dir=None,
@@ -10713,7 +10739,7 @@ __all__ = [
     'run_cell_sections_2_to_5', 'run_cell_analysis_batch',
     'normalize_cell_indices',
     'save_cell_analysis_figures', 'load_cell_analysis_batch_summary',
-    'load_saved_cell_analysis',
+    'saved_cell_analysis_index', 'load_saved_cell_analysis',
     'cell_analysis_output_dir', 'high_quality_cells_path',
     'load_high_quality_cells', 'saved_cell_mean_response_text',
     'saved_cell_review_line', 'set_cell_visual_inspection',
