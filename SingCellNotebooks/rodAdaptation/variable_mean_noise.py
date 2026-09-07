@@ -10776,26 +10776,59 @@ def high_quality_population_overview_analysis(*, output_dir=None) -> dict:
     }
 
 
-POPULATION_LN_GROUPS = (
-    'cell_type', 'rec_type', 'stim_seconds', 'light_contrast')
+POPULATION_STATIC_GROUPS = ('cell_type', 'rec_type')
+POPULATION_TEMPORAL_GROUPS = ('cell_type', 'rec_type', 'duration_group_s')
 
 
 def population_ln_condition_counts(paired_conditions: pd.DataFrame) -> pd.DataFrame:
-    """Count physical cells and saved low/high condition pairs for Section 6c."""
-    columns = [*POPULATION_LN_GROUPS, 'n_cells', 'n_conditions']
+    """Count cells and low/high pairs after pooling duration and contrast."""
+    columns = [*POPULATION_STATIC_GROUPS, 'n_cells', 'n_conditions']
     if paired_conditions is None or paired_conditions.empty:
         return pd.DataFrame(columns=columns)
-    required = {'cell_id', 'condition_id', *POPULATION_LN_GROUPS}
+    required = {'cell_id', 'condition_id', *POPULATION_STATIC_GROUPS}
     missing = sorted(required - set(paired_conditions.columns))
     if missing:
         raise ValueError(f'paired condition table is missing {missing}')
     conditions = paired_conditions[
-        ['cell_id', 'condition_id', *POPULATION_LN_GROUPS]].drop_duplicates()
+        ['cell_id', 'condition_id', *POPULATION_STATIC_GROUPS]].drop_duplicates()
     return (conditions.groupby(
-        list(POPULATION_LN_GROUPS), dropna=False, as_index=False)
+        list(POPULATION_STATIC_GROUPS), dropna=False, as_index=False)
         .agg(n_cells=('cell_id', 'nunique'),
              n_conditions=('condition_id', 'nunique'))
         .reindex(columns=columns))
+
+
+def _prepare_population_temporal_rows(
+        frame: pd.DataFrame, *, truncate_at_s: float = 50.0) -> pd.DataFrame:
+    """Map recordings to 30/50 s groups and trim longer ones at 50 s.
+
+    The saved temporal fits are window based. A window from a 55/60 s epoch is
+    retained when its centre is no later than 50 s, which preserves the same
+    first 16 temporal orders normally present in a 50 s recording.
+    """
+    if frame is None or frame.empty:
+        return pd.DataFrame() if frame is None else frame.copy()
+    if 'stim_seconds' not in frame:
+        raise ValueError('temporal population rows require stim_seconds')
+    rows = frame.copy()
+    duration = pd.to_numeric(rows.stim_seconds, errors='coerce')
+    rows['duration_group_s'] = np.select(
+        (duration.le(40.0), duration.gt(40.0)), (30.0, 50.0),
+        default=np.nan)
+    longer = duration.gt(float(truncate_at_s))
+    if longer.any():
+        if 'centre_s' in rows:
+            centre = pd.to_numeric(rows.centre_s, errors='coerce')
+        elif 'window' in rows:
+            centre = rows.window.astype(str).map(_window_centre)
+        else:
+            raise ValueError(
+                'long temporal recordings require centre_s or window labels')
+        if centre[longer].isna().any():
+            raise ValueError(
+                'could not locate temporal windows in a recording longer than 50 s')
+        rows = rows.loc[~longer | centre.le(float(truncate_at_s))].copy()
+    return rows
 
 
 def _select_low_high_light_rows(frame: pd.DataFrame) -> pd.DataFrame:
@@ -10854,6 +10887,8 @@ def normalize_population_ln_curves(
     if missing:
         raise ValueError(f'LN curve table is missing {missing}')
     selected = select_population_rows(curves, rec_types=rec_types)
+    if temporal:
+        selected = _prepare_population_temporal_rows(selected)
     selected = _select_low_high_light_rows(selected)
     if selected.empty:
         return selected
@@ -10914,12 +10949,14 @@ def normalize_population_ln_curves(
 def population_ln_curve_mean_sem(
         normalized_curves: pd.DataFrame, *, temporal: bool = False,
         grid_points: int = 101) -> pd.DataFrame:
-    """Interpolate normalized curves and compute one-cell-one-vote mean/SEM."""
+    """Interpolate curves after pooling contrast and the requested durations."""
     if normalized_curves is None or normalized_curves.empty:
         return pd.DataFrame()
     if int(grid_points) < 2:
         raise ValueError('grid_points must be at least 2')
-    group_columns = [*POPULATION_LN_GROUPS, 'light_state', 'curve']
+    population_groups = (POPULATION_TEMPORAL_GROUPS if temporal
+                         else POPULATION_STATIC_GROUPS)
+    group_columns = [*population_groups, 'light_state', 'curve']
     if temporal:
         group_columns.append('order')
     required = {
@@ -10974,10 +11011,10 @@ def population_ln_curve_mean_sem(
     summary = summary.drop(columns='y_std')
     if temporal and 'centre_s' in normalized_curves:
         centres = (normalized_curves.groupby(
-            [*POPULATION_LN_GROUPS, 'light_state', 'order'], dropna=False,
+            [*population_groups, 'light_state', 'order'], dropna=False,
             as_index=False).centre_s.mean())
         summary = summary.merge(
-            centres, on=[*POPULATION_LN_GROUPS, 'light_state', 'order'],
+            centres, on=[*population_groups, 'light_state', 'order'],
             how='left')
     return summary
 
@@ -10993,7 +11030,8 @@ def normalize_temporal_ln_parameters(
     missing = sorted(required - set(temporal_summary.columns))
     if missing:
         raise ValueError(f'temporal summary table is missing {missing}')
-    rows = _select_low_high_light_rows(temporal_summary)
+    rows = _select_low_high_light_rows(
+        _prepare_population_temporal_rows(temporal_summary))
     if rows.empty or normalized_temporal_curves is None or normalized_temporal_curves.empty:
         return rows.iloc[0:0].copy()
     scales = (normalized_temporal_curves[
@@ -11018,7 +11056,7 @@ def population_temporal_parameter_mean_sem(
         return pd.DataFrame()
     return population_mean_sem(
         normalized_parameters,
-        [*POPULATION_LN_GROUPS, 'light_state', 'order'],
+        [*POPULATION_TEMPORAL_GROUPS, 'light_state', 'order'],
         ['centre_s', 'time_to_peak_ms', 'biphasic_index',
          'alpha_normalized', 'beta_normalized', 'gamma_normalized',
          'epsilon_normalized'])
@@ -11026,9 +11064,12 @@ def population_temporal_parameter_mean_sem(
 
 def _population_ln_title(block: pd.DataFrame) -> str:
     row = block.iloc[0]
-    return (f'{row.cell_type} | {row.rec_type} | '
-            f'{float(row.stim_seconds):g} s | contrast '
-            f'{float(row.light_contrast):g}')
+    title = f'{row.cell_type} | {row.rec_type}'
+    if 'duration_group_s' in block:
+        title += f' | {float(row.duration_group_s):g} s temporal group'
+    else:
+        title += ' | all durations and contrasts pooled'
+    return title
 
 
 def plot_population_static_ln_curves(summary: pd.DataFrame):
@@ -11186,7 +11227,7 @@ def _resample_condition_ln_curves(
         for column in (
                 'condition_id', 'date', 'cell_label', 'cell_type',
                 'rec_type', 'stim_seconds', 'light_contrast', 'lightMean',
-                'light_state', 'curve', 'order'):
+                'duration_group_s', 'light_state', 'curve', 'order'):
             if column in block:
                 piece[column] = identity[column]
         if temporal and 'window' in block:
@@ -11211,8 +11252,12 @@ def high_quality_population_ln_analysis(
     Files are processed one condition at a time so the multi-million-row raw
     temporal table is never held in memory. When ``high_quality_cells`` is
     omitted, the visual-review CSV is loaded directly, making Section 6c
-    independent of Section 6b. The notebook renders and closes each group
-    sequentially with :func:`iter_population_ln_figures`. Set
+    independent of Section 6b. Static curves pool all contrasts and epoch
+    durations. Temporal results pool contrast but retain 30 s and 50 s groups;
+    longer epochs join the 50 s group after windows centred beyond 50 s are
+    removed.
+    The notebook renders and closes each group sequentially with
+    :func:`iter_population_ln_figures`. Set
     ``retain_normalized`` only when the interpolation-ready per-condition
     curves are needed for debugging.
     """
@@ -11311,18 +11356,19 @@ def iter_population_ln_figures(result: Mapping[str, object]):
     """Yield Section 6c figures one at a time to keep notebook memory bounded."""
     figure_specs = (
         ('static_summary', plot_population_static_ln_curves,
-         'Static filter and nonlinearity'),
+         'Static filter and nonlinearity', POPULATION_STATIC_GROUPS),
         ('temporal_curve_summary', plot_population_temporal_ln_curves,
-         'Temporal filter and nonlinearity'),
+         'Temporal filter and nonlinearity', POPULATION_TEMPORAL_GROUPS),
         ('temporal_parameter_summary', plot_population_temporal_parameters,
-         'Temporal filter and nonlinearity parameters'),
+         'Temporal filter and nonlinearity parameters',
+         POPULATION_TEMPORAL_GROUPS),
     )
-    for summary_name, plotter, label in figure_specs:
+    for summary_name, plotter, label, group_columns in figure_specs:
         summary = result.get(summary_name)
         if not isinstance(summary, pd.DataFrame) or summary.empty:
             continue
         for condition, block in summary.groupby(
-                list(POPULATION_LN_GROUPS), dropna=False, sort=True):
+                list(group_columns), dropna=False, sort=True):
             yield label, condition, plotter(block)
 
 

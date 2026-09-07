@@ -93,6 +93,9 @@ def test_section_6c_runs_high_quality_population_ln_analysis():
              for cell in notebook['cells']}
 
     assert 'population-ln-heading' in cells
+    assert 'All contrasts are pooled' in cells['population-ln-heading']
+    assert 'only two duration groups: 30 s and 50 s' in cells[
+        'population-ln-heading']
     source = cells['population-ln-analysis']
     assert "POPULATION_REC_TYPES = ('extracellular', 'exc')" in source
     assert "POPULATION_CELL_TYPES = ('ON-parasol', 'ON-midget')" in source
@@ -2823,15 +2826,15 @@ def test_population_ln_curve_summary_weights_each_physical_cell_once():
     import pandas as pd
 
     rows = []
-    for condition, date, label, amplitude in (
-            ('A1', '2020-01-01_B', 'Cell1', 1.0),
-            ('A2', '2020-01-01_B', 'Cell1', 3.0),
-            ('B1', '2020-01-02_B', 'Cell2', 6.0)):
+    for condition, date, label, amplitude, duration, contrast in (
+            ('A1', '2020-01-01_B', 'Cell1', 1.0, 30., .3),
+            ('A2', '2020-01-01_B', 'Cell1', 3.0, 60., .5),
+            ('B1', '2020-01-02_B', 'Cell2', 6.0, 50., .9)):
         for x in (0.0, 1.0):
             rows.append({
                 'condition_id': condition, 'date': date, 'cell_label': label,
                 'cell_type': 'OFF-parasol', 'rec_type': 'extracellular',
-                'stim_seconds': 30., 'light_contrast': .3,
+                'stim_seconds': duration, 'light_contrast': contrast,
                 'light_state': 'low', 'curve': 'filter',
                 'x_population': x, 'y_normalized': amplitude,
             })
@@ -2840,6 +2843,32 @@ def test_population_ln_curve_summary_weights_each_physical_cell_once():
     assert summary.n_cells.tolist() == [2, 2]
     assert summary.y_mean.tolist() == pytest.approx([4.0, 4.0])
     assert summary.y_sem.tolist() == pytest.approx([2.0, 2.0])
+    assert 'stim_seconds' not in summary and 'light_contrast' not in summary
+
+
+def test_temporal_population_pools_contrast_within_30_or_50_group():
+    import pandas as pd
+
+    rows = []
+    for condition, date, duration, contrast, amplitude in (
+            ('A', '2020-01-01_B', 50., .3, 1.),
+            ('B', '2020-01-02_B', 60., .9, 3.)):
+        for x in (0., 1.):
+            rows.append({
+                'condition_id': condition, 'date': date, 'cell_label': 'Cell1',
+                'cell_type': 'ON-parasol', 'rec_type': 'extracellular',
+                'stim_seconds': duration, 'light_contrast': contrast,
+                'duration_group_s': 50., 'light_state': 'low',
+                'curve': 'filter', 'order': 0, 'centre_s': 3.5,
+                'x_population': x, 'y_normalized': amplitude,
+            })
+
+    summary = vmn.population_ln_curve_mean_sem(
+        pd.DataFrame(rows), temporal=True, grid_points=2)
+
+    assert summary.duration_group_s.unique().tolist() == [50.]
+    assert 'light_contrast' not in summary and 'stim_seconds' not in summary
+    assert summary.y_mean.tolist() == pytest.approx([2., 2.])
 
 
 def test_condition_batch_helpers_preserve_mode_duration_keys(monkeypatch):
@@ -3376,11 +3405,28 @@ def test_population_ln_condition_counts_uses_physical_cell_identity():
         'condition_id': ['a-30', 'a-60', 'b-30'],
         'cell_type': ['ON-parasol'] * 3,
         'rec_type': ['extracellular'] * 3,
-        'stim_seconds': [30., 30., 30.],
-        'light_contrast': [.3, .3, .3],
+        'stim_seconds': [30., 60., 50.],
+        'light_contrast': [.3, .5, .9],
     })
 
     counts = vmn.population_ln_condition_counts(rows)
 
     assert counts.n_cells.iloc[0] == 2
     assert counts.n_conditions.iloc[0] == 3
+    assert len(counts) == 1
+
+
+def test_temporal_population_maps_long_epochs_to_50_and_truncates():
+    import pandas as pd
+
+    rows = pd.DataFrame({
+        'stim_seconds': [30., 50., 55., 55., 60., 60.],
+        'window': ['28-30 s', '47-50 s', '47-50 s', '50-53 s',
+                   '47-50 s', '50-53 s'],
+        'value': np.arange(6),
+    })
+
+    grouped = vmn._prepare_population_temporal_rows(rows)
+
+    assert grouped.value.tolist() == [0, 1, 2, 4]
+    assert grouped.duration_group_s.tolist() == [30., 50., 50., 50.]
