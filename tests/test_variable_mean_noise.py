@@ -2989,6 +2989,26 @@ def test_saved_cell_analysis_index_uses_independent_requested_range(tmp_path):
     assert saved.cell_label.tolist() == ['cell1', 'cell3']
 
 
+def test_load_saved_cell_analysis_carries_cell_type_for_review(tmp_path):
+    import pandas as pd
+
+    cells = pd.DataFrame({
+        'cell_index': [4], 'exp_name': ['2025-01-02_B'],
+        'cell_label': ['cell4'], 'cell_type': ['ON-midget'],
+    })
+    table_dir = (vmn.cell_analysis_output_dir(
+        '2025-01-02_B', 'cell4', output_dir=tmp_path) / 'tables')
+    table_dir.mkdir(parents=True)
+    pd.DataFrame(columns=['section', 'condition', 'figure', 'path']).to_csv(
+        table_dir / 'figure_manifest.csv', index=False)
+
+    saved = vmn.load_saved_cell_analysis(
+        4, cells, output_dir=tmp_path, table_names=(),
+        include_audit_tables=False)
+
+    assert saved.cell_type == 'ON-midget'
+
+
 def test_cell_sections_wrapper_routes_outputs_to_date_cell_folder(monkeypatch,
                                                                   tmp_path):
     import pandas as pd
@@ -3074,10 +3094,11 @@ def test_visual_inspection_keep_and_remove_updates_high_quality_csv(tmp_path):
         cell_index=12, exp_name='2025-01-01_A', cell_label='Cell2',
         output_dir=tmp_path / '2025-01-01_A__Cell2',
         conditions=conditions, figures=pd.DataFrame(),
-        tables={'mean_response': mean_response})
+        tables={'mean_response': mean_response}, cell_type='ON-parasol')
 
     line = vmn.saved_cell_review_line(saved)
-    assert line == ('cell id 12 | label Cell2 | date 2025-01-01_A | '
+    assert line == ('cell id 12 | label Cell2 | cell type ON-parasol | '
+                    'date 2025-01-01_A | '
                     'mean resp extracellular: 24.5 Hz; exc: -150 pA')
 
     kept = vmn.set_cell_visual_inspection(saved, True, output_dir=tmp_path)

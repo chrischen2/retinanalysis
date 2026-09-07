@@ -9971,6 +9971,7 @@ class SavedCellAnalysis:
     conditions: pd.DataFrame
     figures: pd.DataFrame
     tables: Dict[str, pd.DataFrame]
+    cell_type: str = ''
 
 
 def _condition_figure_token(key) -> str:
@@ -10356,6 +10357,8 @@ def load_saved_cell_analysis(
             f'cell_index {int(cell_index)} matched {len(matches)} rows; expected one')
     row = matches.iloc[0]
     exp_name, cell_label = str(row.exp_name), str(row.cell_label)
+    cell_type_value = row.get('cell_type', row.get('cell_type_short', ''))
+    cell_type = ('' if pd.isna(cell_type_value) else str(cell_type_value))
     cell_dir = cell_analysis_output_dir(
         exp_name, cell_label, output_dir=output_dir)
     if not cell_dir.exists():
@@ -10382,7 +10385,8 @@ def load_saved_cell_analysis(
     return SavedCellAnalysis(
         cell_index=int(cell_index), exp_name=exp_name,
         cell_label=cell_label, output_dir=cell_dir,
-        conditions=conditions, figures=figures, tables=tables)
+        conditions=conditions, figures=figures, tables=tables,
+        cell_type=cell_type)
 
 
 HIGH_QUALITY_CELL_COLUMNS = (
@@ -10444,6 +10448,7 @@ def saved_cell_mean_response_text(saved: SavedCellAnalysis) -> str:
 def saved_cell_review_line(saved: SavedCellAnalysis) -> str:
     """One-line identity and mean-response label for the image browser."""
     return (f'cell id {int(saved.cell_index)} | label {saved.cell_label} | '
+            f'cell type {saved.cell_type or "unclassified"} | '
             f'date {saved.exp_name} | mean resp '
             f'{saved_cell_mean_response_text(saved)}')
 
