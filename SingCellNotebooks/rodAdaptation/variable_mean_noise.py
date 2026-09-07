@@ -10515,6 +10515,84 @@ def high_quality_cell_indices(output_dir=None) -> Tuple[int, ...]:
     return tuple(load_high_quality_cells(output_dir).cell_index.astype(int))
 
 
+HIGH_QUALITY_SUMMARY_COLUMNS = (
+    'cell_type', 'rec_type', 'n_cells',
+    'mean_firing_rate_hz', 'mean_response_pa')
+
+
+def select_high_quality_saved_rows(
+        frame: pd.DataFrame, high_quality_cells: pd.DataFrame) -> pd.DataFrame:
+    """Select saved rows by physical date/cell identity, not mutable index."""
+    if frame is None:
+        return pd.DataFrame()
+    if frame.empty or high_quality_cells is None or high_quality_cells.empty:
+        return frame.iloc[0:0].copy()
+    required = {'date', 'cell_label'}
+    missing_frame = sorted(required - set(frame.columns))
+    missing_review = sorted(required - set(high_quality_cells.columns))
+    if missing_frame or missing_review:
+        raise ValueError(
+            f'high-quality selection requires date/cell_label; '
+            f'saved rows missing {missing_frame}, review rows missing '
+            f'{missing_review}')
+    keys = set(zip(high_quality_cells.date.astype(str),
+                   high_quality_cells.cell_label.astype(str)))
+    keep = [(str(date), str(label)) in keys
+            for date, label in zip(frame.date, frame.cell_label)]
+    return frame.loc[keep].copy()
+
+
+def summarize_high_quality_saved_cells(
+        high_quality_cells: pd.DataFrame,
+        saved_conditions: pd.DataFrame,
+        mean_response_rows: pd.DataFrame) -> pd.DataFrame:
+    """Count reviewed cells and summarize rate/current without mixing units."""
+    conditions = select_high_quality_saved_rows(
+        saved_conditions, high_quality_cells)
+    if conditions.empty:
+        return pd.DataFrame(columns=HIGH_QUALITY_SUMMARY_COLUMNS)
+    required = {
+        'condition_id', 'date', 'cell_label', 'cell_type', 'rec_type',
+        'mean_rate_hz'}
+    missing = sorted(required - set(conditions.columns))
+    if missing:
+        raise ValueError(f'saved condition index is missing {missing}')
+
+    response_by_condition = pd.Series(dtype=float, name='condition_response')
+    responses = select_high_quality_saved_rows(
+        mean_response_rows, high_quality_cells)
+    if (not responses.empty
+            and {'condition_id', 'mean'}.issubset(responses.columns)):
+        response_values = responses.copy()
+        response_values['mean'] = pd.to_numeric(
+            response_values['mean'], errors='coerce')
+        response_by_condition = response_values.groupby(
+            'condition_id', dropna=False)['mean'].mean().rename(
+                'condition_response')
+
+    metrics = conditions[
+        ['condition_id', 'date', 'cell_label', 'cell_type', 'rec_type',
+         'mean_rate_hz']].copy()
+    metrics['mean_rate_hz'] = pd.to_numeric(
+        metrics.mean_rate_hz, errors='coerce')
+    metrics = metrics.join(response_by_condition, on='condition_id')
+    extracellular = metrics.rec_type.astype(str).eq('extracellular')
+    metrics['mean_firing_rate_hz'] = metrics.mean_rate_hz.where(extracellular)
+    metrics['mean_response_pa'] = metrics.condition_response.where(
+        ~extracellular)
+
+    per_cell = (metrics.groupby(
+        ['date', 'cell_label', 'cell_type', 'rec_type'], dropna=False,
+        as_index=False)[['mean_firing_rate_hz', 'mean_response_pa']].mean())
+    summary = (per_cell.groupby(
+        ['cell_type', 'rec_type'], dropna=False, as_index=False)
+        .agg(n_cells=('cell_label', 'size'),
+             mean_firing_rate_hz=('mean_firing_rate_hz', 'mean'),
+             mean_response_pa=('mean_response_pa', 'mean')))
+    return summary.reindex(columns=HIGH_QUALITY_SUMMARY_COLUMNS).sort_values(
+        ['cell_type', 'rec_type'], ignore_index=True)
+
+
 def select_population_rows(frame: pd.DataFrame,
                            rec_types: Optional[Sequence[str]] = None,
                            cell_types: Optional[Sequence[str]] = None) -> pd.DataFrame:
@@ -10780,7 +10858,8 @@ __all__ = [
     'cell_analysis_output_dir', 'high_quality_cells_path',
     'load_high_quality_cells', 'saved_cell_mean_response_text',
     'saved_cell_review_line', 'set_cell_visual_inspection',
-    'high_quality_cell_indices',
+    'high_quality_cell_indices', 'select_high_quality_saved_rows',
+    'summarize_high_quality_saved_cells',
     'save_condition_output', 'save_duration_outputs',
     'save_condition_outputs',
     'load_condition_index', 'load_population_table', 'select_population_rows',

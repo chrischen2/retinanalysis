@@ -52,6 +52,22 @@ def test_section_3_explicitly_displays_each_core_figure():
     assert 'plt.close(figure)' in source
 
 
+def test_section_6b_contains_quality_summary_and_former_section_10():
+    import json
+
+    notebook_path = NOTEBOOK_DIR / 'analyzeVariableMeanNoise.ipynb'
+    notebook = json.loads(notebook_path.read_text())
+    cells = {cell.get('id'): ''.join(cell.get('source', []))
+             for cell in notebook['cells']}
+    source = cells['high-quality-indices']
+
+    assert 'summarize_high_quality_saved_cells' in source
+    assert 'mean_firing_rate_hz' in cells['high-quality-placeholder']
+    assert 'compare_matlab_roster_to_saved' in source
+    assert 'matlab-saved-comparison-code' not in cells
+    assert '085e4041' not in cells
+
+
 def test_visual_browser_ln_menu_uses_measured_vs_predicted_figure():
     import json
 
@@ -3149,3 +3165,39 @@ def test_visual_inspection_keep_and_remove_updates_high_quality_csv(tmp_path):
     removed = vmn.set_cell_visual_inspection(saved, False, output_dir=tmp_path)
     assert removed.empty
     assert vmn.high_quality_cell_indices(tmp_path) == ()
+
+
+def test_high_quality_summary_counts_cells_once_and_keeps_response_units_separate():
+    import pandas as pd
+
+    reviewed = pd.DataFrame({
+        'date': ['2025-01-01_A', '2025-01-02_B'],
+        'cell_label': ['Cell1', 'Cell2'],
+    })
+    conditions = pd.DataFrame({
+        'condition_id': ['spike-a', 'spike-b', 'whole', 'not-reviewed'],
+        'date': ['2025-01-01_A', '2025-01-01_A',
+                 '2025-01-02_B', '2025-01-03_C'],
+        'cell_label': ['Cell1', 'Cell1', 'Cell2', 'Cell3'],
+        'cell_type': ['ON-parasol', 'ON-parasol', 'ON-midget', 'ON-midget'],
+        'rec_type': ['extracellular', 'extracellular', 'exc', 'exc'],
+        'mean_rate_hz': [10., 20., np.nan, np.nan],
+    })
+    responses = pd.DataFrame({
+        'condition_id': ['whole', 'whole', 'not-reviewed'],
+        'date': ['2025-01-02_B', '2025-01-02_B', '2025-01-03_C'],
+        'cell_label': ['Cell2', 'Cell2', 'Cell3'],
+        'mean': [-100., -200., -900.],
+    })
+
+    summary = vmn.summarize_high_quality_saved_cells(
+        reviewed, conditions, responses)
+
+    spike = summary[summary.rec_type.eq('extracellular')].iloc[0]
+    whole = summary[summary.rec_type.eq('exc')].iloc[0]
+    assert spike.n_cells == 1
+    assert spike.mean_firing_rate_hz == pytest.approx(15.)
+    assert np.isnan(spike.mean_response_pa)
+    assert whole.n_cells == 1
+    assert np.isnan(whole.mean_firing_rate_hz)
+    assert whole.mean_response_pa == pytest.approx(-150.)
