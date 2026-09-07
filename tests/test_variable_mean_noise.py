@@ -2951,7 +2951,7 @@ def test_batch_accepts_one_scalar_cell_index(monkeypatch, tmp_path):
     seen = []
 
     def fake_run(cell_index, *_args, **_kwargs):
-        seen.append(cell_index)
+        seen.append((cell_index, _kwargs.get('cell_type_override')))
         return SimpleNamespace(
             exp_name='2025-01-01_A', cell_label=f'cell{cell_index}',
             saved_condition_outputs=[], figure_manifest=[],
@@ -2960,9 +2960,10 @@ def test_batch_accepts_one_scalar_cell_index(monkeypatch, tmp_path):
     monkeypatch.setattr(vmn, 'run_cell_sections_2_to_5', fake_run)
     summary = vmn.run_cell_analysis_batch(
         1, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(),
+        cell_type_overrides_by_index={1: 'ON-midget'},
         output_dir=tmp_path)
 
-    assert seen == [1]
+    assert seen == [(1, 'ON-midget')]
     assert summary.cell_index.tolist() == [1]
     assert summary.status.tolist() == ['complete']
 
@@ -2990,6 +2991,7 @@ def test_saved_cell_analysis_index_uses_independent_requested_range(tmp_path):
 
 
 def test_load_saved_cell_analysis_carries_cell_type_for_review(tmp_path):
+    import json
     import pandas as pd
 
     cells = pd.DataFrame({
@@ -3001,16 +3003,19 @@ def test_load_saved_cell_analysis_carries_cell_type_for_review(tmp_path):
     table_dir.mkdir(parents=True)
     pd.DataFrame(columns=['section', 'condition', 'figure', 'path']).to_csv(
         table_dir / 'figure_manifest.csv', index=False)
+    (table_dir.parent / 'run_manifest.json').write_text(json.dumps({
+        'cell_type': 'OFF-midget'}))
 
     saved = vmn.load_saved_cell_analysis(
         4, cells, output_dir=tmp_path, table_names=(),
         include_audit_tables=False)
 
-    assert saved.cell_type == 'ON-midget'
+    assert saved.cell_type == 'OFF-midget'
 
 
 def test_cell_sections_wrapper_routes_outputs_to_date_cell_folder(monkeypatch,
                                                                   tmp_path):
+    import json
     import pandas as pd
 
     cells = pd.DataFrame({
@@ -3019,6 +3024,10 @@ def test_cell_sections_wrapper_routes_outputs_to_date_cell_folder(monkeypatch,
         '_block_ids': [[11]],
     })
     modes = pd.DataFrame({'block_id': [11], 'rec_type': ['extracellular']})
+    blocks = pd.DataFrame({
+        'block_id': [11], 'cell_label': ['Cell2'],
+        'cell_type': ['ON-parasol'], 'cell_type_short': ['ON-parasol'],
+    })
     epochs = pd.DataFrame({
         'epoch_number': [0], 'block_id': [11], 'block_epoch': [0],
         'assigned_rec_type': ['extracellular'], 'stimTime': [30_000.],
@@ -3060,21 +3069,32 @@ def test_cell_sections_wrapper_routes_outputs_to_date_cell_folder(monkeypatch,
                         lambda current, **_k: current)
 
     saved_to = {}
-    monkeypatch.setattr(
-        vmn, 'save_condition_outputs',
-        lambda *_a, **kwargs: saved_to.update(kwargs) or pd.DataFrame({
-            'output_path': [str(Path(kwargs['output_dir']) / 'condition.h5')]}))
+    def fake_save_condition_outputs(_core, save_blocks, **kwargs):
+        saved_to.update(kwargs)
+        saved_to['cell_type'] = save_blocks.cell_type.iloc[0]
+        saved_to['cell_type_short'] = save_blocks.cell_type_short.iloc[0]
+        return pd.DataFrame({
+            'output_path': [str(Path(kwargs['output_dir']) / 'condition.h5')]})
+
+    monkeypatch.setattr(vmn, 'save_condition_outputs',
+                        fake_save_condition_outputs)
     monkeypatch.setattr(vmn, 'save_cell_analysis_figures',
                         lambda *_a, **_k: pd.DataFrame(
                             columns=['section', 'condition', 'figure', 'path']))
 
     result = vmn.run_cell_sections_2_to_5(
-        7, cells, pd.DataFrame(), modes, output_dir=tmp_path, verbose=False)
+        7, cells, blocks, modes, cell_type_override='OFF-parasol',
+        output_dir=tmp_path, verbose=False)
 
     expected = tmp_path / '2025-01-01_A__Cell2'
     assert result.output_dir == expected
     assert Path(saved_to['output_dir']) == expected
+    assert result.cell_type == 'OFF-parasol'
+    assert saved_to['cell_type'] == 'OFF-parasol'
+    assert saved_to['cell_type_short'] == 'OFF-parasol'
     assert (expected / 'run_manifest.json').is_file()
+    assert json.loads((expected / 'run_manifest.json').read_text())[
+        'cell_type'] == 'OFF-parasol'
 
 
 def test_visual_inspection_keep_and_remove_updates_high_quality_csv(tmp_path):

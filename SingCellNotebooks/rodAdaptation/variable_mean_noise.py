@@ -10068,6 +10068,7 @@ def run_cell_sections_2_to_5(
         block_modes: pd.DataFrame,
         *,
         settings: Optional[CellAnalysisSettings] = None,
+        cell_type_override: Optional[str] = None,
         output_dir=None,
         close_figures: bool = True,
         verbose: bool = True) -> CellAnalysisRun:
@@ -10083,7 +10084,11 @@ def run_cell_sections_2_to_5(
             f'cell_index {int(cell_index)} matched {len(matches)} rows; expected one')
     row = matches.iloc[0]
     exp_name, cell_label = str(row.exp_name), str(row.cell_label)
-    cell_type = str(row.get('cell_type', ''))
+    cell_type = (str(row.get('cell_type', '')).strip()
+                 if cell_type_override is None
+                 else str(cell_type_override).strip())
+    if cell_type_override is not None and not cell_type:
+        raise ValueError('cell type must be a non-empty saved metadata label')
     block_ids = [int(value) for value in row['_block_ids']]
     if verbose:
         print(f'cell {int(cell_index)} | {exp_name} | {cell_label} '
@@ -10189,8 +10194,15 @@ def run_cell_sections_2_to_5(
     cell_dir = cell_analysis_output_dir(
         exp_name, cell_label, output_dir=output_dir)
     cell_dir.mkdir(parents=True, exist_ok=True)
+    save_protocol_blocks = protocol_blocks
+    if cell_type_override is not None:
+        save_protocol_blocks = protocol_blocks.copy()
+        selected_blocks = pd.to_numeric(
+            save_protocol_blocks.block_id, errors='coerce').isin(block_ids)
+        for column in ('cell_type', 'cell_type_short'):
+            save_protocol_blocks.loc[selected_blocks, column] = cell_type
     saved_outputs = save_condition_outputs(
-        core_by_condition, protocol_blocks,
+        core_by_condition, save_protocol_blocks,
         reconstruction_by_condition=reconstruction,
         cell_index=int(cell_index), mean_window_s=settings.mean_window_s,
         output_dir=cell_dir, verbose=verbose)
@@ -10242,6 +10254,7 @@ def run_cell_analysis_batch(
         *,
         settings: Optional[CellAnalysisSettings] = None,
         overrides_by_index: Optional[Mapping[int, Mapping[str, object]]] = None,
+        cell_type_overrides_by_index: Optional[Mapping[int, str]] = None,
         output_dir=None,
         continue_on_error: bool = True) -> pd.DataFrame:
     """Run Sections 2--5 for selected indices with progress and no open plots."""
@@ -10250,6 +10263,16 @@ def run_cell_analysis_batch(
 
     settings = settings or CellAnalysisSettings()
     overrides_by_index = overrides_by_index or {}
+    cell_type_overrides_by_index = {
+        int(index): str(cell_type).strip()
+        for index, cell_type in (cell_type_overrides_by_index or {}).items()}
+    invalid_cell_types = [
+        index for index, cell_type in cell_type_overrides_by_index.items()
+        if not cell_type]
+    if invalid_cell_types:
+        raise ValueError(
+            f'cell type overrides must be non-empty for indices '
+            f'{invalid_cell_types}')
     indices = normalize_cell_indices(cell_indices)
     directory = condition_output_dir(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
@@ -10267,6 +10290,8 @@ def run_cell_analysis_batch(
                 result = run_cell_sections_2_to_5(
                     cell_index, protocol_cells, protocol_blocks, block_modes,
                     settings=cell_settings, output_dir=output_dir,
+                    cell_type_override=cell_type_overrides_by_index.get(
+                        cell_index),
                     close_figures=True, verbose=False)
             elapsed = time.perf_counter() - started
             rows.append({
@@ -10364,6 +10389,13 @@ def load_saved_cell_analysis(
     if not cell_dir.exists():
         raise FileNotFoundError(
             f'no saved batch output for cell index {int(cell_index)} at {cell_dir}')
+    manifest_path = cell_dir / 'run_manifest.json'
+    if manifest_path.is_file():
+        import json
+        with manifest_path.open() as stream:
+            saved_cell_type = str(json.load(stream).get('cell_type', '')).strip()
+        if saved_cell_type:
+            cell_type = saved_cell_type
     table_dir = cell_dir / 'tables'
     audit_paths = (sorted(table_dir.glob('*.csv')) if include_audit_tables else
                    [table_dir / 'figure_manifest.csv'])
