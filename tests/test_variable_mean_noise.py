@@ -99,7 +99,13 @@ def test_section_6c_runs_high_quality_population_ln_analysis():
     source = cells['population-ln-analysis']
     assert "POPULATION_REC_TYPES = ('extracellular', 'exc')" in source
     assert "POPULATION_CELL_TYPES = ('ON-parasol', 'ON-midget')" in source
+    assert 'PHOTOPIC_TIME_TO_PEAK_THRESHOLD_MS = 50.0' in source
+    assert 'photopic_time_to_peak_threshold_ms=' in source
+    assert 'TEMPORAL_PARAMETER_WINDOW_COMBINE = 2' in source
+    assert 'temporal_parameter_window_combine=' in source
     assert 'high_quality_population_ln_analysis' in source
+    assert "population_ln['temporal_condition_counts']" in source
+    assert '30/50 s group' in source
     assert 'iter_population_ln_figures' in source
     assert 'high_quality_cells' not in source
     assert 'REVIEW_OUTPUT_DIR' not in source
@@ -2724,6 +2730,22 @@ def test_population_mean_sem_weights_each_cell_once():
     assert summary.r2_n_cells.iloc[0] == 2
 
 
+def test_population_mean_sem_uses_population_sd_over_sqrt_n_minus_one():
+    import pandas as pd
+
+    values = np.array([1., 4., 9.])
+    frame = pd.DataFrame({
+        'cell_id': ['A', 'B', 'C'], 'group': ['one'] * 3,
+        'response': values,
+    })
+
+    summary = vmn.population_mean_sem(
+        frame, group_by=['group'], metrics=['response'])
+
+    expected = values.std(ddof=0) / np.sqrt(len(values) - 1)
+    assert summary.response_sem.iloc[0] == pytest.approx(expected)
+
+
 def _saved_ln_curve_rows(condition_id, rec_type, levels, temporal=False,
                          date='2020-01-01_B', cell_label='Cell1'):
     import pandas as pd
@@ -2822,6 +2844,35 @@ def test_temporal_nonlinearity_parameters_follow_normalized_axes():
     assert normalized.epsilon_normalized.tolist() == pytest.approx([.25] * 4)
 
 
+def test_temporal_parameter_summary_combines_adjacent_windows_before_sem():
+    import pandas as pd
+
+    rows = []
+    for cell_id, offset in (('A', 0.), ('B', 10.)):
+        for order, centre in enumerate((1.5, 4.5, 7.5, 10.5)):
+            rows.append({
+                'cell_id': cell_id, 'cell_type': 'ON-parasol',
+                'rec_type': 'extracellular', 'light_regime': 'photopic',
+                'duration_group_s': 30., 'light_state': 'low',
+                'order': order, 'centre_s': centre,
+                'time_to_peak_ms': offset + order,
+                'biphasic_index': offset + order,
+                'alpha_normalized': offset + order,
+                'beta_normalized': offset + order,
+                'gamma_normalized': offset + order,
+                'epsilon_normalized': offset + order,
+            })
+
+    summary = vmn.population_temporal_parameter_mean_sem(
+        pd.DataFrame(rows), window_combine=2)
+
+    assert summary.order.tolist() == [0, 1]
+    assert summary.centre_s_mean.tolist() == pytest.approx([3., 9.])
+    assert summary.time_to_peak_ms_mean.tolist() == pytest.approx([5.5, 7.5])
+    # Each bin has per-cell values separated by 10: population SD=5, n=2.
+    assert summary.time_to_peak_ms_sem.tolist() == pytest.approx([5., 5.])
+
+
 def test_population_ln_curve_summary_weights_each_physical_cell_once():
     import pandas as pd
 
@@ -2834,6 +2885,7 @@ def test_population_ln_curve_summary_weights_each_physical_cell_once():
             rows.append({
                 'condition_id': condition, 'date': date, 'cell_label': label,
                 'cell_type': 'OFF-parasol', 'rec_type': 'extracellular',
+                'light_regime': 'photopic',
                 'stim_seconds': duration, 'light_contrast': contrast,
                 'light_state': 'low', 'curve': 'filter',
                 'x_population': x, 'y_normalized': amplitude,
@@ -2857,6 +2909,7 @@ def test_temporal_population_pools_contrast_within_30_or_50_group():
             rows.append({
                 'condition_id': condition, 'date': date, 'cell_label': 'Cell1',
                 'cell_type': 'ON-parasol', 'rec_type': 'extracellular',
+                'light_regime': 'photopic',
                 'stim_seconds': duration, 'light_contrast': contrast,
                 'duration_group_s': 50., 'light_state': 'low',
                 'curve': 'filter', 'order': 0, 'centre_s': 3.5,
@@ -3405,6 +3458,7 @@ def test_population_ln_condition_counts_uses_physical_cell_identity():
         'condition_id': ['a-30', 'a-60', 'b-30'],
         'cell_type': ['ON-parasol'] * 3,
         'rec_type': ['extracellular'] * 3,
+        'light_regime': ['photopic'] * 3,
         'stim_seconds': [30., 60., 50.],
         'light_contrast': [.3, .5, .9],
     })
@@ -3414,6 +3468,35 @@ def test_population_ln_condition_counts_uses_physical_cell_identity():
     assert counts.n_cells.iloc[0] == 2
     assert counts.n_conditions.iloc[0] == 3
     assert len(counts) == 1
+
+    temporal = vmn.population_ln_condition_counts(rows, temporal=True)
+    assert temporal.duration_group_s.tolist() == [30., 50.]
+    thirty = temporal[temporal.duration_group_s.eq(30.)].iloc[0]
+    fifty = temporal[temporal.duration_group_s.eq(50.)].iloc[0]
+    assert (thirty.n_cells, thirty.n_conditions) == (1, 1)
+    assert (fifty.n_cells, fifty.n_conditions) == (2, 2)
+
+
+def test_population_light_regime_requires_both_extremes_below_threshold():
+    import pandas as pd
+
+    rows = pd.DataFrame({
+        'condition_id': ['fast'] * 3 + ['boundary'] * 2 + ['missing'] * 2,
+        'lightMean': [.1, 1., 10., .1, 10., .1, 10.],
+        'time_to_peak_ms': [49., 100., 48., 40., 50., np.nan, 40.],
+    })
+
+    classified = vmn.classify_population_light_regime(
+        rows, photopic_time_to_peak_threshold_ms=50.)
+    result = classified.set_index('condition_id')
+
+    assert result.loc['fast', 'light_regime'] == 'photopic'
+    assert result.loc['fast', 'low_time_to_peak_ms'] == pytest.approx(49.)
+    assert result.loc['fast', 'high_time_to_peak_ms'] == pytest.approx(48.)
+    assert result.loc['boundary', 'light_regime'] == 'scotopic'
+    assert result.loc['boundary', 'classification_complete']
+    assert result.loc['missing', 'light_regime'] == 'scotopic'
+    assert not result.loc['missing', 'classification_complete']
 
 
 def test_temporal_population_maps_long_epochs_to_50_and_truncates():

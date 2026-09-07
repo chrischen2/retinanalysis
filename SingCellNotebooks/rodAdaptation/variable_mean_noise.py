@@ -6358,7 +6358,12 @@ def load_population_table(table: str, output_dir=None,
 
 def population_mean_sem(frame: pd.DataFrame, group_by: Sequence[str],
                         metrics: Sequence[str]) -> pd.DataFrame:
-    """Population mean/SEM with each cell weighted once per coordinate."""
+    """Population mean/SEM with each cell weighted once per coordinate.
+
+    SEM is written explicitly as population SD divided by ``sqrt(n - 1)``.
+    This is algebraically identical to sample SD (``ddof=1``) divided by
+    ``sqrt(n)`` but makes the convention used by the population plots clear.
+    """
     if frame is None or frame.empty:
         return pd.DataFrame()
     group_by, metrics = list(group_by), list(metrics)
@@ -6379,8 +6384,9 @@ def population_mean_sem(frame: pd.DataFrame, group_by: Sequence[str],
         for metric in metrics:
             values = block[metric].dropna()
             row[f'{metric}_mean'] = float(values.mean()) if len(values) else np.nan
-            row[f'{metric}_sem'] = (float(values.std(ddof=1) / np.sqrt(len(values)))
-                                    if len(values) > 1 else np.nan)
+            row[f'{metric}_sem'] = (
+                float(values.std(ddof=0) / np.sqrt(len(values) - 1))
+                if len(values) > 1 else np.nan)
             row[f'{metric}_n_cells'] = int(len(values))
         rows.append(row)
     return pd.DataFrame(rows)
@@ -10776,23 +10782,42 @@ def high_quality_population_overview_analysis(*, output_dir=None) -> dict:
     }
 
 
-POPULATION_STATIC_GROUPS = ('cell_type', 'rec_type')
-POPULATION_TEMPORAL_GROUPS = ('cell_type', 'rec_type', 'duration_group_s')
+POPULATION_STATIC_GROUPS = ('cell_type', 'rec_type', 'light_regime')
+POPULATION_TEMPORAL_GROUPS = (
+    'cell_type', 'rec_type', 'light_regime', 'duration_group_s')
 
 
-def population_ln_condition_counts(paired_conditions: pd.DataFrame) -> pd.DataFrame:
-    """Count cells and low/high pairs after pooling duration and contrast."""
-    columns = [*POPULATION_STATIC_GROUPS, 'n_cells', 'n_conditions']
+def population_ln_condition_counts(
+        paired_conditions: pd.DataFrame, *, temporal: bool = False
+        ) -> pd.DataFrame:
+    """Count contributing cells and low/high pairs for Section 6c.
+
+    Static counts pool all recording durations. With ``temporal=True``, 30 s
+    recordings remain separate while 50, 55, and 60 s recordings are counted
+    in the 50 s temporal group, matching the plotted temporal summaries.
+    """
+    population_groups = (POPULATION_TEMPORAL_GROUPS if temporal
+                         else POPULATION_STATIC_GROUPS)
+    columns = [*population_groups, 'n_cells', 'n_conditions']
     if paired_conditions is None or paired_conditions.empty:
         return pd.DataFrame(columns=columns)
     required = {'cell_id', 'condition_id', *POPULATION_STATIC_GROUPS}
+    if temporal:
+        required.add('stim_seconds')
     missing = sorted(required - set(paired_conditions.columns))
     if missing:
         raise ValueError(f'paired condition table is missing {missing}')
+    paired_conditions = paired_conditions.copy()
+    if temporal:
+        duration = pd.to_numeric(
+            paired_conditions.stim_seconds, errors='coerce')
+        paired_conditions['duration_group_s'] = np.select(
+            (duration.le(40.0), duration.gt(40.0)), (30.0, 50.0),
+            default=np.nan)
     conditions = paired_conditions[
-        ['cell_id', 'condition_id', *POPULATION_STATIC_GROUPS]].drop_duplicates()
+        ['cell_id', 'condition_id', *population_groups]].drop_duplicates()
     return (conditions.groupby(
-        list(POPULATION_STATIC_GROUPS), dropna=False, as_index=False)
+        list(population_groups), dropna=False, as_index=False)
         .agg(n_cells=('cell_id', 'nunique'),
              n_conditions=('condition_id', 'nunique'))
         .reindex(columns=columns))
@@ -10858,6 +10883,50 @@ def _select_low_high_light_rows(frame: pd.DataFrame) -> pd.DataFrame:
         return empty
     return selected.merge(pd.DataFrame(states),
                           on=['condition_id', 'lightMean'], how='inner')
+
+
+def classify_population_light_regime(
+        condition_summary_rows: pd.DataFrame,
+        photopic_time_to_peak_threshold_ms: float = 50.0) -> pd.DataFrame:
+    """Classify each low/high condition as photopic or scotopic.
+
+    A condition is ``photopic`` only when the whole-trace filter time to peak
+    is finite and strictly below the threshold at both its lowest and highest
+    light means. All other conditions are ``scotopic``. The two measured values
+    and classification completeness are retained for audit.
+    """
+    threshold = float(photopic_time_to_peak_threshold_ms)
+    if not np.isfinite(threshold) or threshold <= 0:
+        raise ValueError('photopic time-to-peak threshold must be positive')
+    columns = [
+        'condition_id', 'light_regime', 'low_time_to_peak_ms',
+        'high_time_to_peak_ms', 'classification_complete',
+        'photopic_time_to_peak_threshold_ms']
+    if condition_summary_rows is None or condition_summary_rows.empty:
+        return pd.DataFrame(columns=columns)
+    required = {'condition_id', 'lightMean', 'time_to_peak_ms'}
+    missing = sorted(required - set(condition_summary_rows.columns))
+    if missing:
+        raise ValueError(f'condition summary is missing {missing}')
+    selected = _select_low_high_light_rows(condition_summary_rows)
+    selected['time_to_peak_ms'] = pd.to_numeric(
+        selected.time_to_peak_ms, errors='coerce')
+    rows = []
+    for condition_id, block in selected.groupby('condition_id', dropna=False):
+        by_state = block.groupby('light_state').time_to_peak_ms.mean()
+        low = float(by_state.get('low', np.nan))
+        high = float(by_state.get('high', np.nan))
+        complete = bool(np.isfinite(low) and np.isfinite(high))
+        photopic = complete and low < threshold and high < threshold
+        rows.append({
+            'condition_id': condition_id,
+            'light_regime': 'photopic' if photopic else 'scotopic',
+            'low_time_to_peak_ms': low,
+            'high_time_to_peak_ms': high,
+            'classification_complete': complete,
+            'photopic_time_to_peak_threshold_ms': threshold,
+        })
+    return pd.DataFrame(rows, columns=columns)
 
 
 def normalize_population_ln_curves(
@@ -11006,9 +11075,14 @@ def population_ln_curve_mean_sem(
         as_index=False).y.mean())
     summary = (per_cell.groupby(
         [*group_columns, 'x'], dropna=False, as_index=False)
-        .agg(y_mean=('y', 'mean'), y_std=('y', 'std'), n_cells=('y', 'count')))
-    summary['y_sem'] = summary.y_std / np.sqrt(summary.n_cells)
-    summary = summary.drop(columns='y_std')
+        .agg(y_mean=('y', 'mean'),
+             y_population_std=('y', lambda values: values.std(ddof=0)),
+             n_cells=('y', 'count')))
+    summary['y_sem'] = np.where(
+        summary.n_cells.gt(1),
+        summary.y_population_std / np.sqrt(summary.n_cells - 1),
+        np.nan)
+    summary = summary.drop(columns='y_population_std')
     if temporal and 'centre_s' in normalized_curves:
         centres = (normalized_curves.groupby(
             [*population_groups, 'light_state', 'order'], dropna=False,
@@ -11050,12 +11124,25 @@ def normalize_temporal_ln_parameters(
 
 
 def population_temporal_parameter_mean_sem(
-        normalized_parameters: pd.DataFrame) -> pd.DataFrame:
-    """Population trajectories for filter and normalized sigmoid parameters."""
+        normalized_parameters: pd.DataFrame, *, window_combine: int = 2
+        ) -> pd.DataFrame:
+    """Population trajectories after averaging adjacent temporal windows.
+
+    ``window_combine=2`` combines each pair of the saved 3 s windows within a
+    cell, light state, and duration group before the population mean and SEM.
+    Set it to 1 to retain the original temporal sampling.
+    """
     if normalized_parameters is None or normalized_parameters.empty:
         return pd.DataFrame()
+    combine = int(window_combine)
+    if combine < 1 or combine != window_combine:
+        raise ValueError('temporal parameter window combine must be an integer >= 1')
+    rows = normalized_parameters.copy()
+    order = pd.to_numeric(rows.order, errors='coerce')
+    rows = rows.loc[order.notna()].copy()
+    rows['order'] = np.floor(order.loc[rows.index] / combine).astype(int)
     return population_mean_sem(
-        normalized_parameters,
+        rows,
         [*POPULATION_TEMPORAL_GROUPS, 'light_state', 'order'],
         ['centre_s', 'time_to_peak_ms', 'biphasic_index',
          'alpha_normalized', 'beta_normalized', 'gamma_normalized',
@@ -11064,7 +11151,7 @@ def population_temporal_parameter_mean_sem(
 
 def _population_ln_title(block: pd.DataFrame) -> str:
     row = block.iloc[0]
-    title = f'{row.cell_type} | {row.rec_type}'
+    title = f'{row.cell_type} | {row.rec_type} | {row.light_regime}'
     if 'duration_group_s' in block:
         title += f' | {float(row.duration_group_s):g} s temporal group'
     else:
@@ -11227,7 +11314,8 @@ def _resample_condition_ln_curves(
         for column in (
                 'condition_id', 'date', 'cell_label', 'cell_type',
                 'rec_type', 'stim_seconds', 'light_contrast', 'lightMean',
-                'duration_group_s', 'light_state', 'curve', 'order'):
+                'light_regime', 'duration_group_s', 'light_state', 'curve',
+                'order'):
             if column in block:
                 piece[column] = identity[column]
         if temporal and 'window' in block:
@@ -11245,6 +11333,8 @@ def high_quality_population_ln_analysis(
         high_quality_cells: Optional[pd.DataFrame] = None, *,
         rec_types: Optional[Sequence[str]] = ('extracellular', 'exc'),
         cell_types: Optional[Sequence[str]] = None,
+        photopic_time_to_peak_threshold_ms: float = 50.0,
+        temporal_parameter_window_combine: int = 2,
         output_dir=None, grid_points: int = 101,
         retain_normalized: bool = False) -> dict:
     """Run Section 6c population LN curves and parameter trajectories.
@@ -11255,7 +11345,10 @@ def high_quality_population_ln_analysis(
     independent of Section 6b. Static curves pool all contrasts and epoch
     durations. Temporal results pool contrast but retain 30 s and 50 s groups;
     longer epochs join the 50 s group after windows centred beyond 50 s are
-    removed.
+    removed. Every condition is additionally split into photopic/scotopic from
+    its low/high whole-trace filter time to peak and the configurable threshold.
+    Adjacent temporal parameter windows are averaged according to
+    ``temporal_parameter_window_combine`` before population summarization.
     The notebook renders and closes each group sequentially with
     :func:`iter_population_ln_figures`. Set
     ``retain_normalized`` only when the interpolation-ready per-condition
@@ -11265,6 +11358,12 @@ def high_quality_population_ln_analysis(
 
     if int(grid_points) < 2:
         raise ValueError('grid_points must be at least 2')
+    window_combine = int(temporal_parameter_window_combine)
+    if window_combine < 1 or window_combine != temporal_parameter_window_combine:
+        raise ValueError('temporal parameter window combine must be an integer >= 1')
+    threshold = float(photopic_time_to_peak_threshold_ms)
+    if not np.isfinite(threshold) or threshold <= 0:
+        raise ValueError('photopic time-to-peak threshold must be positive')
     if high_quality_cells is None:
         high_quality_cells = load_high_quality_cells(output_dir)
     if high_quality_cells.empty:
@@ -11282,7 +11381,8 @@ def high_quality_population_ln_analysis(
         'condition_id', 'date', 'cell_label', 'cell_id', 'cell_type',
         'rec_type', 'stim_seconds', 'light_contrast')
     static_pieces, temporal_pieces, parameter_pieces = [], [], []
-    paired_conditions = []
+    classification_pieces = []
+    paired_conditions, temporal_conditions = [], []
     for path in _condition_output_paths(output_dir):
         metadata = _output_metadata(path)
         physical_key = (str(metadata.get('date', '')),
@@ -11309,16 +11409,42 @@ def high_quality_population_ln_analysis(
             static = load_condition_table(h5, 'ln_curves')
             temporal = load_condition_table(h5, 'temporal_ln_curves')
             parameters = load_condition_table(h5, 'temporal_summary')
+            condition_metrics = load_condition_table(h5, 'condition_summary')
+
+        classification = classify_population_light_regime(
+            condition_metrics,
+            photopic_time_to_peak_threshold_ms=threshold)
+        if classification.empty:
+            classification = pd.DataFrame([{
+                'condition_id': metadata['condition_id'],
+                'light_regime': 'scotopic',
+                'low_time_to_peak_ms': np.nan,
+                'high_time_to_peak_ms': np.nan,
+                'classification_complete': False,
+                'photopic_time_to_peak_threshold_ms': threshold,
+            }])
+        classification_row = classification.iloc[0]
+        classification_pieces.append(classification)
+        for frame in (static, temporal, parameters):
+            frame['light_regime'] = classification_row.light_regime
 
         static = normalize_population_ln_curves(static, rec_types=None)
         temporal = normalize_population_ln_curves(
             temporal, temporal=True, rec_types=None)
         if not static.empty:
-            paired_conditions.append({column: metadata.get(column, np.nan)
-                                      for column in population_metadata})
+            paired_conditions.append({
+                **{column: metadata.get(column, np.nan)
+                   for column in population_metadata},
+                **classification_row.to_dict(),
+            })
             static_pieces.append(_resample_condition_ln_curves(
                 static, temporal=False, grid_points=grid_points))
         if not temporal.empty:
+            temporal_conditions.append({
+                **{column: metadata.get(column, np.nan)
+                   for column in population_metadata},
+                **classification_row.to_dict(),
+            })
             temporal_pieces.append(_resample_condition_ln_curves(
                 temporal, temporal=True, grid_points=grid_points))
             normalized_parameters = normalize_temporal_ln_parameters(
@@ -11332,15 +11458,25 @@ def high_quality_population_ln_analysis(
                            if temporal_pieces else pd.DataFrame())
     temporal_parameters = (pd.concat(parameter_pieces, ignore_index=True)
                            if parameter_pieces else pd.DataFrame())
+    classifications = (pd.concat(classification_pieces, ignore_index=True)
+                       if classification_pieces else pd.DataFrame())
+    paired_condition_frame = pd.DataFrame(paired_conditions)
+    temporal_condition_frame = pd.DataFrame(temporal_conditions)
     static_summary = population_ln_curve_mean_sem(
         static_normalized, grid_points=grid_points)
     temporal_curve_summary = population_ln_curve_mean_sem(
         temporal_normalized, temporal=True, grid_points=grid_points)
     temporal_parameter_summary = population_temporal_parameter_mean_sem(
-        temporal_parameters)
+        temporal_parameters, window_combine=window_combine)
 
     return {
-        'paired_conditions': pd.DataFrame(paired_conditions),
+        'paired_conditions': paired_condition_frame,
+        'condition_counts': population_ln_condition_counts(
+            paired_condition_frame),
+        'temporal_conditions': temporal_condition_frame,
+        'temporal_condition_counts': population_ln_condition_counts(
+            temporal_condition_frame, temporal=True),
+        'light_regime_classification': classifications,
         'static_normalized': (static_normalized if retain_normalized
                               else pd.DataFrame()),
         'static_summary': static_summary,
@@ -11642,7 +11778,7 @@ __all__ = [
     'summarize_high_quality_saved_cells',
     'high_quality_population_overview_analysis',
     'MATLAB_ROSTER_DISPLAY_COLUMNS', 'MATLAB_SAVED_COMPARISON_COLUMNS',
-    'population_ln_condition_counts',
+    'population_ln_condition_counts', 'classify_population_light_regime',
     'normalize_population_ln_curves', 'population_ln_curve_mean_sem',
     'normalize_temporal_ln_parameters',
     'population_temporal_parameter_mean_sem',
