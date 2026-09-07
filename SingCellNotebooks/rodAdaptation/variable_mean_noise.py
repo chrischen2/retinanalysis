@@ -6319,9 +6319,9 @@ def load_population_table(table: str, output_dir=None,
     """Load one named result table from every saved cell condition.
 
     When ``high_quality_cells`` is supplied, HDF5 files are filtered by the
-    stable physical ``(date, cell_label)`` identity before their (potentially
-    large) tables are read. This is particularly useful for the temporal curve
-    table used by Section 6c.
+    stable physical ``(date, cell_label, rec_type)`` identity before their
+    (potentially large) tables are read. This is particularly useful for the
+    temporal curve table used by Section 6c.
     """
     import h5py
 
@@ -6329,19 +6329,22 @@ def load_population_table(table: str, output_dir=None,
         raise ValueError(f'table must be one of {CONDITION_TABLES}')
     selected_keys = None
     if high_quality_cells is not None:
-        required = {'date', 'cell_label'}
+        required = {'date', 'cell_label', 'rec_type'}
         missing = sorted(required - set(high_quality_cells.columns))
         if missing:
             raise ValueError(
                 f'high_quality_cells is missing physical identity columns {missing}')
-        selected_keys = set(zip(high_quality_cells.date.astype(str),
-                                high_quality_cells.cell_label.astype(str)))
+        selected_keys = set(zip(
+            high_quality_cells.date.astype(str),
+            high_quality_cells.cell_label.astype(str),
+            high_quality_cells.rec_type.astype(str)))
     frames = []
     for path in _condition_output_paths(output_dir):
         metadata = _output_metadata(path)
         if (selected_keys is not None
                 and (str(metadata.get('date', '')),
-                     str(metadata.get('cell_label', ''))) not in selected_keys):
+                     str(metadata.get('cell_label', '')),
+                     str(metadata.get('rec_type', ''))) not in selected_keys):
             continue
         with h5py.File(path, 'r') as h5:
             if f'tables/{table}' not in h5:
@@ -10450,7 +10453,8 @@ def load_saved_cell_analysis(
 
 
 HIGH_QUALITY_CELL_COLUMNS = (
-    'cell_index', 'date', 'cell_label', 'mean_response', 'reviewed_at')
+    'cell_index', 'date', 'cell_label', 'rec_type', 'mean_response',
+    'reviewed_at')
 
 
 def high_quality_cells_path(output_dir=None) -> Path:
@@ -10459,24 +10463,43 @@ def high_quality_cells_path(output_dir=None) -> Path:
 
 
 def load_high_quality_cells(output_dir=None) -> pd.DataFrame:
-    """Load the visual-review pass list, or an empty typed table."""
+    """Load recording-type-specific visual-review passes.
+
+    Legacy CSVs recorded one decision per physical cell. Those rows are
+    expanded in memory to every recording type currently saved for that cell,
+    preserving the old decision until each mode is reviewed independently.
+    The next browser decision rewrites the CSV in the new explicit schema.
+    """
     path = high_quality_cells_path(output_dir)
     if not path.exists():
         return pd.DataFrame(columns=HIGH_QUALITY_CELL_COLUMNS)
     frame = pd.read_csv(path)
-    missing = set(HIGH_QUALITY_CELL_COLUMNS) - set(frame.columns)
+    legacy_columns = tuple(
+        column for column in HIGH_QUALITY_CELL_COLUMNS if column != 'rec_type')
+    missing = set(legacy_columns) - set(frame.columns)
     if missing:
         raise ValueError(f'{path} is missing columns {sorted(missing)}')
-    frame = frame.loc[:, HIGH_QUALITY_CELL_COLUMNS].copy()
+    if 'rec_type' not in frame:
+        available = load_condition_index(path.parent)[
+            ['date', 'cell_label', 'rec_type']].drop_duplicates()
+        frame = frame.merge(
+            available, on=['date', 'cell_label'], how='inner')
+    frame = frame.reindex(columns=HIGH_QUALITY_CELL_COLUMNS).copy()
     frame['cell_index'] = pd.to_numeric(
         frame.cell_index, errors='raise').astype(int)
-    return (frame.drop_duplicates('cell_index', keep='last')
-            .sort_values('cell_index', ignore_index=True))
+    frame['rec_type'] = frame.rec_type.astype(str)
+    return (frame.drop_duplicates(
+        ['date', 'cell_label', 'rec_type'], keep='last')
+        .sort_values(['cell_index', 'rec_type'], ignore_index=True))
 
 
-def saved_cell_mean_response_text(saved: SavedCellAnalysis) -> str:
+def saved_cell_mean_response_text(
+        saved: SavedCellAnalysis, rec_type: Optional[str] = None) -> str:
     """Compact condition-aware response summary for visual inspection."""
     conditions = saved.conditions.copy()
+    if rec_type is not None:
+        conditions = conditions[
+            conditions.rec_type.astype(str).eq(str(rec_type))].copy()
     mean_response = saved.tables.get('mean_response', pd.DataFrame())
     pieces = []
     for condition in conditions.itertuples(index=False):
@@ -10505,33 +10528,47 @@ def saved_cell_mean_response_text(saved: SavedCellAnalysis) -> str:
     return '; '.join(pieces) if pieces else 'unavailable'
 
 
-def saved_cell_review_line(saved: SavedCellAnalysis) -> str:
+def saved_cell_review_line(
+        saved: SavedCellAnalysis, rec_type: Optional[str] = None) -> str:
     """One-line identity and mean-response label for the image browser."""
+    mode = f' | recording type {rec_type}' if rec_type is not None else ''
     return (f'cell id {int(saved.cell_index)} | label {saved.cell_label} | '
             f'cell type {saved.cell_type or "unclassified"} | '
-            f'date {saved.exp_name} | mean resp '
-            f'{saved_cell_mean_response_text(saved)}')
+            f'date {saved.exp_name}{mode} | mean resp '
+            f'{saved_cell_mean_response_text(saved, rec_type=rec_type)}')
 
 
 def set_cell_visual_inspection(
-        saved: SavedCellAnalysis, keep: bool, *, output_dir=None
+        saved: SavedCellAnalysis, rec_type: str, keep: bool, *, output_dir=None
         ) -> pd.DataFrame:
-    """Add/remove one cell in the durable visual-inspection pass list."""
+    """Add/remove one cell-recording pair in the visual-inspection pass list."""
+    rec_type = str(rec_type)
+    available = set(saved.conditions.rec_type.astype(str))
+    if rec_type not in available:
+        raise ValueError(
+            f'recording type {rec_type!r} is not available for cell '
+            f'{int(saved.cell_index)}; choose from {sorted(available)}')
     path = high_quality_cells_path(output_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     frame = load_high_quality_cells(output_dir)
-    frame = frame[~frame.cell_index.eq(int(saved.cell_index))].copy()
+    same_recording = (
+        frame.date.astype(str).eq(str(saved.exp_name))
+        & frame.cell_label.astype(str).eq(str(saved.cell_label))
+        & frame.rec_type.astype(str).eq(rec_type))
+    frame = frame.loc[~same_recording].copy()
     if bool(keep):
         row = pd.DataFrame([{
             'cell_index': int(saved.cell_index), 'date': saved.exp_name,
-            'cell_label': saved.cell_label,
-            'mean_response': saved_cell_mean_response_text(saved),
+            'cell_label': saved.cell_label, 'rec_type': rec_type,
+            'mean_response': saved_cell_mean_response_text(
+                saved, rec_type=rec_type),
             'reviewed_at': pd.Timestamp.now(tz='UTC').isoformat(),
         }])
         frame = pd.concat([frame, row], ignore_index=True)
     frame = frame.reindex(columns=HIGH_QUALITY_CELL_COLUMNS)
     if len(frame):
-        frame = frame.sort_values('cell_index', ignore_index=True)
+        frame = frame.sort_values(
+            ['cell_index', 'rec_type'], ignore_index=True)
     temporary = path.with_suffix('.csv.tmp')
     frame.to_csv(temporary, index=False)
     temporary.replace(path)
@@ -10539,8 +10576,9 @@ def set_cell_visual_inspection(
 
 
 def high_quality_cell_indices(output_dir=None) -> Tuple[int, ...]:
-    """Stable cell indices retained by Section 6a visual inspection."""
-    return tuple(load_high_quality_cells(output_dir).cell_index.astype(int))
+    """Unique stable cell indices with at least one retained recording type."""
+    indices = load_high_quality_cells(output_dir).cell_index.astype(int)
+    return tuple(sorted(indices.unique()))
 
 
 def build_cell_review_browser(
@@ -10566,6 +10604,9 @@ def build_cell_review_browser(
     cell_selector = widgets.Dropdown(
         options=cell_options, description='Cell:',
         layout=widgets.Layout(width='520px'))
+    rec_type_selector = widgets.Dropdown(
+        options=(), description='Recording:',
+        layout=widgets.Layout(width='320px'))
     info_line = widgets.HTML()
     review_status = widgets.HTML()
     keep_button = widgets.Button(
@@ -10582,11 +10623,21 @@ def build_cell_review_browser(
         name: widgets.Image(
             format='png', layout=widgets.Layout(width='100%', height='auto'))
         for name in figure_selectors}
-    state = {'saved_cell': None}
+    state = {
+        'saved_cell': None,
+        'reviewed': load_high_quality_cells(directory),
+        'cell_selector': cell_selector,
+        'rec_type_selector': rec_type_selector,
+        'figure_selectors': figure_selectors,
+        'keep_button': keep_button,
+        'remove_button': remove_button,
+    }
 
-    def figure_options(figures, group):
+    def figure_options(figures, group, rec_type):
         if group == 'Raw trace':
-            rows = figures[figures.section.eq('section2')]
+            rows = figures[
+                figures.section.eq('section2')
+                & figures.figure.astype(str).eq(f'raw-{rec_type}')]
         elif group == 'LN model':
             rows = figures[figures.figure.eq('static-ln')]
         elif group == 'Temporal LN':
@@ -10596,6 +10647,9 @@ def build_cell_review_browser(
             rows = figures[figures.section.eq('section4')]
         rows = rows.copy()
         rows['condition'] = rows.condition.fillna('all').replace('', 'all')
+        if group != 'Raw trace':
+            rows = rows[
+                rows.condition.astype(str).str.startswith(f'{rec_type}__')]
         return [
             (f'{row.condition or "all"} | {row.figure}', row.path)
             for row in rows.itertuples(index=False)
@@ -10606,12 +10660,34 @@ def build_cell_review_browser(
         figure_images[group].value = Path(path).read_bytes() if path else b''
 
     def refresh_status(message=''):
-        cell_index = int(cell_selector.value)
-        kept = set(high_quality_cell_indices(directory))
+        saved = state['saved_cell']
+        rec_type = str(rec_type_selector.value)
+        reviewed = state['reviewed']
+        kept = set(zip(
+            reviewed.date.astype(str), reviewed.cell_label.astype(str),
+            reviewed.rec_type.astype(str)))
+        review_key = (str(saved.exp_name), str(saved.cell_label), rec_type)
         decision = ('<b style="color:#188038">KEPT</b>'
-                    if cell_index in kept else 'not kept')
+                    if review_key in kept else 'not kept')
         suffix = f' — {html.escape(message)}' if message else ''
-        review_status.value = f'Visual inspection: {decision}{suffix}'
+        review_status.value = (
+            f'Visual inspection for <b>{html.escape(rec_type)}</b>: '
+            f'{decision}{suffix}')
+
+    def load_selected_recording_type(_change=None):
+        saved = state['saved_cell']
+        if saved is None or rec_type_selector.value is None:
+            return
+        rec_type = str(rec_type_selector.value)
+        info_line.value = (
+            f'<b>{html.escape(saved_cell_review_line(saved, rec_type))}</b>')
+        for group, selector in figure_selectors.items():
+            options = figure_options(saved.figures, group, rec_type)
+            selector.options = options or [('not available', '')]
+            selector.value = options[0][1] if options else ''
+            selector.disabled = not bool(options)
+            show_figure(group)
+        refresh_status()
 
     def load_selected_cell(_change=None):
         saved = load_saved_cell_analysis(
@@ -10619,24 +10695,28 @@ def build_cell_review_browser(
             output_dir=directory, table_names=('mean_response',),
             include_audit_tables=False)
         state['saved_cell'] = saved
-        info_line.value = (
-            f'<b>{html.escape(saved_cell_review_line(saved))}</b>')
-        for group, selector in figure_selectors.items():
-            options = figure_options(saved.figures, group)
-            selector.options = options or [('not available', '')]
-            selector.value = options[0][1] if options else ''
-            selector.disabled = not bool(options)
-            show_figure(group)
-        refresh_status()
+        available = [
+            rec_type for rec_type in RECORDING_TYPES
+            if saved.conditions.rec_type.astype(str).eq(rec_type).any()]
+        extras = sorted(
+            set(saved.conditions.rec_type.astype(str)) - set(available))
+        rec_type_selector.options = tuple(available + extras)
+        if rec_type_selector.options:
+            rec_type_selector.value = rec_type_selector.options[0]
+            load_selected_recording_type()
 
     def save_decision(keep):
         saved = state['saved_cell']
-        set_cell_visual_inspection(saved, keep, output_dir=directory)
+        rec_type = str(rec_type_selector.value)
+        state['reviewed'] = set_cell_visual_inspection(
+            saved, rec_type, keep, output_dir=directory)
         action = ('saved to high_quality_cells.csv' if keep
                   else 'removed from high_quality_cells.csv')
         refresh_status(action)
 
     cell_selector.observe(load_selected_cell, names='value')
+    rec_type_selector.observe(
+        load_selected_recording_type, names='value')
     for group, selector in figure_selectors.items():
         selector.observe(
             lambda _change, name=group: show_figure(name), names='value')
@@ -10650,7 +10730,8 @@ def build_cell_review_browser(
             figure_images[name]])
         for name in figure_selectors]
     browser = widgets.VBox([
-        cell_selector, info_line, widgets.HBox([keep_button, remove_button]),
+        widgets.HBox([cell_selector, rec_type_selector]), info_line,
+        widgets.HBox([keep_button, remove_button]),
         review_status,
         widgets.GridBox(
             panels, layout=widgets.Layout(
@@ -10678,23 +10759,26 @@ MATLAB_SAVED_COMPARISON_COLUMNS = (
 
 def select_high_quality_saved_rows(
         frame: pd.DataFrame, high_quality_cells: pd.DataFrame) -> pd.DataFrame:
-    """Select saved rows by physical date/cell identity, not mutable index."""
+    """Select rows by physical cell and reviewed recording type."""
     if frame is None:
         return pd.DataFrame()
     if frame.empty or high_quality_cells is None or high_quality_cells.empty:
         return frame.iloc[0:0].copy()
-    required = {'date', 'cell_label'}
+    required = {'date', 'cell_label', 'rec_type'}
     missing_frame = sorted(required - set(frame.columns))
     missing_review = sorted(required - set(high_quality_cells.columns))
     if missing_frame or missing_review:
         raise ValueError(
-            f'high-quality selection requires date/cell_label; '
+            f'high-quality selection requires date/cell_label/rec_type; '
             f'saved rows missing {missing_frame}, review rows missing '
             f'{missing_review}')
-    keys = set(zip(high_quality_cells.date.astype(str),
-                   high_quality_cells.cell_label.astype(str)))
-    keep = [(str(date), str(label)) in keys
-            for date, label in zip(frame.date, frame.cell_label)]
+    keys = set(zip(
+        high_quality_cells.date.astype(str),
+        high_quality_cells.cell_label.astype(str),
+        high_quality_cells.rec_type.astype(str)))
+    keep = [(str(date), str(label), str(rec_type)) in keys
+            for date, label, rec_type in zip(
+                frame.date, frame.cell_label, frame.rec_type)]
     return frame.loc[keep].copy()
 
 
@@ -10755,7 +10839,8 @@ def high_quality_population_overview_analysis(*, output_dir=None) -> dict:
     This wrapper deliberately does not require Section 1 discovery variables or
     Section 6a widget state. The stable cell-index registry is consulted by
     :func:`load_condition_index`, and the MATLAB roster is loaded here only for
-    the saved-result audit.
+    the saved-result audit. Saved conditions are retained only when their
+    physical cell and recording type were both approved in Section 6a.
     """
     directory = condition_output_dir(output_dir)
     high_quality = load_high_quality_cells(directory)
@@ -10773,7 +10858,8 @@ def high_quality_population_overview_analysis(*, output_dir=None) -> dict:
     return {
         'output_dir': directory,
         'high_quality_cells': high_quality,
-        'high_quality_cell_indices': tuple(high_quality.cell_index.astype(int)),
+        'high_quality_cell_indices': tuple(sorted(
+            high_quality.cell_index.astype(int).unique())),
         'saved_conditions': selected,
         'mean_response_rows': mean_rows,
         'cell_summary': summary,
@@ -11342,7 +11428,9 @@ def high_quality_population_ln_analysis(
     Files are processed one condition at a time so the multi-million-row raw
     temporal table is never held in memory. When ``high_quality_cells`` is
     omitted, the visual-review CSV is loaded directly, making Section 6c
-    independent of Section 6b. Static curves pool all contrasts and epoch
+    independent of Section 6b. Review matching includes recording type, so a
+    retained extracellular recording never admits a rejected whole-cell
+    recording from the same cell. Static curves pool all contrasts and epoch
     durations. Temporal results pool contrast but retain 30 s and 50 s groups;
     longer epochs join the 50 s group after windows centred beyond 50 s are
     removed. Every condition is additionally split into photopic/scotopic from
@@ -11369,13 +11457,15 @@ def high_quality_population_ln_analysis(
     if high_quality_cells.empty:
         selected_keys = set()
     else:
-        required = {'date', 'cell_label'}
+        required = {'date', 'cell_label', 'rec_type'}
         missing = sorted(required - set(high_quality_cells.columns))
         if missing:
             raise ValueError(
-                f'high_quality_cells is missing physical identity columns {missing}')
-        selected_keys = set(zip(high_quality_cells.date.astype(str),
-                                high_quality_cells.cell_label.astype(str)))
+                f'high_quality_cells is missing review key columns {missing}')
+        selected_keys = set(zip(
+            high_quality_cells.date.astype(str),
+            high_quality_cells.cell_label.astype(str),
+            high_quality_cells.rec_type.astype(str)))
 
     population_metadata = (
         'condition_id', 'date', 'cell_label', 'cell_id', 'cell_type',
@@ -11385,9 +11475,10 @@ def high_quality_population_ln_analysis(
     paired_conditions, temporal_conditions = [], []
     for path in _condition_output_paths(output_dir):
         metadata = _output_metadata(path)
-        physical_key = (str(metadata.get('date', '')),
-                        str(metadata.get('cell_label', '')))
-        if physical_key not in selected_keys:
+        review_key = (str(metadata.get('date', '')),
+                      str(metadata.get('cell_label', '')),
+                      str(metadata.get('rec_type', '')))
+        if review_key not in selected_keys:
             continue
         if rec_types is not None and metadata.get('rec_type') not in rec_types:
             continue

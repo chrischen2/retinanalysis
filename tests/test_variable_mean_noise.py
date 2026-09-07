@@ -121,6 +121,66 @@ def test_visual_browser_ln_menu_uses_measured_vs_predicted_figure():
 
     assert "figures.figure.eq('static-ln')" in source
     assert "figures.figure.isin(('mean-response', 'static-ln'))" not in source
+    assert "description='Recording:'" in source
+    assert "f'raw-{rec_type}'" in source
+    assert 'saved, rec_type, keep' in source
+
+
+def test_visual_browser_filters_figures_and_decisions_by_recording_type(
+        monkeypatch, tmp_path):
+    import pandas as pd
+
+    paths = {}
+    entries = []
+    for rec_type in ('extracellular', 'exc'):
+        for section, figure in (
+                ('section2', f'raw-{rec_type}'),
+                ('section3', 'static-ln'),
+                ('section3', 'temporal-ln'),
+                ('section4', 'reconstruction-trace')):
+            path = tmp_path / f'{section}-{rec_type}-{figure}.png'
+            path.write_bytes(f'{rec_type}-{figure}'.encode())
+            paths[(rec_type, figure)] = str(path)
+            entries.append({
+                'section': section,
+                'condition': ('' if section == 'section2'
+                              else f'{rec_type}__duration-30000ms'),
+                'figure': figure, 'path': str(path),
+            })
+    saved = vmn.SavedCellAnalysis(
+        cell_index=12, exp_name='2025-01-01_A', cell_label='Cell2',
+        output_dir=tmp_path, cell_type='ON-parasol',
+        conditions=pd.DataFrame({
+            'condition_id': ['spike', 'whole'],
+            'rec_type': ['extracellular', 'exc'],
+            'stim_seconds': [30., 30.], 'mean_rate_hz': [25., np.nan],
+        }),
+        figures=pd.DataFrame(entries), tables={'mean_response': pd.DataFrame()})
+    monkeypatch.setattr(vmn, 'saved_cell_analysis_index', lambda *_a, **_k:
+                        pd.DataFrame([{
+                            'cell_index': 12, 'date': '2025-01-01_A',
+                            'cell_label': 'Cell2', 'output_dir': str(tmp_path),
+                        }]))
+    monkeypatch.setattr(vmn, 'load_saved_cell_analysis', lambda *_a, **_k: saved)
+    decisions = []
+    monkeypatch.setattr(
+        vmn, 'set_cell_visual_inspection',
+        lambda _saved, rec_type, keep, **_kwargs:
+        decisions.append((rec_type, keep)) or pd.DataFrame())
+
+    browser = vmn.build_cell_review_browser(
+        pd.DataFrame(), output_dir=tmp_path)
+    state = browser._vmn_browser_state
+
+    assert tuple(state['rec_type_selector'].options) == (
+        'extracellular', 'exc')
+    state['rec_type_selector'].value = 'exc'
+    assert all(
+        'exc' in str(selector.value)
+        for selector in state['figure_selectors'].values())
+    state['keep_button'].click()
+    state['remove_button'].click()
+    assert decisions == [('exc', True), ('exc', False)]
 
 # RandStream('mt19937ar', 'Seed', 42).randn(1, 64), from MATLAB R2025b.
 MATLAB_RANDN_SEED42 = np.array([
@@ -3397,19 +3457,72 @@ def test_visual_inspection_keep_and_remove_updates_high_quality_csv(tmp_path):
     assert line == ('cell id 12 | label Cell2 | cell type ON-parasol | '
                     'date 2025-01-01_A | '
                     'mean resp extracellular: 24.5 Hz; exc: -150 pA')
+    assert vmn.saved_cell_review_line(saved, 'exc') == (
+        'cell id 12 | label Cell2 | cell type ON-parasol | '
+        'date 2025-01-01_A | recording type exc | mean resp exc: -150 pA')
 
-    kept = vmn.set_cell_visual_inspection(saved, True, output_dir=tmp_path)
+    kept = vmn.set_cell_visual_inspection(
+        saved, 'extracellular', True, output_dir=tmp_path)
     assert kept.cell_index.tolist() == [12]
+    assert kept.rec_type.tolist() == ['extracellular']
+    assert kept.mean_response.tolist() == ['extracellular: 24.5 Hz']
     assert vmn.high_quality_cell_indices(tmp_path) == (12,)
     assert (tmp_path / 'high_quality_cells.csv').is_file()
 
-    # Keeping again updates the same row rather than duplicating the cell.
-    kept_again = vmn.set_cell_visual_inspection(saved, True, output_dir=tmp_path)
-    assert kept_again.cell_index.tolist() == [12]
+    # A second recording type is an independent decision for the same cell.
+    kept_both = vmn.set_cell_visual_inspection(
+        saved, 'exc', True, output_dir=tmp_path)
+    assert kept_both.cell_index.tolist() == [12, 12]
+    assert kept_both.rec_type.tolist() == ['exc', 'extracellular']
+    assert vmn.high_quality_cell_indices(tmp_path) == (12,)
 
-    removed = vmn.set_cell_visual_inspection(saved, False, output_dir=tmp_path)
+    removed = vmn.set_cell_visual_inspection(
+        saved, 'exc', False, output_dir=tmp_path)
+    assert removed.rec_type.tolist() == ['extracellular']
+    removed = vmn.set_cell_visual_inspection(
+        saved, 'extracellular', False, output_dir=tmp_path)
     assert removed.empty
     assert vmn.high_quality_cell_indices(tmp_path) == ()
+
+
+def test_legacy_high_quality_rows_expand_to_saved_recording_types(
+        monkeypatch, tmp_path):
+    import pandas as pd
+
+    pd.DataFrame([{
+        'cell_index': 12, 'date': '2025-01-01_A', 'cell_label': 'Cell2',
+        'mean_response': 'legacy combined response', 'reviewed_at': 'earlier',
+    }]).to_csv(tmp_path / 'high_quality_cells.csv', index=False)
+    monkeypatch.setattr(vmn, 'load_condition_index', lambda *_a, **_k:
+                        pd.DataFrame({
+                            'date': ['2025-01-01_A'] * 2,
+                            'cell_label': ['Cell2'] * 2,
+                            'rec_type': ['extracellular', 'exc'],
+                        }))
+
+    migrated = vmn.load_high_quality_cells(tmp_path)
+
+    assert migrated.rec_type.tolist() == ['exc', 'extracellular']
+    assert migrated.cell_index.tolist() == [12, 12]
+
+
+def test_high_quality_selection_is_recording_type_specific():
+    import pandas as pd
+
+    rows = pd.DataFrame({
+        'date': ['2025-01-01_A'] * 2,
+        'cell_label': ['Cell2'] * 2,
+        'rec_type': ['extracellular', 'exc'],
+        'condition_id': ['spike', 'whole'],
+    })
+    reviewed = pd.DataFrame({
+        'date': ['2025-01-01_A'], 'cell_label': ['Cell2'],
+        'rec_type': ['extracellular'],
+    })
+
+    selected = vmn.select_high_quality_saved_rows(rows, reviewed)
+
+    assert selected.condition_id.tolist() == ['spike']
 
 
 def test_high_quality_summary_counts_cells_once_and_keeps_response_units_separate():
@@ -3418,6 +3531,7 @@ def test_high_quality_summary_counts_cells_once_and_keeps_response_units_separat
     reviewed = pd.DataFrame({
         'date': ['2025-01-01_A', '2025-01-02_B'],
         'cell_label': ['Cell1', 'Cell2'],
+        'rec_type': ['extracellular', 'exc'],
     })
     conditions = pd.DataFrame({
         'condition_id': ['spike-a', 'spike-b', 'whole', 'not-reviewed'],
@@ -3432,6 +3546,7 @@ def test_high_quality_summary_counts_cells_once_and_keeps_response_units_separat
         'condition_id': ['whole', 'whole', 'not-reviewed'],
         'date': ['2025-01-02_B', '2025-01-02_B', '2025-01-03_C'],
         'cell_label': ['Cell2', 'Cell2', 'Cell3'],
+        'rec_type': ['exc', 'exc', 'exc'],
         'mean': [-100., -200., -900.],
     })
 
