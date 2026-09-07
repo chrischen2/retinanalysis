@@ -52,6 +52,21 @@ def test_section_3_explicitly_displays_each_core_figure():
     assert 'plt.close(figure)' in source
 
 
+def test_notebook_keeps_all_imports_in_the_setup_cell():
+    import ast
+    import json
+
+    notebook_path = NOTEBOOK_DIR / 'analyzeVariableMeanNoise.ipynb'
+    notebook = json.loads(notebook_path.read_text())
+    code_cells = [cell for cell in notebook['cells']
+                  if cell.get('cell_type') == 'code']
+    assert code_cells[0].get('id') == 'ef0462d7'
+    for cell in code_cells[1:]:
+        tree = ast.parse(''.join(cell.get('source', [])))
+        assert not any(isinstance(node, (ast.Import, ast.ImportFrom))
+                       for node in ast.walk(tree)), cell.get('id')
+
+
 def test_section_6b_contains_quality_summary_and_former_section_10():
     import json
 
@@ -61,9 +76,10 @@ def test_section_6b_contains_quality_summary_and_former_section_10():
              for cell in notebook['cells']}
     source = cells['high-quality-indices']
 
-    assert 'summarize_high_quality_saved_cells' in source
+    assert 'high_quality_population_overview_analysis' in source
     assert 'mean_firing_rate_hz' in cells['high-quality-placeholder']
-    assert 'compare_matlab_roster_to_saved' in source
+    assert 'protocol_cells' not in source
+    assert 'matlab_roster.copy' not in source
     assert 'matlab-saved-comparison-code' not in cells
     assert '085e4041' not in cells
 
@@ -79,22 +95,20 @@ def test_section_6c_runs_high_quality_population_ln_analysis():
     assert 'population-ln-heading' in cells
     source = cells['population-ln-analysis']
     assert "POPULATION_REC_TYPES = ('extracellular', 'exc')" in source
+    assert "POPULATION_CELL_TYPES = ('ON-parasol', 'ON-midget')" in source
     assert 'high_quality_population_ln_analysis' in source
-    assert 'plot_population_temporal_ln_curves' in source
-    assert 'plot_population_temporal_parameters' in source
+    assert 'iter_population_ln_figures' in source
+    assert 'high_quality_cells' not in source
+    assert 'REVIEW_OUTPUT_DIR' not in source
     ids = [cell.get('id') for cell in notebook['cells']]
     assert ids.index('high-quality-indices') < ids.index('population-ln-heading')
     assert ids.index('population-ln-analysis') < ids.index('ea098e58')
 
 
 def test_visual_browser_ln_menu_uses_measured_vs_predicted_figure():
-    import json
+    import inspect
 
-    notebook_path = NOTEBOOK_DIR / 'analyzeVariableMeanNoise.ipynb'
-    notebook = json.loads(notebook_path.read_text())
-    source = ''.join(next(
-        cell['source'] for cell in notebook['cells']
-        if cell.get('id') == 'load-batch-cell'))
+    source = inspect.getsource(vmn.build_cell_review_browser)
 
     assert "figures.figure.eq('static-ln')" in source
     assert "figures.figure.isin(('mean-response', 'static-ln'))" not in source
@@ -2951,22 +2965,24 @@ def test_inspection_excludes_only_failed_activity_conditions(monkeypatch):
 
 
 def test_population_wrappers_are_safe_before_any_records_exist(tmp_path):
-    import pandas as pd
-
     overview = vmn.population_overview_analysis(output_dir=tmp_path)
     temporal = vmn.population_temporal_analysis(output_dir=tmp_path)
     decoding = vmn.population_decoding_analysis(output_dir=tmp_path)
+    quality_overview = vmn.high_quality_population_overview_analysis(
+        output_dir=tmp_path)
     quality_ln = vmn.high_quality_population_ln_analysis(
-        pd.DataFrame(columns=['date', 'cell_label']), output_dir=tmp_path)
+        output_dir=tmp_path)
 
     assert overview['saved_cells'].empty
     assert overview['mean_figures'] == {}
     assert temporal['summary'].empty and temporal['figures'] == {}
     assert decoding['directional_contrast'].empty
     assert decoding['directional_contrast_figures'] == {}
+    assert quality_overview['high_quality_cells'].empty
+    assert quality_overview['saved_conditions'].empty
     assert quality_ln['static_summary'].empty
     assert quality_ln['temporal_parameter_summary'].empty
-    assert quality_ln['static_figures'] == {}
+    assert list(vmn.iter_population_ln_figures(quality_ln)) == []
 
 
 def test_condition_output_default_is_external_rod_noise_folder():
@@ -3348,3 +3364,23 @@ def test_high_quality_summary_counts_cells_once_and_keeps_response_units_separat
     assert whole.n_cells == 1
     assert np.isnan(whole.mean_firing_rate_hz)
     assert whole.mean_response_pa == pytest.approx(-150.)
+
+
+def test_population_ln_condition_counts_uses_physical_cell_identity():
+    import pandas as pd
+
+    rows = pd.DataFrame({
+        'cell_id': ['date-a/Cell1/extracellular',
+                    'date-a/Cell1/extracellular',
+                    'date-b/Cell1/extracellular'],
+        'condition_id': ['a-30', 'a-60', 'b-30'],
+        'cell_type': ['ON-parasol'] * 3,
+        'rec_type': ['extracellular'] * 3,
+        'stim_seconds': [30., 30., 30.],
+        'light_contrast': [.3, .3, .3],
+    })
+
+    counts = vmn.population_ln_condition_counts(rows)
+
+    assert counts.n_cells.iloc[0] == 2
+    assert counts.n_conditions.iloc[0] == 3

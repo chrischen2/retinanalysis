@@ -54,6 +54,7 @@ returning a stimulus that silently is not the one presented.
 """
 from __future__ import annotations
 
+import html
 import warnings
 from collections import OrderedDict
 from dataclasses import asdict, dataclass, field, replace
@@ -10536,9 +10537,137 @@ def high_quality_cell_indices(output_dir=None) -> Tuple[int, ...]:
     return tuple(load_high_quality_cells(output_dir).cell_index.astype(int))
 
 
+def build_cell_review_browser(
+        protocol_cells: pd.DataFrame, cell_indices=None, *, output_dir=None):
+    """Build the saved-figure browser used by notebook Section 6a.
+
+    Widget imports and callbacks live here so the notebook cell only supplies
+    its selection. With ``cell_indices=None`` every saved cell in the stable
+    protocol-cell registry is offered, independently of the latest batch run.
+    """
+    import ipywidgets as widgets
+
+    directory = condition_output_dir(output_dir)
+    completed = saved_cell_analysis_index(
+        protocol_cells, cell_indices, output_dir=directory)
+    if completed.empty:
+        raise ValueError('No saved cell figures were found for visual review.')
+
+    cell_options = [
+        (f'{int(row.cell_index)} | {row.date} | {row.cell_label}',
+         int(row.cell_index))
+        for row in completed.itertuples(index=False)]
+    cell_selector = widgets.Dropdown(
+        options=cell_options, description='Cell:',
+        layout=widgets.Layout(width='520px'))
+    info_line = widgets.HTML()
+    review_status = widgets.HTML()
+    keep_button = widgets.Button(
+        description='Keep', button_style='success', icon='check')
+    remove_button = widgets.Button(
+        description='Remove', button_style='danger', icon='trash')
+    figure_selectors = {
+        'Raw trace': widgets.Dropdown(description='Raw:'),
+        'LN model': widgets.Dropdown(description='LN trace:'),
+        'Temporal LN': widgets.Dropdown(description='Temporal:'),
+        'Decoding': widgets.Dropdown(description='Decoding:'),
+    }
+    figure_images = {
+        name: widgets.Image(
+            format='png', layout=widgets.Layout(width='100%', height='auto'))
+        for name in figure_selectors}
+    state = {'saved_cell': None}
+
+    def figure_options(figures, group):
+        if group == 'Raw trace':
+            rows = figures[figures.section.eq('section2')]
+        elif group == 'LN model':
+            rows = figures[figures.figure.eq('static-ln')]
+        elif group == 'Temporal LN':
+            rows = figures[
+                figures.figure.isin(('temporal-ln', 'temporal-kinetics'))]
+        else:
+            rows = figures[figures.section.eq('section4')]
+        rows = rows.copy()
+        rows['condition'] = rows.condition.fillna('all').replace('', 'all')
+        return [
+            (f'{row.condition or "all"} | {row.figure}', row.path)
+            for row in rows.itertuples(index=False)
+            if Path(row.path).is_file()]
+
+    def show_figure(group):
+        path = figure_selectors[group].value
+        figure_images[group].value = Path(path).read_bytes() if path else b''
+
+    def refresh_status(message=''):
+        cell_index = int(cell_selector.value)
+        kept = set(high_quality_cell_indices(directory))
+        decision = ('<b style="color:#188038">KEPT</b>'
+                    if cell_index in kept else 'not kept')
+        suffix = f' — {html.escape(message)}' if message else ''
+        review_status.value = f'Visual inspection: {decision}{suffix}'
+
+    def load_selected_cell(_change=None):
+        saved = load_saved_cell_analysis(
+            int(cell_selector.value), protocol_cells=protocol_cells,
+            output_dir=directory, table_names=('mean_response',),
+            include_audit_tables=False)
+        state['saved_cell'] = saved
+        info_line.value = (
+            f'<b>{html.escape(saved_cell_review_line(saved))}</b>')
+        for group, selector in figure_selectors.items():
+            options = figure_options(saved.figures, group)
+            selector.options = options or [('not available', '')]
+            selector.value = options[0][1] if options else ''
+            selector.disabled = not bool(options)
+            show_figure(group)
+        refresh_status()
+
+    def save_decision(keep):
+        saved = state['saved_cell']
+        set_cell_visual_inspection(saved, keep, output_dir=directory)
+        action = ('saved to high_quality_cells.csv' if keep
+                  else 'removed from high_quality_cells.csv')
+        refresh_status(action)
+
+    cell_selector.observe(load_selected_cell, names='value')
+    for group, selector in figure_selectors.items():
+        selector.observe(
+            lambda _change, name=group: show_figure(name), names='value')
+    keep_button.on_click(lambda _button: save_decision(True))
+    remove_button.on_click(lambda _button: save_decision(False))
+    load_selected_cell()
+
+    panels = [
+        widgets.VBox([
+            widgets.HTML(f'<b>{name}</b>'), figure_selectors[name],
+            figure_images[name]])
+        for name in figure_selectors]
+    browser = widgets.VBox([
+        cell_selector, info_line, widgets.HBox([keep_button, remove_button]),
+        review_status,
+        widgets.GridBox(
+            panels, layout=widgets.Layout(
+                grid_template_columns='repeat(2, minmax(0, 1fr))',
+                grid_gap='12px'))])
+    # Keep state discoverable for debugging without exposing notebook globals.
+    browser._vmn_browser_state = state
+    return browser
+
+
 HIGH_QUALITY_SUMMARY_COLUMNS = (
     'cell_type', 'rec_type', 'n_cells',
     'mean_firing_rate_hz', 'mean_response_pa')
+MATLAB_ROSTER_DISPLAY_COLUMNS = (
+    'index', 'recorded_date', 'corrected_date', 'cell_label', 'cell_type',
+    'rec_type', 'epoch_len_ms', 'tau_low', 'tau_high', 'is_example')
+MATLAB_SAVED_COMPARISON_COLUMNS = (
+    'matlab_index', 'match_status', 'recorded_date', 'corrected_date',
+    'date_match_source', 'saved_date', 'matlab_cell_label',
+    'saved_cell_label', 'matlab_rec_type', 'saved_rec_type',
+    'matlab_epoch_seconds', 'saved_stim_seconds', 'matlab_cell_type',
+    'saved_cell_type', 'cell_type_agrees', 'saved_cell_index', 'saved_entry',
+    'saved_output_path', 'saved_current_cell_index', 'saved_index_status')
 
 
 def select_high_quality_saved_rows(
@@ -10614,8 +10743,59 @@ def summarize_high_quality_saved_cells(
         ['cell_type', 'rec_type'], ignore_index=True)
 
 
+def high_quality_population_overview_analysis(*, output_dir=None) -> dict:
+    """Load all Section 6b inputs directly from durable saved outputs.
+
+    This wrapper deliberately does not require Section 1 discovery variables or
+    Section 6a widget state. The stable cell-index registry is consulted by
+    :func:`load_condition_index`, and the MATLAB roster is loaded here only for
+    the saved-result audit.
+    """
+    directory = condition_output_dir(output_dir)
+    high_quality = load_high_quality_cells(directory)
+    saved = load_condition_index(directory)
+    selected = select_high_quality_saved_rows(saved, high_quality)
+    mean_rows = load_population_table(
+        'mean_response', directory, high_quality_cells=high_quality)
+    summary = summarize_high_quality_saved_cells(
+        high_quality, selected, mean_rows)
+    roster = load_summary(show=False).copy()
+    roster['recorded_date'] = roster['calendar_date']
+    roster['corrected_date'] = corrected_dates(roster)
+    comparison = compare_matlab_roster_to_saved(
+        roster, selected, show=False)
+    return {
+        'output_dir': directory,
+        'high_quality_cells': high_quality,
+        'high_quality_cell_indices': tuple(high_quality.cell_index.astype(int)),
+        'saved_conditions': selected,
+        'mean_response_rows': mean_rows,
+        'cell_summary': summary,
+        'matlab_roster': roster,
+        'matlab_saved_comparison': comparison,
+    }
+
+
 POPULATION_LN_GROUPS = (
     'cell_type', 'rec_type', 'stim_seconds', 'light_contrast')
+
+
+def population_ln_condition_counts(paired_conditions: pd.DataFrame) -> pd.DataFrame:
+    """Count physical cells and saved low/high condition pairs for Section 6c."""
+    columns = [*POPULATION_LN_GROUPS, 'n_cells', 'n_conditions']
+    if paired_conditions is None or paired_conditions.empty:
+        return pd.DataFrame(columns=columns)
+    required = {'cell_id', 'condition_id', *POPULATION_LN_GROUPS}
+    missing = sorted(required - set(paired_conditions.columns))
+    if missing:
+        raise ValueError(f'paired condition table is missing {missing}')
+    conditions = paired_conditions[
+        ['cell_id', 'condition_id', *POPULATION_LN_GROUPS]].drop_duplicates()
+    return (conditions.groupby(
+        list(POPULATION_LN_GROUPS), dropna=False, as_index=False)
+        .agg(n_cells=('cell_id', 'nunique'),
+             n_conditions=('condition_id', 'nunique'))
+        .reindex(columns=columns))
 
 
 def _select_low_high_light_rows(frame: pd.DataFrame) -> pd.DataFrame:
@@ -11021,17 +11201,18 @@ def _resample_condition_ln_curves(
 
 
 def high_quality_population_ln_analysis(
-        high_quality_cells: pd.DataFrame, *,
+        high_quality_cells: Optional[pd.DataFrame] = None, *,
         rec_types: Optional[Sequence[str]] = ('extracellular', 'exc'),
         cell_types: Optional[Sequence[str]] = None,
         output_dir=None, grid_points: int = 101,
-        make_figures: bool = False,
         retain_normalized: bool = False) -> dict:
     """Run Section 6c population LN curves and parameter trajectories.
 
     Files are processed one condition at a time so the multi-million-row raw
-    temporal table is never held in memory. Figures are opt-in because the
-    notebook renders and closes each group sequentially. Set
+    temporal table is never held in memory. When ``high_quality_cells`` is
+    omitted, the visual-review CSV is loaded directly, making Section 6c
+    independent of Section 6b. The notebook renders and closes each group
+    sequentially with :func:`iter_population_ln_figures`. Set
     ``retain_normalized`` only when the interpolation-ready per-condition
     curves are needed for debugging.
     """
@@ -11039,7 +11220,9 @@ def high_quality_population_ln_analysis(
 
     if int(grid_points) < 2:
         raise ValueError('grid_points must be at least 2')
-    if high_quality_cells is None or high_quality_cells.empty:
+    if high_quality_cells is None:
+        high_quality_cells = load_high_quality_cells(output_dir)
+    if high_quality_cells.empty:
         selected_keys = set()
     else:
         required = {'date', 'cell_label'}
@@ -11111,22 +11294,6 @@ def high_quality_population_ln_analysis(
     temporal_parameter_summary = population_temporal_parameter_mean_sem(
         temporal_parameters)
 
-    figure_groups = list(POPULATION_LN_GROUPS)
-    static_figures = ({
-        key: plot_population_static_ln_curves(block)
-        for key, block in static_summary.groupby(
-            figure_groups, dropna=False, sort=True)}
-        if make_figures and not static_summary.empty else {})
-    temporal_curve_figures = ({
-        key: plot_population_temporal_ln_curves(block)
-        for key, block in temporal_curve_summary.groupby(
-            figure_groups, dropna=False, sort=True)}
-        if make_figures and not temporal_curve_summary.empty else {})
-    parameter_figures = ({
-        key: plot_population_temporal_parameters(block)
-        for key, block in temporal_parameter_summary.groupby(
-            figure_groups, dropna=False, sort=True)}
-        if make_figures and not temporal_parameter_summary.empty else {})
     return {
         'paired_conditions': pd.DataFrame(paired_conditions),
         'static_normalized': (static_normalized if retain_normalized
@@ -11137,10 +11304,26 @@ def high_quality_population_ln_analysis(
         'temporal_curve_summary': temporal_curve_summary,
         'temporal_parameters': temporal_parameters,
         'temporal_parameter_summary': temporal_parameter_summary,
-        'static_figures': static_figures,
-        'temporal_curve_figures': temporal_curve_figures,
-        'parameter_figures': parameter_figures,
     }
+
+
+def iter_population_ln_figures(result: Mapping[str, object]):
+    """Yield Section 6c figures one at a time to keep notebook memory bounded."""
+    figure_specs = (
+        ('static_summary', plot_population_static_ln_curves,
+         'Static filter and nonlinearity'),
+        ('temporal_curve_summary', plot_population_temporal_ln_curves,
+         'Temporal filter and nonlinearity'),
+        ('temporal_parameter_summary', plot_population_temporal_parameters,
+         'Temporal filter and nonlinearity parameters'),
+    )
+    for summary_name, plotter, label in figure_specs:
+        summary = result.get(summary_name)
+        if not isinstance(summary, pd.DataFrame) or summary.empty:
+            continue
+        for condition, block in summary.groupby(
+                list(POPULATION_LN_GROUPS), dropna=False, sort=True):
+            yield label, condition, plotter(block)
 
 
 def select_population_rows(frame: pd.DataFrame,
@@ -11408,15 +11591,19 @@ __all__ = [
     'cell_analysis_output_dir', 'high_quality_cells_path',
     'load_high_quality_cells', 'saved_cell_mean_response_text',
     'saved_cell_review_line', 'set_cell_visual_inspection',
-    'high_quality_cell_indices', 'select_high_quality_saved_rows',
+    'high_quality_cell_indices', 'build_cell_review_browser',
+    'select_high_quality_saved_rows',
     'summarize_high_quality_saved_cells',
+    'high_quality_population_overview_analysis',
+    'MATLAB_ROSTER_DISPLAY_COLUMNS', 'MATLAB_SAVED_COMPARISON_COLUMNS',
+    'population_ln_condition_counts',
     'normalize_population_ln_curves', 'population_ln_curve_mean_sem',
     'normalize_temporal_ln_parameters',
     'population_temporal_parameter_mean_sem',
     'plot_population_static_ln_curves',
     'plot_population_temporal_ln_curves',
     'plot_population_temporal_parameters',
-    'high_quality_population_ln_analysis',
+    'high_quality_population_ln_analysis', 'iter_population_ln_figures',
     'save_condition_output', 'save_duration_outputs',
     'save_condition_outputs',
     'load_condition_index', 'load_population_table', 'select_population_rows',
