@@ -114,19 +114,20 @@ def test_section_6c_runs_high_quality_population_ln_analysis():
              for cell in notebook['cells']}
 
     assert 'population-ln-heading' in cells
-    assert 'All contrasts are pooled' in cells['population-ln-heading']
-    assert 'only two duration groups: 30 s and 50 s' in cells[
+    assert '**all contrasts and durations**' in cells['population-ln-heading']
+    assert '**only 50 and 60 s recordings**' in cells[
         'population-ln-heading']
     source = cells['population-ln-analysis']
     assert "POPULATION_REC_TYPES = ('extracellular', 'exc')" in source
     assert "POPULATION_CELL_TYPES = ('ON-parasol', 'ON-midget')" in source
-    assert 'PHOTOPIC_TIME_TO_PEAK_THRESHOLD_MS = 50.0' in source
+    assert 'PHOTOPIC_TIME_TO_PEAK_THRESHOLD_MS =' in source
     assert 'photopic_time_to_peak_threshold_ms=' in source
     assert 'TEMPORAL_PARAMETER_WINDOW_COMBINE = 2' in source
     assert 'temporal_parameter_window_combine=' in source
     assert 'high_quality_population_ln_analysis' in source
     assert "population_ln['temporal_condition_counts']" in source
-    assert '30/50 s group' in source
+    assert '50/60 s recordings, first 50 s' in source
+    assert 'normalized_ln=NORMALIZED_LN' in source
     assert 'iter_population_ln_figures' in source
     assert 'high_quality_cells' not in source
     assert 'REVIEW_OUTPUT_DIR' not in source
@@ -2874,7 +2875,7 @@ def _saved_ln_curve_rows(condition_id, rec_type, levels, temporal=False,
                         'date': date, 'cell_label': cell_label,
                         'cell_id': f'{date}/{cell_label}/{rec_type}',
                         'cell_type': 'OFF-parasol', 'rec_type': rec_type,
-                        'stim_seconds': 30.0, 'light_contrast': .3,
+                        'stim_seconds': 50.0 if temporal else 30.0, 'light_contrast': .3,
                         'lightMean': level, 'order': order, 'window': window,
                         'curve': curve, 'point': point,
                         'x': x_value, 'y': y_value,
@@ -2934,9 +2935,10 @@ def test_temporal_nonlinearity_parameters_follow_normalized_axes():
         'cell_id': ['2020-01-01_B/Cell1/extracellular'] * 4,
         'cell_type': ['OFF-parasol'] * 4,
         'rec_type': ['extracellular'] * 4,
-        'stim_seconds': [30.0] * 4, 'light_contrast': [.3] * 4,
+        'stim_seconds': [50.0] * 4, 'light_contrast': [.3] * 4,
         'lightMean': [1.0, 1.0, 2.0, 2.0], 'order': [0, 1, 0, 1],
         'centre_s': [.5, 1.5, .5, 1.5],
+        'window': ['0-1 s', '1-2 s'] * 2,
         'time_to_peak_ms': [20., 21., 18., 19.],
         'biphasic_index': [.2, .3, .4, .5],
         'alpha': [8.] * 4, 'beta': [.5] * 4,
@@ -2945,11 +2947,11 @@ def test_temporal_nonlinearity_parameters_follow_normalized_axes():
 
     normalized = vmn.normalize_temporal_ln_parameters(params, curves)
 
-    # Joint temporal NL scales are max response=8 and max |generator|=2.
-    assert normalized.alpha_normalized.tolist() == pytest.approx([1.] * 4)
-    assert normalized.beta_normalized.tolist() == pytest.approx([1.] * 4)
+    # Separate temporal response scales: low=4, high=8; generator units unchanged.
+    assert normalized.alpha_normalized.tolist() == pytest.approx([2., 2., 1., 1.])
+    assert normalized.beta_normalized.tolist() == pytest.approx([.5] * 4)
     assert normalized.gamma_normalized.tolist() == pytest.approx([-.2] * 4)
-    assert normalized.epsilon_normalized.tolist() == pytest.approx([.25] * 4)
+    assert normalized.epsilon_normalized.tolist() == pytest.approx([.5, .5, .25, .25])
 
 
 def test_temporal_parameter_summary_combines_adjacent_windows_before_sem():
@@ -3638,10 +3640,8 @@ def test_population_ln_condition_counts_uses_physical_cell_identity():
     assert len(counts) == 1
 
     temporal = vmn.population_ln_condition_counts(rows, temporal=True)
-    assert temporal.duration_group_s.tolist() == [30., 50.]
-    thirty = temporal[temporal.duration_group_s.eq(30.)].iloc[0]
+    assert temporal.duration_group_s.tolist() == [50.]
     fifty = temporal[temporal.duration_group_s.eq(50.)].iloc[0]
-    assert (thirty.n_cells, thirty.n_conditions) == (1, 1)
     assert (fifty.n_cells, fifty.n_conditions) == (2, 2)
 
 
@@ -3679,8 +3679,8 @@ def test_temporal_population_maps_long_epochs_to_50_and_truncates():
 
     grouped = vmn._prepare_population_temporal_rows(rows)
 
-    assert grouped.value.tolist() == [0, 1, 2, 4]
-    assert grouped.duration_group_s.tolist() == [30., 50., 50., 50.]
+    assert grouped.value.tolist() == [1, 4]
+    assert grouped.duration_group_s.tolist() == [50., 50.]
 
 
 def test_saved_lnk_inputs_restore_adjusted_sequences_by_index(tmp_path, monkeypatch):
@@ -3755,3 +3755,64 @@ def test_saved_lnk_inputs_restore_adjusted_sequences_by_index(tmp_path, monkeypa
         del h5['model_inputs']
     with pytest.raises(ValueError, match='reviewed baseline settings'):
         vmn.load_saved_lnk_inputs(19, output_dir=tmp_path, protocol_cells=registry)
+
+
+@pytest.mark.parametrize('rec_type', ['extracellular', 'exc', 'inh'])
+def test_temporal_ln_response_normalization_and_absolute_mode(rec_type):
+    from scipy.stats import norm
+    temporal = _saved_ln_curve_rows('test', rec_type, [1., 2.], temporal=True)
+    for normalized_ln in (True, False):
+        curves = vmn.normalize_population_ln_curves(
+            temporal, temporal=True, rec_types=None, normalized_ln=normalized_ln)
+        np.testing.assert_allclose(curves.x_population[curves.curve.eq('nonlinearity')],
+                                   curves.x[curves.curve.eq('nonlinearity')])
+        for state in ('low', 'high'):
+            block = curves[curves.light_state.eq(state) & curves.curve.eq('nonlinearity')]
+            scale = block.response_scale.iloc[0]
+            assert block.response_scale.nunique() == 1
+            if normalized_ln:
+                assert block.y_normalized.abs().max() == pytest.approx(1.)
+                early = block[block.order.eq(0)].y_normalized.abs().max()
+                assert early == pytest.approx(.5)  # not independently normalized per window
+            else:
+                assert scale == 1.
+                np.testing.assert_array_equal(block.y_normalized, block.y)
+        params = temporal[temporal.curve.eq('nonlinearity')].drop_duplicates(
+            ['condition_id', 'lightMean', 'order']).copy()
+        params['alpha'] = 8. if rec_type == 'extracellular' else -8.
+        params['beta'], params['gamma'], params['epsilon'] = 2., -.3, 1.
+        parameters = vmn.normalize_temporal_ln_parameters(params, curves)
+        for row in parameters.itertuples():
+            x = np.linspace(-1., 1., 21)
+            expected = (row.alpha * norm.cdf(row.beta*x + row.gamma) + row.epsilon)
+            actual = (row.alpha_normalized * norm.cdf(
+                row.beta_normalized*x + row.gamma_normalized) + row.epsilon_normalized)
+            np.testing.assert_allclose(actual, expected / row.response_scale)
+            assert row.slope_normalized == pytest.approx(
+                row.slope / row.response_scale)
+            if not normalized_ln:
+                assert row.alpha_normalized == row.alpha
+                assert row.epsilon_normalized == row.epsilon
+
+
+def test_temporal_population_excludes_windows_crossing_fifty_seconds():
+    import pandas as pd
+    rows = pd.DataFrame({'stim_seconds': [30., 50., 60., 60., 55.],
+                         'window': ['0-3 s', '47-50 s', '47-50 s', '49-51 s', '0-3 s']})
+    selected = vmn._prepare_population_temporal_rows(rows)
+    assert selected.index.tolist() == [1, 2]
+
+
+def test_population_nonlinearity_preserves_contrast_units_and_plot_limits():
+    import matplotlib.pyplot as plt
+    curves = _saved_ln_curve_rows('test', 'extracellular', [.5, 2.])
+    curves['light_regime'] = 'scotopic'
+    normalized = vmn.normalize_population_ln_curves(curves, normalized_ln=False)
+    summary = vmn.population_ln_curve_mean_sem(normalized)
+    nonlinearities = summary[summary.curve.eq('nonlinearity')]
+    assert nonlinearities.x.between(-1., 1.).all()
+    figure = vmn.plot_population_static_ln_curves(summary, normalized_ln=False)
+    assert figure.axes[1].get_xlim() == (-1., 1.)
+    assert figure.axes[1].get_xlabel() == 'generator (contrast units)'
+    assert figure.axes[1].get_ylabel() == 'response (Hz)'
+    plt.close(figure)

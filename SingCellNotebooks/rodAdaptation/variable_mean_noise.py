@@ -10969,9 +10969,8 @@ def population_ln_condition_counts(
         ) -> pd.DataFrame:
     """Count contributing cells and low/high pairs for Section 6c.
 
-    Static counts pool all recording durations. With ``temporal=True``, 30 s
-    recordings remain separate while 50, 55, and 60 s recordings are counted
-    in the 50 s temporal group, matching the plotted temporal summaries.
+    Static counts pool all recording durations. With ``temporal=True``, only
+    50 and 60 s recordings contribute to the common first-50-s group.
     """
     population_groups = (POPULATION_TEMPORAL_GROUPS if temporal
                          else POPULATION_STATIC_GROUPS)
@@ -10988,9 +10987,8 @@ def population_ln_condition_counts(
     if temporal:
         duration = pd.to_numeric(
             paired_conditions.stim_seconds, errors='coerce')
-        paired_conditions['duration_group_s'] = np.select(
-            (duration.le(40.0), duration.gt(40.0)), (30.0, 50.0),
-            default=np.nan)
+        paired_conditions = paired_conditions.loc[duration.isin((50., 60.))].copy()
+        paired_conditions['duration_group_s'] = 50.0
     conditions = paired_conditions[
         ['cell_id', 'condition_id', *population_groups]].drop_duplicates()
     return (conditions.groupby(
@@ -11002,35 +11000,33 @@ def population_ln_condition_counts(
 
 def _prepare_population_temporal_rows(
         frame: pd.DataFrame, *, truncate_at_s: float = 50.0) -> pd.DataFrame:
-    """Map recordings to 30/50 s groups and trim longer ones at 50 s.
+    """Use only 50/60 s recordings and windows wholly inside the first 50 s.
 
-    The saved temporal fits are window based. A window from a 55/60 s epoch is
-    retained when its centre is no later than 50 s, which preserves the same
-    first 16 temporal orders normally present in a 50 s recording.
+    A fit crossing the boundary cannot be truncated after fitting: exclude it.
+    Saved labels (or explicit start/end times) provide the required bounds.
     """
     if frame is None or frame.empty:
         return pd.DataFrame() if frame is None else frame.copy()
     if 'stim_seconds' not in frame:
         raise ValueError('temporal population rows require stim_seconds')
-    rows = frame.copy()
-    duration = pd.to_numeric(rows.stim_seconds, errors='coerce')
-    rows['duration_group_s'] = np.select(
-        (duration.le(40.0), duration.gt(40.0)), (30.0, 50.0),
-        default=np.nan)
-    longer = duration.gt(float(truncate_at_s))
-    if longer.any():
-        if 'centre_s' in rows:
-            centre = pd.to_numeric(rows.centre_s, errors='coerce')
-        elif 'window' in rows:
-            centre = rows.window.astype(str).map(_window_centre)
-        else:
-            raise ValueError(
-                'long temporal recordings require centre_s or window labels')
-        if centre[longer].isna().any():
-            raise ValueError(
-                'could not locate temporal windows in a recording longer than 50 s')
-        rows = rows.loc[~longer | centre.le(float(truncate_at_s))].copy()
-    return rows
+    rows = frame.loc[pd.to_numeric(frame.stim_seconds, errors='coerce')
+                     .isin((50., 60.))].copy()
+    rows['duration_group_s'] = 50.0
+    if rows.empty:
+        return rows
+    if 'window' in rows:
+        bounds = rows.window.astype(str).map(_window_bounds)
+        end = bounds.map(lambda pair: pair[1])
+    elif 'end_s' in rows:
+        end = pd.to_numeric(rows.end_s, errors='coerce')
+    elif {'start_s', 'centre_s'}.issubset(rows.columns):
+        end = (2 * pd.to_numeric(rows.centre_s, errors='coerce')
+               - pd.to_numeric(rows.start_s, errors='coerce'))
+    else:
+        raise ValueError('temporal rows require window bounds to enforce the first 50 s')
+    if end.isna().any():
+        raise ValueError('could not locate temporal window ends')
+    return rows.loc[end.le(float(truncate_at_s) + 1e-9)].copy()
 
 
 def _select_low_high_light_rows(frame: pd.DataFrame) -> pd.DataFrame:
@@ -11108,18 +11104,16 @@ def classify_population_light_regime(
 
 def normalize_population_ln_curves(
         curves: pd.DataFrame, *, temporal: bool = False,
+        normalized_ln: bool = True,
         rec_types: Optional[Sequence[str]] = ('extracellular', 'exc')
         ) -> pd.DataFrame:
-    """Select low/high light and normalize saved LN curves within condition.
+    """Prepare low/high curves on their original contrast-generator coordinates.
 
-    One scale is shared by the low/high pair. For temporal curves that same
-    scale is also shared by every window, preserving changes over adaptation
-    time. Filters use their joint maximum absolute amplitude. Extracellular
-    nonlinearities use their joint maximum response, while excitatory
-    whole-cell nonlinearities use their joint maximum absolute amplitude and
-    retain their negative sign. The nonlinearity generator axis is divided by
-    its joint maximum absolute value so curves from different cells have a
-    common population coordinate.
+    Temporal response scales are separate for low/high light, shared over all
+    retained windows within a condition. Spike scale is maximum response;
+    whole-cell scale is maximum absolute response, retaining current polarity.
+    Static curves and filters retain a joint low/high scale. Absolute mode
+    applies no response/filter scaling. Generator values are never rescaled.
     """
     if curves is None or curves.empty:
         return pd.DataFrame() if curves is None else curves.copy()
@@ -11144,31 +11138,24 @@ def normalize_population_ln_curves(
         selected.curve.isin(('filter', 'nonlinearity'))
         & selected.x.notna() & selected.y.notna()].copy()
 
+    if selected.empty:
+        return selected
     scales = []
-    for condition_id, block in selected.groupby('condition_id', dropna=False):
-        filter_y = block.loc[block.curve.eq('filter'), 'y'].to_numpy(float)
-        nl = block[block.curve.eq('nonlinearity')]
-        nl_y = nl.y.to_numpy(float)
-        nl_x = nl.x.to_numpy(float)
-        rec_type = str(block.rec_type.iloc[0])
-        filter_scale = (float(np.max(np.abs(filter_y)))
-                        if filter_y.size else np.nan)
-        if nl_y.size and rec_type == 'extracellular':
-            response_scale = float(np.max(nl_y))
-            if not np.isfinite(response_scale) or response_scale <= 0:
-                response_scale = float(np.max(np.abs(nl_y)))
-        else:
-            response_scale = (float(np.max(np.abs(nl_y)))
-                              if nl_y.size else np.nan)
-        generator_scale = (float(np.max(np.abs(nl_x)))
-                           if nl_x.size else np.nan)
-        scales.append({
-            'condition_id': condition_id,
-            'filter_scale': filter_scale,
-            'response_scale': response_scale,
-            'generator_scale': generator_scale,
-        })
-    selected = selected.merge(pd.DataFrame(scales), on='condition_id', how='left')
+    scale_keys = ['condition_id', 'light_state'] if temporal else ['condition_id']
+    for group_key, block in selected.groupby(scale_keys, dropna=False):
+        group_key = group_key if isinstance(group_key, tuple) else (group_key,)
+        condition = selected[selected.condition_id.eq(block.condition_id.iloc[0])]
+        filter_y = condition.loc[condition.curve.eq('filter'), 'y'].to_numpy(float)
+        nl_y = block.loc[block.curve.eq('nonlinearity'), 'y'].to_numpy(float)
+        filter_scale = float(np.max(np.abs(filter_y))) if filter_y.size else np.nan
+        response_scale = (float(np.max(nl_y))
+                          if nl_y.size and str(block.rec_type.iloc[0]) == 'extracellular'
+                          else float(np.max(np.abs(nl_y))) if nl_y.size else np.nan)
+        scales.append({**dict(zip(scale_keys, group_key)),
+                       'filter_scale': filter_scale if normalized_ln else 1.,
+                       'response_scale': response_scale if normalized_ln else 1.,
+                       'generator_scale': 1.})
+    selected = selected.merge(pd.DataFrame(scales), on=scale_keys, how='left')
     selected['x_population'] = selected.x
     selected.loc[selected.curve.eq('filter'), 'x_population'] *= 1e3
     nl_mask = selected.curve.eq('nonlinearity')
@@ -11230,6 +11217,8 @@ def population_ln_curve_mean_sem(
         if not curve_blocks:
             continue
         overlap_low, overlap_high = max(lower), min(upper)
+        if population.curve.iloc[0] == 'nonlinearity':
+            overlap_low, overlap_high = max(-1., overlap_low), min(1., overlap_high)
         if not np.isfinite(overlap_low + overlap_high) or overlap_high <= overlap_low:
             continue
         grid = np.linspace(overlap_low, overlap_high, int(grid_points))
@@ -11286,9 +11275,9 @@ def normalize_temporal_ln_parameters(
     if rows.empty or normalized_temporal_curves is None or normalized_temporal_curves.empty:
         return rows.iloc[0:0].copy()
     scales = (normalized_temporal_curves[
-        ['condition_id', 'response_scale', 'generator_scale']]
-        .drop_duplicates('condition_id'))
-    rows = rows.merge(scales, on='condition_id', how='inner')
+        ['condition_id', 'light_state', 'response_scale', 'generator_scale']]
+        .drop_duplicates(['condition_id', 'light_state']))
+    rows = rows.merge(scales, on=['condition_id', 'light_state'], how='inner')
     for parameter in ('alpha', 'beta', 'gamma', 'epsilon',
                       'centre_s', 'time_to_peak_ms', 'biphasic_index'):
         if parameter in rows:
@@ -11297,6 +11286,10 @@ def normalize_temporal_ln_parameters(
     rows['beta_normalized'] = rows.beta * rows.generator_scale
     rows['gamma_normalized'] = rows.gamma
     rows['epsilon_normalized'] = rows.epsilon / rows.response_scale
+    # Signed derivative at the sigmoid midpoint for alpha * Phi(beta*x + gamma).
+    rows['slope'] = rows.alpha * rows.beta / np.sqrt(2 * np.pi)
+    rows['slope_normalized'] = (
+        rows.alpha_normalized * rows.beta_normalized / np.sqrt(2 * np.pi))
     return rows.replace([np.inf, -np.inf], np.nan)
 
 
@@ -11318,12 +11311,13 @@ def population_temporal_parameter_mean_sem(
     order = pd.to_numeric(rows.order, errors='coerce')
     rows = rows.loc[order.notna()].copy()
     rows['order'] = np.floor(order.loc[rows.index] / combine).astype(int)
+    metrics = ['centre_s', 'time_to_peak_ms', 'biphasic_index',
+               'alpha_normalized', 'beta_normalized', 'gamma_normalized',
+               'epsilon_normalized', 'slope_normalized',
+               'alpha', 'beta', 'gamma', 'epsilon', 'slope']
     return population_mean_sem(
-        rows,
-        [*POPULATION_TEMPORAL_GROUPS, 'light_state', 'order'],
-        ['centre_s', 'time_to_peak_ms', 'biphasic_index',
-         'alpha_normalized', 'beta_normalized', 'gamma_normalized',
-         'epsilon_normalized'])
+        rows, [*POPULATION_TEMPORAL_GROUPS, 'light_state', 'order'],
+        [metric for metric in metrics if metric in rows])
 
 
 def _population_ln_title(block: pd.DataFrame) -> str:
@@ -11336,7 +11330,8 @@ def _population_ln_title(block: pd.DataFrame) -> str:
     return title
 
 
-def plot_population_static_ln_curves(summary: pd.DataFrame):
+def plot_population_static_ln_curves(
+        summary: pd.DataFrame, *, normalized_ln: bool = True):
     """Plot normalized static filter/nonlinearity population mean ± SEM."""
     import matplotlib.pyplot as plt
     from retinanalysis.utils import style
@@ -11346,10 +11341,12 @@ def plot_population_static_ln_curves(summary: pd.DataFrame):
     style.apply_publication_style()
     fig, axes = plt.subplots(1, 2, figsize=(9.0, 3.8))
     colors = {'low': '#4477AA', 'high': '#CC6677'}
+    prefix = 'normalized ' if normalized_ln else ''
+    units = 'Hz' if summary.rec_type.iloc[0] == 'extracellular' else 'pA'
     for ax, curve, xlabel, ylabel in (
-            (axes[0], 'filter', 'filter lag (ms)', 'normalized filter'),
-            (axes[1], 'nonlinearity', 'normalized generator',
-             'normalized response')):
+            (axes[0], 'filter', 'filter lag (ms)', prefix + 'filter'),
+            (axes[1], 'nonlinearity', 'generator (contrast units)',
+             'normalized response' if normalized_ln else f'response ({units})')):
         for state in ('low', 'high'):
             block = summary[
                 summary.curve.eq(curve) & summary.light_state.eq(state)
@@ -11366,13 +11363,16 @@ def plot_population_static_ln_curves(summary: pd.DataFrame):
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
         ax.set_title(curve)
+        if curve == 'nonlinearity':
+            ax.set_xlim(-1., 1.)
     axes[0].legend(frameon=False, title='light mean')
     fig.suptitle(_population_ln_title(summary))
     fig.tight_layout(rect=(0, 0, 1, .94))
     return fig
 
 
-def plot_population_temporal_ln_curves(summary: pd.DataFrame):
+def plot_population_temporal_ln_curves(
+        summary: pd.DataFrame, *, normalized_ln: bool = True):
     """Plot normalized temporal filters and nonlinearities at low/high light."""
     import matplotlib.pyplot as plt
     from matplotlib import colormaps, colors as mpl_colors
@@ -11419,9 +11419,13 @@ def plot_population_temporal_ln_curves(summary: pd.DataFrame):
             ax.axhline(0, color='0.75', lw=.7)
             ax.set_title(f'{state} light | {curve}')
             ax.set_xlabel('filter lag (ms)' if curve == 'filter'
-                          else 'normalized generator')
-            ax.set_ylabel('normalized filter' if curve == 'filter'
-                          else 'normalized response')
+                          else 'generator (contrast units)')
+            units = 'Hz' if summary.rec_type.iloc[0] == 'extracellular' else 'pA'
+            ax.set_ylabel(('normalized filter' if normalized_ln else 'filter')
+                          if curve == 'filter' else
+                          ('normalized response' if normalized_ln else f'response ({units})'))
+            if curve == 'nonlinearity':
+                ax.set_xlim(-1., 1.)
     if orders:
         colorbar = fig.colorbar(
             plt.cm.ScalarMappable(norm=color_norm, cmap=color_map),
@@ -11431,7 +11435,8 @@ def plot_population_temporal_ln_curves(summary: pd.DataFrame):
     return fig
 
 
-def plot_population_temporal_parameters(summary: pd.DataFrame):
+def plot_population_temporal_parameters(
+        summary: pd.DataFrame, *, normalized_ln: bool = True):
     """Plot temporal filter and normalized sigmoid parameter trajectories."""
     import matplotlib.pyplot as plt
     from retinanalysis.utils import style
@@ -11439,15 +11444,20 @@ def plot_population_temporal_parameters(summary: pd.DataFrame):
     if summary is None or summary.empty:
         return None
     style.apply_publication_style()
+    suffix = ' (normalized)' if normalized_ln else ''
+    units = 'Hz' if summary.rec_type.iloc[0] == 'extracellular' else 'pA'
+    response_label = suffix if normalized_ln else f' ({units})'
     panels = (
         ('time_to_peak_ms', 'time to peak (ms)'),
         ('biphasic_index', 'biphasic index'),
-        ('alpha_normalized', 'NL amplitude alpha (normalized)'),
-        ('beta_normalized', 'NL slope beta (normalized)'),
+        ('alpha_normalized', 'NL amplitude alpha' + response_label),
+        ('beta_normalized', 'NL steepness beta (1/contrast unit)'),
         ('gamma_normalized', 'NL offset gamma'),
-        ('epsilon_normalized', 'NL baseline epsilon (normalized)'),
+        ('epsilon_normalized', 'NL baseline epsilon' + response_label),
+        ('slope_normalized', 'NL midpoint slope' + response_label + '/contrast unit'),
     )
-    fig, axes = plt.subplots(2, 3, figsize=(12.2, 7.1), squeeze=False)
+    fig, axes = plt.subplots(2, 4, figsize=(15.0, 7.1), squeeze=False)
+    axes.ravel()[-1].set_visible(False)
     colors = {'low': '#4477AA', 'high': '#CC6677'}
     for ax, (metric, ylabel) in zip(axes.ravel(), panels):
         for state in ('low', 'high'):
@@ -11513,7 +11523,7 @@ def high_quality_population_ln_analysis(
         photopic_time_to_peak_threshold_ms: float = 50.0,
         temporal_parameter_window_combine: int = 2,
         output_dir=None, grid_points: int = 101,
-        retain_normalized: bool = False) -> dict:
+        retain_normalized: bool = False, normalized_ln: bool = True) -> dict:
     """Run Section 6c population LN curves and parameter trajectories.
 
     Files are processed one condition at a time so the multi-million-row raw
@@ -11522,9 +11532,10 @@ def high_quality_population_ln_analysis(
     independent of Section 6b. Review matching includes recording type, so a
     retained extracellular recording never admits a rejected whole-cell
     recording from the same cell. Static curves pool all contrasts and epoch
-    durations. Temporal results pool contrast but retain 30 s and 50 s groups;
-    longer epochs join the 50 s group after windows centred beyond 50 s are
-    removed. Every condition is additionally split into photopic/scotopic from
+    durations. Temporal results pool contrast for 50/60 s recordings only,
+    retaining windows ending no later than 50 s. ``normalized_ln=False``
+    displays absolute responses and parameters; generator units stay unchanged.
+    Every condition is additionally split into photopic/scotopic from
     its low/high whole-trace filter time to peak and the configurable threshold.
     Adjacent temporal parameter windows are averaged according to
     ``temporal_parameter_window_combine`` before population summarization.
@@ -11589,8 +11600,11 @@ def high_quality_population_ln_analysis(
 
         with h5py.File(path, 'r') as h5:
             static = load_condition_table(h5, 'ln_curves')
-            temporal = load_condition_table(h5, 'temporal_ln_curves')
-            parameters = load_condition_table(h5, 'temporal_summary')
+            temporal_eligible = float(metadata['stim_seconds']) in (50., 60.)
+            temporal = (load_condition_table(h5, 'temporal_ln_curves')
+                        if temporal_eligible else pd.DataFrame())
+            parameters = (load_condition_table(h5, 'temporal_summary')
+                          if temporal_eligible else pd.DataFrame())
             condition_metrics = load_condition_table(h5, 'condition_summary')
 
         classification = classify_population_light_regime(
@@ -11610,9 +11624,10 @@ def high_quality_population_ln_analysis(
         for frame in (static, temporal, parameters):
             frame['light_regime'] = classification_row.light_regime
 
-        static = normalize_population_ln_curves(static, rec_types=None)
+        static = normalize_population_ln_curves(
+            static, rec_types=None, normalized_ln=normalized_ln)
         temporal = normalize_population_ln_curves(
-            temporal, temporal=True, rec_types=None)
+            temporal, temporal=True, rec_types=None, normalized_ln=normalized_ln)
         if not static.empty:
             paired_conditions.append({
                 **{column: metadata.get(column, np.nan)
@@ -11652,6 +11667,7 @@ def high_quality_population_ln_analysis(
         temporal_parameters, window_combine=window_combine)
 
     return {
+        'normalized_ln': bool(normalized_ln),
         'paired_conditions': paired_condition_frame,
         'condition_counts': population_ln_condition_counts(
             paired_condition_frame),
@@ -11687,7 +11703,8 @@ def iter_population_ln_figures(result: Mapping[str, object]):
             continue
         for condition, block in summary.groupby(
                 list(group_columns), dropna=False, sort=True):
-            yield label, condition, plotter(block)
+            yield label, condition, plotter(
+                block, normalized_ln=bool(result.get('normalized_ln', True)))
 
 
 def select_population_rows(frame: pd.DataFrame,
