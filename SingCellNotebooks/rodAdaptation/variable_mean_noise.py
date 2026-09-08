@@ -10749,6 +10749,35 @@ def high_quality_cell_indices(output_dir=None) -> Tuple[int, ...]:
     return tuple(sorted(indices.unique()))
 
 
+def load_example_cells(output_dir=None) -> pd.DataFrame:
+    """Explicit cell-level example flags; unlisted cells default to False."""
+    path = condition_output_dir(output_dir) / 'example_cells.csv'
+    columns = ['cell_index', 'date', 'cell_label', 'is_example']
+    if not path.exists():
+        return pd.DataFrame(columns=columns)
+    frame = pd.read_csv(path, dtype={'date': str, 'cell_label': str})
+    frame['is_example'] = frame.is_example.astype(str).str.lower().eq('true')
+    return frame.reindex(columns=columns)
+
+
+def set_cell_example(saved: SavedCellAnalysis, is_example: bool = True, *,
+                     output_dir=None) -> pd.DataFrame:
+    """Persist a physical cell's example flag independently of Keep/Remove."""
+    path = condition_output_dir(output_dir) / 'example_cells.csv'
+    frame = load_example_cells(output_dir)
+    same = (frame.date.eq(str(saved.exp_name))
+            & frame.cell_label.eq(str(saved.cell_label)))
+    frame = pd.concat([frame.loc[~same], pd.DataFrame([{
+        'cell_index': int(saved.cell_index), 'date': str(saved.exp_name),
+        'cell_label': str(saved.cell_label), 'is_example': bool(is_example),
+    }])], ignore_index=True).sort_values('cell_index', ignore_index=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix('.csv.tmp')
+    frame.to_csv(temporary, index=False)
+    temporary.replace(path)
+    return frame
+
+
 def build_cell_review_browser(
         protocol_cells: pd.DataFrame, cell_indices=None, *, output_dir=None):
     """Build the saved-figure browser used by notebook Section 6a.
@@ -10781,6 +10810,8 @@ def build_cell_review_browser(
         description='Keep', button_style='success', icon='check')
     remove_button = widgets.Button(
         description='Remove', button_style='danger', icon='trash')
+    example_button = widgets.Button(
+        description='Set example', icon='star-o')
     figure_selectors = {
         'Raw trace': widgets.Dropdown(description='Raw:'),
         'LN model': widgets.Dropdown(description='LN trace:'),
@@ -10793,6 +10824,9 @@ def build_cell_review_browser(
         for name in figure_selectors}
     state = {
         'saved_cell': None,
+        'examples': load_example_cells(directory),
+        'example_button': example_button,
+        'is_example': False,
         'reviewed': load_high_quality_cells(directory),
         'cell_selector': cell_selector,
         'rec_type_selector': rec_type_selector,
@@ -10837,10 +10871,19 @@ def build_cell_review_browser(
         review_key = (str(saved.exp_name), str(saved.cell_label), rec_type)
         decision = ('<b style="color:#188038">KEPT</b>'
                     if review_key in kept else 'not kept')
+        examples = state['examples']
+        example = bool((examples.date.eq(str(saved.exp_name))
+                        & examples.cell_label.eq(str(saved.cell_label))
+                        & examples.is_example.eq(True)).any())
+        state['is_example'] = example
+        example_button.description = 'Unset example' if example else 'Set example'
+        example_button.icon = 'star' if example else 'star-o'
+        example_button.button_style = 'warning' if example else ''
+        example_text = '<b>★ EXAMPLE</b>' if example else 'Example: false'
         suffix = f' — {html.escape(message)}' if message else ''
         review_status.value = (
             f'Visual inspection for <b>{html.escape(rec_type)}</b>: '
-            f'{decision}{suffix}')
+            f'{decision} | {example_text}{suffix}')
 
     def load_selected_recording_type(_change=None):
         saved = state['saved_cell']
@@ -10882,6 +10925,12 @@ def build_cell_review_browser(
                   else 'removed from high_quality_cells.csv')
         refresh_status(action)
 
+    def toggle_example(_button):
+        state['examples'] = set_cell_example(
+            state['saved_cell'], not state['is_example'], output_dir=directory)
+        refresh_status('example flag saved')
+
+    example_button.on_click(toggle_example)
     cell_selector.observe(load_selected_cell, names='value')
     rec_type_selector.observe(
         load_selected_recording_type, names='value')
@@ -10899,7 +10948,7 @@ def build_cell_review_browser(
         for name in figure_selectors]
     browser = widgets.VBox([
         widgets.HBox([cell_selector, rec_type_selector]), info_line,
-        widgets.HBox([keep_button, remove_button]),
+        widgets.HBox([keep_button, remove_button, example_button]),
         review_status,
         widgets.GridBox(
             panels, layout=widgets.Layout(
@@ -12030,7 +12079,8 @@ __all__ = [
     'save_cell_analysis_figures', 'load_cell_analysis_batch_summary',
     'saved_cell_analysis_index', 'load_saved_cell_analysis',
     'cell_analysis_output_dir', 'high_quality_cells_path',
-    'load_high_quality_cells', 'saved_cell_mean_response_text',
+    'load_high_quality_cells', 'load_example_cells', 'set_cell_example',
+    'saved_cell_mean_response_text',
     'saved_cell_review_line', 'set_cell_visual_inspection',
     'high_quality_cell_indices', 'build_cell_review_browser',
     'select_high_quality_saved_rows',

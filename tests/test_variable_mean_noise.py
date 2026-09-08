@@ -187,7 +187,8 @@ def test_visual_browser_filters_figures_and_decisions_by_recording_type(
     monkeypatch.setattr(
         vmn, 'set_cell_visual_inspection',
         lambda _saved, rec_type, keep, **_kwargs:
-        decisions.append((rec_type, keep)) or pd.DataFrame())
+        decisions.append((rec_type, keep)) or pd.DataFrame(
+            columns=vmn.HIGH_QUALITY_CELL_COLUMNS))
 
     browser = vmn.build_cell_review_browser(
         pd.DataFrame(), output_dir=tmp_path)
@@ -201,6 +202,20 @@ def test_visual_browser_filters_figures_and_decisions_by_recording_type(
         for selector in state['figure_selectors'].values())
     state['keep_button'].click()
     state['remove_button'].click()
+    assert decisions == [('exc', True), ('exc', False)]
+
+    assert state['is_example'] is False
+    assert state['example_button'].description == 'Set example'
+    state['example_button'].click()
+    assert state['is_example'] is True
+    assert state['example_button'].description == 'Unset example'
+    assert bool(vmn.load_example_cells(tmp_path).iloc[0].is_example)
+    state['rec_type_selector'].value = 'extracellular'
+    assert state['is_example'] is True  # physical cell flag spans recording types
+    reloaded = vmn.build_cell_review_browser(pd.DataFrame(), output_dir=tmp_path)
+    assert reloaded._vmn_browser_state['is_example'] is True
+    reloaded._vmn_browser_state['example_button'].click()
+    assert not bool(vmn.load_example_cells(tmp_path).iloc[0].is_example)
     assert decisions == [('exc', True), ('exc', False)]
 
 # RandStream('mt19937ar', 'Seed', 42).randn(1, 64), from MATLAB R2025b.
