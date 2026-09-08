@@ -3665,3 +3665,77 @@ def test_temporal_population_maps_long_epochs_to_50_and_truncates():
 
     assert grouped.value.tolist() == [0, 1, 2, 4]
     assert grouped.duration_group_s.tolist() == [30., 50., 50., 50.]
+
+
+def test_saved_lnk_inputs_restore_adjusted_sequences_by_index(tmp_path, monkeypatch):
+    import copy
+    import h5py
+    import pandas as pd
+
+    analysis, _ = _population_analysis()
+    analysis.rec_type, analysis.units = 'exc', 'pA'
+    analysis.whole_cell_baseline_shift_pa = 1250.0
+    analysis.whole_cell_baseline_target = 'median'
+    analysis.excluded_epochs = [(11, 4)]
+    analysis.activity_excluded_epochs = [(12, 5)]
+    analysis.epoch_adjustments = pd.DataFrame({
+        'epoch': [0, 1, 2, 3], 'shift_pa': [1250., 1300., 1100., 1200.]})
+    analysis.sequence_epoch = np.repeat(np.arange(4), 20)
+    analysis.sequence_light_mean = np.repeat([.1, 1., .1, 1.], 20)
+    analysis.sequence_stimulus = np.linspace(.01, 2., 80)
+    # These samples are already adjusted, with sub-float32 precision preserved.
+    analysis.sequence_response = np.arange(80) * .123456789123 + 1250.
+    reconstruction = copy.deepcopy(analysis)
+    reconstruction.skip_seconds = 2.
+    keep = np.tile(np.arange(20) >= 2, 4)
+    for name in ('sequence_epoch', 'sequence_light_mean',
+                 'sequence_stimulus', 'sequence_response'):
+        setattr(reconstruction, name, getattr(reconstruction, name)[keep])
+    blocks = pd.DataFrame({'block_id': [11, 12],
+                           'protocol_name': [vmn.PROTOCOLS[0]] * 2,
+                           'exp_name': [analysis.exp_name] * 2,
+                           'cell_label': ['Cell3'] * 2})
+    monkeypatch.setattr(vmn, 'led_attenuation', lambda row: {
+        'rig': 'B', 'led': 'Blue LED', 'led_color': 'blue',
+        'led_ndfs': '', 'optical_density': 0., 'attenuation': 1.,
+        'unknown_tokens': '', 'filter_wheel_ndf': 0.,
+        'wheel_tokens_ignored': '', 'wheel_ignored': True})
+    registry = pd.DataFrame({'exp_name': [analysis.exp_name],
+                             'cell_label': ['Cell3'], 'cell_index': [19]})
+    key = ('exc', 30000.)
+    saved = vmn.save_condition_outputs(
+        {key: vmn.CoreLNAnalysis(analysis, {}, pd.DataFrame())}, blocks,
+        reconstruction_by_condition={key: {'analysis': reconstruction}},
+        cell_index=19, output_dir=tmp_path, verbose=False)
+    monkeypatch.setattr(vmn, 'analyze_condition', lambda *a, **kw: pytest.fail(
+        'Loading saved inputs must not re-read or re-adjust raw traces'))
+    fitted = []
+    monkeypatch.setattr(vmn, 'fit_condition', lambda a, **kw: fitted.append(a))
+    restored, cores = vmn.load_saved_lnk_inputs(
+        19, output_dir=tmp_path, protocol_cells=registry)
+    assert fitted == [cores[key].analysis]
+    for original, loaded in ((analysis, cores[key].analysis),
+                             (reconstruction, restored[key]['analysis'])):
+        for name in ('sequence_response', 'sequence_stimulus',
+                     'sequence_epoch', 'sequence_light_mean'):
+            np.testing.assert_array_equal(getattr(original, name), getattr(loaded, name))
+        assert loaded.whole_cell_baseline_shift_pa == 1250.
+        assert loaded.whole_cell_baseline_target == 'median'
+        assert loaded.skip_seconds == original.skip_seconds
+        assert loaded.excluded_epochs == original.excluded_epochs
+        assert loaded.activity_excluded_epochs == original.activity_excluded_epochs
+        pd.testing.assert_frame_equal(loaded.epoch_adjustments, original.epoch_adjustments)
+    assert restored[key]['saved_input_source'] == 'reconstruction'
+    path = saved.iloc[0].output_path
+    with h5py.File(path, 'a') as h5:
+        assert not h5.attrs['contains_lnk']
+        del h5['model_inputs/reconstruction']
+    restored, _ = vmn.load_saved_lnk_inputs(
+        19, output_dir=tmp_path, protocol_cells=registry, fit_static=False)
+    assert restored[key]['saved_input_source'] == 'core'
+    np.testing.assert_array_equal(restored[key]['analysis'].sequence_response,
+                                  analysis.sequence_response)
+    with h5py.File(path, 'a') as h5:
+        del h5['model_inputs']
+    with pytest.raises(ValueError, match='reviewed baseline settings'):
+        vmn.load_saved_lnk_inputs(19, output_dir=tmp_path, protocol_cells=registry)

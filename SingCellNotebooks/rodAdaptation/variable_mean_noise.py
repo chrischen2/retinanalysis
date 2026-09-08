@@ -5968,6 +5968,91 @@ def _condition_output_name(exp_name: str, cell_label: str, rec_type: str,
             + f'__blocks-{digest}.h5')
 
 
+def _write_model_input(group, analysis):
+    """Persist exact pre-normalization samples and their preprocessing provenance."""
+    import json
+    from dataclasses import fields
+
+    array_names = ('sequence_stimulus', 'sequence_response',
+                   'sequence_light_mean', 'sequence_epoch')
+    omitted = set(array_names) | {
+        'light_means', 'n_epochs', 'ln_model', 'stimulus', 'response',
+        'dropped_epochs', 'epoch_adjustments'}
+    metadata = {item.name: getattr(analysis, item.name)
+                for item in fields(analysis) if item.name not in omitted}
+    group.attrs['format_version'] = 1
+    group.attrs['metadata'] = json.dumps(metadata, default=lambda value: value.item())
+    for name in array_names:
+        group.create_dataset(name, data=np.asarray(getattr(analysis, name)),
+                             compression='gzip')
+    for name in ('dropped_epochs', 'epoch_adjustments'):
+        _write_output_frame(group.create_group(name), getattr(analysis, name))
+
+
+def _read_model_input(group):
+    import json
+
+    if int(group.attrs.get('format_version', 0)) != 1:
+        raise ValueError('Unsupported saved model-input version; resave the LN analysis')
+    metadata = json.loads(group.attrs['metadata'])
+    for name in ('excluded_epochs', 'activity_excluded_epochs'):
+        metadata[name] = [tuple(pair) for pair in metadata.get(name, [])]
+    analysis = ConditionAnalysis(**metadata)
+    for name in ('sequence_stimulus', 'sequence_response',
+                 'sequence_light_mean', 'sequence_epoch'):
+        setattr(analysis, name, group[name][:])
+    if not analysis.sequence_response.size:
+        raise ValueError('Saved analysis has no response sequence; rerun and save LN analysis')
+    (analysis.light_means, analysis.n_epochs,
+     analysis.stimulus, analysis.response) = _regroup_by_level(
+        analysis.sequence_stimulus, analysis.sequence_response,
+        analysis.sequence_light_mean, analysis.sequence_epoch)
+    for name in ('dropped_epochs', 'epoch_adjustments'):
+        setattr(analysis, name, _read_output_frame(group[name]))
+    return analysis
+
+
+def load_saved_lnk_inputs(cell_index: int, *, output_dir=None,
+                          protocol_cells=None, fit_static: bool = True):
+    """Restore all saved conditions by stable cell index, without raw-data loading.
+
+    Returns ``(reconstruction_by_condition, core_by_condition)`` for the LNK
+    runners. Baseline corrections are already in the saved samples and are
+    never applied again. Static LN fits can be rebuilt from these samples for
+    the one-state comparison; no kinetic fit is run here. Legacy summary-only
+    files must be regenerated once with the reviewed baseline settings.
+    """
+    import h5py
+
+    index = load_condition_index(output_dir, protocol_cells=protocol_cells)
+    rows = index[pd.to_numeric(index.current_cell_index, errors='coerce')
+                 .fillna(index.cell_index).eq(int(cell_index))]
+    if rows.empty:
+        raise FileNotFoundError(f'No saved conditions for cell_index {cell_index}')
+    reconstruction, cores = {}, {}
+    for row in rows.itertuples():
+        with h5py.File(row.output_path, 'r') as h5:
+            if 'model_inputs/core' not in h5:
+                raise ValueError(
+                    f'{row.output_path} predates saved LNK inputs; rerun and save '
+                    'the LN analysis once with its reviewed baseline settings')
+            core_analysis = _read_model_input(h5['model_inputs/core'])
+            source = ('reconstruction' if 'model_inputs/reconstruction' in h5
+                      else 'core')
+            kinetic_analysis = _read_model_input(h5[f'model_inputs/{source}'])
+        key = (core_analysis.rec_type, core_analysis.stim_time_ms)
+        if np.isfinite(core_analysis.light_contrast):
+            key += (core_analysis.light_contrast,)
+        if key in cores:
+            raise ValueError(f'Multiple saved files match condition {key}')
+        if fit_static:
+            fit_condition(core_analysis, verbose=False)
+        cores[key] = CoreLNAnalysis(core_analysis, {}, pd.DataFrame())
+        reconstruction[key] = {'analysis': kinetic_analysis,
+                               'saved_input_source': source}
+    return reconstruction, cores
+
+
 def save_condition_output(
         analysis: ConditionAnalysis,
         protocol_blocks: pd.DataFrame,
@@ -5980,7 +6065,8 @@ def save_condition_output(
         cell_index: Optional[int] = None,
         mean_window_s: float = 1.0,
         output_dir=None,
-        verbose: bool = True) -> Path:
+        verbose: bool = True,
+        reconstruction_analysis: Optional[ConditionAnalysis] = None) -> Path:
     """Save one selected cell condition for later population analysis.
 
     Stored outputs cover the core response/LN and reconstruction analyses:
@@ -5990,6 +6076,14 @@ def save_condition_output(
     """
     import h5py
 
+    if reconstruction_analysis is not None:
+        for name in ('exp_name', 'block_ids', 'rec_type', 'stim_time_ms',
+                     'whole_cell_baseline_shift_pa', 'align_epoch_means',
+                     'whole_cell_baseline_target'):
+            if getattr(reconstruction_analysis, name) != getattr(analysis, name):
+                raise ValueError(
+                    f'Reconstruction and core LN disagree on {name}; rerun '
+                    'reconstruction with the reviewed LN baseline settings')
     lights = condition_light_settings(protocol_blocks, analysis)
     selected = protocol_blocks[
         pd.to_numeric(protocol_blocks.block_id, errors='coerce').isin(analysis.block_ids)
@@ -6094,6 +6188,11 @@ def save_condition_output(
         h5.attrs['n_epochs'] = int(sum(analysis.n_epochs.values()))
         h5.attrs['frequency_cutoff'] = float(analysis.frequency_cutoff)
         h5.attrs['light_means'] = np.asarray(analysis.light_means, dtype=float)
+        inputs = h5.create_group('model_inputs')
+        _write_model_input(inputs.create_group('core'), analysis)
+        if reconstruction_analysis is not None:
+            _write_model_input(inputs.create_group('reconstruction'),
+                               reconstruction_analysis)
         h5.attrs['contains_lnk'] = False
         h5.create_dataset('block_ids', data=np.asarray(analysis.block_ids, dtype=np.int64))
         excluded_array = np.asarray(analysis.excluded_epochs, dtype=np.int64)
@@ -6154,6 +6253,7 @@ def save_duration_outputs(
         path = save_condition_output(
             core.analysis, protocol_blocks,
             temporal_models=core.temporal_models,
+            reconstruction_analysis=reconstruction.get('analysis'),
             decoded=reconstruction.get('decoded'),
             directional_decoding=reconstruction.get('directional_decoding'),
             early_late=reconstruction.get('early_late'),
@@ -6222,6 +6322,7 @@ def save_condition_outputs(
         path = save_condition_output(
             core.analysis, protocol_blocks,
             temporal_models=core.temporal_models,
+            reconstruction_analysis=reconstruction.get('analysis'),
             decoded=reconstruction.get('decoded'),
             directional_decoding=reconstruction.get('directional_decoding'),
             early_late=reconstruction.get('early_late'),
@@ -11945,7 +12046,7 @@ __all__ = [
     'plot_population_temporal_parameters',
     'high_quality_population_ln_analysis', 'iter_population_ln_figures',
     'save_condition_output', 'save_duration_outputs',
-    'save_condition_outputs',
+    'save_condition_outputs', 'load_saved_lnk_inputs',
     'load_condition_index', 'load_population_table', 'select_population_rows',
     'population_overview_analysis', 'population_temporal_analysis',
     'population_decoding_analysis', 'run_one_state_lnk_conditions',
