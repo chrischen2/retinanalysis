@@ -1641,6 +1641,14 @@ def epoch_response_window(params, sample_rate: float,
     return start, stop, float(pre_time_ms)
 
 
+def _normalize_whole_cell_baseline_shift(value) -> float:
+    """Return a finite additive current shift in pA."""
+    shift = float(value)
+    if not np.isfinite(shift):
+        raise ValueError('whole-cell baseline shift must be finite')
+    return shift
+
+
 def epoch_response_summary(
         exp_name: str,
         block_ids: Sequence[int],
@@ -1653,6 +1661,7 @@ def epoch_response_summary(
         spike_median_window_ms: Optional[float] = 5.0,
         spike_high_pass_hz: float = 300.0,
         whole_cell_bin_ms: float = 5.0,
+        whole_cell_baseline_shift_pa: float = 0.0,
         show: bool = True) -> pd.DataFrame:
     """One intuitive response-size measurement for every recorded epoch.
 
@@ -1667,6 +1676,8 @@ def epoch_response_summary(
     the table and raw figure to describe exactly the same selected epochs.
     """
     spiking = rec_type == 'extracellular'
+    baseline_shift = _normalize_whole_cell_baseline_shift(
+        whole_cell_baseline_shift_pa)
     excluded = _excluded_epoch_set(excluded_epochs)
     rows = []
     for block_id in block_ids:
@@ -1715,6 +1726,7 @@ def epoch_response_summary(
                     baseline = min(int(0.1 * sample_rate), trace.size)
                     if baseline:
                         trace = trace - float(np.nanmean(trace[:baseline]))
+                trace = trace + baseline_shift
                 trace, _ = preprocess_whole_cell_trace(
                     trace, sample_rate, bin_ms=whole_cell_bin_ms)
                 row.update({
@@ -1748,6 +1760,7 @@ def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
                 spike_high_pass_hz: float = 300.0,
                 psth_sigma_ms: float = 10.0,
                 whole_cell_bin_ms: float = 5.0,
+                whole_cell_baseline_shift_pa: float = 0.0,
                 figsize: Tuple[float, float] = (12.0, 5.0)):
     """Every epoch's response, coloured by the light mean it was recorded at.
 
@@ -1762,6 +1775,8 @@ def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
 
     style.apply_publication_style()
     spiking = rec_type == 'extracellular'
+    baseline_shift = _normalize_whole_cell_baseline_shift(
+        whole_cell_baseline_shift_pa)
     excluded = _excluded_epoch_set(excluded_epochs)
     traces, labels = [], []
     for block_id in block_ids:
@@ -1800,6 +1815,7 @@ def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
                 trace = amp[index, epoch_start:epoch_stop]
                 if subtract_baseline:
                     trace = trace - float(np.mean(trace[:int(0.1 * rate)]))
+                trace = trace + baseline_shift
                 reduced, reduced_rate = preprocess_whole_cell_trace(
                     trace, rate, bin_ms=whole_cell_bin_ms)
             traces.append((reduced, reduced_rate))
@@ -1843,6 +1859,7 @@ def plot_raw_epoch_traces(
         spike_median_window_ms: Optional[float] = 5.0,
         spike_high_pass_hz: float = 300.0,
         whole_cell_bin_ms: float = 5.0,
+        whole_cell_baseline_shift_pa: float = 0.0,
         max_points: Optional[int] = None,
         row_height: float = 1.15,
         width: float = 12.0,
@@ -1867,6 +1884,8 @@ def plot_raw_epoch_traces(
     remove = {int(value) for value in remove_epochs}
     spiking = str(rec_type) == 'extracellular'
     whole_cell = str(rec_type) in ('exc', 'inh')
+    baseline_shift = _normalize_whole_cell_baseline_shift(
+        whole_cell_baseline_shift_pa)
     display_factor = max(int(downsample), 1)
     n_rows = len(catalog)
     fig, axes = plt.subplots(
@@ -1898,6 +1917,7 @@ def plot_raw_epoch_traces(
         elif whole_cell:
             reduced, display_rate = preprocess_whole_cell_trace(
                 full_trace[start:stop], rate, bin_ms=whole_cell_bin_ms)
+            reduced = reduced + baseline_shift
         else:
             reduced = _block_average(full_trace[start:stop], display_factor)
             display_rate = rate / display_factor
@@ -1921,11 +1941,13 @@ def plot_raw_epoch_traces(
     group_text = f' | assigned {group_label}' if group_label else ''
     median_label = ('off' if spike_median_window_ms is None else
                     f'{float(spike_median_window_ms):g} ms')
+    shift_label = ('' if not whole_cell or baseline_shift == 0 else
+                   f' + manual baseline shift {baseline_shift:+g} pA')
     processing = (f'{median_label} median subtraction + '
                   f'{float(spike_high_pass_hz):g} Hz high-pass + '
                   f'{display_factor:g}-sample display average'
                   if spiking else (f'{float(whole_cell_bin_ms):g} ms bin average'
-                                    if whole_cell else
+                                    f'{shift_label}' if whole_cell else
                                     f'raw, {display_factor:g}-sample display average'))
     first_epoch = int(catalog.epoch_number.min())
     last_epoch = int(catalog.epoch_number.max())
@@ -3398,6 +3420,7 @@ class ConditionAnalysis:
     spike_high_pass_hz: float = 300.0
     psth_sigma_ms: float = 10.0
     whole_cell_bin_ms: float = 5.0
+    whole_cell_baseline_shift_pa: float = 0.0
     align_epoch_means: bool = True
     whole_cell_baseline_target: str = 'first_epoch'
     skip_seconds: float = 0.0
@@ -3636,6 +3659,7 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                       max_series_resistance: Optional[float] = 30e6,
                       align_epoch_means: bool = True,
                       whole_cell_baseline_target: str = 'first_epoch',
+                      whole_cell_baseline_shift_pa: float = 0.0,
                       max_epochs: Optional[int] = None,
                       excluded_epochs=(),
                       activity_excluded_epochs=(),
@@ -3692,6 +3716,11 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
         ``'median'`` to reproduce an older target policy.
         The shifts are printed and kept in
         ``ConditionAnalysis.epoch_adjustments``.
+    ``whole_cell_baseline_shift_pa``
+        is a manual additive shift applied identically to every retained
+        whole-cell trace. It defaults to 0 pA. Because the same constant is
+        used for every epoch and light mean, it can recenter a leaky recording
+        without changing real between-condition baseline differences.
 
     A constant offset per epoch is not something the model can explain: it adds
     between-epoch variance to the response while the stimulus says nothing
@@ -3792,6 +3821,8 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
 
     baseline_target_method = _normalize_whole_cell_baseline_target(
         whole_cell_baseline_target)
+    baseline_shift = _normalize_whole_cell_baseline_shift(
+        whole_cell_baseline_shift_pa)
 
     spiking = rec_type == 'extracellular'
     activity_excluded = _excluded_epoch_set(activity_excluded_epochs)
@@ -3824,7 +3855,8 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                   f'series-resistance limit {gate}, baseline alignment '
                   f'{"on" if align_epoch_means else "off"} '
                   f'(target {baseline_target_method}; '
-                  'separately within each lightMean; between-mean levels preserved)')
+                  'separately within each lightMean; between-mean levels preserved), '
+                  f'manual all-epoch shift {baseline_shift:+g} pA')
         else:
             print(f'{rec_type}: spike rate, so the whole-cell drift guards do '
                   f'not apply -- nothing to drift and no series resistance')
@@ -3902,6 +3934,7 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                 if subtract_baseline:
                     baseline = int(min(0.1 * sample_rate, trace.size))
                     trace = trace - float(np.mean(trace[:baseline]))
+                trace = trace + baseline_shift
             width = min(stimulus.size, trace.size)
             # The stimulus stays in raw intensity units: its contrast is
             # sigma/mean, and fit_ln_model normalises the filter by the ratio
@@ -3948,6 +3981,7 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
         spike_high_pass_hz=float(spike_high_pass_hz),
         psth_sigma_ms=float(psth_sigma_ms),
         whole_cell_bin_ms=float(whole_cell_bin_ms),
+        whole_cell_baseline_shift_pa=(baseline_shift if whole_cell else 0.0),
         align_epoch_means=bool(align_epoch_means),
         whole_cell_baseline_target=baseline_target_method,
         stim_time_ms=(float(stim_time_ms) if stim_time_ms is not None else np.nan),
@@ -6048,6 +6082,8 @@ def save_condition_output(
         h5.attrs['spike_high_pass_hz'] = float(analysis.spike_high_pass_hz)
         h5.attrs['psth_sigma_ms'] = float(analysis.psth_sigma_ms)
         h5.attrs['whole_cell_bin_ms'] = float(analysis.whole_cell_bin_ms)
+        h5.attrs['whole_cell_baseline_shift_pa'] = float(
+            analysis.whole_cell_baseline_shift_pa)
         h5.attrs['align_epoch_means'] = bool(analysis.align_epoch_means)
         h5.attrs['whole_cell_baseline_target'] = str(
             analysis.whole_cell_baseline_target)
@@ -6242,6 +6278,8 @@ def _output_metadata(path) -> dict:
             'psth_sigma_ms': float(h5.attrs.get('psth_sigma_ms', np.nan)),
             'whole_cell_bin_ms': float(
                 h5.attrs.get('whole_cell_bin_ms', np.nan)),
+            'whole_cell_baseline_shift_pa': float(
+                h5.attrs.get('whole_cell_baseline_shift_pa', 0.0)),
             'align_epoch_means': bool(
                 h5.attrs.get('align_epoch_means', True)),
             'whole_cell_baseline_target': text(
@@ -6279,6 +6317,7 @@ def load_condition_index(output_dir=None,
                'stim_time_ms', 'stim_seconds', 'light_contrast', 'n_epochs_total',
                'spike_median_window_ms', 'spike_high_pass_hz',
                'psth_sigma_ms', 'whole_cell_bin_ms',
+               'whole_cell_baseline_shift_pa',
                'align_epoch_means',
                'whole_cell_baseline_target',
                'decode_window_s', 'decode_window_rule', 'protocols',
@@ -9011,6 +9050,7 @@ def subset_analysis(analysis: ConditionAnalysis,
         spike_high_pass_hz=analysis.spike_high_pass_hz,
         psth_sigma_ms=analysis.psth_sigma_ms,
         whole_cell_bin_ms=analysis.whole_cell_bin_ms,
+        whole_cell_baseline_shift_pa=analysis.whole_cell_baseline_shift_pa,
         align_epoch_means=analysis.align_epoch_means,
         whole_cell_baseline_target=analysis.whole_cell_baseline_target,
         skip_seconds=float(analysis.skip_seconds),
@@ -9057,6 +9097,8 @@ def save_analysis(analysis: ConditionAnalysis, path) -> Path:
         'spike_high_pass_hz': float(analysis.spike_high_pass_hz),
         'psth_sigma_ms': float(analysis.psth_sigma_ms),
         'whole_cell_bin_ms': float(analysis.whole_cell_bin_ms),
+        'whole_cell_baseline_shift_pa': float(
+            analysis.whole_cell_baseline_shift_pa),
         'align_epoch_means': bool(analysis.align_epoch_means),
         'whole_cell_baseline_target': str(
             analysis.whole_cell_baseline_target),
@@ -9110,6 +9152,8 @@ def load_analysis(path) -> ConditionAnalysis:
         spike_high_pass_hz=meta.get('spike_high_pass_hz', 300.0),
         psth_sigma_ms=meta.get('psth_sigma_ms', 10.0),
         whole_cell_bin_ms=meta.get('whole_cell_bin_ms', 5.0),
+        whole_cell_baseline_shift_pa=meta.get(
+            'whole_cell_baseline_shift_pa', 0.0),
         align_epoch_means=meta.get('align_epoch_means', True),
         whole_cell_baseline_target=meta.get(
             'whole_cell_baseline_target', 'median'),
@@ -9160,6 +9204,7 @@ def build_fixture(exp_name: str, block_ids: Sequence[int],
                   max_series_resistance: Optional[float] = 30e6,
                   align_epoch_means: bool = True,
                   whole_cell_baseline_target: str = 'first_epoch',
+                  whole_cell_baseline_shift_pa: float = 0.0,
                   verbose: bool = True) -> Path:
     """Load one real recording and cache it as a fixture. Run once, off-line.
 
@@ -9184,6 +9229,7 @@ def build_fixture(exp_name: str, block_ids: Sequence[int],
         max_series_resistance=max_series_resistance,
         align_epoch_means=align_epoch_means,
         whole_cell_baseline_target=whole_cell_baseline_target,
+        whole_cell_baseline_shift_pa=whole_cell_baseline_shift_pa,
         fit=False, verbose=verbose)
     small = subset_analysis(analysis, epochs_per_level=epochs_per_level,
                             decimate=decimate, seconds=seconds)
@@ -9410,6 +9456,7 @@ def run_core_ln_analysis(
         max_series_resistance: Optional[float] = 30e6,
         align_epoch_means: bool = True,
         whole_cell_baseline_target: str = 'first_epoch',
+        whole_cell_baseline_shift_pa: float = 0.0,
         excluded_epochs=(),
         activity_excluded_epochs=(),
         min_firing_rate_hz: Optional[float] = None,
@@ -9460,6 +9507,7 @@ def run_core_ln_analysis(
         max_series_resistance=max_series_resistance,
         align_epoch_means=align_epoch_means,
         whole_cell_baseline_target=whole_cell_baseline_target,
+        whole_cell_baseline_shift_pa=whole_cell_baseline_shift_pa,
         max_epochs=max_epochs,
         excluded_epochs=excluded_epochs,
         activity_excluded_epochs=activity_excluded_epochs,
@@ -9514,10 +9562,13 @@ def response_qc_signature(
         psth_sigma_ms: float = 10.0,
         whole_cell_bin_ms: float = 5.0,
         align_epoch_means: bool = True,
-        whole_cell_baseline_target: str = 'first_epoch') -> tuple:
+        whole_cell_baseline_target: str = 'first_epoch',
+        whole_cell_baseline_shift_pa: float = 0.0) -> tuple:
     """Immutable identity of the selected conditions and response-QC policy."""
     baseline_target_method = _normalize_whole_cell_baseline_target(
         whole_cell_baseline_target)
+    baseline_shift = _normalize_whole_cell_baseline_shift(
+        whole_cell_baseline_shift_pa)
     pairs = tuple((
         row.rec_type, float(row.stim_time_ms),
         (float(row.light_contrast)
@@ -9535,7 +9586,7 @@ def response_qc_signature(
              float(spike_median_window_ms)),
             float(spike_high_pass_hz), float(psth_sigma_ms),
             float(whole_cell_bin_ms), bool(align_epoch_means),
-            baseline_target_method)
+            baseline_target_method, baseline_shift)
 
 
 def inspect_recording_conditions(
@@ -9553,6 +9604,7 @@ def inspect_recording_conditions(
         whole_cell_bin_ms: float = 5.0,
         align_epoch_means: bool = True,
         whole_cell_baseline_target: str = 'first_epoch',
+        whole_cell_baseline_shift_pa: float = 0.0,
         make_response_trace_figures: bool = True,
         verbose: bool = True) -> ResponseInspection:
     """Plot conditions and automatically exclude failed mean-light groups.
@@ -9566,6 +9618,8 @@ def inspect_recording_conditions(
     """
     whole_cell_baseline_target = _normalize_whole_cell_baseline_target(
         whole_cell_baseline_target)
+    whole_cell_baseline_shift_pa = _normalize_whole_cell_baseline_shift(
+        whole_cell_baseline_shift_pa)
     summaries, figures, qc = {}, {}, {}
     updated = conditions.copy()
     if 'light_contrast' not in updated:
@@ -9606,6 +9660,7 @@ def inspect_recording_conditions(
             spike_median_window_ms=spike_median_window_ms,
             spike_high_pass_hz=spike_high_pass_hz,
             whole_cell_bin_ms=whole_cell_bin_ms,
+            whole_cell_baseline_shift_pa=whole_cell_baseline_shift_pa,
             show=verbose)
         summaries[key] = summary
         if make_response_trace_figures:
@@ -9617,7 +9672,8 @@ def inspect_recording_conditions(
                 spike_median_window_ms=spike_median_window_ms,
                 spike_high_pass_hz=spike_high_pass_hz,
                 psth_sigma_ms=psth_sigma_ms,
-                whole_cell_bin_ms=whole_cell_bin_ms)
+                whole_cell_bin_ms=whole_cell_bin_ms,
+                whole_cell_baseline_shift_pa=whole_cell_baseline_shift_pa)
 
         retained_means, failed_reasons, activity_excluded = [], [], []
         n_retained_active = 0
@@ -9703,7 +9759,8 @@ def inspect_recording_conditions(
         min_firing_rate_hz, min_whole_cell_modulation_pa,
         low_response_epoch_fraction, spike_median_window_ms,
         spike_high_pass_hz, psth_sigma_ms, whole_cell_bin_ms,
-        align_epoch_means, whole_cell_baseline_target)
+        align_epoch_means, whole_cell_baseline_target,
+        whole_cell_baseline_shift_pa)
     condition_audit = pd.DataFrame(audit_rows)
     if verbose:
         print('\nSection 2 activity-QC condition audit:')
@@ -9739,6 +9796,7 @@ def run_core_condition_analyses(
         max_series_resistance: Optional[float] = 30e6,
         align_epoch_means: bool = True,
         whole_cell_baseline_target: str = 'first_epoch',
+        whole_cell_baseline_shift_pa: float = 0.0,
         mean_window_s: float = 2.0,
         condition_window_s: float = 6.0,
         temporal_window_s: Optional[float] = None,
@@ -9749,7 +9807,8 @@ def run_core_condition_analyses(
         min_firing_rate_hz, min_whole_cell_modulation_pa,
         low_response_epoch_fraction, spike_median_window_ms,
         spike_high_pass_hz, psth_sigma_ms, whole_cell_bin_ms,
-        align_epoch_means, whole_cell_baseline_target)
+        align_epoch_means, whole_cell_baseline_target,
+        whole_cell_baseline_shift_pa)
     if qc_signature != expected:
         raise RuntimeError(
             'Section 2 activity QC has not run for the current retained '
@@ -9783,6 +9842,7 @@ def run_core_condition_analyses(
             max_series_resistance=max_series_resistance,
             align_epoch_means=align_epoch_means,
             whole_cell_baseline_target=whole_cell_baseline_target,
+            whole_cell_baseline_shift_pa=whole_cell_baseline_shift_pa,
             excluded_epochs=excluded_epochs,
             activity_excluded_epochs=activity_excluded_epochs,
             mean_window_s=mean_window_s,
@@ -9823,6 +9883,7 @@ def run_reconstruction_analyses(
         max_series_resistance: Optional[float] = 30e6,
         align_epoch_means: bool = True,
         whole_cell_baseline_target: str = 'first_epoch',
+        whole_cell_baseline_shift_pa: float = 0.0,
         verbose: bool = True) -> Dict[Tuple[str, float, float], dict]:
     """Run all held-out reconstruction analyses for every saved condition."""
     results = {}
@@ -9847,6 +9908,7 @@ def run_reconstruction_analyses(
             max_series_resistance=max_series_resistance,
             align_epoch_means=align_epoch_means,
             whole_cell_baseline_target=whole_cell_baseline_target,
+            whole_cell_baseline_shift_pa=whole_cell_baseline_shift_pa,
             excluded_epochs=core.analysis.excluded_epochs,
             activity_excluded_epochs=core.analysis.activity_excluded_epochs,
             fit=False, verbose=False)
@@ -9947,6 +10009,7 @@ class CellAnalysisSettings:
     whole_cell_rec_type: str = 'exc'
     align_epoch_means: bool = True
     whole_cell_baseline_target: str = 'first_epoch'
+    whole_cell_baseline_shift_pa: float = 0.0
     spike_median_window_ms: Optional[float] = 5.0
     spike_high_pass_hz: float = 300.0
     psth_sigma_ms: float = 10.0
@@ -10148,7 +10211,8 @@ def run_cell_sections_2_to_5(
         exp_name, epoch_table, remove_epochs=effective_remove_epochs,
         spike_median_window_ms=settings.spike_median_window_ms,
         spike_high_pass_hz=settings.spike_high_pass_hz,
-        whole_cell_bin_ms=settings.whole_cell_bin_ms)
+        whole_cell_bin_ms=settings.whole_cell_bin_ms,
+        whole_cell_baseline_shift_pa=settings.whole_cell_baseline_shift_pa)
 
     requested_types = ((settings.recording_types_to_analyze,)
                        if isinstance(settings.recording_types_to_analyze, str)
@@ -10177,6 +10241,7 @@ def run_cell_sections_2_to_5(
         whole_cell_bin_ms=settings.whole_cell_bin_ms,
         align_epoch_means=settings.align_epoch_means,
         whole_cell_baseline_target=settings.whole_cell_baseline_target,
+        whole_cell_baseline_shift_pa=settings.whole_cell_baseline_shift_pa,
         make_response_trace_figures=False, verbose=verbose)
     analysis_conditions = inspection.conditions[
         inspection.conditions.included].copy()
@@ -10197,6 +10262,7 @@ def run_cell_sections_2_to_5(
         max_series_resistance=settings.max_series_resistance,
         align_epoch_means=settings.align_epoch_means,
         whole_cell_baseline_target=settings.whole_cell_baseline_target,
+        whole_cell_baseline_shift_pa=settings.whole_cell_baseline_shift_pa,
         mean_window_s=settings.mean_window_s,
         condition_window_s=settings.condition_window_s,
         temporal_window_s=settings.temporal_window_s, verbose=verbose)
@@ -10218,6 +10284,7 @@ def run_cell_sections_2_to_5(
         max_series_resistance=settings.max_series_resistance,
         align_epoch_means=settings.align_epoch_means,
         whole_cell_baseline_target=settings.whole_cell_baseline_target,
+        whole_cell_baseline_shift_pa=settings.whole_cell_baseline_shift_pa,
         verbose=verbose)
     reconstruction = add_early_late_reconstruction(
         reconstruction, verbose=verbose)

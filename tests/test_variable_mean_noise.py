@@ -52,6 +52,27 @@ def test_section_3_explicitly_displays_each_core_figure():
     assert 'plt.close(figure)' in source
 
 
+def test_sections_2_and_6_expose_all_epoch_whole_cell_baseline_shift():
+    import json
+
+    notebook_path = NOTEBOOK_DIR / 'analyzeVariableMeanNoise.ipynb'
+    notebook = json.loads(notebook_path.read_text())
+    cells = {cell.get('id'): ''.join(cell.get('source', []))
+             for cell in notebook['cells']}
+
+    section_2 = cells['74a72cc6']
+    assert 'WHOLE_CELL_BASELINE_SHIFT_PA = 0.0' in section_2
+    assert section_2.count(
+        'whole_cell_baseline_shift_pa=WHOLE_CELL_BASELINE_SHIFT_PA') == 2
+    assert 'whole_cell_baseline_shift_pa=WHOLE_CELL_BASELINE_SHIFT_PA' in cells[
+        'c443d0c5']
+    assert 'whole_cell_baseline_shift_pa=WHOLE_CELL_BASELINE_SHIFT_PA' in cells[
+        '9e057c5b']
+    batch = cells['run-batch-sections-2-5']
+    assert 'whole_cell_baseline_shift_pa=0.0' in batch
+    assert "'whole_cell_baseline_shift_pa': 3000.0" in batch
+
+
 def test_notebook_keeps_all_imports_in_the_setup_cell():
     import ast
     import json
@@ -794,18 +815,23 @@ def test_whole_cell_bin_is_identical_in_raw_plot_and_ln_input(monkeypatch):
         lambda row, sample_rate: np.arange(int(row.stimTime), dtype=float))
 
     figure = vmn.plot_raw_epoch_traces(
-        'synthetic', catalog, rec_type='exc', whole_cell_bin_ms=2.0)
+        'synthetic', catalog, rec_type='exc', whole_cell_bin_ms=2.0,
+        whole_cell_baseline_shift_pa=250.0)
     analysis = vmn.analyze_condition(
         'synthetic', [1], rec_type='exc', stim_time_ms=10.0,
         skip_seconds=0.0, whole_cell_bin_ms=2.0,
+        whole_cell_baseline_shift_pa=250.0,
         align_epoch_means=False, fit=False, verbose=False)
-    expected = np.array([0.5, 2.5, 4.5, 6.5, 8.5])
+    expected = np.array([250.5, 252.5, 254.5, 256.5, 258.5])
 
     np.testing.assert_array_equal(figure.axes[0].lines[0].get_ydata(), expected)
     np.testing.assert_array_equal(analysis.response[1.0][0], expected)
-    np.testing.assert_array_equal(analysis.stimulus[1.0][0], expected)
+    np.testing.assert_array_equal(
+        analysis.stimulus[1.0][0], [0.5, 2.5, 4.5, 6.5, 8.5])
     assert analysis.sampling_interval == 0.002
     assert analysis.whole_cell_bin_ms == 2.0
+    assert analysis.whole_cell_baseline_shift_pa == 250.0
+    assert 'manual baseline shift +250 pA' in figure._suptitle.get_text()
     plt.close(figure)
 
 
@@ -1323,14 +1349,16 @@ def test_whole_cell_baseline_alignment_is_separate_within_each_light_mean(
     analysis = vmn.analyze_condition(
         'synthetic', [1], rec_type='exc', stim_time_ms=4.0,
         skip_seconds=0.0, downsample=1, align_epoch_means=True,
+        whole_cell_baseline_shift_pa=500.0,
         whole_cell_bin_ms=1.0,
         fit=False, verbose=False)
 
     low_means = analysis.response[0.1].mean(axis=1)
     high_means = analysis.response[1.0].mean(axis=1)
-    np.testing.assert_allclose(low_means, [10.0, 10.0, 10.0])
-    np.testing.assert_allclose(high_means, [100.0, 100.0, 100.0])
+    np.testing.assert_allclose(low_means, [510.0, 510.0, 510.0])
+    np.testing.assert_allclose(high_means, [600.0, 600.0, 600.0])
     assert high_means[0] - low_means[0] == 90.0
+    assert analysis.whole_cell_baseline_shift_pa == 500.0
     adjustments = analysis.epoch_adjustments
     assert adjustments.groupby('light_mean').mean_after_pa.nunique().eq(1).all()
     assert set(adjustments.baseline_target_method) == {'first_epoch'}
@@ -1445,9 +1473,10 @@ def test_epoch_response_summary_reports_whole_cell_modulation_in_pa(monkeypatch)
         lambda _exp, _block, _spiking, **_kwargs: (amp, 1000.0, None))
 
     summary = vmn.epoch_response_summary(
-        'synthetic', [1], 'exc', whole_cell_bin_ms=1.0, show=False)
+        'synthetic', [1], 'exc', whole_cell_bin_ms=1.0,
+        whole_cell_baseline_shift_pa=250.0, show=False)
 
-    np.testing.assert_allclose(summary.mean_current_pA, [10.0, -5.0])
+    np.testing.assert_allclose(summary.mean_current_pA, [260.0, 245.0])
     np.testing.assert_allclose(summary.modulation_sd_pA, [3.0, 4.0])
 
 
@@ -2539,6 +2568,7 @@ def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
     analysis, temporal = _population_analysis()
     analysis.excluded_epochs = [(11, 1)]
     analysis.activity_excluded_epochs = [(11, 1)]
+    analysis.whole_cell_baseline_shift_pa = 1250.0
     blocks = pd.DataFrame({
         'block_id': [11, 12], 'exp_name': ['2020-06-11_B'] * 2,
         'cell_label': ['Cell3'] * 2, 'cell_type_short': ['OFF-parasol'] * 2,
@@ -2594,6 +2624,7 @@ def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
         assert stored.attrs['spike_high_pass_hz'] == 300.0
         assert stored.attrs['psth_sigma_ms'] == 10.0
         assert stored.attrs['whole_cell_bin_ms'] == 5.0
+        assert stored.attrs['whole_cell_baseline_shift_pa'] == 1250.0
         assert bool(stored.attrs['align_epoch_means'])
         assert stored.attrs['whole_cell_baseline_target'] == 'first_epoch'
         assert stored['excluded_epochs'][:].tolist() == [[11, 1]]
@@ -2612,6 +2643,7 @@ def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
     assert index.loc[0, [
         'spike_median_window_ms', 'spike_high_pass_hz',
         'psth_sigma_ms', 'whole_cell_bin_ms']].tolist() == [5.0, 300.0, 10.0, 5.0]
+    assert index.loc[0, 'whole_cell_baseline_shift_pa'] == 1250.0
     assert index.loc[0, 'whole_cell_baseline_target'] == 'first_epoch'
     assert bool(index.loc[0, 'align_epoch_means'])
     assert index[['date', 'cell_index', 'cell_label', 'cell_type', 'rec_type',
@@ -3008,6 +3040,7 @@ def test_condition_batch_helpers_preserve_mode_duration_keys(monkeypatch):
         spike_median_window_ms=7., spike_high_pass_hz=250.,
         psth_sigma_ms=12., whole_cell_bin_ms=4.,
         align_epoch_means=False, whole_cell_baseline_target='median',
+        whole_cell_baseline_shift_pa=750.,
         make_response_trace_figures=False,
         verbose=False)
     assert set(inspection.summaries) == {
@@ -3024,7 +3057,8 @@ def test_condition_batch_helpers_preserve_mode_duration_keys(monkeypatch):
                       kwargs['spike_median_window_ms'],
                       kwargs['spike_high_pass_hz'], kwargs['psth_sigma_ms'],
                       kwargs['whole_cell_bin_ms'], kwargs['align_epoch_means'],
-                      kwargs['whole_cell_baseline_target']))
+                      kwargs['whole_cell_baseline_target'],
+                      kwargs['whole_cell_baseline_shift_pa']))
         current = analysis
         current.rec_type = rec_type
         current.stim_time_ms = kwargs['stim_time_ms']
@@ -3039,12 +3073,13 @@ def test_condition_batch_helpers_preserve_mode_duration_keys(monkeypatch):
         spike_median_window_ms=7., spike_high_pass_hz=250.,
         psth_sigma_ms=12., whole_cell_bin_ms=4.,
         align_epoch_means=False, whole_cell_baseline_target='median',
+        whole_cell_baseline_shift_pa=750.,
         verbose=False)
     assert list(cores) == [('extracellular', 30_000.), ('exc', 60_000.)]
     assert calls == [
         ('extracellular', 30_000., ((11, 1),), (.1,), 7., 250., 12., 4.,
-         False, 'median'),
-        ('exc', 60_000., (), (.1,), 7., 250., 12., 4., False, 'median')]
+         False, 'median', 750.),
+        ('exc', 60_000., (), (.1,), 7., 250., 12., 4., False, 'median', 750.)]
 
 
 def test_inspection_excludes_only_failed_activity_conditions(monkeypatch):
@@ -3169,6 +3204,7 @@ def test_reconstruction_batch_helper_returns_save_ready_bundle(monkeypatch):
         spike_median_window_ms=7., spike_high_pass_hz=250.,
         psth_sigma_ms=12., whole_cell_bin_ms=4.,
         whole_cell_baseline_target='median',
+        whole_cell_baseline_shift_pa=900.,
         verbose=False)
 
     bundle = result[('extracellular', 30_000.)]
@@ -3178,6 +3214,7 @@ def test_reconstruction_batch_helper_returns_save_ready_bundle(monkeypatch):
     assert reload_calls[0]['psth_sigma_ms'] == 12.
     assert reload_calls[0]['whole_cell_bin_ms'] == 4.
     assert reload_calls[0]['whole_cell_baseline_target'] == 'median'
+    assert reload_calls[0]['whole_cell_baseline_shift_pa'] == 900.
     assert bundle['decode_window_s'] == 2.0
     assert bundle['directional_decoding'] is directional
     assert bundle['transfer_figure'] == 'figure'
