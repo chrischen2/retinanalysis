@@ -1,6 +1,9 @@
 # RetinAnalysis
 MEA and Single Cell Ephys Analysis Package
 
+For reusable saved-data browsing and Keep/Remove/Example controls, see
+[Shared notebook browsing and review](docs/notebook_review.md).
+
 ## Installation
 1. Pull retinanalysis repo (include --recursive flag to get required submodules contained in 'lib' folder):
 ```

@@ -10716,31 +10716,21 @@ def set_cell_visual_inspection(
         raise ValueError(
             f'recording type {rec_type!r} is not available for cell '
             f'{int(saved.cell_index)}; choose from {sorted(available)}')
-    path = high_quality_cells_path(output_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    frame = load_high_quality_cells(output_dir)
-    same_recording = (
-        frame.date.astype(str).eq(str(saved.exp_name))
-        & frame.cell_label.astype(str).eq(str(saved.cell_label))
-        & frame.rec_type.astype(str).eq(rec_type))
-    frame = frame.loc[~same_recording].copy()
-    if bool(keep):
-        row = pd.DataFrame([{
-            'cell_index': int(saved.cell_index), 'date': saved.exp_name,
-            'cell_label': saved.cell_label, 'rec_type': rec_type,
-            'mean_response': saved_cell_mean_response_text(
-                saved, rec_type=rec_type),
-            'reviewed_at': pd.Timestamp.now(tz='UTC').isoformat(),
-        }])
-        frame = pd.concat([frame, row], ignore_index=True)
-    frame = frame.reindex(columns=HIGH_QUALITY_CELL_COLUMNS)
-    if len(frame):
-        frame = frame.sort_values(
-            ['cell_index', 'rec_type'], ignore_index=True)
-    temporary = path.with_suffix('.csv.tmp')
-    frame.to_csv(temporary, index=False)
-    temporary.replace(path)
-    return frame
+    from retinanalysis.utils.review_store import ReviewStore
+
+    store = ReviewStore(high_quality_cells_path(output_dir),
+                        keys=('date', 'cell_label', 'rec_type'),
+                        columns=HIGH_QUALITY_CELL_COLUMNS)
+    identity = dict(date=str(saved.exp_name), cell_label=str(saved.cell_label),
+                    rec_type=rec_type)
+    values = ({
+        'cell_index': int(saved.cell_index),
+        'mean_response': saved_cell_mean_response_text(saved, rec_type=rec_type),
+        'reviewed_at': pd.Timestamp.now(tz='UTC').isoformat(),
+    } if keep else None)
+    # Preserve the legacy cell-level -> recording-type migration on first write.
+    frame = store.update(identity, values, frame=load_high_quality_cells(output_dir))
+    return frame.sort_values(['cell_index', 'rec_type'], ignore_index=True)
 
 
 def high_quality_cell_indices(output_dir=None) -> Tuple[int, ...]:
@@ -10749,212 +10739,96 @@ def high_quality_cell_indices(output_dir=None) -> Tuple[int, ...]:
     return tuple(sorted(indices.unique()))
 
 
+def _example_review_store(output_dir=None):
+    from retinanalysis.utils.review_store import ReviewStore
+
+    return ReviewStore(condition_output_dir(output_dir) / 'example_cells.csv',
+                       keys=('date', 'cell_label'),
+                       columns=('cell_index', 'date', 'cell_label', 'is_example'),
+                       boolean_columns=('is_example',))
+
+
 def load_example_cells(output_dir=None) -> pd.DataFrame:
     """Explicit cell-level example flags; unlisted cells default to False."""
-    path = condition_output_dir(output_dir) / 'example_cells.csv'
-    columns = ['cell_index', 'date', 'cell_label', 'is_example']
-    if not path.exists():
-        return pd.DataFrame(columns=columns)
-    frame = pd.read_csv(path, dtype={'date': str, 'cell_label': str})
-    frame['is_example'] = frame.is_example.astype(str).str.lower().eq('true')
-    return frame.reindex(columns=columns)
+    return _example_review_store(output_dir).read()
 
 
 def set_cell_example(saved: SavedCellAnalysis, is_example: bool = True, *,
                      output_dir=None) -> pd.DataFrame:
     """Persist a physical cell's example flag independently of Keep/Remove."""
-    path = condition_output_dir(output_dir) / 'example_cells.csv'
-    frame = load_example_cells(output_dir)
-    same = (frame.date.eq(str(saved.exp_name))
-            & frame.cell_label.eq(str(saved.cell_label)))
-    frame = pd.concat([frame.loc[~same], pd.DataFrame([{
-        'cell_index': int(saved.cell_index), 'date': str(saved.exp_name),
-        'cell_label': str(saved.cell_label), 'is_example': bool(is_example),
-    }])], ignore_index=True).sort_values('cell_index', ignore_index=True)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix('.csv.tmp')
-    frame.to_csv(temporary, index=False)
-    temporary.replace(path)
-    return frame
+    return _example_review_store(output_dir).update(
+        dict(date=str(saved.exp_name), cell_label=str(saved.cell_label)),
+        dict(cell_index=int(saved.cell_index), is_example=bool(is_example)))
+
+
+def _review_figure_options(saved, group, rec_type):
+    """VariableMeanNoise figure-manifest routing; UI lives in utils.browse."""
+    figures = saved.figures
+    if group == 'Raw trace':
+        rows = figures[figures.section.eq('section2')
+                       & figures.figure.astype(str).eq(f'raw-{rec_type}')]
+    elif group == 'LN model':
+        rows = figures[figures.figure.eq('static-ln')]
+    elif group == 'Temporal LN':
+        rows = figures[figures.figure.isin(('temporal-ln', 'temporal-kinetics'))]
+    else:
+        rows = figures[figures.section.eq('section4')]
+    rows = rows.copy()
+    rows['condition'] = rows.condition.fillna('all').replace('', 'all')
+    if group != 'Raw trace':
+        rows = rows[rows.condition.astype(str).str.startswith(f'{rec_type}__')]
+    return [(f'{row.condition or "all"} | {row.figure}', row.path)
+            for row in rows.itertuples(index=False)]
 
 
 def build_cell_review_browser(
         protocol_cells: pd.DataFrame, cell_indices=None, *, output_dir=None):
-    """Build the saved-figure browser used by notebook Section 6a.
+    """Adapt VariableMeanNoise saved conditions to the shared review browser.
 
-    Widget imports and callbacks live here so the notebook cell only supplies
-    its selection. With ``cell_indices=None`` every saved cell in the stable
-    protocol-cell registry is offered, independently of the latest batch run.
+    Keep/Remove retain cell x recording-type scope. Example flags retain
+    physical-cell scope. Existing CSVs and notebook calls stay compatible.
     """
-    import ipywidgets as widgets
+    from retinanalysis.utils.browse import saved_figure_review_browser
 
     directory = condition_output_dir(output_dir)
     completed = saved_cell_analysis_index(
         protocol_cells, cell_indices, output_dir=directory)
     if completed.empty:
         raise ValueError('No saved cell figures were found for visual review.')
+    options = [(f'{int(row.cell_index)} | {row.date} | {row.cell_label}',
+                int(row.cell_index)) for row in completed.itertuples(index=False)]
 
-    cell_options = [
-        (f'{int(row.cell_index)} | {row.date} | {row.cell_label}',
-         int(row.cell_index))
-        for row in completed.itertuples(index=False)]
-    cell_selector = widgets.Dropdown(
-        options=cell_options, description='Cell:',
-        layout=widgets.Layout(width='520px'))
-    rec_type_selector = widgets.Dropdown(
-        options=(), description='Recording:',
-        layout=widgets.Layout(width='320px'))
-    info_line = widgets.HTML()
-    review_status = widgets.HTML()
-    keep_button = widgets.Button(
-        description='Keep', button_style='success', icon='check')
-    remove_button = widgets.Button(
-        description='Remove', button_style='danger', icon='trash')
-    example_button = widgets.Button(
-        description='Set example', icon='star-o')
-    figure_selectors = {
-        'Raw trace': widgets.Dropdown(description='Raw:'),
-        'LN model': widgets.Dropdown(description='LN trace:'),
-        'Temporal LN': widgets.Dropdown(description='Temporal:'),
-        'Decoding': widgets.Dropdown(description='Decoding:'),
-    }
-    figure_images = {
-        name: widgets.Image(
-            format='png', layout=widgets.Layout(width='100%', height='auto'))
-        for name in figure_selectors}
-    state = {
-        'saved_cell': None,
-        'examples': load_example_cells(directory),
-        'example_button': example_button,
-        'is_example': False,
-        'reviewed': load_high_quality_cells(directory),
-        'cell_selector': cell_selector,
-        'rec_type_selector': rec_type_selector,
-        'figure_selectors': figure_selectors,
-        'keep_button': keep_button,
-        'remove_button': remove_button,
-    }
+    def load(index):
+        return load_saved_cell_analysis(
+            int(index), protocol_cells=protocol_cells, output_dir=directory,
+            table_names=('mean_response',), include_audit_tables=False)
 
-    def figure_options(figures, group, rec_type):
-        if group == 'Raw trace':
-            rows = figures[
-                figures.section.eq('section2')
-                & figures.figure.astype(str).eq(f'raw-{rec_type}')]
-        elif group == 'LN model':
-            rows = figures[figures.figure.eq('static-ln')]
-        elif group == 'Temporal LN':
-            rows = figures[
-                figures.figure.isin(('temporal-ln', 'temporal-kinetics'))]
-        else:
-            rows = figures[figures.section.eq('section4')]
-        rows = rows.copy()
-        rows['condition'] = rows.condition.fillna('all').replace('', 'all')
-        if group != 'Raw trace':
-            rows = rows[
-                rows.condition.astype(str).str.startswith(f'{rec_type}__')]
-        return [
-            (f'{row.condition or "all"} | {row.figure}', row.path)
-            for row in rows.itertuples(index=False)
-            if Path(row.path).is_file()]
+    def sections(saved):
+        available = set(saved.conditions.rec_type.astype(str))
+        return ([rec_type for rec_type in RECORDING_TYPES if rec_type in available]
+                + sorted(available - set(RECORDING_TYPES)))
 
-    def show_figure(group):
-        path = figure_selectors[group].value
-        figure_images[group].value = Path(path).read_bytes() if path else b''
+    def flags(saved, rec_type):
+        reviewed = load_high_quality_cells(directory)
+        kept = bool((reviewed.date.astype(str).eq(str(saved.exp_name))
+                     & reviewed.cell_label.astype(str).eq(str(saved.cell_label))
+                     & reviewed.rec_type.astype(str).eq(str(rec_type))).any())
+        example = _example_review_store(directory).flag(
+            dict(date=str(saved.exp_name), cell_label=str(saved.cell_label)), 'is_example')
+        return kept, example
 
-    def refresh_status(message=''):
-        saved = state['saved_cell']
-        rec_type = str(rec_type_selector.value)
-        reviewed = state['reviewed']
-        kept = set(zip(
-            reviewed.date.astype(str), reviewed.cell_label.astype(str),
-            reviewed.rec_type.astype(str)))
-        review_key = (str(saved.exp_name), str(saved.cell_label), rec_type)
-        decision = ('<b style="color:#188038">KEPT</b>'
-                    if review_key in kept else 'not kept')
-        examples = state['examples']
-        example = bool((examples.date.eq(str(saved.exp_name))
-                        & examples.cell_label.eq(str(saved.cell_label))
-                        & examples.is_example.eq(True)).any())
-        state['is_example'] = example
-        example_button.description = 'Unset example' if example else 'Set example'
-        example_button.icon = 'star' if example else 'star-o'
-        example_button.button_style = 'warning' if example else ''
-        example_text = '<b>★ EXAMPLE</b>' if example else 'Example: false'
-        suffix = f' — {html.escape(message)}' if message else ''
-        review_status.value = (
-            f'Visual inspection for <b>{html.escape(rec_type)}</b>: '
-            f'{decision} | {example_text}{suffix}')
-
-    def load_selected_recording_type(_change=None):
-        saved = state['saved_cell']
-        if saved is None or rec_type_selector.value is None:
-            return
-        rec_type = str(rec_type_selector.value)
-        info_line.value = (
-            f'<b>{html.escape(saved_cell_review_line(saved, rec_type))}</b>')
-        for group, selector in figure_selectors.items():
-            options = figure_options(saved.figures, group, rec_type)
-            selector.options = options or [('not available', '')]
-            selector.value = options[0][1] if options else ''
-            selector.disabled = not bool(options)
-            show_figure(group)
-        refresh_status()
-
-    def load_selected_cell(_change=None):
-        saved = load_saved_cell_analysis(
-            int(cell_selector.value), protocol_cells=protocol_cells,
-            output_dir=directory, table_names=('mean_response',),
-            include_audit_tables=False)
-        state['saved_cell'] = saved
-        available = [
-            rec_type for rec_type in RECORDING_TYPES
-            if saved.conditions.rec_type.astype(str).eq(rec_type).any()]
-        extras = sorted(
-            set(saved.conditions.rec_type.astype(str)) - set(available))
-        rec_type_selector.options = tuple(available + extras)
-        if rec_type_selector.options:
-            rec_type_selector.value = rec_type_selector.options[0]
-            load_selected_recording_type()
-
-    def save_decision(keep):
-        saved = state['saved_cell']
-        rec_type = str(rec_type_selector.value)
-        state['reviewed'] = set_cell_visual_inspection(
-            saved, rec_type, keep, output_dir=directory)
-        action = ('saved to high_quality_cells.csv' if keep
-                  else 'removed from high_quality_cells.csv')
-        refresh_status(action)
-
-    def toggle_example(_button):
-        state['examples'] = set_cell_example(
-            state['saved_cell'], not state['is_example'], output_dir=directory)
-        refresh_status('example flag saved')
-
-    example_button.on_click(toggle_example)
-    cell_selector.observe(load_selected_cell, names='value')
-    rec_type_selector.observe(
-        load_selected_recording_type, names='value')
-    for group, selector in figure_selectors.items():
-        selector.observe(
-            lambda _change, name=group: show_figure(name), names='value')
-    keep_button.on_click(lambda _button: save_decision(True))
-    remove_button.on_click(lambda _button: save_decision(False))
-    load_selected_cell()
-
-    panels = [
-        widgets.VBox([
-            widgets.HTML(f'<b>{name}</b>'), figure_selectors[name],
-            figure_images[name]])
-        for name in figure_selectors]
-    browser = widgets.VBox([
-        widgets.HBox([cell_selector, rec_type_selector]), info_line,
-        widgets.HBox([keep_button, remove_button, example_button]),
-        review_status,
-        widgets.GridBox(
-            panels, layout=widgets.Layout(
-                grid_template_columns='repeat(2, minmax(0, 1fr))',
-                grid_gap='12px'))])
-    # Keep state discoverable for debugging without exposing notebook globals.
+    browser = saved_figure_review_browser(
+        options, load_item=load, sections=sections,
+        panels=('Raw trace', 'LN model', 'Temporal LN', 'Decoding'),
+        figure_options=_review_figure_options, describe=saved_cell_review_line,
+        review_flags=flags,
+        set_keep=lambda saved, rec_type, keep: set_cell_visual_inspection(
+            saved, rec_type, keep, output_dir=directory),
+        set_example=lambda saved, value: set_cell_example(saved, value, output_dir=directory))
+    # Compatibility for existing notebook integrations and widget diagnostics.
+    state = browser.review_state
+    state['cell_selector'] = state['selector']
+    state['rec_type_selector'] = state['section_selector']
     browser._vmn_browser_state = state
     return browser
 

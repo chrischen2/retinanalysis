@@ -136,15 +136,16 @@ def test_section_6c_runs_high_quality_population_ln_analysis():
 
 
 def test_visual_browser_ln_menu_uses_measured_vs_predicted_figure():
-    import inspect
+    import pandas as pd
+    from types import SimpleNamespace
 
-    source = inspect.getsource(vmn.build_cell_review_browser)
-
-    assert "figures.figure.eq('static-ln')" in source
-    assert "figures.figure.isin(('mean-response', 'static-ln'))" not in source
-    assert "description='Recording:'" in source
-    assert "f'raw-{rec_type}'" in source
-    assert 'saved, rec_type, keep' in source
+    saved = SimpleNamespace(figures=pd.DataFrame([
+        {'section': 'section3', 'figure': figure,
+         'condition': 'exc__duration-30000ms', 'path': figure + '.png'}
+        for figure in ('mean-response', 'static-ln')]))
+    assert vmn._review_figure_options(saved, 'LN model', 'exc') == [
+        ('exc__duration-30000ms | static-ln', 'static-ln.png')]
+    assert vmn._review_figure_options(saved, 'LN model', 'extracellular') == []
 
 
 def test_visual_browser_filters_figures_and_decisions_by_recording_type(
