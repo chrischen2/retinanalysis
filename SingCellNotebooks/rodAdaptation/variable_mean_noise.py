@@ -11502,7 +11502,7 @@ def _resample_condition_ln_curves(
                 'condition_id', 'date', 'cell_label', 'cell_type',
                 'rec_type', 'stim_seconds', 'light_contrast', 'lightMean',
                 'light_regime', 'duration_group_s', 'light_state', 'curve',
-                'order'):
+                'whole_cell_baseline_shift_pa', 'cell_index', 'order'):
             if column in block:
                 piece[column] = identity[column]
         if temporal and 'window' in block:
@@ -11514,6 +11514,48 @@ def _resample_condition_ln_curves(
                     float(match.group(1)) + float(match.group(2)))
         pieces.append(piece)
     return pd.concat(pieces, ignore_index=True) if pieces else pd.DataFrame()
+
+
+def _population_condition_sources(output_dir=None):
+    """Prefer contrast-resolved outputs over legacy copies of the same blocks.
+
+    Earlier saves omitted contrast from both the filename and metadata, so
+    filename deduplication alone can retain an obsolete unadjusted copy.
+    Different block sets, durations, and known contrasts remain independent.
+    Files on disk are never changed.
+    """
+    import h5py
+
+    groups = {}
+    for path in _condition_output_paths(output_dir):
+        metadata = _output_metadata(path)
+        with h5py.File(path, 'r') as h5:
+            blocks = tuple(sorted(int(value) for value in h5['block_ids'][:]))
+        key = (metadata['date'], metadata['cell_label'], metadata['rec_type'],
+               metadata['stim_time_ms'], blocks)
+        groups.setdefault(key, []).append((path, metadata))
+    selected, audit = [], []
+    for entries in groups.values():
+        resolved = [(path, meta) for path, meta in entries
+                    if np.isfinite(meta['light_contrast'])]
+        for path, meta in entries:
+            superseded = bool(resolved) and not np.isfinite(meta['light_contrast'])
+            audit.append({
+                'condition_id': meta['condition_id'], 'cell_index': meta['cell_index'],
+                'date': meta['date'], 'cell_label': meta['cell_label'],
+                'rec_type': meta['rec_type'], 'cell_type': meta['cell_type'],
+                'output_path': str(path),
+                'included': not superseded,
+                'reason': ('legacy copy superseded by contrast-resolved output for same blocks'
+                           if superseded else 'current saved condition'),
+                'replacement_paths': (' | '.join(str(p) for p, _ in resolved)
+                                      if superseded else ''),
+            })
+            if not superseded:
+                selected.append((path, meta))
+    return selected, pd.DataFrame(audit, columns=[
+        'condition_id', 'cell_index', 'date', 'cell_label', 'rec_type', 'cell_type',
+        'output_path', 'included', 'reason', 'replacement_paths'])
 
 
 def high_quality_population_ln_analysis(
@@ -11542,7 +11584,10 @@ def high_quality_population_ln_analysis(
     The notebook renders and closes each group sequentially with
     :func:`iter_population_ln_figures`. Set
     ``retain_normalized`` only when the interpolation-ready per-condition
-    curves are needed for debugging.
+    curves are needed for debugging. Saved manual baseline shifts are already
+    in NL y and epsilon; they are never added again. The returned
+    ``baseline_adjustment_audit`` exposes the per-condition saved shifts
+    (legacy missing values default to zero) and confirms no second shift.
     """
     import h5py
 
@@ -11571,12 +11616,20 @@ def high_quality_population_ln_analysis(
 
     population_metadata = (
         'condition_id', 'date', 'cell_label', 'cell_id', 'cell_type',
-        'rec_type', 'stim_seconds', 'light_contrast')
+        'rec_type', 'stim_seconds', 'light_contrast', 'cell_index',
+        'whole_cell_baseline_shift_pa')
+    baseline_audit = []
     static_pieces, temporal_pieces, parameter_pieces = [], [], []
     classification_pieces = []
     paired_conditions, temporal_conditions = [], []
-    for path in _condition_output_paths(output_dir):
-        metadata = _output_metadata(path)
+    sources, source_audit = _population_condition_sources(output_dir)
+    if not source_audit.empty:
+        source_audit = source_audit.loc[[
+            (str(row.date), str(row.cell_label), str(row.rec_type)) in selected_keys
+            and (rec_types is None or row.rec_type in rec_types)
+            and (cell_types is None or row.cell_type in cell_types)
+            for row in source_audit.itertuples()]].copy()
+    for path, metadata in sources:
         review_key = (str(metadata.get('date', '')),
                       str(metadata.get('cell_label', '')),
                       str(metadata.get('rec_type', '')))
@@ -11624,10 +11677,22 @@ def high_quality_population_ln_analysis(
         for frame in (static, temporal, parameters):
             frame['light_regime'] = classification_row.light_regime
 
+        # analyze_condition adds the manual offset before fitting. The saved
+        # empirical NL y and fitted epsilon therefore already carry it. The
+        # metadata is provenance, not an instruction to shift these tables again.
         static = normalize_population_ln_curves(
             static, rec_types=None, normalized_ln=normalized_ln)
         temporal = normalize_population_ln_curves(
             temporal, temporal=True, rec_types=None, normalized_ln=normalized_ln)
+        baseline_audit.append({
+            **{column: metadata.get(column, np.nan) for column in population_metadata},
+            'baseline_shift_added_in_population_pa': 0.0,
+            'baseline_status': ('already included in saved NL'
+                                if metadata.get('whole_cell_baseline_shift_pa', 0.) != 0.
+                                else 'no saved shift (0 pA)'),
+            'static_included': not static.empty,
+            'temporal_included': not temporal.empty,
+        })
         if not static.empty:
             paired_conditions.append({
                 **{column: metadata.get(column, np.nan)
@@ -11667,6 +11732,11 @@ def high_quality_population_ln_analysis(
         temporal_parameters, window_combine=window_combine)
 
     return {
+        'source_audit': source_audit,
+        'baseline_adjustment_audit': pd.DataFrame(
+            baseline_audit, columns=[*population_metadata,
+                'baseline_shift_added_in_population_pa', 'baseline_status',
+                'static_included', 'temporal_included']),
         'normalized_ln': bool(normalized_ln),
         'paired_conditions': paired_condition_frame,
         'condition_counts': population_ln_condition_counts(

@@ -3816,3 +3816,99 @@ def test_population_nonlinearity_preserves_contrast_units_and_plot_limits():
     assert figure.axes[1].get_xlabel() == 'generator (contrast units)'
     assert figure.axes[1].get_ylabel() == 'response (Hz)'
     plt.close(figure)
+
+
+def test_population_saved_baseline_shift_is_included_exactly_once(tmp_path, monkeypatch):
+    import h5py
+    import pandas as pd
+
+    monkeypatch.setattr(vmn, 'led_attenuation', lambda row: {
+        'rig': 'B', 'led': 'Blue LED', 'led_color': 'blue',
+        'led_ndfs': '', 'optical_density': 0., 'attenuation': 1.,
+        'unknown_tokens': '', 'filter_wheel_ndf': 0.,
+        'wheel_tokens_ignored': '', 'wheel_ignored': True})
+    blocks = pd.DataFrame({
+        'block_id': [11, 12], 'exp_name': ['2020-06-11_B'] * 2,
+        'cell_label': ['Cell3'] * 2, 'cell_type_short': ['OFF-parasol'] * 2,
+        'protocol_name': [vmn.PROTOCOLS[0]] * 2})
+    quality = pd.DataFrame([dict(date='2020-06-11_B', cell_label='Cell3', rec_type='exc')])
+    outputs = {}
+    for shift in (0., 5.):
+        analysis, temporal = _population_analysis()
+        analysis.rec_type, analysis.units = 'exc', 'pA'
+        analysis.stim_time_ms = 50000.
+        analysis.whole_cell_baseline_shift_pa = shift
+        # Saved models have already received y += shift and epsilon += shift.
+        for model in [*analysis.ln_model.values(),
+                      *(m for models in temporal.values() for m in models)]:
+            model.nl_y = np.array([-30., -20., -10.]) + shift
+            model.params.update(alpha=20., beta=1., gamma=.2, epsilon=-30.+shift)
+        directory = tmp_path / str(shift)
+        path = vmn.save_condition_output(
+            analysis, blocks, temporal_models=temporal, cell_index=19,
+            output_dir=directory, verbose=False)
+        if not shift:
+            # Older files without the manual-shift attribute default to zero.
+            with h5py.File(path, 'a') as h5:
+                del h5.attrs['whole_cell_baseline_shift_pa']
+        for normalize in (False, True):
+            result = vmn.high_quality_population_ln_analysis(
+                quality, output_dir=directory, normalized_ln=normalize,
+                retain_normalized=True, temporal_parameter_window_combine=1)
+            outputs[(shift, normalize)] = result
+            audit = result['baseline_adjustment_audit'].iloc[0]
+            assert audit.whole_cell_baseline_shift_pa == shift
+            assert audit.baseline_shift_added_in_population_pa == 0.
+            params = result['temporal_parameters']
+            np.testing.assert_allclose(params.alpha, 20.)
+            np.testing.assert_allclose(params.beta, 1.)
+            np.testing.assert_allclose(params.gamma, .2)
+            np.testing.assert_allclose(params.epsilon, -30.+shift)
+            scale = 30.-shift if normalize else 1.
+            np.testing.assert_allclose(params.response_scale, scale)
+            np.testing.assert_allclose(params.alpha_normalized, 20./scale)
+            np.testing.assert_allclose(params.epsilon_normalized, (-30.+shift)/scale)
+            for table in ('static_summary', 'temporal_curve_summary'):
+                curves = result[table]
+                for _, nl in curves[curves.curve.eq('nonlinearity')].groupby('light_state'):
+                    np.testing.assert_allclose(nl.y_mean, (10.*nl.x-20.+shift)/scale)
+    base, shifted = outputs[(0., False)], outputs[(5., False)]
+    for table in ('static_summary', 'temporal_curve_summary'):
+        mask = base[table].curve.eq('filter')
+        np.testing.assert_array_equal(base[table].loc[mask, 'y_mean'],
+                                      shifted[table].loc[mask, 'y_mean'])
+    for metric in ('alpha', 'beta', 'gamma', 'slope'):
+        np.testing.assert_array_equal(
+            base['temporal_parameter_summary'][f'{metric}_mean'],
+            shifted['temporal_parameter_summary'][f'{metric}_mean'])
+    np.testing.assert_allclose(shifted['temporal_parameter_summary'].epsilon_mean
+                               - base['temporal_parameter_summary'].epsilon_mean, 5.)
+    # A pre-contrast filename can coexist with the corrected modern save.
+    # It must not dilute the adjusted average, even though names differ.
+    import shutil
+    mixed = tmp_path / 'mixed'
+    mixed.mkdir()
+    legacy = mixed / 'legacy.h5'
+    current = mixed / 'current.h5'
+    shutil.copy2(next((tmp_path / '0.0').glob('*.h5')), legacy)
+    shutil.copy2(next((tmp_path / '5.0').glob('*.h5')), current)
+    with h5py.File(legacy, 'a') as h5:
+        h5.attrs.pop('light_contrast', None)
+    with h5py.File(current, 'a') as h5:
+        h5.attrs['light_contrast'] = .5
+    result = vmn.high_quality_population_ln_analysis(
+        quality, output_dir=mixed, normalized_ln=False)
+    assert result['paired_conditions'].condition_id.tolist() == ['current']
+    assert result['source_audit'].set_index('condition_id').loc['legacy', 'included'] == False
+    np.testing.assert_allclose(result['temporal_parameters'].epsilon, -25.)
+    # Retain genuinely distinct modern contrasts and block sets.
+    other = mixed / 'other-contrast.h5'
+    shutil.copy2(current, other)
+    with h5py.File(other, 'a') as h5:
+        h5.attrs['light_contrast'] = .3
+    distinct = mixed / 'other-blocks.h5'
+    shutil.copy2(legacy, distinct)
+    with h5py.File(distinct, 'a') as h5:
+        h5['block_ids'][:] = [21, 22]
+    sources, audit = vmn._population_condition_sources(mixed)
+    assert {p.stem for p, _ in sources} == {'current', 'other-contrast', 'other-blocks'}
