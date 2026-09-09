@@ -11673,6 +11673,7 @@ def high_quality_population_ln_analysis(
         'whole_cell_baseline_shift_pa')
     baseline_audit = []
     static_pieces, temporal_pieces, parameter_pieces = [], [], []
+    directional_pieces = []
     classification_pieces = []
     paired_conditions, temporal_conditions = [], []
     sources, source_audit = _population_condition_sources(output_dir)
@@ -11712,6 +11713,7 @@ def high_quality_population_ln_analysis(
             parameters = (load_condition_table(h5, 'temporal_summary')
                           if temporal_eligible else pd.DataFrame())
             condition_metrics = load_condition_table(h5, 'condition_summary')
+            directional = load_condition_table(h5, 'directional_decoding')
 
         classification = classify_population_light_regime(
             condition_metrics,
@@ -11766,6 +11768,9 @@ def high_quality_population_ln_analysis(
                 parameters, temporal)
             if not normalized_parameters.empty:
                 parameter_pieces.append(normalized_parameters)
+        if not directional.empty:
+            directional['light_contrast'] = metadata.get('light_contrast', np.nan)
+            directional_pieces.append(directional)
 
     static_normalized = (pd.concat(static_pieces, ignore_index=True)
                          if static_pieces else pd.DataFrame())
@@ -11773,6 +11778,9 @@ def high_quality_population_ln_analysis(
                            if temporal_pieces else pd.DataFrame())
     temporal_parameters = (pd.concat(parameter_pieces, ignore_index=True)
                            if parameter_pieces else pd.DataFrame())
+    directional_rows = (pd.concat(directional_pieces, ignore_index=True)
+                        if directional_pieces else pd.DataFrame())
+    directional_contrast = directional_saturation_contrast(directional_rows)
     classifications = (pd.concat(classification_pieces, ignore_index=True)
                        if classification_pieces else pd.DataFrame())
     paired_condition_frame = pd.DataFrame(paired_conditions)
@@ -11806,6 +11814,8 @@ def high_quality_population_ln_analysis(
         'temporal_curve_summary': temporal_curve_summary,
         'temporal_parameters': temporal_parameters,
         'temporal_parameter_summary': temporal_parameter_summary,
+        'directional_decoding': directional_rows,
+        'directional_saturation_contrast': directional_contrast,
     }
 
 
@@ -11828,6 +11838,209 @@ def iter_population_ln_figures(result: Mapping[str, object]):
                 list(group_columns), dropna=False, sort=True):
             yield label, condition, plotter(
                 block, normalized_ln=bool(result.get('normalized_ln', True)))
+
+
+def _adaptation_curve_grid(summary: pd.DataFrame, *, curve: str = 'nonlinearity',
+                           states=('low', 'high'), grid_points: int = 101):
+    """Return common generator grids for adaptation comparison figures.
+
+    The input is already cell-weighted population data.  This helper only
+    interpolates within the displayed population summary and never combines
+    recording types or light states.
+    """
+    if summary is None or summary.empty:
+        return pd.DataFrame()
+    rows = summary[summary.curve.eq(curve) & summary.light_state.isin(states)].copy()
+    if rows.empty or 'cell_type' not in rows or 'order' not in rows:
+        return pd.DataFrame()
+    rows['x'] = pd.to_numeric(rows.x, errors='coerce')
+    rows['y_mean'] = pd.to_numeric(rows.y_mean, errors='coerce')
+    rows = rows.dropna(subset=['x', 'y_mean'])
+    pieces = []
+    for keys, block in rows.groupby(['cell_type', 'rec_type', 'light_regime',
+                                     'light_state', 'order'], dropna=False):
+        block = block.sort_values('x').drop_duplicates('x')
+        if len(block) < 2:
+            continue
+        lo, hi = float(block.x.min()), float(block.x.max())
+        if hi <= lo:
+            continue
+        x = np.linspace(lo, hi, int(grid_points))
+        y = np.interp(x, block.x.to_numpy(float), block.y_mean.to_numpy(float))
+        row = dict(zip(['cell_type', 'rec_type', 'light_regime',
+                        'light_state', 'order'], keys))
+        row.update({'x': x, 'y': y, 'centre_s': float(block.centre_s.mean())
+                    if 'centre_s' in block else float(keys[-1])})
+        pieces.append(pd.DataFrame(row))
+    return pd.concat(pieces, ignore_index=True) if pieces else pd.DataFrame()
+
+
+def plot_population_adaptation_selectivity_map(summary: pd.DataFrame,
+        *, cell_types=('ON-midget', 'ON-parasol'), light_state='high'):
+    """Plot midget-versus-parasol preference over generator drive and time.
+
+    Color is the bounded preference index ``(M-P)/(|M|+|P|)``.  A separate
+    response panel is intentionally retained by the caller: preference alone
+    is not evidence when both classes are silent.
+    """
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+    grid = _adaptation_curve_grid(summary, states=(light_state,))
+    if grid.empty:
+        return None
+    present = [c for c in cell_types if c in set(grid.cell_type)]
+    if len(present) < 2:
+        return None
+    blocks = {c: grid[grid.cell_type.eq(c)] for c in present[:2]}
+    keys = ['rec_type', 'light_regime', 'light_state', 'order']
+    maps = []
+    for key, m in blocks[present[0]].groupby(keys, dropna=False):
+        p = blocks[present[1]]
+        for col, value in zip(keys, key):
+            p = p[p[col].eq(value)]
+        if p.empty:
+            continue
+        merged = m.merge(p, on='x', suffixes=('_m', '_p'))
+        den = np.abs(merged.y_m) + np.abs(merged.y_p)
+        merged['preference'] = np.where(den > 0,
+                                        (merged.y_m - merged.y_p) / den, np.nan)
+        merged['centre_s'] = merged.centre_s_m
+        maps.append(merged[['x', 'centre_s', 'preference']])
+    if not maps:
+        return None
+    table = pd.concat(maps, ignore_index=True)
+    pivot = table.pivot_table(index='centre_s', columns='x', values='preference',
+                              aggfunc='mean').sort_index()
+    style.apply_publication_style()
+    fig, ax = plt.subplots(figsize=(8.4, 4.5))
+    mesh = ax.pcolormesh(pivot.columns.to_numpy(float), pivot.index.to_numpy(float),
+                         pivot.to_numpy(float), cmap='coolwarm', vmin=-1, vmax=1,
+                         shading='auto')
+    fig.colorbar(mesh, ax=ax, label='midget–parasol preference')
+    ax.set(xlabel='generator contrast', ylabel='time since luminance step (s)',
+           title=f'{light_state} light: adaptation selectivity map')
+    ax.axvline(0, color='0.5', lw=.7)
+    fig.tight_layout()
+    return fig
+
+
+def plot_population_response_selectivity_trajectory(summary: pd.DataFrame,
+        *, cell_types=('ON-midget', 'ON-parasol'), light_state='high'):
+    """Plot useful response versus suppressed response as adaptation evolves."""
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+    grid = _adaptation_curve_grid(summary, states=(light_state,))
+    if grid.empty or not all(c in set(grid.cell_type) for c in cell_types):
+        return None
+    values = []
+    for cell_type in cell_types:
+        block = grid[grid.cell_type.eq(cell_type)]
+        for keys, part in block.groupby(['rec_type', 'light_regime', 'light_state',
+                                         'order'], dropna=False):
+            # Positive-drive response, where increment saturation is tested.
+            part = part[part.x.ge(0)]
+            values.append({'cell_type': cell_type, 'order': keys[-1],
+                           'centre_s': part.centre_s.mean(),
+                           'response': float(np.trapz(np.maximum(part.y, 0), part.x))})
+    values = pd.DataFrame(values)
+    if values.empty:
+        return None
+    style.apply_publication_style()
+    fig, ax = plt.subplots(figsize=(6.4, 5.0))
+    colors = {'ON-midget': '#CC6677', 'ON-parasol': '#4477AA'}
+    for order, block in values.groupby('order', sort=True):
+        point = block.set_index('cell_type').reindex(cell_types)
+        if point.response.isna().any():
+            continue
+        ax.scatter(point.response.iloc[0], point.response.iloc[1],
+                   color=plt.cm.viridis(float(order) / max(1, values.order.max())),
+                   s=35, label=f'{point.centre_s.iloc[0]:g} s')
+    ax.set(xlabel=f'{cell_types[0]} positive-drive response',
+           ylabel=f'{cell_types[1]} positive-drive response',
+           title=f'{light_state} light: adaptation response trajectory')
+    ax.legend(frameon=False, fontsize=7, title='window')
+    fig.tight_layout()
+    return fig
+
+
+def plot_population_local_sensitivity_map(summary: pd.DataFrame,
+        *, cell_type='ON-midget', light_state='high'):
+    """Show local NL slope as a generator-by-adaptation heat map."""
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+    grid = _adaptation_curve_grid(summary, states=(light_state,))
+    grid = grid[grid.cell_type.eq(cell_type)] if not grid.empty else grid
+    if grid.empty:
+        return None
+    pieces = []
+    for centre, block in grid.groupby('centre_s', sort=True):
+        block = block.sort_values('x')
+        slope = np.gradient(block.y.to_numpy(float), block.x.to_numpy(float))
+        pieces.append(pd.DataFrame({'centre_s': centre, 'x': block.x, 'slope': slope}))
+    table = pd.concat(pieces, ignore_index=True)
+    pivot = table.pivot_table(index='centre_s', columns='x', values='slope', aggfunc='mean')
+    scale = np.nanmax(np.abs(pivot.to_numpy(float)))
+    style.apply_publication_style()
+    fig, ax = plt.subplots(figsize=(8.4, 4.5))
+    mesh = ax.pcolormesh(pivot.columns, pivot.index, pivot, cmap='magma',
+                         vmin=0, vmax=scale if scale > 0 else 1, shading='auto')
+    fig.colorbar(mesh, ax=ax, label='local NL sensitivity |dR/dg|')
+    ax.set(xlabel='generator contrast', ylabel='time since luminance step (s)',
+           title=f'{cell_type}, {light_state} light: local sensitivity')
+    fig.tight_layout()
+    return fig
+
+
+def plot_population_class_overlays(summary: pd.DataFrame,
+        *, cell_types=('ON-midget', 'ON-parasol'), light_state='high'):
+    """Overlay class nonlinearities and temporal filters at early/mid/late times."""
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+    if summary is None or summary.empty:
+        return None
+    rows = summary[summary.light_state.eq(light_state) & summary.cell_type.isin(cell_types)]
+    if rows.empty:
+        return None
+    orders = sorted(pd.to_numeric(rows.order, errors='coerce').dropna().unique())
+    chosen = orders if len(orders) <= 3 else [orders[0], orders[len(orders)//2], orders[-1]]
+    style.apply_publication_style()
+    fig, axes = plt.subplots(1, 2, figsize=(10.2, 4.0))
+    colors = {'ON-midget': '#CC6677', 'ON-parasol': '#4477AA'}
+    for cell_type in cell_types:
+        for order in chosen:
+            for ax, curve in zip(axes, ('nonlinearity', 'filter')):
+                block = rows[rows.cell_type.eq(cell_type) & rows.order.eq(order)
+                             & rows.curve.eq(curve)].sort_values('x')
+                if block.empty:
+                    continue
+                alpha = .35 + .55 * (chosen.index(order) / max(1, len(chosen)-1))
+                ax.plot(block.x, block.y_mean, color=colors[cell_type], alpha=alpha,
+                        lw=1.8, label=f'{cell_type}, {block.centre_s.mean():g} s')
+    axes[0].set(xlabel='generator contrast', ylabel='normalized response',
+                title=f'{light_state} light: NL overlays'); axes[0].set_xlim(-1, 1)
+    axes[1].set(xlabel='filter lag (ms)', ylabel='normalized filter',
+                title=f'{light_state} light: temporal-filter overlays')
+    axes[0].legend(frameon=False, fontsize=7, ncol=2)
+    fig.tight_layout()
+    return fig
+
+
+def iter_population_adaptation_figures(result: Mapping[str, object]):
+    """Yield all exploratory adaptation visualizations for Section 6c."""
+    summary = result.get('temporal_curve_summary')
+    if not isinstance(summary, pd.DataFrame) or summary.empty:
+        return
+    for name, maker in (
+            ('class overlays', plot_population_class_overlays),
+            ('selectivity map', plot_population_adaptation_selectivity_map),
+            ('response trajectory', plot_population_response_selectivity_trajectory),
+            ('midget local sensitivity', lambda s: plot_population_local_sensitivity_map(
+                s, cell_type='ON-midget')),
+            ('parasol local sensitivity', lambda s: plot_population_local_sensitivity_map(
+                s, cell_type='ON-parasol'))):
+        figure = maker(summary)
+        if figure is not None:
+            yield name, figure
 
 
 def select_population_rows(frame: pd.DataFrame,
