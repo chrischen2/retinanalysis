@@ -10848,13 +10848,14 @@ def set_cell_visual_inspection(
     } if keep else None)
     # Preserve the legacy cell-level -> recording-type migration on first write.
     frame = store.update(identity, values, frame=load_high_quality_cells(output_dir))
+    export_kept_cell_selection(output_dir)
     return frame.sort_values(['cell_index', 'rec_type'], ignore_index=True)
 
 
 def high_quality_cell_indices(output_dir=None) -> Tuple[int, ...]:
     """Unique stable cell indices with at least one retained recording type."""
     indices = load_high_quality_cells(output_dir).cell_index.astype(int)
-    return tuple(sorted(indices.unique()))
+    return tuple(sorted(int(index) for index in indices.unique()))
 
 
 def _example_review_store(output_dir=None):
@@ -10874,9 +10875,71 @@ def load_example_cells(output_dir=None) -> pd.DataFrame:
 def set_cell_example(saved: SavedCellAnalysis, is_example: bool = True, *,
                      output_dir=None) -> pd.DataFrame:
     """Persist a physical cell's example flag independently of Keep/Remove."""
-    return _example_review_store(output_dir).update(
+    frame = _example_review_store(output_dir).update(
         dict(date=str(saved.exp_name), cell_label=str(saved.cell_label)),
         dict(cell_index=int(saved.cell_index), is_example=bool(is_example)))
+    export_kept_cell_selection(output_dir)
+    return frame
+
+
+def saved_cell_review_flags(frame: pd.DataFrame, *, output_dir=None) -> pd.DataFrame:
+    """Attach the same persisted Keep and Example flags used by both browsers."""
+    rows = frame.copy()
+    kept = load_high_quality_cells(output_dir)
+    examples = load_example_cells(output_dir)
+    keep_keys = set(zip(kept.date.astype(str), kept.cell_label.astype(str),
+                        kept.rec_type.astype(str)))
+    example_keys = set(zip(examples.loc[examples.is_example, 'date'].astype(str),
+                           examples.loc[examples.is_example, 'cell_label'].astype(str)))
+    rows['keep'] = [(str(r.date), str(r.cell_label), str(r.rec_type)) in keep_keys
+                    for r in rows.itertuples()]
+    rows['is_example'] = [(str(r.date), str(r.cell_label)) in example_keys
+                          for r in rows.itertuples()]
+    return rows
+
+
+def export_kept_cell_selection(output_dir=None) -> Path:
+    """Write a batch-ready CSV; Keep is per recording type, Example per cell.
+
+    One row per retained recording type preserves the selection when only one
+    mode of a cell passes review. An example flag alone never implies Keep.
+    Empty selections still write a header, so Remove cannot leave stale indices.
+    """
+    rows = saved_cell_review_flags(load_high_quality_cells(output_dir),
+                                   output_dir=output_dir)
+    path = condition_output_dir(output_dir) / 'kept_cell_selection.csv'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows[['cell_index', 'date', 'cell_label', 'rec_type', 'is_example']].to_csv(
+        path, index=False)
+    return path
+
+
+def load_kept_cell_batch_selection(protocol_cells: pd.DataFrame, *, output_dir=None,
+                                  path=None) -> tuple:
+    """Return (index tuple, recording-type overrides) from the review export.
+
+    Resolve indices through the current date/case-sensitive-label registry.
+    Never silently run another cell when an old exported index has changed.
+    """
+    path = Path(path) if path is not None else (
+        condition_output_dir(output_dir) / 'kept_cell_selection.csv')
+    rows = pd.read_csv(path)
+    required = {'cell_index', 'date', 'cell_label', 'rec_type', 'is_example'}
+    if not required.issubset(rows.columns):
+        raise ValueError(f'{path} is missing {sorted(required - set(rows.columns))}')
+    overrides = {}
+    for (date, label), group in rows.groupby(['date', 'cell_label'], dropna=False):
+        matches = protocol_cells[protocol_cells.exp_name.astype(str).eq(str(date))
+                                 & protocol_cells.cell_label.astype(str).eq(str(label))]
+        if len(matches) != 1:
+            raise ValueError(f'Kept cell {date}/{label} has {len(matches)} registry matches')
+        index = int(matches.iloc[0].cell_index)
+        modes = set(group.rec_type.astype(str))
+        if modes - set(RECORDING_TYPES):
+            raise ValueError(f'Unknown retained recording types: {sorted(modes)}')
+        overrides[index] = {'recording_types_to_analyze': tuple(
+            mode for mode in RECORDING_TYPES if mode in modes)}
+    return tuple(sorted(overrides)), overrides
 
 
 def _review_figure_options(saved, group, rec_type):
@@ -10913,6 +10976,7 @@ def build_cell_review_browser(
         protocol_cells, cell_indices, output_dir=directory)
     if completed.empty:
         raise ValueError('No saved cell figures were found for visual review.')
+    export_kept_cell_selection(directory)
     options = [(f'{int(row.cell_index)} | {row.date} | {row.cell_label}',
                 int(row.cell_index)) for row in completed.itertuples(index=False)]
 
@@ -10938,7 +11002,11 @@ def build_cell_review_browser(
     browser = saved_figure_review_browser(
         options, load_item=load, sections=sections,
         panels=('Raw trace', 'LN model', 'Temporal LN', 'Decoding'),
-        figure_options=_review_figure_options, describe=saved_cell_review_line,
+        figure_options=_review_figure_options,
+        describe=lambda saved, rec_type: (
+            saved_cell_review_line(saved, rec_type)
+            + f' | kept indices: {high_quality_cell_indices(directory)}'
+            + f' | CSV: {directory / "kept_cell_selection.csv"}'),
         review_flags=flags,
         set_keep=lambda saved, rec_type, keep: set_cell_visual_inspection(
             saved, rec_type, keep, output_dir=directory),

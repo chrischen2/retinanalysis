@@ -3336,6 +3336,39 @@ def test_normalize_cell_indices_accepts_one_index_or_a_batch():
     assert vmn.normalize_cell_indices([3, 1, 3]) == (3, 1)
 
 
+def test_review_csv_round_trip_preserves_modes_examples_and_remaps_indices(tmp_path):
+    import pandas as pd
+    from types import SimpleNamespace
+
+    saved = SimpleNamespace(cell_index=2, exp_name='2025-01-01_A', cell_label='Cell2',
+        conditions=pd.DataFrame({'rec_type': ['extracellular', 'exc'],
+                                 'stim_seconds': [50., 50.]}), tables={})
+    registry = pd.DataFrame([dict(cell_index=12, exp_name=saved.exp_name,
+                                   cell_label=saved.cell_label)])
+    vmn.set_cell_example(saved, True, output_dir=tmp_path)
+    assert vmn.load_kept_cell_batch_selection(registry, output_dir=tmp_path) == ((), {})
+    vmn.set_cell_visual_inspection(saved, 'extracellular', True, output_dir=tmp_path)
+    vmn.set_cell_visual_inspection(saved, 'exc', True, output_dir=tmp_path)
+    vmn.set_cell_visual_inspection(saved, 'exc', False, output_dir=tmp_path)
+    indices, overrides = vmn.load_kept_cell_batch_selection(registry, output_dir=tmp_path)
+    assert indices == (12,)
+    assert overrides == {12: {'recording_types_to_analyze': ('extracellular',)}}
+    exported = pd.read_csv(tmp_path / 'kept_cell_selection.csv')
+    assert exported.is_example.tolist() == [True]
+    assert exported.cell_index.tolist() == [2]  # retain saved provenance in export
+    conditions = pd.DataFrame(dict(date=[saved.exp_name]*2, cell_label=['Cell2']*2,
+                                    rec_type=['extracellular', 'exc']))
+    flags = vmn.saved_cell_review_flags(conditions, output_dir=tmp_path)
+    assert flags.keep.tolist() == [True, False]
+    assert flags.is_example.tolist() == [True, True]
+    vmn.set_cell_example(saved, False, output_dir=tmp_path)
+    assert not pd.read_csv(tmp_path / 'kept_cell_selection.csv').is_example.any()
+    with pytest.raises(ValueError, match='registry matches'):
+        vmn.load_kept_cell_batch_selection(registry.iloc[:0], output_dir=tmp_path)
+    vmn.set_cell_visual_inspection(saved, 'extracellular', False, output_dir=tmp_path)
+    assert vmn.load_kept_cell_batch_selection(registry, output_dir=tmp_path) == ((), {})
+
+
 def test_batch_restores_saved_baseline_with_new_window_and_preserves_flags(monkeypatch, tmp_path):
     import pandas as pd
     from types import SimpleNamespace
