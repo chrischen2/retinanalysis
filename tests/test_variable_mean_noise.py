@@ -3338,6 +3338,38 @@ def test_normalize_cell_indices_accepts_one_index_or_a_batch():
     assert vmn.normalize_cell_indices([3, 1, 3]) == (3, 1)
 
 
+def test_class_overlays_separate_groups_and_select_example(monkeypatch):
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    pieces = []
+    for index, mode in enumerate(('extracellular', 'exc')):
+        for regime in ('scotopic', 'photopic'):
+            rows = _saved_ln_curve_rows(f'{mode}-{regime}', mode, [.5, 1.], temporal=True)
+            rows['light_regime'] = regime
+            rows['cell_type'] = 'ON-midget'
+            rows['cell_index'] = index
+            pieces.append(vmn.normalize_population_ln_curves(rows, temporal=True))
+    normalized = pd.concat(pieces, ignore_index=True)
+    summary = vmn.population_ln_curve_mean_sem(normalized, temporal=True)
+    result = dict(temporal_curve_summary=summary, temporal_normalized=normalized, normalized_ln=False)
+    figures = list(vmn.iter_population_class_overlay_figures(result))
+    assert len(figures) == 8  # two recording types x two regimes x low/high
+    for title, fig in figures:
+        for line in fig.axes[0].lines:
+            assert np.all(np.diff(line.get_xdata()) > 0)
+        assert 'normalized' not in fig.axes[0].get_ylabel()
+        plt.close(fig)
+    examples = list(vmn.iter_population_class_overlay_figures(result, example_cell_indices=(1,)))
+    assert len(examples) == 4
+    for title, fig in examples:
+        assert 'exc' in title and 'example cells (1,)' in title
+        plt.close(fig)
+    with pytest.raises(ValueError, match='no eligible'):
+        list(vmn.iter_population_class_overlay_figures(result, example_cell_indices=(999,)))
+    with pytest.raises(ValueError, match='one recording type'):
+        vmn.plot_population_class_overlays(summary)
+
+
 @pytest.mark.parametrize('duration', [30., 50., 60.])
 def test_temporal_window_count_covers_every_sample(duration, monkeypatch):
     from types import SimpleNamespace

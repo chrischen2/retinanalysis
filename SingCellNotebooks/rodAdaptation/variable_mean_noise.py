@@ -12167,7 +12167,13 @@ def plot_population_adaptation_selectivity_map(summary: pd.DataFrame,
             p = p[p[col].eq(value)]
         if p.empty:
             continue
-        merged = m.merge(p, on='x', suffixes=('_m', '_p'))
+        lo, hi = max(m.x.min(), p.x.min()), min(m.x.max(), p.x.max())
+        if not np.isfinite(lo + hi) or hi <= lo:
+            continue
+        x = np.linspace(lo, hi, 101)
+        m, p = m.sort_values('x'), p.sort_values('x')
+        merged = pd.DataFrame(dict(x=x, y_m=np.interp(x, m.x, m.y),
+                                  y_p=np.interp(x, p.x, p.y), centre_s_m=m.centre_s.mean()))
         den = np.abs(merged.y_m) + np.abs(merged.y_p)
         merged['preference'] = np.where(den > 0,
                                         (merged.y_m - merged.y_p) / den, np.nan)
@@ -12242,7 +12248,7 @@ def plot_population_local_sensitivity_map(summary: pd.DataFrame,
     pieces = []
     for centre, block in grid.groupby('centre_s', sort=True):
         block = block.sort_values('x')
-        slope = np.gradient(block.y.to_numpy(float), block.x.to_numpy(float))
+        slope = np.abs(np.gradient(block.y.to_numpy(float), block.x.to_numpy(float)))
         pieces.append(pd.DataFrame({'centre_s': centre, 'x': block.x, 'slope': slope}))
     table = pd.concat(pieces, ignore_index=True)
     pivot = table.pivot_table(index='centre_s', columns='x', values='slope', aggfunc='mean')
@@ -12259,7 +12265,8 @@ def plot_population_local_sensitivity_map(summary: pd.DataFrame,
 
 
 def plot_population_class_overlays(summary: pd.DataFrame,
-        *, cell_types=('ON-midget', 'ON-parasol'), light_state='high'):
+        *, cell_types=('ON-midget', 'ON-parasol'), light_state='high',
+        normalized_ln=True):
     """Overlay class nonlinearities and temporal filters at early/mid/late times."""
     import matplotlib.pyplot as plt
     from retinanalysis.utils import style
@@ -12268,11 +12275,14 @@ def plot_population_class_overlays(summary: pd.DataFrame,
     rows = summary[summary.light_state.eq(light_state) & summary.cell_type.isin(cell_types)]
     if rows.empty:
         return None
+    if len(rows[['rec_type', 'light_regime']].drop_duplicates()) != 1:
+        raise ValueError('Overlay one recording type and light regime at a time')
     orders = sorted(pd.to_numeric(rows.order, errors='coerce').dropna().unique())
     chosen = orders if len(orders) <= 3 else [orders[0], orders[len(orders)//2], orders[-1]]
     style.apply_publication_style()
     fig, axes = plt.subplots(1, 2, figsize=(10.2, 4.0))
-    colors = {'ON-midget': '#CC6677', 'ON-parasol': '#4477AA'}
+    colors = {'ON-midget': '#CC6677', 'ON-parasol': '#4477AA',
+              'OFF-midget': '#CC6677', 'OFF-parasol': '#4477AA'}
     for cell_type in cell_types:
         for order in chosen:
             for ax, curve in zip(axes, ('nonlinearity', 'filter')):
@@ -12281,15 +12291,64 @@ def plot_population_class_overlays(summary: pd.DataFrame,
                 if block.empty:
                     continue
                 alpha = .35 + .55 * (chosen.index(order) / max(1, len(chosen)-1))
-                ax.plot(block.x, block.y_mean, color=colors[cell_type], alpha=alpha,
-                        lw=1.8, label=f'{cell_type}, {block.centre_s.mean():g} s')
-    axes[0].set(xlabel='generator contrast', ylabel='normalized response',
+                time_label = (f'{block.centre_s.mean():g} s' if 'centre_s' in block
+                              else f'window {order}')
+                ax.plot(block.x, block.y_mean, color=colors.get(cell_type, '0.4'), alpha=alpha,
+                        lw=1.8, label=f'{cell_type}, {time_label}')
+    units = 'Hz' if rows.rec_type.iloc[0] == 'extracellular' else 'pA'
+    axes[0].set(xlabel='generator contrast', ylabel=('normalized response' if normalized_ln
+                                                  else f'response ({units})'),
                 title=f'{light_state} light: NL overlays'); axes[0].set_xlim(-1, 1)
-    axes[1].set(xlabel='filter lag (ms)', ylabel='normalized filter',
+    axes[1].set(xlabel='filter lag (ms)', ylabel=('normalized filter' if normalized_ln else 'filter'),
                 title=f'{light_state} light: temporal-filter overlays')
     axes[0].legend(frameon=False, fontsize=7, ncol=2)
     fig.tight_layout()
     return fig
+
+
+def iter_population_class_overlay_figures(result, *, example_cell_indices=None):
+    """Overlay population means or explicitly selected example cells.
+
+    Example curves use the same normalization and per-cell condition averaging
+    as population curves. Provide at most one physical cell per class in each
+    recording-type/light-regime group. No automatic example selection occurs.
+    """
+    summary = result.get('temporal_curve_summary', pd.DataFrame())
+    source_label = 'population average'
+    if example_cell_indices is not None:
+        indices = normalize_cell_indices(example_cell_indices)
+        if not indices:
+            raise ValueError('Choose at least one example cell index')
+        rows = result.get('temporal_normalized', pd.DataFrame())
+        if rows.empty:
+            raise ValueError('Example overlays require retain_normalized=True in population analysis')
+        rows = rows[rows.cell_index.isin(indices)].copy()
+        missing = set(indices) - set(rows.cell_index.dropna().astype(int))
+        if missing:
+            raise ValueError(f'Example cells {sorted(missing)} have no eligible retained temporal curves')
+        for _, block in rows.groupby(['rec_type', 'light_regime', 'cell_type']):
+            if len(block[['date', 'cell_label']].drop_duplicates()) > 1:
+                raise ValueError('Select only one example cell per cell type and comparison group')
+        summary = population_ln_curve_mean_sem(rows, temporal=True)
+        source_label = f'example cells {indices}'
+    if summary.empty:
+        return
+    for keys, block in summary.groupby(['rec_type', 'light_regime', 'duration_group_s'],
+                                       dropna=False):
+        for polarity in ('ON', 'OFF'):
+            types = tuple(t for t in (f'{polarity}-midget', f'{polarity}-parasol')
+                          if t in set(block.cell_type))
+            if not types:
+                continue
+            for state in ('low', 'high'):
+                fig = plot_population_class_overlays(
+                    block, cell_types=types, light_state=state,
+                    normalized_ln=bool(result.get('normalized_ln', True)))
+                if fig is not None:
+                    title = f'{source_label} | {keys[0]} | {keys[1]} | {polarity} | {state} light'
+                    fig.suptitle(title)
+                    fig.tight_layout()
+                    yield title, fig
 
 
 def iter_population_adaptation_figures(result: Mapping[str, object]):
@@ -12298,16 +12357,17 @@ def iter_population_adaptation_figures(result: Mapping[str, object]):
     if not isinstance(summary, pd.DataFrame) or summary.empty:
         return
     for name, maker in (
-            ('class overlays', plot_population_class_overlays),
             ('selectivity map', plot_population_adaptation_selectivity_map),
             ('response trajectory', plot_population_response_selectivity_trajectory),
             ('midget local sensitivity', lambda s: plot_population_local_sensitivity_map(
                 s, cell_type='ON-midget')),
             ('parasol local sensitivity', lambda s: plot_population_local_sensitivity_map(
                 s, cell_type='ON-parasol'))):
-        figure = maker(summary)
-        if figure is not None:
-            yield name, figure
+        for key, block in summary.groupby(['rec_type', 'light_regime', 'duration_group_s'],
+                                          dropna=False):
+            figure = maker(block)
+            if figure is not None:
+                yield f'{name} | {key}', figure
 
     contrast = result.get('directional_saturation_contrast')
     if isinstance(contrast, pd.DataFrame) and not contrast.empty:
