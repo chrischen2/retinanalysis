@@ -12042,6 +12042,32 @@ def iter_population_adaptation_figures(result: Mapping[str, object]):
         if figure is not None:
             yield name, figure
 
+    contrast = result.get('directional_saturation_contrast')
+    if isinstance(contrast, pd.DataFrame) and not contrast.empty:
+        import matplotlib.pyplot as plt
+        from retinanalysis.utils import style
+        style.apply_publication_style()
+        fig, axes = plt.subplots(1, 3, figsize=(11.0, 3.5), sharex=False)
+        metrics = [('gain_dec_minus_inc', 'gain: decrement − increment'),
+                   ('accuracy_dec_minus_inc', 'accuracy: decrement − increment'),
+                   ('error_inc_minus_dec', 'error: increment − decrement')]
+        for ax, (metric, label) in zip(axes, metrics):
+            for cell_type, block in contrast.groupby('cell_type', dropna=False):
+                values = pd.to_numeric(block[metric], errors='coerce').dropna()
+                if values.empty:
+                    continue
+                ax.scatter([cell_type] * len(values), values, alpha=.55, s=22,
+                           label=str(cell_type))
+                ax.plot([cell_type], [values.mean()], marker='_', ms=16,
+                        color='black', lw=2)
+            ax.axhline(0, color='0.5', lw=.7)
+            ax.set_ylabel(label)
+            ax.tick_params(axis='x', rotation=35)
+        axes[0].legend(frameon=False, fontsize=7)
+        fig.suptitle('Matched positive-generator bright-light decoding')
+        fig.tight_layout()
+        yield 'increment/decrement decoding contrast', fig
+
 
 def select_population_rows(frame: pd.DataFrame,
                            rec_types: Optional[Sequence[str]] = None,
