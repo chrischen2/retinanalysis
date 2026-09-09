@@ -10498,6 +10498,44 @@ def normalize_cell_indices(cell_indices) -> Tuple[int, ...]:
     return tuple(dict.fromkeys(int(value) for value in values))
 
 
+def saved_batch_baseline_settings(cell_index, protocol_cells, sources, overrides=None):
+    """Recover a physical cell's baseline policy from current saved conditions.
+
+    Match date and cell label, not a potentially reordered roster index. Ignore
+    spikes (their saved shift is always zero). Refuse conflicting whole-cell
+    policies rather than silently replacing a manually corrected condition.
+    """
+    matches = protocol_cells[pd.to_numeric(
+        protocol_cells.cell_index, errors='coerce').eq(int(cell_index))]
+    if len(matches) != 1:
+        raise ValueError(f'cell_index {cell_index} must match exactly one cell')
+    cell = matches.iloc[0]
+    names = ('whole_cell_baseline_shift_pa', 'align_epoch_means',
+             'whole_cell_baseline_target')
+    policies = []
+    paths = []
+    for path, meta in sources:
+        if (str(meta['date']) != str(cell.exp_name)
+                or str(meta['cell_label']) != str(cell.cell_label)
+                or meta['rec_type'] not in ('exc', 'inh')):
+            continue
+        policy = (_normalize_whole_cell_baseline_shift(
+            meta.get(names[0], 0.0)), bool(meta.get(names[1], True)),
+            str(meta.get(names[2], 'median')))
+        policy = tuple((overrides or {}).get(name, value)
+                       for name, value in zip(names, policy))
+        policies.append(policy)
+        paths.append(str(path))
+    if len(set(policies)) > 1:
+        raise ValueError(
+            f'Conflicting saved baseline policies for {cell.exp_name}/{cell.cell_label}: '
+            f'{sorted(set(policies))}. Supply explicit per-index baseline overrides '
+            'or rerun the distinct conditions separately; no fit was overwritten.')
+    if not policies:
+        return {'whole_cell_baseline_shift_pa': 0.0}, 'no saved whole-cell correction; zero', ''
+    return dict(zip(names, policies[0])), 'saved whole-cell baseline policy', ' | '.join(paths)
+
+
 def run_cell_analysis_batch(
         cell_indices,
         protocol_cells: pd.DataFrame,
@@ -10507,9 +10545,17 @@ def run_cell_analysis_batch(
         settings: Optional[CellAnalysisSettings] = None,
         overrides_by_index: Optional[Mapping[int, Mapping[str, object]]] = None,
         cell_type_overrides_by_index: Optional[Mapping[int, str]] = None,
+        load_saved_baseline_adjustments: bool = False,
         output_dir=None,
         continue_on_error: bool = True) -> pd.DataFrame:
-    """Run Sections 2--5 for selected indices with progress and no open plots."""
+    """Run Sections 2--5, preserving independently stored review/example flags.
+
+    With ``load_saved_baseline_adjustments=True``, restore saved whole-cell
+    shift, alignment, and baseline target before refitting raw data. Missing
+    shifts default to zero, never the batch-wide manual shift. Explicit
+    per-index settings take precedence. Snapshot sources before any overwrite.
+    ``settings.temporal_window_s`` controls the new fit window independently.
+    """
     import time
     import matplotlib.pyplot as plt
 
@@ -10529,6 +10575,8 @@ def run_cell_analysis_batch(
     directory = condition_output_dir(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
     print(f'batch output: {directory}', flush=True)
+    baseline_sources = (_population_condition_sources(directory)[0]
+                        if load_saved_baseline_adjustments else [])
     rows = []
     total = len(indices)
     for position, cell_index in enumerate(indices, start=1):
@@ -10536,8 +10584,21 @@ def run_cell_analysis_batch(
         print(f'[{position}/{total}] cell index {cell_index}: '
               'starting Sections 2--5', flush=True)
         try:
+            overrides = dict(overrides_by_index.get(cell_index, {}))
+            baseline = {}
+            baseline_source, baseline_paths = 'batch settings', ''
+            if load_saved_baseline_adjustments:
+                baseline, baseline_source, baseline_paths = saved_batch_baseline_settings(
+                    cell_index, protocol_cells, baseline_sources, overrides)
+            if any(name in overrides for name in (
+                    'whole_cell_baseline_shift_pa', 'align_epoch_means',
+                    'whole_cell_baseline_target')):
+                baseline_source += ' + explicit per-index override'
             cell_settings = replace(
-                settings, **dict(overrides_by_index.get(cell_index, {})))
+                settings, **{**baseline, **overrides})
+            print(f'  baseline {cell_settings.whole_cell_baseline_shift_pa:+g} pA '
+                  f'({baseline_source}); temporal window '
+                  f'{cell_settings.temporal_window_s} s', flush=True)
             with plt.ioff():
                 result = run_cell_sections_2_to_5(
                     cell_index, protocol_cells, protocol_blocks, block_modes,
@@ -10553,6 +10614,10 @@ def run_cell_analysis_batch(
                 'n_figures': len(result.figure_manifest),
                 'elapsed_s': elapsed, 'output_dir': str(result.output_dir),
                 'error': '',
+                'whole_cell_baseline_shift_pa': cell_settings.whole_cell_baseline_shift_pa,
+                'baseline_source': baseline_source,
+                'baseline_source_paths': baseline_paths,
+                'temporal_window_s': cell_settings.temporal_window_s,
             })
             print(f'[{position}/{total}] cell index {cell_index}: complete | '
                   f'{len(result.saved_condition_outputs)} condition(s), '

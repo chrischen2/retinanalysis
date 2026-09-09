@@ -3336,6 +3336,57 @@ def test_normalize_cell_indices_accepts_one_index_or_a_batch():
     assert vmn.normalize_cell_indices([3, 1, 3]) == (3, 1)
 
 
+def test_batch_restores_saved_baseline_with_new_window_and_preserves_flags(monkeypatch, tmp_path):
+    import pandas as pd
+    from types import SimpleNamespace
+
+    cells = pd.DataFrame([dict(cell_index=7, exp_name='date', cell_label='CellA'),
+                          dict(cell_index=8, exp_name='date', cell_label='CellB')])
+    # Saved index differs: identity must follow date/label. Spike zero must not
+    # conflict with the whole-cell correction for the same physical cell.
+    meta = dict(date='date', cell_label='CellA', cell_index=99, rec_type='exc',
+                whole_cell_baseline_shift_pa=1600., align_epoch_means=True,
+                whole_cell_baseline_target='first_epoch')
+    sources = [(tmp_path / 'exc.h5', meta), (tmp_path / 'spike.h5',
+               {**meta, 'rec_type': 'extracellular', 'whole_cell_baseline_shift_pa': 0.})]
+    monkeypatch.setattr(vmn, '_population_condition_sources',
+                        lambda _: (sources, pd.DataFrame()))
+    flags = {name: b'date,cell_label,flag\ndate,CellA,True\n'
+             for name in ('example_cells.csv', 'high_quality_cells.csv')}
+    for name, data in flags.items():
+        (tmp_path / name).write_bytes(data)
+    seen = []
+
+    def fake_run(index, *_args, settings, **_kwargs):
+        seen.append(settings)
+        return SimpleNamespace(exp_name='date', cell_label=f'Cell{index}',
+                               saved_condition_outputs=[], figure_manifest=[],
+                               output_dir=tmp_path)
+
+    monkeypatch.setattr(vmn, 'run_cell_sections_2_to_5', fake_run)
+    summary = vmn.run_cell_analysis_batch(
+        [7, 8], cells, pd.DataFrame(), pd.DataFrame(), output_dir=tmp_path,
+        settings=vmn.CellAnalysisSettings(whole_cell_baseline_shift_pa=4000.,
+                                          temporal_window_s=10.),
+        load_saved_baseline_adjustments=True)
+    assert summary.status.tolist() == ['complete', 'complete']
+    assert [s.whole_cell_baseline_shift_pa for s in seen] == [1600., 0.]
+    assert seen[0].whole_cell_baseline_target == 'first_epoch'
+    assert all(s.temporal_window_s == 10. for s in seen)
+    for name, data in flags.items():
+        assert (tmp_path / name).read_bytes() == data
+    override = vmn.saved_batch_baseline_settings(7, cells, sources,
+                                                {'whole_cell_baseline_shift_pa': 25.})
+    assert override[0]['whole_cell_baseline_shift_pa'] == 25.
+    conflicting = sources + [(tmp_path / 'other.h5',
+                              {**meta, 'whole_cell_baseline_shift_pa': 1800.})]
+    with pytest.raises(ValueError, match='Conflicting saved baseline'):
+        vmn.saved_batch_baseline_settings(7, cells, conflicting)
+    assert vmn.saved_batch_baseline_settings(
+        7, cells, conflicting, {'whole_cell_baseline_shift_pa': 25.})[0][
+            'whole_cell_baseline_shift_pa'] == 25.
+
+
 def test_batch_accepts_one_scalar_cell_index(monkeypatch, tmp_path):
     import pandas as pd
     from types import SimpleNamespace
