@@ -3336,6 +3336,22 @@ def test_normalize_cell_indices_accepts_one_index_or_a_batch():
     assert vmn.normalize_cell_indices([3, 1, 3]) == (3, 1)
 
 
+def test_static_ln_quality_plot_keeps_negative_r2_and_separates_modes():
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    rows = pd.DataFrame(dict(rec_type=['exc', 'exc', 'extracellular', 'extracellular'],
+        light_state=['low', 'high', 'low', 'high'], r2=[-.5, .7, .9, np.nan],
+        nl_r2=[.99]*4, date=['date']*4, cell_label=['cell']*4))
+    fig = vmn.plot_saved_static_ln_r2(rows)
+    assert len(fig.axes) == 2
+    exc = next(ax for ax in fig.axes if ax.get_title().startswith('exc |'))
+    assert exc.get_xlim()[0] <= -.5
+    assert [t.get_text() for t in exc.get_legend().get_texts()] == ['low: 1 fits', 'high: 1 fits']
+    spike = next(ax for ax in fig.axes if ax.get_title().startswith('extracellular |'))
+    assert any('1 nonfinite' in t.get_text() for t in spike.texts)
+    plt.close(fig)
+
+
 def test_batch_csv_selects_current_baseline_and_overrides_h5_values(tmp_path, monkeypatch):
     import pandas as pd
     cells = pd.DataFrame([dict(cell_index=0, exp_name='2020-06-11_B', cell_label='Cell10')])

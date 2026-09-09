@@ -10544,6 +10544,64 @@ def saved_batch_baseline_sources(output_dir=None):
     return selected
 
 
+def saved_static_ln_quality(output_dir=None) -> pd.DataFrame:
+    """Low/high full static-LN prediction R² from current saved conditions.
+
+    Read only condition_summary, using the saved-run CSV to exclude old loose
+    copies. Each row is one condition/light-level fit, before visual-review
+    selection. This is model.r2, not the fitted sigmoid's nl_r2.
+    """
+    import h5py
+    pieces = []
+    for path, meta in saved_batch_baseline_sources(output_dir):
+        with h5py.File(path, 'r') as h5:
+            if 'tables/condition_summary' not in h5:
+                continue
+            rows = _read_output_frame(h5['tables/condition_summary'])
+        if rows.empty or not {'r2', 'lightMean'}.issubset(rows):
+            continue
+        for column in ('condition_id', 'cell_index', 'date', 'cell_label',
+                       'cell_type', 'rec_type', 'stim_seconds', 'light_contrast'):
+            rows[column] = meta.get(column, np.nan)
+        pieces.append(_select_low_high_light_rows(rows))
+    return pd.concat(pieces, ignore_index=True) if pieces else pd.DataFrame()
+
+
+def plot_saved_static_ln_r2(rows: pd.DataFrame, *, bins: int = 20):
+    """Compare low/high R² distributions; count fits and retain negative R²."""
+    import matplotlib.pyplot as plt
+    if rows is None or rows.empty:
+        return None
+    rows = rows.copy()
+    rows['r2'] = pd.to_numeric(rows.r2, errors='coerce')
+    modes = [mode for mode in RECORDING_TYPES if mode in set(rows.rec_type)]
+    if not modes:
+        return None
+    fig, axes = plt.subplots(1, len(modes), figsize=(4.5 * len(modes), 3.7),
+                             squeeze=False, layout='constrained')
+    for ax, mode in zip(axes.ravel(), modes):
+        block = rows[rows.rec_type.eq(mode)]
+        finite = block.loc[np.isfinite(block.r2), 'r2']
+        edges = np.linspace(min(0., finite.min()) if len(finite) else 0.,
+                            max(1., finite.max()) if len(finite) else 1., bins + 1)
+        for state, color in (('low', '#4477AA'), ('high', '#CC6677')):
+            part = block[block.light_state.eq(state)]
+            values = part.loc[np.isfinite(part.r2), 'r2']
+            ax.hist(values, bins=edges, histtype='step', linewidth=1.8,
+                    color=color, label=f'{state}: {len(values)} fits')
+        n_cells = len(block[['date', 'cell_label']].drop_duplicates())
+        missing = int((~np.isfinite(block.r2)).sum())
+        ax.set(title=f'{mode} | {n_cells} cells', xlabel='Full static LN prediction R²',
+               ylabel='Number of fits')
+        ax.axvline(0., color='0.5', linestyle=':', linewidth=.8)
+        ax.legend(frameon=False)
+        if missing:
+            ax.text(.02, .97, f'{missing} nonfinite R² omitted', transform=ax.transAxes,
+                    va='top', fontsize=8)
+    fig.suptitle('All saved conditions · low/high mean light · before Keep/Remove selection')
+    return fig
+
+
 def saved_batch_baseline_settings(cell_index, protocol_cells, sources, overrides=None):
     """Recover a physical cell's baseline policy from current saved conditions.
 
