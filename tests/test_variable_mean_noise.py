@@ -3076,7 +3076,8 @@ def test_condition_batch_helpers_preserve_mode_duration_keys(monkeypatch):
                       kwargs['spike_high_pass_hz'], kwargs['psth_sigma_ms'],
                       kwargs['whole_cell_bin_ms'], kwargs['align_epoch_means'],
                       kwargs['whole_cell_baseline_target'],
-                      kwargs['whole_cell_baseline_shift_pa']))
+                      kwargs['whole_cell_baseline_shift_pa'],
+                      kwargs['temporal_n_windows']))
         current = analysis
         current.rec_type = rec_type
         current.stim_time_ms = kwargs['stim_time_ms']
@@ -3086,6 +3087,7 @@ def test_condition_batch_helpers_preserve_mode_duration_keys(monkeypatch):
     retained = inspection.conditions[inspection.conditions.included].copy()
     cores = vmn.run_core_condition_analyses(
         'example', [11, 12], retained, qc_signature=inspection.signature,
+        temporal_n_windows=5,
         min_firing_rate_hz=30., min_whole_cell_modulation_pa=100.,
         low_response_epoch_fraction=.8,
         spike_median_window_ms=7., spike_high_pass_hz=250.,
@@ -3096,8 +3098,8 @@ def test_condition_batch_helpers_preserve_mode_duration_keys(monkeypatch):
     assert list(cores) == [('extracellular', 30_000.), ('exc', 60_000.)]
     assert calls == [
         ('extracellular', 30_000., ((11, 1),), (.1,), 7., 250., 12., 4.,
-         False, 'median', 750.),
-        ('exc', 60_000., (), (.1,), 7., 250., 12., 4., False, 'median', 750.)]
+         False, 'median', 750., 5),
+        ('exc', 60_000., (), (.1,), 7., 250., 12., 4., False, 'median', 750., 6)]
 
 
 def test_inspection_excludes_only_failed_activity_conditions(monkeypatch):

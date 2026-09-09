@@ -9921,7 +9921,12 @@ def run_core_condition_analyses(
         temporal_window_s: Optional[float] = None,
         temporal_n_windows: Optional[int] = None,
         verbose: bool = True) -> Dict[Tuple[str, float, float], CoreLNAnalysis]:
-    """Verify Section 2 QC and run the core analysis for every condition."""
+    """Verify QC and run each condition; count-based 60 s fits use six windows.
+
+    Other durations use temporal_n_windows. The legacy target-width mode
+    (temporal_n_windows=None) is unchanged. Population analysis still enforces
+    its strict 50 s boundary using the actual saved window endpoints.
+    """
     expected = response_qc_signature(
         exp_name, block_ids, conditions, max_epochs,
         min_firing_rate_hz, min_whole_cell_modulation_pa,
@@ -9968,7 +9973,9 @@ def run_core_condition_analyses(
             mean_window_s=mean_window_s,
             condition_window_s=condition_window_s,
             temporal_window_s=temporal_window_s,
-            temporal_n_windows=temporal_n_windows, verbose=verbose)
+            temporal_n_windows=(6 if temporal_n_windows is not None
+                                and np.isclose(duration, 60000.)
+                                else temporal_n_windows), verbose=verbose)
         key = ((rec_type, duration, contrast) if np.isfinite(contrast)
                else (rec_type, duration))
         results[key] = core
