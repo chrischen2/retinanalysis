@@ -3336,6 +3336,34 @@ def test_normalize_cell_indices_accepts_one_index_or_a_batch():
     assert vmn.normalize_cell_indices([3, 1, 3]) == (3, 1)
 
 
+@pytest.mark.parametrize('duration', [30., 50., 60.])
+def test_temporal_window_count_covers_every_sample(duration, monkeypatch):
+    from types import SimpleNamespace
+    analysis, _ = _population_analysis()
+    analysis.skip_seconds = 1.
+    width = int((duration - analysis.skip_seconds) / analysis.sampling_interval)
+    analysis.stimulus = {m: np.arange(width)[None, :] for m in analysis.light_means}
+    analysis.response = {m: np.arange(width)[None, :] for m in analysis.light_means}
+    seen = []
+
+    def fit(stim, resp, **kwargs):
+        seen.append(stim.copy())
+        return SimpleNamespace(label=kwargs['label'])
+
+    monkeypatch.setattr(vmn, 'fit_ln_model', fit)
+    models = vmn.temporal_ln_model(analysis, n_windows=5, window_seconds=3., verbose=False)
+    assert all(len(group) == 5 for group in models.values())
+    for start in (0, 5):
+        np.testing.assert_array_equal(np.concatenate(seen[start:start+5], axis=1),
+                                      analysis.stimulus[analysis.light_means[0]])
+        assert max(x.shape[1] for x in seen[start:start+5]) - min(
+            x.shape[1] for x in seen[start:start+5]) <= 1
+    assert next(iter(models.values()))[0].label.startswith('1.0-')
+    assert next(iter(models.values()))[-1].label.endswith(f'{duration:.1f} s')
+    with pytest.raises(ValueError, match='positive integer'):
+        vmn.temporal_ln_model(analysis, n_windows=2.5, verbose=False)
+
+
 def test_static_ln_quality_plot_keeps_negative_r2_and_separates_modes():
     import pandas as pd
     import matplotlib.pyplot as plt

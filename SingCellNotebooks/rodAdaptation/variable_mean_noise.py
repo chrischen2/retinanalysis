@@ -4234,7 +4234,8 @@ def temporal_ln_model(analysis: ConditionAnalysis,
                       filter_length_s: float = 1.0,
                       frequency_cutoff: Optional[float] = None,
                       n_bins: int = 100,
-                      verbose: bool = True) -> Dict[float, List[LNModel]]:
+                      verbose: bool = True,
+                      n_windows: Optional[int] = None) -> Dict[float, List[LNModel]]:
     """One LN model per successive window of the epoch, per light mean.
 
     The MATLAB's ``temporalLNModel``: cut the fitted stretch into successive
@@ -4242,6 +4243,11 @@ def temporal_ln_model(analysis: ConditionAnalysis,
     nonlinearity can be watched changing as the cell adapts. Epochs are pooled
     within a window -- all the first five seconds together, then all the second
     five -- because one epoch's window is far too little data for a filter.
+
+    ``n_windows`` explicitly sets the number of equal windows per light mean
+    and takes precedence over ``window_seconds``. Their width is the usable
+    epoch duration (after skipping its start) divided by this count; sample
+    edges are rounded so every sample is assigned exactly once.
 
     **The windows are sized to fit the epoch, not fixed.** With
     ``window_seconds=None`` (the default) :func:`temporal_windows` takes as many
@@ -4276,7 +4282,14 @@ def temporal_ln_model(analysis: ConditionAnalysis,
     if not widths:
         return {}
     usable_s = min(widths) * analysis.sampling_interval
-    if window_seconds is None:
+    if n_windows is not None:
+        if isinstance(n_windows, bool) or int(n_windows) != n_windows or n_windows < 1:
+            raise ValueError('n_windows must be a positive integer')
+        n_windows = int(n_windows)
+        if 2 * n_windows > min(widths):
+            raise ValueError('n_windows requires at least two samples per window')
+        window_seconds = usable_s / n_windows
+    elif window_seconds is None:
         n_windows, window_seconds = temporal_windows(usable_s, min_window_s)
     else:
         n_windows = max(int(round(usable_s / float(window_seconds))), 1)
@@ -9576,6 +9589,7 @@ def run_core_ln_analysis(
         mean_window_s: float = 2.0,
         condition_window_s: float = 6.0,
         temporal_window_s: Optional[float] = None,
+        temporal_n_windows: Optional[int] = None,
         verbose: bool = True) -> CoreLNAnalysis:
     """Run the routine response and LN analyses from one call.
 
@@ -9639,6 +9653,7 @@ def run_core_ln_analysis(
 
     temporal_models = temporal_ln_model(
         analysis, window_seconds=temporal_window_s,
+        n_windows=temporal_n_windows,
         filter_length_s=filter_length_s,
         frequency_cutoff=frequency_cutoff, n_bins=n_bins, verbose=verbose)
     temporal_figure = plot_temporal_ln(analysis, temporal_models)
@@ -9904,6 +9919,7 @@ def run_core_condition_analyses(
         mean_window_s: float = 2.0,
         condition_window_s: float = 6.0,
         temporal_window_s: Optional[float] = None,
+        temporal_n_windows: Optional[int] = None,
         verbose: bool = True) -> Dict[Tuple[str, float, float], CoreLNAnalysis]:
     """Verify Section 2 QC and run the core analysis for every condition."""
     expected = response_qc_signature(
@@ -9951,7 +9967,8 @@ def run_core_condition_analyses(
             activity_excluded_epochs=activity_excluded_epochs,
             mean_window_s=mean_window_s,
             condition_window_s=condition_window_s,
-            temporal_window_s=temporal_window_s, verbose=verbose)
+            temporal_window_s=temporal_window_s,
+            temporal_n_windows=temporal_n_windows, verbose=verbose)
         key = ((rec_type, duration, contrast) if np.isfinite(contrast)
                else (rec_type, duration))
         results[key] = core
@@ -10126,6 +10143,7 @@ class CellAnalysisSettings:
     mean_window_s: float = 3.0
     condition_window_s: float = 15.0
     temporal_window_s: Optional[float] = None
+    temporal_n_windows: Optional[int] = None
     max_series_resistance: Optional[float] = 30e6
     decode_skip_s: float = 2.0
     decode_window_s: object = 'auto'
@@ -10459,7 +10477,8 @@ def run_cell_sections_2_to_5(
         whole_cell_baseline_shift_pa=settings.whole_cell_baseline_shift_pa,
         mean_window_s=settings.mean_window_s,
         condition_window_s=settings.condition_window_s,
-        temporal_window_s=settings.temporal_window_s, verbose=verbose)
+        temporal_window_s=settings.temporal_window_s,
+        temporal_n_windows=settings.temporal_n_windows, verbose=verbose)
     reconstruction = run_reconstruction_analyses(
         exp_name, core_by_condition,
         decode_skip_s=settings.decode_skip_s,
@@ -10658,7 +10677,9 @@ def run_cell_analysis_batch(
     shift, alignment, and baseline target before refitting raw data. Missing
     shifts default to zero, never the batch-wide manual shift. Explicit
     per-index settings take precedence. Snapshot sources before any overwrite.
-    ``settings.temporal_window_s`` controls the new fit window independently.
+    ``settings.temporal_n_windows`` sets the number of equal temporal windows
+    independently of baseline policy. When None, ``temporal_window_s`` retains
+    its legacy target-width behavior.
     """
     import time
     import matplotlib.pyplot as plt
@@ -10701,8 +10722,9 @@ def run_cell_analysis_batch(
             cell_settings = replace(
                 settings, **{**baseline, **overrides})
             print(f'  baseline {cell_settings.whole_cell_baseline_shift_pa:+g} pA '
-                  f'({baseline_source}); temporal window '
-                  f'{cell_settings.temporal_window_s} s', flush=True)
+                  f'({baseline_source}); temporal windows: '
+                  f'{cell_settings.temporal_n_windows} (count), '
+                  f'{cell_settings.temporal_window_s} s (legacy target)', flush=True)
             with plt.ioff():
                 result = run_cell_sections_2_to_5(
                     cell_index, protocol_cells, protocol_blocks, block_modes,
@@ -10722,6 +10744,7 @@ def run_cell_analysis_batch(
                 'baseline_source': baseline_source,
                 'baseline_source_paths': baseline_paths,
                 'temporal_window_s': cell_settings.temporal_window_s,
+                'temporal_n_windows': cell_settings.temporal_n_windows,
             })
             print(f'[{position}/{total}] cell index {cell_index}: complete | '
                   f'{len(result.saved_condition_outputs)} condition(s), '
