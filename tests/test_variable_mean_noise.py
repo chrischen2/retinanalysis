@@ -3336,6 +3336,38 @@ def test_normalize_cell_indices_accepts_one_index_or_a_batch():
     assert vmn.normalize_cell_indices([3, 1, 3]) == (3, 1)
 
 
+def test_batch_csv_selects_current_baseline_and_overrides_h5_values(tmp_path, monkeypatch):
+    import pandas as pd
+    cells = pd.DataFrame([dict(cell_index=0, exp_name='2020-06-11_B', cell_label='Cell10')])
+    directory = vmn.cell_analysis_output_dir('2020-06-11_B', 'Cell10', output_dir=tmp_path)
+    (directory / 'tables').mkdir(parents=True)
+    current = directory / 'current.h5'
+    current.touch()
+    old = tmp_path / 'legacy.h5'
+    meta = dict(date='2020-06-11_B', cell_label='Cell10', rec_type='exc',
+                whole_cell_baseline_shift_pa=4600., align_epoch_means=True,
+                whole_cell_baseline_target='median')
+    monkeypatch.setattr(vmn, '_population_condition_sources', lambda _: (
+        [(current, meta), (old, {**meta, 'whole_cell_baseline_shift_pa': 0.})], pd.DataFrame()))
+    monkeypatch.setattr(vmn, '_output_metadata', lambda _: meta.copy())
+    csv_path = directory / 'tables' / 'saved_conditions.csv'
+    pd.DataFrame([dict(output_path=str(current))]).to_csv(csv_path, index=False)
+    sources = vmn.saved_batch_baseline_sources(tmp_path)
+    assert len(sources) == 1
+    settings, _, provenance = vmn.saved_batch_baseline_settings(0, cells, sources)
+    assert settings['whole_cell_baseline_shift_pa'] == 4600.
+    assert str(csv_path) in provenance
+    # A directly edited CSV is authoritative, including an explicit zero.
+    for shift in (5000., 0.):
+        pd.DataFrame([dict(output_path=str(current), whole_cell_baseline_shift_pa=shift,
+                          align_epoch_means=False, whole_cell_baseline_target='first_epoch')]
+                     ).to_csv(csv_path, index=False)
+        settings, _, _ = vmn.saved_batch_baseline_settings(
+            0, cells, vmn.saved_batch_baseline_sources(tmp_path))
+        assert settings == dict(whole_cell_baseline_shift_pa=shift,
+                                align_epoch_means=False, whole_cell_baseline_target='first_epoch')
+
+
 def test_review_csv_round_trip_preserves_modes_examples_and_remaps_indices(tmp_path):
     import pandas as pd
     from types import SimpleNamespace

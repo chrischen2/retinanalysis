@@ -6267,6 +6267,9 @@ def save_duration_outputs(
             'stim_time_ms': duration,
             'stim_seconds': duration / 1e3,
             'n_epochs': int(sum(core.analysis.n_epochs.values())),
+            'whole_cell_baseline_shift_pa': core.analysis.whole_cell_baseline_shift_pa,
+            'align_epoch_means': core.analysis.align_epoch_means,
+            'whole_cell_baseline_target': core.analysis.whole_cell_baseline_target,
             'output_path': str(path),
         })
     return pd.DataFrame(rows)
@@ -10498,6 +10501,49 @@ def normalize_cell_indices(cell_indices) -> Tuple[int, ...]:
     return tuple(dict.fromkeys(int(value) for value in values))
 
 
+def saved_batch_baseline_sources(output_dir=None):
+    """Snapshot baseline policies using each cell's saved_conditions.csv first.
+
+    CSV baseline fields, when present, are authoritative. Older CSVs provide
+    output paths instead; read the policy from only those listed files. Loose
+    historical HDF5 copies cannot override a cell's explicit saved-run index.
+    Cells without an index retain the legacy HDF5 discovery fallback.
+    """
+    sources, _ = _population_condition_sources(output_dir)
+    groups = {}
+    for path, meta in sources:
+        groups.setdefault((meta['date'], meta['cell_label']), []).append((path, meta))
+    selected = []
+    for (date, label), entries in groups.items():
+        cell_dir = cell_analysis_output_dir(date, label, output_dir=output_dir)
+        csv_path = cell_dir / 'tables' / 'saved_conditions.csv'
+        if not csv_path.exists():
+            selected.extend(entries)
+            continue
+        rows = pd.read_csv(csv_path)
+        if 'output_path' not in rows:
+            raise ValueError(f'{csv_path}: missing output_path')
+        for row in rows.to_dict('records'):
+            path = Path(row['output_path'])
+            if not path.is_file():
+                path = cell_dir / path.name  # allow a relocated output root
+            meta = _output_metadata(path)
+            if (meta['date'], meta['cell_label']) != (date, label):
+                raise ValueError(f'{csv_path}: listed output belongs to another cell')
+            for name in ('whole_cell_baseline_shift_pa', 'align_epoch_means',
+                         'whole_cell_baseline_target'):
+                if name in row and pd.notna(row[name]):
+                    value = row[name]
+                    if name == 'align_epoch_means':
+                        if str(value).lower() not in ('true', 'false', '1', '0'):
+                            raise ValueError(f'{csv_path}: invalid {name}: {value}')
+                        value = str(value).lower() in ('true', '1')
+                    meta[name] = value
+            meta['baseline_source_csv'] = str(csv_path)
+            selected.append((path, meta))
+    return selected
+
+
 def saved_batch_baseline_settings(cell_index, protocol_cells, sources, overrides=None):
     """Recover a physical cell's baseline policy from current saved conditions.
 
@@ -10525,7 +10571,7 @@ def saved_batch_baseline_settings(cell_index, protocol_cells, sources, overrides
         policy = tuple((overrides or {}).get(name, value)
                        for name, value in zip(names, policy))
         policies.append(policy)
-        paths.append(str(path))
+        paths.append(str(meta.get('baseline_source_csv', path)))
     if len(set(policies)) > 1:
         raise ValueError(
             f'Conflicting saved baseline policies for {cell.exp_name}/{cell.cell_label}: '
@@ -10575,7 +10621,7 @@ def run_cell_analysis_batch(
     directory = condition_output_dir(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
     print(f'batch output: {directory}', flush=True)
-    baseline_sources = (_population_condition_sources(directory)[0]
+    baseline_sources = (saved_batch_baseline_sources(directory)
                         if load_saved_baseline_adjustments else [])
     rows = []
     total = len(indices)
