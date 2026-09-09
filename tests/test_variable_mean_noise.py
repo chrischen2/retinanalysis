@@ -3431,7 +3431,10 @@ def test_cell_sections_wrapper_routes_outputs_to_date_cell_folder(monkeypatch,
     })
     inspection = vmn.ResponseInspection(
         {}, {}, {}, ('qc',), conditions, pd.DataFrame())
-    core = object()
+    core = vmn.CoreLNAnalysis(
+        vmn.ConditionAnalysis(exp_name='2025-01-01_A', block_ids=[11],
+                              rec_type='extracellular', sample_rate=1000., units='Hz'),
+        {}, pd.DataFrame())
     reconstruction = {('extracellular', 30_000., .3): {}}
 
     monkeypatch.setattr(vmn, 'apply_recording_type_override',
@@ -3912,3 +3915,96 @@ def test_population_saved_baseline_shift_is_included_exactly_once(tmp_path, monk
         h5['block_ids'][:] = [21, 22]
     sources, audit = vmn._population_condition_sources(mixed)
     assert {p.stem for p, _ in sources} == {'current', 'other-contrast', 'other-blocks'}
+
+
+def test_section5_saves_complete_batch_layout_from_existing_results(tmp_path, monkeypatch):
+    import ast
+    import copy
+    import json
+    import h5py
+    import pandas as pd
+    import matplotlib.pyplot as plt
+
+    analysis, temporal = _population_analysis()
+    analysis.rec_type, analysis.units = 'exc', 'pA'
+    analysis.stim_time_ms, analysis.light_contrast = 50000., .5
+    analysis.whole_cell_baseline_shift_pa = 1500.
+    for model in [*analysis.ln_model.values(), *(m for ms in temporal.values() for m in ms)]:
+        model.nl_y += 1500.
+        model.params['epsilon'] += 1500.
+    analysis.sequence_epoch = np.repeat(np.arange(4), 20)
+    analysis.sequence_light_mean = np.repeat([.1, .1, 1., 1.], 20)
+    analysis.sequence_stimulus = np.concatenate([s.ravel() for s in analysis.stimulus.values()])
+    analysis.sequence_response = np.concatenate([r.ravel() for r in analysis.response.values()]) + 1500.
+    key = ('exc', 50000., .5)
+    figure, ax = plt.subplots()
+    ax.plot([0, 1], [1, 2])
+    plt.close(figure)  # Section 3 closes display figures; they must still save.
+    core = vmn.CoreLNAnalysis(analysis, temporal, pd.DataFrame(), condition_figure=figure)
+    reconstruction = {key: {'analysis': copy.deepcopy(analysis), 'trace_figure': figure}}
+    cells = pd.DataFrame([dict(cell_index=19, exp_name=analysis.exp_name,
+                               cell_label='Cell3', cell_type='OFF-parasol', _block_ids=[11, 12])])
+    blocks = pd.DataFrame(dict(block_id=[11, 12], exp_name=[analysis.exp_name]*2,
+        cell_label=['Cell3']*2, cell_type_short=['OFF-parasol']*2,
+        protocol_name=[vmn.PROTOCOLS[0]]*2))
+    inspection = vmn.ResponseInspection({}, {}, {}, (),
+        conditions=pd.DataFrame([{'rec_type': 'exc', 'stim_time_ms': 50000.}]),
+        condition_audit=pd.DataFrame(columns=['rec_type', 'included']))
+    monkeypatch.setattr(vmn, 'condition_output_dir', lambda output_dir=None:
+                        Path(output_dir) if output_dir is not None else tmp_path)
+    monkeypatch.setattr(vmn, 'led_attenuation', lambda row: {
+        'rig': 'B', 'led': 'Blue LED', 'led_color': 'blue',
+        'led_ndfs': '', 'optical_density': 0., 'attenuation': 1.,
+        'unknown_tokens': '', 'filter_wheel_ndf': 0.,
+        'wheel_tokens_ignored': '', 'wheel_ignored': True})
+    monkeypatch.setattr(vmn, 'analyze_condition', lambda *a, **k: pytest.fail('Save must not refit'))
+    settings = vmn.CellAnalysisSettings(whole_cell_baseline_shift_pa=1500.)
+    notebook = json.loads((NOTEBOOK_DIR / 'analyzeVariableMeanNoise.ipynb').read_text())
+    code = ''.join(next(c for c in notebook['cells']
+                        if c.get('id') == 'save-population-output-code')['source'])
+    namespace = dict(vmn=vmn, CELL_INDEX=19, protocol_cells=cells, protocol_blocks=blocks,
+        epoch_table=pd.DataFrame({'block_id': [11, 12]}), inspection=inspection,
+        core_by_condition={key: core}, reconstruction_by_condition=reconstruction,
+        raw_trace_figures_by_assigned_type={'exc': figure}, display=lambda value: None)
+    # Supply an existing interactive run's controls to the actual notebook cell.
+    settings_call = next(node for node in ast.walk(ast.parse(code))
+                         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                         and node.func.attr == 'CellAnalysisSettings')
+    for kw in settings_call.keywords:
+        namespace[kw.value.id] = getattr(settings, kw.arg)
+    exec(compile(code, 'Section 5', 'exec'), namespace)
+    saved = namespace['saved_cell_run']
+    expected_dir = vmn.cell_analysis_output_dir(analysis.exp_name, 'Cell3', output_dir=tmp_path)
+    assert saved.output_dir == expected_dir
+    assert not list(tmp_path.glob('*.h5'))
+    assert set(saved.figure_manifest.section) == {'section2', 'section3', 'section4'}
+    assert all(Path(path).read_bytes().startswith(b'\x89PNG') for path in saved.figure_manifest.path)
+    assert set(saved.table_paths) == {'epoch_catalog', 'conditions', 'condition_audit',
+                                    'saved_conditions', 'figure_manifest'}
+    manifest = json.loads((expected_dir / 'run_manifest.json').read_text())
+    assert manifest['settings']['whole_cell_baseline_shift_pa'] == 1500.
+    path = Path(saved.saved_condition_outputs.iloc[0].output_path)
+    with h5py.File(path) as h5:
+        assert h5.attrs['whole_cell_baseline_shift_pa'] == 1500.
+        assert 'model_inputs/core' in h5 and 'model_inputs/reconstruction' in h5
+        assert not h5.attrs['contains_lnk']
+    loaded = vmn.load_saved_cell_analysis(19, cells, output_dir=tmp_path)
+    assert len(loaded.figures) == 3
+    inputs, cores = vmn.load_saved_lnk_inputs(19, output_dir=tmp_path, protocol_cells=cells,
+                                           fit_static=False)
+    np.testing.assert_array_equal(inputs[key]['analysis'].sequence_response,
+                                  analysis.sequence_response)
+    # Reusing the batch writer updates the exact same condition instead of a flat copy.
+    rerun = vmn.save_cell_analysis_run(19, cells, blocks, settings=settings,
+        epoch_table=namespace['epoch_table'], inspection=inspection,
+        core_by_condition={key: core}, reconstruction_by_condition=reconstruction,
+        raw_figures={'exc': figure}, output_dir=tmp_path, verbose=False)
+    assert rerun.saved_condition_outputs.iloc[0].output_path == str(path)
+    assert len(list(tmp_path.rglob('*.h5'))) == 1
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match='baseline_shift'):
+        vmn.save_cell_analysis_run(19, cells, blocks, settings=vmn.CellAnalysisSettings(),
+            epoch_table=namespace['epoch_table'], inspection=inspection,
+            core_by_condition={key: core}, reconstruction_by_condition=reconstruction,
+            raw_figures={}, output_dir=tmp_path, verbose=False)
+    assert path.read_bytes() == before

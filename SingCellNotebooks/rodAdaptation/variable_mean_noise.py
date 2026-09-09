@@ -10256,6 +10256,98 @@ def _save_cell_run_tables(
     return paths
 
 
+def save_cell_analysis_run(
+        cell_index: int, protocol_cells: pd.DataFrame,
+        protocol_blocks: pd.DataFrame, *, settings: CellAnalysisSettings,
+        epoch_table: pd.DataFrame, inspection: ResponseInspection,
+        core_by_condition: Mapping[tuple, CoreLNAnalysis],
+        reconstruction_by_condition: Mapping[tuple, dict],
+        raw_figures: Mapping[str, object],
+        cell_type_override: Optional[str] = None, output_dir=None,
+        close_figures: bool = True, verbose: bool = True) -> CellAnalysisRun:
+    """Save completed interactive or batch analyses in the same per-cell layout.
+
+    Does not load raw data or rerun fits. HDF5 conditions, adjusted LNK inputs,
+    figures, selection/QC tables, and run settings all use the batch contract.
+    ``output_dir`` is the population root, not the per-cell subdirectory.
+    """
+    import json
+
+    matches = protocol_cells[
+        pd.to_numeric(protocol_cells.cell_index, errors='coerce').eq(
+            int(cell_index))]
+    if len(matches) != 1:
+        raise ValueError(
+            f'cell_index {int(cell_index)} matched {len(matches)} rows; expected one')
+    row = matches.iloc[0]
+    exp_name, cell_label = str(row.exp_name), str(row.cell_label)
+    cell_type = (str(row.get('cell_type', '')).strip()
+                 if cell_type_override is None
+                 else str(cell_type_override).strip())
+    if cell_type_override is not None and not cell_type:
+        raise ValueError('cell type must be a non-empty saved metadata label')
+    block_ids = [int(value) for value in row['_block_ids']]
+    if not core_by_condition:
+        raise ValueError('No completed core conditions to save')
+    for core in core_by_condition.values():
+        analysis = core.analysis
+        if (str(analysis.exp_name) != exp_name
+                or not set(analysis.block_ids).issubset(block_ids)):
+            raise ValueError('Completed analysis does not match the selected cell')
+        if analysis.rec_type in ('exc', 'inh'):
+            for name in ('whole_cell_baseline_shift_pa', 'align_epoch_means',
+                         'whole_cell_baseline_target'):
+                if getattr(analysis, name) != getattr(settings, name):
+                    raise ValueError(
+                        f'Save settings disagree with the completed analysis on {name}; '
+                        'use the settings used for Sections 2-4')
+    reconstruction = reconstruction_by_condition
+    cell_dir = cell_analysis_output_dir(
+        exp_name, cell_label, output_dir=output_dir)
+    cell_dir.mkdir(parents=True, exist_ok=True)
+    save_protocol_blocks = protocol_blocks
+    if cell_type_override is not None:
+        save_protocol_blocks = protocol_blocks.copy()
+        selected_blocks = pd.to_numeric(
+            save_protocol_blocks.block_id, errors='coerce').isin(block_ids)
+        for column in ('cell_type', 'cell_type_short'):
+            save_protocol_blocks.loc[selected_blocks, column] = cell_type
+    saved_outputs = save_condition_outputs(
+        core_by_condition, save_protocol_blocks,
+        reconstruction_by_condition=reconstruction,
+        cell_index=int(cell_index), mean_window_s=settings.mean_window_s,
+        output_dir=cell_dir, verbose=verbose)
+    figure_manifest = save_cell_analysis_figures(
+        raw_figures, core_by_condition, reconstruction, cell_dir,
+        dpi=settings.figure_dpi, close=close_figures)
+    table_paths = _save_cell_run_tables(
+        cell_dir, epoch_table, inspection.conditions,
+        inspection, saved_outputs, figure_manifest)
+    manifest = {
+        'status': 'complete', 'cell_index': int(cell_index),
+        'exp_name': exp_name, 'cell_label': cell_label,
+        'cell_type': cell_type, 'block_ids': block_ids,
+        'settings': asdict(settings),
+        'h5_outputs': saved_outputs.output_path.tolist(),
+        'figures': figure_manifest.path.tolist(),
+        'tables': {name: str(path) for name, path in table_paths.items()},
+    }
+    with (cell_dir / 'run_manifest.json').open('w') as stream:
+        json.dump(manifest, stream, indent=2, default=str)
+    if verbose:
+        print(f'saved {len(saved_outputs)} HDF5 condition(s) and '
+              f'{len(figure_manifest)} figure(s) under {cell_dir}')
+    return CellAnalysisRun(
+        cell_index=int(cell_index), exp_name=exp_name,
+        cell_label=cell_label, cell_type=cell_type, output_dir=cell_dir,
+        settings=settings, epoch_table=epoch_table,
+        condition_table=inspection.conditions, inspection=inspection,
+        core_by_condition=core_by_condition,
+        reconstruction_by_condition=reconstruction,
+        saved_condition_outputs=saved_outputs,
+        figure_manifest=figure_manifest, table_paths=table_paths)
+
+
 def run_cell_sections_2_to_5(
         cell_index: int,
         protocol_cells: pd.DataFrame,
@@ -10268,8 +10360,6 @@ def run_cell_sections_2_to_5(
         close_figures: bool = True,
         verbose: bool = True) -> CellAnalysisRun:
     """Run, save, and return the notebook's complete Sections 2--5 workflow."""
-    import json
-
     settings = settings or CellAnalysisSettings()
     matches = protocol_cells[
         pd.to_numeric(protocol_cells.cell_index, errors='coerce').eq(
@@ -10390,50 +10480,13 @@ def run_cell_sections_2_to_5(
     reconstruction = add_early_late_reconstruction(
         reconstruction, verbose=verbose)
 
-    cell_dir = cell_analysis_output_dir(
-        exp_name, cell_label, output_dir=output_dir)
-    cell_dir.mkdir(parents=True, exist_ok=True)
-    save_protocol_blocks = protocol_blocks
-    if cell_type_override is not None:
-        save_protocol_blocks = protocol_blocks.copy()
-        selected_blocks = pd.to_numeric(
-            save_protocol_blocks.block_id, errors='coerce').isin(block_ids)
-        for column in ('cell_type', 'cell_type_short'):
-            save_protocol_blocks.loc[selected_blocks, column] = cell_type
-    saved_outputs = save_condition_outputs(
-        core_by_condition, save_protocol_blocks,
-        reconstruction_by_condition=reconstruction,
-        cell_index=int(cell_index), mean_window_s=settings.mean_window_s,
-        output_dir=cell_dir, verbose=verbose)
-    figure_manifest = save_cell_analysis_figures(
-        raw_figures, core_by_condition, reconstruction, cell_dir,
-        dpi=settings.figure_dpi, close=close_figures)
-    table_paths = _save_cell_run_tables(
-        cell_dir, epoch_table, inspection.conditions,
-        inspection, saved_outputs, figure_manifest)
-    manifest = {
-        'status': 'complete', 'cell_index': int(cell_index),
-        'exp_name': exp_name, 'cell_label': cell_label,
-        'cell_type': cell_type, 'block_ids': block_ids,
-        'settings': asdict(settings),
-        'h5_outputs': saved_outputs.output_path.tolist(),
-        'figures': figure_manifest.path.tolist(),
-        'tables': {name: str(path) for name, path in table_paths.items()},
-    }
-    with (cell_dir / 'run_manifest.json').open('w') as stream:
-        json.dump(manifest, stream, indent=2, default=str)
-    if verbose:
-        print(f'saved {len(saved_outputs)} HDF5 condition(s) and '
-              f'{len(figure_manifest)} figure(s) under {cell_dir}')
-    return CellAnalysisRun(
-        cell_index=int(cell_index), exp_name=exp_name,
-        cell_label=cell_label, cell_type=cell_type, output_dir=cell_dir,
-        settings=settings, epoch_table=epoch_table,
-        condition_table=inspection.conditions, inspection=inspection,
+    return save_cell_analysis_run(
+        cell_index, protocol_cells, protocol_blocks, settings=settings,
+        epoch_table=epoch_table, inspection=inspection,
         core_by_condition=core_by_condition,
-        reconstruction_by_condition=reconstruction,
-        saved_condition_outputs=saved_outputs,
-        figure_manifest=figure_manifest, table_paths=table_paths)
+        reconstruction_by_condition=reconstruction, raw_figures=raw_figures,
+        cell_type_override=cell_type_override, output_dir=output_dir,
+        close_figures=close_figures, verbose=verbose)
 
 
 def normalize_cell_indices(cell_indices) -> Tuple[int, ...]:
@@ -12004,6 +12057,7 @@ __all__ = [
     'PROTOCOLS', 'PROTOCOL_SEARCH', 'DEFAULT_SUMMARY_PATH', 'SUMMARY_DIR',
     'STEP_DIRECTIONS', 'STEP_LABELS', 'LNModel', 'ConditionAnalysis',
     'CoreLNAnalysis', 'ResponseInspection', 'CellAnalysisSettings',
+    'save_cell_analysis_run',
     'CellAnalysisRun', 'SavedCellAnalysis',
     'summary_path', 'load_summary', 'load_cell',
     'DATE_OFFSETS', 'SAVED_DATE_OFFSET_DAYS', 'FALLBACK_OFFSETS',
