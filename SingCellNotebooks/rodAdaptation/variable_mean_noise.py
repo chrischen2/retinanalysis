@@ -12184,6 +12184,8 @@ def plot_population_adaptation_selectivity_map(summary: pd.DataFrame,
     table = pd.concat(maps, ignore_index=True)
     pivot = table.pivot_table(index='centre_s', columns='x', values='preference',
                               aggfunc='mean').sort_index()
+    if pivot.empty or not np.isfinite(pivot.to_numpy(float)).any():
+        return None
     style.apply_publication_style()
     fig, ax = plt.subplots(figsize=(8.4, 4.5))
     mesh = ax.pcolormesh(pivot.columns.to_numpy(float), pivot.index.to_numpy(float),
@@ -12252,6 +12254,8 @@ def plot_population_local_sensitivity_map(summary: pd.DataFrame,
         pieces.append(pd.DataFrame({'centre_s': centre, 'x': block.x, 'slope': slope}))
     table = pd.concat(pieces, ignore_index=True)
     pivot = table.pivot_table(index='centre_s', columns='x', values='slope', aggfunc='mean')
+    if pivot.empty or not np.isfinite(pivot.to_numpy(float)).any():
+        return None
     scale = np.nanmax(np.abs(pivot.to_numpy(float)))
     style.apply_publication_style()
     fig, ax = plt.subplots(figsize=(8.4, 4.5))

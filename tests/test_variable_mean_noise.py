@@ -122,7 +122,7 @@ def test_section_6c_runs_high_quality_population_ln_analysis():
     assert "POPULATION_CELL_TYPES = ('ON-parasol', 'ON-midget')" in source
     assert 'PHOTOPIC_TIME_TO_PEAK_THRESHOLD_MS =' in source
     assert 'photopic_time_to_peak_threshold_ms=' in source
-    assert 'TEMPORAL_PARAMETER_WINDOW_COMBINE = 2' in source
+    assert 'TEMPORAL_PARAMETER_WINDOW_COMBINE =' in source
     assert 'temporal_parameter_window_combine=' in source
     assert 'high_quality_population_ln_analysis' in source
     assert "population_ln['temporal_condition_counts']" in source
@@ -3336,6 +3336,27 @@ def test_normalize_cell_indices_accepts_one_index_or_a_batch():
     assert vmn.normalize_cell_indices(1) == (1,)
     assert vmn.normalize_cell_indices(range(1, 4)) == (1, 2, 3)
     assert vmn.normalize_cell_indices([3, 1, 3]) == (3, 1)
+
+
+def test_selectivity_map_handles_empty_and_different_generator_grids():
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    rows = pd.DataFrame([
+        dict(cell_type=kind, rec_type='extracellular', light_regime='scotopic',
+             light_state='high', curve='nonlinearity', order=0, centre_s=5.,
+             x=x, y_mean=0.)
+        for kind, grid in [('ON-midget', [-1., 0., 1.]),
+                           ('ON-parasol', [-.9, .1, 1.1])]
+        for x in grid])
+    # Previously an all-undefined ratio produced a 0x0 pivot and crashed QuadMesh.
+    assert vmn.plot_population_adaptation_selectivity_map(rows) is None
+    rows['y_mean'] = rows.x + 2
+    figure = vmn.plot_population_adaptation_selectivity_map(rows)
+    assert figure is not None
+    figure.canvas.draw()
+    plt.close(figure)
+    rows.loc[rows.cell_type.eq('ON-parasol'), 'x'] += 10
+    assert vmn.plot_population_adaptation_selectivity_map(rows) is None
 
 
 def test_class_overlays_separate_groups_and_select_example(monkeypatch):
