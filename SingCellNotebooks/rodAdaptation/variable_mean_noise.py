@@ -11144,7 +11144,6 @@ def build_cell_review_browser(
         figure_options=_review_figure_options,
         describe=lambda saved, rec_type: (
             saved_cell_review_line(saved, rec_type)
-            + f' | kept indices: {high_quality_cell_indices(directory)}'
             + f' | CSV: {directory / "kept_cell_selection.csv"}'),
         review_flags=flags,
         set_keep=lambda saved, rec_type, keep: set_cell_visual_inspection(
