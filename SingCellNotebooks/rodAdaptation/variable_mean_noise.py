@@ -11349,6 +11349,44 @@ def _prepare_population_temporal_rows(
     return rows.loc[end.le(float(truncate_at_s) + 1e-9)].copy()
 
 
+def align_population_temporal_times(curves, parameters):
+    """Use a common 50 s reference time for each retained temporal window.
+
+    Input curves/parameters have already passed the strict original-end <=50 s
+    filter. This changes display timestamps only, never fit values or window
+    bounds. Thirty-second rows are excluded defensively. Reference centres are
+    medians across unique 50 s condition/window pairs, independent of cell type,
+    recording type, light state, or the number of sampled curve points.
+    """
+    frames = [frame.loc[pd.to_numeric(frame.stim_seconds, errors='coerce')
+                        .isin((50., 60.))].copy() if not frame.empty else frame.copy()
+              for frame in (curves, parameters)]
+    references = []
+    for frame in frames:
+        if not frame.empty and 'centre_s' in frame:
+            references.append(frame.loc[frame.stim_seconds.eq(50.),
+                ['condition_id', 'order', 'centre_s']].drop_duplicates())
+    reference = (pd.concat(references, ignore_index=True)
+                 .drop_duplicates(['condition_id', 'order'])
+                 .groupby('order').centre_s.median()
+                 if references else pd.Series(dtype=float))
+    audit = []
+    for index, frame in enumerate(frames):
+        if frame.empty or 'centre_s' not in frame:
+            continue
+        frame['original_centre_s'] = frame.centre_s
+        mapped = frame.order.map(reference)
+        frame['time_alignment_status'] = np.where(
+            mapped.notna(), '50 s reference by window order', 'no 50 s reference; original time')
+        frame['centre_s'] = mapped.fillna(frame.original_centre_s)
+        audit.append(frame[[c for c in ('condition_id', 'cell_index', 'rec_type',
+            'stim_seconds', 'order', 'original_centre_s', 'centre_s',
+            'time_alignment_status') if c in frame]].drop_duplicates())
+        frames[index] = frame
+    return (*frames, pd.concat(audit, ignore_index=True).drop_duplicates()
+            if audit else pd.DataFrame())
+
+
 def _select_low_high_light_rows(frame: pd.DataFrame) -> pd.DataFrame:
     """Retain only each condition's lowest and highest recorded light means."""
     if frame is None or frame.empty:
@@ -11944,6 +11982,14 @@ def high_quality_population_ln_analysis(
     classification_pieces = []
     paired_conditions, temporal_conditions = [], []
     sources, source_audit = _population_condition_sources(output_dir)
+    # The per-cell CSV identifies the current completed run. Loose outputs may
+    # retain an older temporal window count even when contrast metadata exists.
+    sources = saved_batch_baseline_sources(output_dir)
+    current_paths = {str(path) for path, _ in sources}
+    if not source_audit.empty:
+        unlisted = source_audit.included & ~source_audit.output_path.isin(current_paths)
+        source_audit.loc[unlisted, 'included'] = False
+        source_audit.loc[unlisted, 'reason'] = 'not listed in the current saved_conditions.csv'
     if not source_audit.empty:
         source_audit = source_audit.loc[[
             (str(row.date), str(row.cell_label), str(row.rec_type)) in selected_keys
@@ -12045,6 +12091,8 @@ def high_quality_population_ln_analysis(
                            if temporal_pieces else pd.DataFrame())
     temporal_parameters = (pd.concat(parameter_pieces, ignore_index=True)
                            if parameter_pieces else pd.DataFrame())
+    temporal_normalized, temporal_parameters, temporal_time_audit = (
+        align_population_temporal_times(temporal_normalized, temporal_parameters))
     directional_rows = (pd.concat(directional_pieces, ignore_index=True)
                         if directional_pieces else pd.DataFrame())
     directional_contrast = directional_saturation_contrast(directional_rows)
@@ -12061,6 +12109,7 @@ def high_quality_population_ln_analysis(
 
     return {
         'source_audit': source_audit,
+        'temporal_time_alignment_audit': temporal_time_audit,
         'baseline_adjustment_audit': pd.DataFrame(
             baseline_audit, columns=[*population_metadata,
                 'baseline_shift_added_in_population_pa', 'baseline_status',

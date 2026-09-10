@@ -3338,6 +3338,19 @@ def test_normalize_cell_indices_accepts_one_index_or_a_batch():
     assert vmn.normalize_cell_indices([3, 1, 3]) == (3, 1)
 
 
+def test_population_temporal_times_use_fifty_second_axis_and_exclude_thirty():
+    import pandas as pd
+    rows = pd.DataFrame(dict(condition_id=['fifty']*2+['sixty']*2+['thirty'],
+        stim_seconds=[50.,50.,60.,60.,30.], order=[0,1,0,1,0],
+        centre_s=[5.9,15.7,5.9167,15.75,3.8], alpha=[1,2,3,4,999]))
+    curves, parameters, audit = vmn.align_population_temporal_times(rows, rows)
+    assert curves.centre_s.tolist() == [5.9,15.7,5.9,15.7]
+    assert parameters.alpha.tolist() == [1,2,3,4]
+    assert parameters.original_centre_s.tolist() == [5.9,15.7,5.9167,15.75]
+    assert set(audit.stim_seconds) == {50.,60.}
+    assert parameters.groupby('order').centre_s.nunique().eq(1).all()
+
+
 def test_selectivity_map_handles_empty_and_different_generator_grids():
     import pandas as pd
     import matplotlib.pyplot as plt
