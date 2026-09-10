@@ -11916,6 +11916,29 @@ def _population_condition_sources(output_dir=None):
         'output_path', 'included', 'reason', 'replacement_paths'])
 
 
+def static_ln_r2_quality(condition_summary, threshold=0.4):
+    """Require finite full static-LN prediction R² > threshold at both extremes.
+
+    Evaluate each saved condition independently; an excellent fit in another
+    duration/contrast/recording type cannot rescue a poor fit in this condition.
+    """
+    threshold = float(threshold)
+    if not np.isfinite(threshold):
+        raise ValueError('static LN R² threshold must be finite')
+    scores = {'low_static_r2': np.nan, 'high_static_r2': np.nan}
+    if not condition_summary.empty and {'lightMean', 'r2'}.issubset(condition_summary):
+        rows = condition_summary.copy()
+        rows['lightMean'] = pd.to_numeric(rows.lightMean, errors='coerce')
+        levels = sorted(rows.lightMean.dropna().unique())
+        if len(levels) >= 2:
+            for key, mean in zip(scores, (levels[0], levels[-1])):
+                values = pd.to_numeric(rows.loc[rows.lightMean.eq(mean), 'r2'], errors='coerce')
+                if len(values) and np.isfinite(values).all():
+                    scores[key] = float(values.min())
+    return {**scores, 'static_r2_pass': all(
+        np.isfinite(value) and value > threshold for value in scores.values())}
+
+
 def high_quality_population_ln_analysis(
         high_quality_cells: Optional[pd.DataFrame] = None, *,
         rec_types: Optional[Sequence[str]] = ('extracellular', 'exc'),
@@ -11923,8 +11946,17 @@ def high_quality_population_ln_analysis(
         photopic_time_to_peak_threshold_ms: float = 50.0,
         temporal_parameter_window_combine: int = 2,
         output_dir=None, grid_points: int = 101,
-        retain_normalized: bool = False, normalized_ln: bool = True) -> dict:
+        retain_normalized: bool = False, normalized_ln: bool = True,
+        quality_selection: str = 'csv', static_r2_threshold: float = 0.4) -> dict:
     """Run Section 6c population LN curves and parameter trajectories.
+
+    ``quality_selection`` chooses ``csv`` (visual Keep list), ``r2`` (static
+    prediction R² only, independent of the Keep CSV), or ``both``. R² selection
+    requires both extreme light means strictly above ``static_r2_threshold``
+    in each saved condition. The same condition gate applies to static curves,
+    temporal fits, and decoding; it never modifies durable review decisions.
+    ``quality_selection_audit`` reports both scores and inclusion for every
+    current source within the requested recording/cell-type scope.
 
     Files are processed one condition at a time so the multi-million-row raw
     temporal table is never held in memory. When ``high_quality_cells`` is
@@ -11949,6 +11981,9 @@ def high_quality_population_ln_analysis(
     """
     import h5py
 
+    if quality_selection not in ('csv', 'r2', 'both'):
+        raise ValueError('quality_selection must be csv, r2, or both')
+    static_ln_r2_quality(pd.DataFrame(), static_r2_threshold)  # validate threshold
     if int(grid_points) < 2:
         raise ValueError('grid_points must be at least 2')
     window_combine = int(temporal_parameter_window_combine)
@@ -11957,7 +11992,9 @@ def high_quality_population_ln_analysis(
     threshold = float(photopic_time_to_peak_threshold_ms)
     if not np.isfinite(threshold) or threshold <= 0:
         raise ValueError('photopic time-to-peak threshold must be positive')
-    if high_quality_cells is None:
+    if quality_selection == 'r2':
+        high_quality_cells = pd.DataFrame()
+    elif high_quality_cells is None:
         high_quality_cells = load_high_quality_cells(output_dir)
     if high_quality_cells.empty:
         selected_keys = set()
@@ -11977,6 +12014,7 @@ def high_quality_population_ln_analysis(
         'rec_type', 'stim_seconds', 'light_contrast', 'cell_index',
         'whole_cell_baseline_shift_pa')
     baseline_audit = []
+    quality_audit = []
     static_pieces, temporal_pieces, parameter_pieces = [], [], []
     directional_pieces = []
     classification_pieces = []
@@ -11992,7 +12030,8 @@ def high_quality_population_ln_analysis(
         source_audit.loc[unlisted, 'reason'] = 'not listed in the current saved_conditions.csv'
     if not source_audit.empty:
         source_audit = source_audit.loc[[
-            (str(row.date), str(row.cell_label), str(row.rec_type)) in selected_keys
+            (quality_selection == 'r2' or
+             (str(row.date), str(row.cell_label), str(row.rec_type)) in selected_keys)
             and (rec_types is None or row.rec_type in rec_types)
             and (cell_types is None or row.cell_type in cell_types)
             for row in source_audit.itertuples()]].copy()
@@ -12000,8 +12039,6 @@ def high_quality_population_ln_analysis(
         review_key = (str(metadata.get('date', '')),
                       str(metadata.get('cell_label', '')),
                       str(metadata.get('rec_type', '')))
-        if review_key not in selected_keys:
-            continue
         if rec_types is not None and metadata.get('rec_type') not in rec_types:
             continue
         if cell_types is not None and metadata.get('cell_type') not in cell_types:
@@ -12019,13 +12056,28 @@ def high_quality_population_ln_analysis(
             return frame
 
         with h5py.File(path, 'r') as h5:
+            condition_metrics = load_condition_table(h5, 'condition_summary')
+            quality = static_ln_r2_quality(condition_metrics, static_r2_threshold)
+            csv_pass = review_key in selected_keys
+            included = ((quality_selection == 'r2' or csv_pass)
+                        and (quality_selection == 'csv' or quality['static_r2_pass']))
+            quality_audit.append({
+                **{name: metadata.get(name, np.nan) for name in population_metadata},
+                **quality, 'csv_keep': csv_pass if quality_selection != 'r2' else pd.NA,
+                'selection_mode': quality_selection, 'static_r2_threshold': static_r2_threshold,
+                'included': included,
+                'reason': ('included' if included else
+                           'not retained in CSV' if quality_selection != 'r2' and not csv_pass else
+                           'both low/high static R² must be finite and strictly above threshold'),
+            })
+            if not included:
+                continue
             static = load_condition_table(h5, 'ln_curves')
             temporal_eligible = float(metadata['stim_seconds']) in (50., 60.)
             temporal = (load_condition_table(h5, 'temporal_ln_curves')
                         if temporal_eligible else pd.DataFrame())
             parameters = (load_condition_table(h5, 'temporal_summary')
                           if temporal_eligible else pd.DataFrame())
-            condition_metrics = load_condition_table(h5, 'condition_summary')
             directional = load_condition_table(h5, 'directional_decoding')
 
         classification = classify_population_light_regime(
@@ -12109,6 +12161,9 @@ def high_quality_population_ln_analysis(
 
     return {
         'source_audit': source_audit,
+        'quality_selection_audit': pd.DataFrame(quality_audit),
+        'quality_selection': quality_selection,
+        'static_r2_threshold': float(static_r2_threshold),
         'temporal_time_alignment_audit': temporal_time_audit,
         'baseline_adjustment_audit': pd.DataFrame(
             baseline_audit, columns=[*population_metadata,

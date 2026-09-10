@@ -3338,6 +3338,44 @@ def test_normalize_cell_indices_accepts_one_index_or_a_batch():
     assert vmn.normalize_cell_indices([3, 1, 3]) == (3, 1)
 
 
+@pytest.mark.parametrize('scores,passed', [([.5,.6],True),([.4,.9],False),
+    ([.9,.4],False),([np.nan,.9],False),([.9,np.inf],False)])
+def test_static_r2_filter_requires_both_finite_scores_above_threshold(scores, passed):
+    import pandas as pd
+    rows = pd.DataFrame({'lightMean':[.1,1.], 'r2':scores, 'nl_r2':[1.,1.]})
+    assert vmn.static_ln_r2_quality(rows,.4)['static_r2_pass'] is passed
+    assert not vmn.static_ln_r2_quality(rows.iloc[:1],.4)['static_r2_pass']
+
+
+def test_population_quality_modes_gate_conditions_independently(tmp_path, monkeypatch):
+    import pandas as pd
+    analysis, temporal = _population_analysis()
+    blocks = pd.DataFrame({'block_id':[11,12], 'exp_name':[analysis.exp_name]*2,
+                           'cell_label':['Cell3']*2, 'protocol_name':[vmn.PROTOCOLS[0]]*2})
+    monkeypatch.setattr(vmn, 'led_attenuation', lambda row: {
+        'rig':'B','led':'Blue LED','led_color':'blue','led_ndfs':'',
+        'optical_density':0.,'attenuation':1.,'unknown_tokens':'',
+        'filter_wheel_ndf':0.,'wheel_tokens_ignored':'','wheel_ignored':True})
+    for duration, low in ((30000.,.5),(50000.,.4)):
+        analysis.stim_time_ms = duration
+        analysis.ln_model[.1].r2 = low
+        analysis.ln_model[1.].r2 = .9
+        vmn.save_condition_output(analysis, blocks, temporal_models=temporal,
+                                  cell_index=19, output_dir=tmp_path, verbose=False)
+    review = pd.DataFrame([dict(date=analysis.exp_name,cell_label='Cell3',rec_type='extracellular')])
+    for mode, kept, expected in [('csv',True,2),('csv',False,0),('r2',False,1),
+                                  ('both',True,1),('both',False,0)]:
+        result = vmn.high_quality_population_ln_analysis(
+            review if kept else review.iloc[:0], quality_selection=mode,
+            static_r2_threshold=.4, output_dir=tmp_path)
+        audit = result['quality_selection_audit']
+        assert int(audit.included.sum()) == expected
+        assert len(result['paired_conditions']) == expected
+        if mode=='r2':
+            assert result['temporal_curve_summary'].empty  # poor 50 s fit is rejected
+    assert not (tmp_path/'high_quality_cells.csv').exists()
+
+
 def test_population_temporal_times_use_fifty_second_axis_and_exclude_thirty():
     import pandas as pd
     rows = pd.DataFrame(dict(condition_id=['fifty']*2+['sixty']*2+['thirty'],
