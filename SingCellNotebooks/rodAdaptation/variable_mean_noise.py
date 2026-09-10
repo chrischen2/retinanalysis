@@ -6164,6 +6164,10 @@ def save_condition_output(
     existed = path.exists()
     temporary = path.with_suffix('.h5.tmp')
     with h5py.File(temporary, 'w') as h5:
+        import time
+        # Replace the complete condition, including every temporal dataset.
+        # Persist save order independently of later file copies or moves.
+        h5.attrs['saved_at_ns'] = time.time_ns()
         h5.attrs['output_version'] = CONDITION_OUTPUT_VERSION
         h5.attrs['exp_name'] = analysis.exp_name
         h5.attrs['cell_label'] = cell_label
@@ -6371,6 +6375,7 @@ def _output_metadata(path) -> dict:
             raise ValueError(f'{path}: unsupported output version')
         return {
             'condition_id': path.stem,
+            'saved_at_ns': int(h5.attrs.get('saved_at_ns', path.stat().st_mtime_ns)),
             'cell_id': (f'{text(h5.attrs["exp_name"])}/'
                         f'{text(h5.attrs["cell_label"])}/'
                         f'{text(h5.attrs["rec_type"])}'),
@@ -11354,35 +11359,73 @@ def align_population_temporal_times(curves, parameters):
 
     Input curves/parameters have already passed the strict original-end <=50 s
     filter. This changes display timestamps only, never fit values or window
-    bounds. Thirty-second rows are excluded defensively. Reference centres are
-    medians across unique 50 s condition/window pairs, independent of cell type,
-    recording type, light state, or the number of sampled curve points.
+    bounds. Thirty-second rows are excluded defensively. The most recently saved
+    50 s condition supplies the reference layout; incompatible older layouts
+    are excluded from temporal analysis. Tables without save provenance fall
+    back to the most common observed layout. If no 50 s condition is available,
+    the most recently saved 60 s layout supplies the reference instead.
     """
     frames = [frame.loc[pd.to_numeric(frame.stim_seconds, errors='coerce')
                         .isin((50., 60.))].copy() if not frame.empty else frame.copy()
               for frame in (curves, parameters)]
+    reference_duration = 50. if any(
+        not frame.empty and frame.stim_seconds.eq(50.).any()
+        for frame in frames) else 60.
     references = []
     for frame in frames:
         if not frame.empty and 'centre_s' in frame:
-            references.append(frame.loc[frame.stim_seconds.eq(50.),
-                ['condition_id', 'order', 'centre_s']].drop_duplicates())
-    reference = (pd.concat(references, ignore_index=True)
-                 .drop_duplicates(['condition_id', 'order'])
-                 .groupby('order').centre_s.median()
-                 if references else pd.Series(dtype=float))
+            references.append(frame.loc[frame.stim_seconds.eq(reference_duration),
+                [c for c in ('condition_id', 'order', 'centre_s', 'saved_at_ns')
+                 if c in frame]].drop_duplicates())
+    reference = pd.Series(dtype=float)
+    if references:
+        candidates = pd.concat(references, ignore_index=True).drop_duplicates(
+            ['condition_id', 'order']).sort_values('order')
+        # Select one actual saved layout, never a median of incompatible grids.
+        layouts = candidates.groupby('condition_id').centre_s.apply(
+            lambda values: tuple(np.round(values.to_numpy(float), 6)))
+        counts = layouts.value_counts()
+        if len(counts):
+            chosen = sorted(counts.index, key=lambda key: (-counts[key], len(key), key))[0]
+            condition = layouts[layouts.map(lambda value: value == chosen)].index[0]
+            if 'saved_at_ns' in candidates and candidates.saved_at_ns.notna().any():
+                latest = candidates.dropna(subset=['saved_at_ns']).sort_values(
+                    ['saved_at_ns', 'condition_id'])
+                condition = latest.iloc[-1].condition_id
+            reference = candidates[candidates.condition_id.eq(condition)].set_index('order').centre_s
     audit = []
     for index, frame in enumerate(frames):
         if frame.empty or 'centre_s' not in frame:
             continue
         frame['original_centre_s'] = frame.centre_s
+        compatible = pd.Series(True, index=frame.index)
+        if len(reference):
+            # Compatible window orders must map to distinct nearest reference
+            # centres. An old dense grid cannot be relabelled as a coarse grid.
+            ref_times = reference.to_numpy(float)
+            ref_orders = reference.index.to_numpy()
+            for condition, block in frame.groupby('condition_id'):
+                times = block[['order', 'centre_s']].drop_duplicates().sort_values('order')
+                nearest = ref_orders[np.abs(times.centre_s.to_numpy()[:, None]
+                                             - ref_times[None, :]).argmin(axis=1)]
+                valid = (len(nearest) == len(set(nearest))
+                         and np.array_equal(nearest, times.order.to_numpy()))
+                if block.stim_seconds.iloc[0] == reference_duration:
+                    valid = (valid and len(times) == len(reference)
+                             and np.allclose(times.centre_s, ref_times, atol=.02, rtol=0))
+                compatible.loc[block.index] = valid
         mapped = frame.order.map(reference)
         frame['time_alignment_status'] = np.where(
-            mapped.notna(), '50 s reference by window order', 'no 50 s reference; original time')
+            mapped.notna(), f'{reference_duration:g} s reference by window order',
+            'no reference; original time')
         frame['centre_s'] = mapped.fillna(frame.original_centre_s)
+        frame['time_alignment_included'] = compatible
+        frame.loc[~compatible, 'time_alignment_status'] = (
+            'excluded: incompatible saved window layout; rerun with current batch window count')
         audit.append(frame[[c for c in ('condition_id', 'cell_index', 'rec_type',
             'stim_seconds', 'order', 'original_centre_s', 'centre_s',
-            'time_alignment_status') if c in frame]].drop_duplicates())
-        frames[index] = frame
+            'time_alignment_status', 'time_alignment_included') if c in frame]].drop_duplicates())
+        frames[index] = frame.loc[compatible].copy()
     return (*frames, pd.concat(audit, ignore_index=True).drop_duplicates()
             if audit else pd.DataFrame())
 
@@ -11617,6 +11660,34 @@ def population_ln_curve_mean_sem(
     return summary
 
 
+def fitted_temporal_population_curves(curves, parameters):
+    """Evaluate saved sigmoid fits on observed support, preserving axis scales.
+
+    Saved nl_y values are empirical bin means. They remain available in the
+    source files; plotting fitted NL models must evaluate alpha/beta/gamma/epsilon.
+    No smoothing, extrapolation, or refitting is performed here.
+    """
+    from scipy.special import ndtr
+    if curves.empty:
+        return curves
+    keys = ['condition_id', 'lightMean', 'order']
+    params = ['alpha', 'beta', 'gamma', 'epsilon']
+    if parameters.empty or not set(keys + params).issubset(parameters):
+        return curves.loc[curves.curve.ne('nonlinearity')].copy()
+    rows = curves.merge(parameters[keys + params].drop_duplicates(keys),
+                        on=keys, how='left', validate='many_to_one')
+    nl = rows.curve.eq('nonlinearity')
+    for name in params:
+        rows[name] = pd.to_numeric(rows[name], errors='coerce')
+    valid = np.isfinite(rows[params]).all(axis=1)
+    rows['empirical_y_normalized'] = rows.y_normalized
+    rows.loc[nl, 'y_normalized'] = (
+        rows.loc[nl, 'epsilon'] + rows.loc[nl, 'alpha'] * ndtr(
+            rows.loc[nl, 'beta'] * rows.loc[nl, 'x'] + rows.loc[nl, 'gamma'])
+        ) / rows.loc[nl, 'response_scale']
+    return rows.loc[~nl | valid].drop(columns=params)
+
+
 def normalize_temporal_ln_parameters(
         temporal_summary: pd.DataFrame,
         normalized_temporal_curves: pd.DataFrame) -> pd.DataFrame:
@@ -11673,9 +11744,14 @@ def population_temporal_parameter_mean_sem(
                'alpha_normalized', 'beta_normalized', 'gamma_normalized',
                'epsilon_normalized', 'slope_normalized',
                'alpha', 'beta', 'gamma', 'epsilon', 'slope']
-    return population_mean_sem(
+    summary = population_mean_sem(
         rows, [*POPULATION_TEMPORAL_GROUPS, 'light_state', 'order'],
         [metric for metric in metrics if metric in rows])
+    keys = [*POPULATION_TEMPORAL_GROUPS, 'light_state', 'order']
+    identity = 'condition_id' if 'condition_id' in rows else 'cell_id'
+    cohorts = rows.groupby(keys, dropna=False)[identity].agg(
+        lambda values: '|'.join(sorted(set(values.astype(str))))).rename('cohort_id').reset_index()
+    return summary.merge(cohorts, on=keys, validate='one_to_one')
 
 
 def _population_ln_title(block: pd.DataFrame) -> str:
@@ -11825,13 +11901,20 @@ def plot_population_temporal_parameters(
             x = block.centre_s_mean.to_numpy(float)
             y = block[f'{metric}_mean'].to_numpy(float)
             error = block[f'{metric}_sem'].fillna(0).to_numpy(float)
+            count = block.get(f'{metric}_n_cells', pd.Series(dtype=float))
+            label = f'{state} (n={int(count.min())}–{int(count.max())})' if len(count) else state
             ax.errorbar(x, y, yerr=error, color=colors[state], marker='o',
-                        ms=3.5, lw=1.3, capsize=2, label=state)
+                        linestyle='none', ms=3.5, lw=1.3, capsize=2, label=label)
+            cohorts = block.get('cohort_id', pd.Series('', index=block.index))
+            segment = cohorts.ne(cohorts.shift()).cumsum().to_numpy()
+            for group in np.unique(segment):
+                mask = segment == group
+                ax.plot(x[mask], y[mask], color=colors[state], lw=1.3)
         ax.set_xlabel('time since luminance step (s)')
         ax.set_ylabel(ylabel)
     axes[0, 0].legend(frameon=False, title='light mean')
-    fig.suptitle(_population_ln_title(summary))
-    fig.tight_layout(rect=(0, 0, 1, .96))
+    fig.suptitle(_population_ln_title(summary) + '\nLines connect unchanged condition cohorts only')
+    fig.tight_layout(rect=(0, 0, 1, .93))
     return fig
 
 
@@ -11860,7 +11943,7 @@ def _resample_condition_ln_curves(
                 'condition_id', 'date', 'cell_label', 'cell_type',
                 'rec_type', 'stim_seconds', 'light_contrast', 'lightMean',
                 'light_regime', 'duration_group_s', 'light_state', 'curve',
-                'whole_cell_baseline_shift_pa', 'cell_index', 'order'):
+                'whole_cell_baseline_shift_pa', 'cell_index', 'order', 'saved_at_ns'):
             if column in block:
                 piece[column] = identity[column]
         if temporal and 'window' in block:
@@ -11947,7 +12030,8 @@ def high_quality_population_ln_analysis(
         temporal_parameter_window_combine: int = 2,
         output_dir=None, grid_points: int = 101,
         retain_normalized: bool = False, normalized_ln: bool = True,
-        quality_selection: str = 'csv', static_r2_threshold: float = 0.4) -> dict:
+        quality_selection: str = 'csv', static_r2_threshold: float = 0.4,
+        fitted_temporal_nl: bool = False) -> dict:
     """Run Section 6c population LN curves and parameter trajectories.
 
     ``quality_selection`` chooses ``csv`` (visual Keep list), ``r2`` (static
@@ -12012,7 +12096,7 @@ def high_quality_population_ln_analysis(
     population_metadata = (
         'condition_id', 'date', 'cell_label', 'cell_id', 'cell_type',
         'rec_type', 'stim_seconds', 'light_contrast', 'cell_index',
-        'whole_cell_baseline_shift_pa')
+        'whole_cell_baseline_shift_pa', 'saved_at_ns')
     baseline_audit = []
     quality_audit = []
     static_pieces, temporal_pieces, parameter_pieces = [], [], []
@@ -12104,6 +12188,8 @@ def high_quality_population_ln_analysis(
             static, rec_types=None, normalized_ln=normalized_ln)
         temporal = normalize_population_ln_curves(
             temporal, temporal=True, rec_types=None, normalized_ln=normalized_ln)
+        if fitted_temporal_nl:
+            temporal = fitted_temporal_population_curves(temporal, parameters)
         baseline_audit.append({
             **{column: metadata.get(column, np.nan) for column in population_metadata},
             'baseline_shift_added_in_population_pa': 0.0,
@@ -12152,6 +12238,12 @@ def high_quality_population_ln_analysis(
                        if classification_pieces else pd.DataFrame())
     paired_condition_frame = pd.DataFrame(paired_conditions)
     temporal_condition_frame = pd.DataFrame(temporal_conditions)
+    if not temporal_condition_frame.empty:
+        temporal_condition_frame = temporal_condition_frame[
+            temporal_condition_frame.condition_id.isin(temporal_normalized.condition_id)]
+    included_temporal = set(temporal_condition_frame.get('condition_id', []))
+    for row in baseline_audit:
+        row['temporal_included'] = row['condition_id'] in included_temporal
     static_summary = population_ln_curve_mean_sem(
         static_normalized, grid_points=grid_points)
     temporal_curve_summary = population_ln_curve_mean_sem(
@@ -12163,6 +12255,7 @@ def high_quality_population_ln_analysis(
         'source_audit': source_audit,
         'quality_selection_audit': pd.DataFrame(quality_audit),
         'quality_selection': quality_selection,
+        'fitted_temporal_nl': bool(fitted_temporal_nl),
         'static_r2_threshold': float(static_r2_threshold),
         'temporal_time_alignment_audit': temporal_time_audit,
         'baseline_adjustment_audit': pd.DataFrame(

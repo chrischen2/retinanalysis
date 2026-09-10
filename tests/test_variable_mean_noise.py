@@ -3389,6 +3389,72 @@ def test_population_temporal_times_use_fifty_second_axis_and_exclude_thirty():
     assert parameters.groupby('order').centre_s.nunique().eq(1).all()
 
 
+def test_temporal_alignment_uses_latest_layout_not_majority_or_mixed_medians():
+    import pandas as pd
+    rows = []
+    for name, duration, centres, saved in [
+            ('old_a', 50., np.arange(2.5, 50., 3.), 1),
+            ('old_b', 50., np.arange(2.5, 50., 3.), 2),
+            ('latest', 50., [5.9, 15.7, 25.5, 35.3, 45.1], 3),
+            ('sixty', 60., [5.9167, 15.75, 25.5833, 35.4167], 4),
+            ('thirty', 30., [3.9, 9.7], 5)]:
+        rows.extend(dict(condition_id=name, stim_seconds=duration, order=i,
+                         centre_s=t, saved_at_ns=saved, alpha=42.)
+                    for i, t in enumerate(centres))
+    frame = pd.DataFrame(rows)
+    curves, params, audit = vmn.align_population_temporal_times(frame, frame)
+    assert set(curves.condition_id) == {'latest', 'sixty'}
+    assert params.groupby('order').centre_s.first().is_monotonic_increasing
+    assert params.alpha.eq(42.).all()
+    assert not audit[audit.condition_id.str.startswith('old')].time_alignment_included.any()
+    assert params[params.condition_id.eq('sixty')].centre_s.tolist() == [5.9, 15.7, 25.5, 35.3]
+
+
+def test_fitted_population_nl_uses_saved_parameters_and_preserves_filter():
+    import pandas as pd
+    curves = pd.DataFrame(dict(condition_id=['a']*4, lightMean=[1.]*4,
+        order=[0]*4, curve=['nonlinearity']*3+['filter'],
+        x=[-1., 0., 1., .01], y_normalized=[100., -100., 100., -.3],
+        response_scale=[10.]*4))
+    params = pd.DataFrame([dict(condition_id='a', lightMean=1., order=0,
+                               alpha=20., beta=2., gamma=.5, epsilon=-5.)])
+    result = vmn.fitted_temporal_population_curves(curves, params)
+    expected = vmn.sigmoid(np.array([-1., 0., 1.]), 20., 2., .5, -5.) / 10.
+    np.testing.assert_allclose(result.y_normalized.iloc[:3], expected)
+    assert result.y_normalized.iloc[3] == -.3
+
+
+def test_resaving_condition_replaces_all_older_temporal_bins(tmp_path, monkeypatch):
+    import copy
+    import pandas as pd
+    analysis, temporal = _population_analysis()
+    blocks = pd.DataFrame({'block_id': [11, 12], 'exp_name': [analysis.exp_name]*2,
+        'cell_label': ['Cell3']*2, 'protocol_name': [vmn.PROTOCOLS[0]]*2})
+    monkeypatch.setattr(vmn, 'led_attenuation', lambda row: {
+        'rig': 'B', 'led': 'Blue LED', 'led_color': 'blue', 'led_ndfs': '',
+        'optical_density': 0., 'attenuation': 1., 'unknown_tokens': '',
+        'filter_wheel_ndf': 0., 'wheel_tokens_ignored': '', 'wheel_ignored': True})
+    previous_stamp = 0
+    paths = []
+    for count in (8, 3, 5):
+        fits = {}
+        for level, models in temporal.items():
+            fits[level] = [copy.deepcopy(models[0]) for _ in range(count)]
+            for i, model in enumerate(fits[level]):
+                model.label = f'{1+i*2}.0-{3+i*2}.0 s'
+        path = vmn.save_condition_output(analysis, blocks, temporal_models=fits,
+                                         output_dir=tmp_path, verbose=False)
+        paths.append(path)
+        stamp = vmn._output_metadata(path)['saved_at_ns']
+        assert stamp > previous_stamp
+        previous_stamp = stamp
+        for table in ('temporal_summary', 'temporal_ln_curves'):
+            saved = vmn.load_population_table(table, output_dir=tmp_path)
+            assert saved.groupby('lightMean').order.nunique().eq(count).all()
+    assert len(set(paths)) == 1
+    assert len(list(tmp_path.rglob('*.h5'))) == 1
+
+
 def test_selectivity_map_handles_empty_and_different_generator_grids():
     import pandas as pd
     import matplotlib.pyplot as plt
