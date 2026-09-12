@@ -4357,3 +4357,77 @@ def test_review_raw_samples_bypass_all_preprocessing(monkeypatch, rec_type):
                                     whole_cell_baseline_shift_pa=4700, max_points=1)
     np.testing.assert_array_equal(fig.axes[0].lines[0].get_ydata(), amp[0])
     plt.close(fig)
+
+
+@pytest.fixture
+def standalone_batch_metadata(monkeypatch, tmp_path):
+    import pandas as pd
+    registry = pd.DataFrame({
+        'cell_index': [42, 43], 'exp_name': ['2021-08-18_B', '2021-09-01_A'],
+        'cell_label': ['Cell1', 'Cell2']})
+    path = tmp_path / 'registry.csv'
+    registry.to_csv(path, index=False)
+    monkeypatch.setattr(vmn, 'CELL_INDEX_REGISTRY_PATH', path)
+    blocks = registry.assign(block_id=[100, 200])
+    modes = pd.DataFrame({'block_id': [100, 200], 'rec_type': ['extracellular', 'exc']})
+    calls = []
+    def discover(exp_names=None, show=False):
+        calls.append(exp_names)
+        return blocks.copy() if exp_names is None else blocks[blocks.exp_name.isin(exp_names)].copy()
+    monkeypatch.setattr(vmn, 'find_blocks', discover)
+    monkeypatch.setattr(vmn, 'load_block_modes', lambda: modes.copy())
+    monkeypatch.setattr(vmn, 'find_protocol_cells', lambda blocks, **kw: blocks.copy())
+    return registry, blocks, modes, calls
+
+
+def test_standalone_batch_loads_selected_dates_and_reuses_modes(standalone_batch_metadata, monkeypatch):
+    registry, blocks, modes, calls = standalone_batch_metadata
+    monkeypatch.setattr(vmn, 'build_mode_cache', lambda *a, **k: pytest.fail('Cache was valid'))
+    result = vmn.load_batch_inputs(42)
+    assert result['cell_indices'] == (42,)
+    assert calls == [['2021-08-18_B']]
+    assert result['protocol_blocks'].block_id.tolist() == [100]
+    assert result['protocol_cells'].cell_index.tolist() == [42]
+    assert vmn.load_batch_inputs(None)['cell_indices'] == (42, 43)
+    assert calls[-1] is None
+
+
+def test_standalone_batch_refresh_preserves_full_mode_cache(standalone_batch_metadata, monkeypatch):
+    registry, blocks, modes, calls = standalone_batch_metadata
+    monkeypatch.setattr(vmn, 'load_block_modes', lambda: modes.iloc[:0])
+    refreshed = []
+    def rebuild(frame, **kw):
+        refreshed.append(frame.block_id.tolist())
+        return modes.copy()
+    monkeypatch.setattr(vmn, 'build_mode_cache', rebuild)
+    result = vmn.load_batch_inputs(42)
+    assert refreshed == [[100, 200]]
+    assert calls == [['2021-08-18_B'], None]
+    assert result['cell_indices'] == (42,)
+
+
+def test_standalone_batch_csv_resolves_identity_and_retained_modes(standalone_batch_metadata, tmp_path):
+    import pandas as pd
+    registry, blocks, modes, calls = standalone_batch_metadata
+    path = tmp_path / 'keep.csv'
+    pd.DataFrame([dict(cell_index=999, date='2021-08-18_B', cell_label='Cell1',
+                       rec_type='extracellular', is_example=False)]).to_csv(path, index=False)
+    result = vmn.load_batch_inputs(43, selection_path=path)
+    assert result['cell_indices'] == (42,)
+    assert result['kept_mode_overrides'] == {42: {'recording_types_to_analyze': ('extracellular',)}}
+    assert calls == [['2021-08-18_B']]
+
+
+def test_standalone_batch_empty_selection_skips_discovery(standalone_batch_metadata):
+    *_, calls = standalone_batch_metadata
+    result = vmn.load_batch_inputs([])
+    assert result['cell_indices'] == ()
+    assert calls == []
+
+
+def test_standalone_batch_unknown_indices_use_global_discovery(standalone_batch_metadata):
+    *_, calls = standalone_batch_metadata
+    result = vmn.load_batch_inputs([125])
+    assert calls == [None]
+    # Preserve the runner's per-cell failure handling for unavailable indices.
+    assert result['cell_indices'] == (125,)

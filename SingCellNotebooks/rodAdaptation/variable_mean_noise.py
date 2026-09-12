@@ -10678,6 +10678,65 @@ def saved_batch_baseline_settings(cell_index, protocol_cells, sources, overrides
     return dict(zip(names, policies[0])), 'saved whole-cell baseline policy', ' | '.join(paths)
 
 
+def load_batch_inputs(cell_indices=None, *, selection_path=None,
+                      refresh_mode_cache: bool = False) -> dict:
+    """Load Section 6 metadata without Section 1 variables or display output.
+
+    Known stable indices restrict discovery to their recording dates. None
+    selects all eligible cells. Unregistered indices use full discovery so
+    newly discovered cells retain Section 1's global index assignment. CSV
+    selections resolve by physical identity through the existing Keep loader.
+    A missing/outdated mode cache is rebuilt with the usual full discovery
+    context, preserving the classifier and acquisition-order rules.
+    """
+    indices = None if cell_indices is None else normalize_cell_indices(cell_indices)
+    experiments = None
+    if selection_path is not None:
+        selection = pd.read_csv(selection_path)
+        if not {'date', 'cell_label'}.issubset(selection):
+            raise ValueError(f'{selection_path} requires date and cell_label')
+        if selection.empty:
+            experiments = []
+        elif CELL_INDEX_REGISTRY_PATH.exists():
+            registry = pd.read_csv(CELL_INDEX_REGISTRY_PATH)
+            known_keys = set(zip(registry.exp_name, registry.cell_label))
+            if set(zip(selection.date, selection.cell_label)).issubset(known_keys):
+                experiments = sorted(selection.date.astype(str).unique())
+    elif indices is not None and CELL_INDEX_REGISTRY_PATH.exists():
+        registry = pd.read_csv(CELL_INDEX_REGISTRY_PATH)
+        known = registry[registry.cell_index.isin(indices)]
+        if set(indices).issubset(set(known.cell_index)):
+            experiments = sorted(known.exp_name.astype(str).unique())
+
+    if (indices == () and selection_path is None) or experiments == []:
+        cells = pd.DataFrame(columns=['cell_index', 'exp_name', 'cell_label'])
+        kept = (load_kept_cell_batch_selection(cells, path=selection_path)[1]
+                if selection_path is not None else {})
+        return dict(cell_indices=(), protocol_cells=cells,
+                    protocol_blocks=pd.DataFrame(), block_modes=pd.DataFrame(),
+                    kept_mode_overrides=kept)
+
+    blocks = find_blocks(exp_names=experiments, show=False)
+    modes = load_block_modes()
+    missing = set(blocks.block_id) - set(modes.block_id.dropna()) if len(blocks) else set()
+    if refresh_mode_cache or modes.empty or missing:
+        # build_mode_cache replaces its CSV: refresh all blocks, never just
+        # this batch's dates, so other cells keep their cached classification.
+        all_blocks = find_blocks(show=False) if experiments is not None else blocks
+        modes = build_mode_cache(all_blocks, verbose=False)
+    cells = find_protocol_cells(blocks, modes=modes, show=False)
+    if cells.empty:
+        cells = pd.DataFrame(columns=['cell_index', 'exp_name', 'cell_label'])
+    kept = {}
+    if selection_path is not None:
+        indices, kept = load_kept_cell_batch_selection(cells, path=selection_path)
+    elif indices is None:
+        indices = normalize_cell_indices(cells.cell_index)
+    return dict(cell_indices=indices, protocol_cells=cells,
+                protocol_blocks=blocks, block_modes=modes,
+                kept_mode_overrides=kept)
+
+
 def run_cell_analysis_batch(
         cell_indices,
         protocol_cells: pd.DataFrame,
@@ -11109,7 +11168,7 @@ def _review_figure_options(saved, group, rec_type):
 
 
 def build_cell_review_browser(
-        protocol_cells: pd.DataFrame, cell_indices=None, *, output_dir=None,
+        protocol_cells: Optional[pd.DataFrame] = None, cell_indices=None, *, output_dir=None,
         raw_traces: bool = False):
     """Adapt VariableMeanNoise saved conditions to the shared review browser.
 
@@ -11143,6 +11202,13 @@ def build_cell_review_browser(
         return [('Raw amplifier', path), *filtered_options]
 
     directory = condition_output_dir(output_dir)
+    if protocol_cells is None:
+        saved_index = load_condition_index(directory)
+        saved_index['cell_index'] = saved_index.current_cell_index.fillna(
+            saved_index.cell_index)
+        protocol_cells = (saved_index.rename(columns={'date': 'exp_name'})
+                          [['cell_index', 'exp_name', 'cell_label', 'cell_type']]
+                          .drop_duplicates(['exp_name', 'cell_label']))
     completed = saved_cell_analysis_index(
         protocol_cells, cell_indices, output_dir=directory)
     if completed.empty:
@@ -12889,7 +12955,7 @@ __all__ = [
     'run_core_ln_analysis', 'inspect_recording_conditions',
     'response_qc_signature', 'run_core_condition_analyses',
     'run_reconstruction_analyses', 'add_early_late_reconstruction',
-    'run_cell_sections_2_to_5', 'run_cell_analysis_batch',
+    'run_cell_sections_2_to_5', 'load_batch_inputs', 'run_cell_analysis_batch',
     'normalize_cell_indices',
     'save_cell_analysis_figures', 'load_cell_analysis_batch_summary',
     'saved_cell_analysis_index', 'load_saved_cell_analysis',
