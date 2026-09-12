@@ -97,8 +97,10 @@ def test_section_6b_contains_quality_summary_and_former_section_10():
              for cell in notebook['cells']}
     source = cells['high-quality-indices']
 
-    assert 'high_quality_population_overview_analysis' in source
-    assert 'mean_firing_rate_hz' in cells['high-quality-placeholder']
+    assert 'compare_matlab_roster_to_saved' in source
+    assert "groupby('corrected_date', sort=True)" in source
+    assert 'Not matched' in source
+    assert 'Saved, not kept' in source
     assert 'protocol_cells' not in source
     assert 'matlab_roster.copy' not in source
     assert 'matlab-saved-comparison-code' not in cells
@@ -4340,3 +4342,21 @@ def test_section5_saves_complete_batch_layout_from_existing_results(tmp_path, mo
             core_by_condition={key: core}, reconstruction_by_condition=reconstruction,
             raw_figures={}, output_dir=tmp_path, verbose=False)
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize('rec_type', ['extracellular', 'exc', 'inh'])
+def test_review_raw_samples_bypass_all_preprocessing(monkeypatch, rec_type):
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    catalog = pd.DataFrame({'epoch_number': [0], 'block_id': [10],
+                            'block_epoch': [0], 'stimTime': [4.], 'preTime': [0.]})
+    amp = np.array([[101., 205., 98., 302.]])
+    monkeypatch.setattr(vmn, 'load_block', lambda *args: (amp, 1000., None))
+    def unexpected(*args, **kwargs):
+        raise AssertionError('Raw review must bypass preprocessing')
+    monkeypatch.setattr(vmn, 'preprocess_spike_trace', unexpected)
+    monkeypatch.setattr(vmn, 'preprocess_whole_cell_trace', unexpected)
+    fig = vmn.plot_raw_epoch_traces('test', catalog, rec_type, raw=True,
+                                    whole_cell_baseline_shift_pa=4700, max_points=1)
+    np.testing.assert_array_equal(fig.axes[0].lines[0].get_ydata(), amp[0])
+    plt.close(fig)

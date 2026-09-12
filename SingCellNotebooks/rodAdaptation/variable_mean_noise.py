@@ -1863,7 +1863,8 @@ def plot_raw_epoch_traces(
         max_points: Optional[int] = None,
         row_height: float = 1.15,
         width: float = 12.0,
-        group_label: str = ''):
+        group_label: str = '',
+        raw: bool = False):
     """Plot the analysis-ready amplifier response in one row per epoch.
 
     Rows follow the cell-wide chronological ``epoch_number`` labels. Spike
@@ -1873,6 +1874,9 @@ def plot_raw_epoch_traces(
     recordings show the same binned current supplied to LN fitting. Requested
     removals remain visible in gray with a ``REMOVE`` label so the analyst can
     verify the edit before rerunning QC.
+
+    With ``raw=True``, show original amplifier samples without filtering,
+    binning, display averaging, or baseline adjustment.
     """
     import matplotlib.pyplot as plt
     from retinanalysis.utils import style
@@ -1908,7 +1912,10 @@ def plot_raw_epoch_traces(
         values = pd.Series(row._asdict())
         start, stop, _ = epoch_response_window(values, rate, amp.shape[1])
         full_trace = np.asarray(amp[block_epoch], dtype=float)
-        if spiking:
+        if raw:
+            reduced = full_trace[start:stop]
+            display_rate = rate
+        elif spiking:
             processed = preprocess_spike_trace(
                 full_trace, rate, median_window_ms=spike_median_window_ms,
                 high_pass_hz=spike_high_pass_hz)[start:stop]
@@ -1921,7 +1928,7 @@ def plot_raw_epoch_traces(
         else:
             reduced = _block_average(full_trace[start:stop], display_factor)
             display_rate = rate / display_factor
-        if max_points is not None and reduced.size > int(max_points):
+        if not raw and max_points is not None and reduced.size > int(max_points):
             display_step = int(np.ceil(reduced.size / int(max_points)))
             reduced = _block_average(reduced, display_step)
             display_rate /= display_step
@@ -1952,7 +1959,8 @@ def plot_raw_epoch_traces(
     first_epoch = int(catalog.epoch_number.min())
     last_epoch = int(catalog.epoch_number.max())
     fig.suptitle(
-        f'{exp_name}{group_text} | preprocessed amplifier traces | {processing} | '
+        f'{exp_name}{group_text} | '
+        f'{"raw amplifier traces" if raw else "preprocessed amplifier traces | " + processing} | '
         f'epoch labels {first_epoch}–{last_epoch}', fontsize=10, y=1.0)
     fig.tight_layout()
     return fig
@@ -11102,13 +11110,35 @@ def _review_figure_options(saved, group, rec_type):
 
 
 def build_cell_review_browser(
-        protocol_cells: pd.DataFrame, cell_indices=None, *, output_dir=None):
+        protocol_cells: pd.DataFrame, cell_indices=None, *, output_dir=None,
+        raw_traces: bool = False):
     """Adapt VariableMeanNoise saved conditions to the shared review browser.
 
     Keep/Remove retain cell x recording-type scope. Example flags retain
     physical-cell scope. Existing CSVs and notebook calls stay compatible.
     """
     from retinanalysis.utils.browse import saved_figure_review_browser
+    import tempfile
+
+    raw_cache = tempfile.TemporaryDirectory(prefix='vmn-raw-review-') if raw_traces else None
+
+    def figure_options(saved, group, rec_type):
+        if group != 'Raw trace' or not raw_traces:
+            return _review_figure_options(saved, group, rec_type)
+        path = Path(raw_cache.name) / f'{saved.cell_index}-{rec_type}.png'
+        if not path.exists():
+            import matplotlib.pyplot as plt
+            catalog = pd.read_csv(saved.output_dir / 'tables' / 'epoch_catalog.csv')
+            catalog = catalog.loc[catalog.assigned_rec_type.eq(rec_type)]
+            figure = plot_raw_epoch_traces(
+                saved.exp_name, catalog, rec_type, raw=True, group_label=rec_type)
+            if figure is None:
+                return []
+            try:
+                figure.savefig(path, dpi=120)
+            finally:
+                plt.close(figure)
+        return [('Original amplifier trace', path)]
 
     directory = condition_output_dir(output_dir)
     completed = saved_cell_analysis_index(
@@ -11141,7 +11171,7 @@ def build_cell_review_browser(
     browser = saved_figure_review_browser(
         options, load_item=load, sections=sections,
         panels=('Raw trace', 'LN model', 'Temporal LN', 'Decoding'),
-        figure_options=_review_figure_options,
+        figure_options=figure_options,
         describe=lambda saved, rec_type: (
             saved_cell_review_line(saved, rec_type)
             + f' | CSV: {directory / "kept_cell_selection.csv"}'),
@@ -11154,6 +11184,7 @@ def build_cell_review_browser(
     state['cell_selector'] = state['selector']
     state['rec_type_selector'] = state['section_selector']
     browser._vmn_browser_state = state
+    browser._vmn_raw_cache = raw_cache
     return browser
 
 
