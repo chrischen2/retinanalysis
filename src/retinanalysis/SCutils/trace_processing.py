@@ -64,13 +64,43 @@ def preprocess_spike_trace(trace: np.ndarray, sample_rate: float,
         cutoff_frequency=float(high_pass_hz))[0]
 
 
+def smooth_whole_cell_trace(trace: np.ndarray, span: int = 100) -> np.ndarray:
+    """MATLAB ``smooth(trace, span)`` moving average, at acquisition rate.
+
+    MATLAB reduces an even span to the preceding odd span (100 -> 99).
+    Endpoint windows grow/shrink symmetrically: 1, 3, 5, ... samples.
+    """
+    values = np.asarray(trace, dtype=float)
+    if values.ndim != 1:
+        raise ValueError('trace must be one-dimensional')
+    if int(span) != span or span < 1:
+        raise ValueError('span must be a positive integer')
+    if not values.size:
+        return values.copy()
+    window = min(int(span), values.size)
+    window -= 1 - window % 2
+    if window == 1:
+        return values.copy()
+    denominators = np.arange(1, window, 2)
+    start = np.cumsum(values[:window - 1])[::2] / denominators
+    end = (np.cumsum(values[:-(window):-1])[::2] / denominators)[::-1]
+    middle = np.convolve(values, np.ones(window) / window, mode='valid')
+    return np.concatenate((start, middle, end))
+
+
 def preprocess_whole_cell_trace(
         trace: np.ndarray, sample_rate: float,
-        bin_ms: float = 5.0) -> Tuple[np.ndarray, float]:
-    """Smooth and reduce a current trace by non-overlapping bin averages."""
+        bin_ms: Optional[float] = 5.0) -> Tuple[np.ndarray, float]:
+    """MATLAB smooth(..., 100), followed by optional analysis downsampling.
+
+    ``bin_ms=None`` returns the full-rate smoothed current for inspection.
+    """
+    smoothed = smooth_whole_cell_trace(trace, 100)
+    if bin_ms is None:
+        return smoothed, float(sample_rate)
     factor = milliseconds_to_samples(
         bin_ms, sample_rate, 'whole_cell_bin_ms', allow_zero=False)
-    return block_average(trace, factor), float(sample_rate) / factor
+    return block_average(smoothed, factor), float(sample_rate) / factor
 
 
 def normalize_epoch_baseline_target(value) -> str:
@@ -150,5 +180,5 @@ __all__ = [
     'EPOCH_BASELINE_TARGETS', 'EpochBaselineAlignment',
     'align_epoch_group_baselines', 'block_average',
     'milliseconds_to_samples', 'normalize_epoch_baseline_target',
-    'preprocess_spike_trace', 'preprocess_whole_cell_trace',
+    'preprocess_spike_trace', 'preprocess_whole_cell_trace', 'smooth_whole_cell_trace',
 ]

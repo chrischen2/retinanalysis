@@ -55,3 +55,23 @@ def test_baseline_alignment_requires_one_two_dimensional_group():
         tp.align_epoch_group_baselines(np.arange(4.0))
     with pytest.raises(ValueError, match='baseline target'):
         tp.align_epoch_group_baselines(np.ones((2, 4)), target='unknown')
+
+
+def test_whole_cell_smoothing_matches_matlab_even_span_and_endpoints():
+    # Reference produced by MATLAB smooth((0:9).^2, 100).
+    expected = np.array([0., 5/3, 6., 13., 68/3, 95/3, 40., 51., 194/3, 81.])
+    actual, rate = tp.preprocess_whole_cell_trace(np.arange(10.) ** 2, 10000., bin_ms=None)
+    np.testing.assert_allclose(actual, expected, rtol=0, atol=1e-12)
+    assert rate == 10000.
+    reduced, rate = tp.preprocess_whole_cell_trace(np.arange(10.) ** 2, 10000., bin_ms=.2)
+    np.testing.assert_allclose(reduced, expected.reshape(-1, 2).mean(axis=1))
+    assert rate == 5000.
+
+
+def test_whole_cell_smooth100_preserves_sample_count_and_impulse_area():
+    trace = np.zeros(401)
+    trace[200] = 99.
+    expected = np.zeros(401)
+    expected[151:250] = 1.
+    np.testing.assert_allclose(tp.smooth_whole_cell_trace(trace), expected, atol=1e-14)
+    assert tp.smooth_whole_cell_trace(trace).sum() == pytest.approx(99.)

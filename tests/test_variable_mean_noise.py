@@ -812,7 +812,7 @@ def test_spike_raw_plot_shows_shared_detector_preprocessing(monkeypatch):
     plt.close(figure)
 
 
-def test_whole_cell_bin_is_identical_in_raw_plot_and_ln_input(monkeypatch):
+def test_whole_cell_smoothing_is_identical_in_raw_plot_and_ln_input(monkeypatch):
     import matplotlib.pyplot as plt
     import pandas as pd
 
@@ -820,7 +820,7 @@ def test_whole_cell_bin_is_identical_in_raw_plot_and_ln_input(monkeypatch):
         'stimTime': [10.0], 'preTime': [0.0], 'lightMean': [1.0],
         'frequencyCutoff': [20.0],
     })
-    amp = np.arange(10.0)[None, :]
+    amp = (np.arange(10.0) ** 2)[None, :]
     catalog = pd.DataFrame({
         'epoch_number': [0], 'block_id': [1], 'block_epoch': [0],
         'stimTime': [10.0], 'preTime': [0.0],
@@ -841,10 +841,11 @@ def test_whole_cell_bin_is_identical_in_raw_plot_and_ln_input(monkeypatch):
         skip_seconds=0.0, whole_cell_bin_ms=2.0,
         whole_cell_baseline_shift_pa=250.0,
         align_epoch_means=False, fit=False, verbose=False)
-    expected = np.array([250.5, 252.5, 254.5, 256.5, 258.5])
+    smoothed = np.array([0., 5/3, 6., 13., 68/3, 95/3, 40., 51., 194/3, 81.])
+    expected = 250. + smoothed.reshape(-1, 2).mean(axis=1)
 
-    np.testing.assert_array_equal(figure.axes[0].lines[0].get_ydata(), expected)
-    np.testing.assert_array_equal(analysis.response[1.0][0], expected)
+    np.testing.assert_allclose(figure.axes[0].lines[0].get_ydata(), expected, atol=1e-12)
+    np.testing.assert_allclose(analysis.response[1.0][0], expected, atol=1e-12)
     np.testing.assert_array_equal(
         analysis.stimulus[1.0][0], [0.5, 2.5, 4.5, 6.5, 8.5])
     assert analysis.sampling_interval == 0.002
@@ -1493,7 +1494,10 @@ def test_epoch_response_summary_reports_whole_cell_modulation_in_pa(monkeypatch)
         whole_cell_baseline_shift_pa=250.0, show=False)
 
     np.testing.assert_allclose(summary.mean_current_pA, [260.0, 245.0])
-    np.testing.assert_allclose(summary.modulation_sd_pA, [3.0, 4.0])
+    # MATLAB smooth100 uses 99 samples inside and 1,3,...,97 at the ends.
+    attenuation = np.sqrt((2 * np.sum(1 / np.arange(1, 99, 2, dtype=float)**2)
+                           + 902 / 99**2) / 1000)
+    np.testing.assert_allclose(summary.modulation_sd_pA, np.array([3., 4.]) * attenuation)
 
 
 def _polarity_dataset(n_epochs=6, n_time=4000, lag=8, seed=0):

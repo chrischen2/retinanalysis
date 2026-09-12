@@ -1793,7 +1793,7 @@ def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
             n_samples = epoch_stop - epoch_start
             if spiking:
                 factor = max(int(downsample), 1)
-                # Already at the reduced rate: binned, then smoothed.
+                # Smooth at acquisition rate, then reduce for display.
                 samples = (np.asarray(spike_times[index], dtype=np.int64)
                            - epoch_start)
                 reduced = _spike_rate(samples, n_samples, rate,
@@ -1948,8 +1948,10 @@ def plot_raw_epoch_traces(
     processing = (f'{median_label} median subtraction + '
                   f'{float(spike_high_pass_hz):g} Hz high-pass + '
                   f'{display_factor:g}-sample display average'
-                  if spiking else (f'{float(whole_cell_bin_ms):g} ms bin average'
-                                    f'{shift_label}' if whole_cell else
+                  if spiking else ('MATLAB smooth(..., 100)'
+                                    + ('' if whole_cell_bin_ms is None else
+                                       f' + {float(whole_cell_bin_ms):g} ms downsampling')
+                                    + shift_label if whole_cell else
                                     f'raw, {display_factor:g}-sample display average'))
     first_epoch = int(catalog.epoch_number.min())
     last_epoch = int(catalog.epoch_number.max())
@@ -3429,6 +3431,7 @@ class ConditionAnalysis:
     spike_detection_method: str = 'legacy/unspecified'
     psth_processing_order: str = 'legacy/unspecified'
     whole_cell_bin_ms: float = 5.0
+    whole_cell_smoothing: str = 'legacy/unspecified'
     whole_cell_baseline_shift_pa: float = 0.0
     align_epoch_means: bool = True
     whole_cell_baseline_target: str = 'first_epoch'
@@ -3757,13 +3760,14 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
 
     **Reduction.** Everything is built at the amplifier rate and reduced once.
     Extracellular PSTHs use ``downsample`` (10, so 10 kHz to 1 kHz), while
-    whole-cell traces use ``whole_cell_bin_ms`` (5 ms by default):
+    whole-cell traces are smoothed with MATLAB smooth(..., 100), then
+    downsampled with ``whole_cell_bin_ms`` (5 ms by default):
 
     ==================  ==================================================
     stimulus            regenerated at the amplifier rate from the seed
     spiking response    spike times -> binary train -> Gaussian smoothed at
                         ``psth_sigma_ms`` (10 ms), all at the amplifier rate
-    whole-cell response recorded current -> ``whole_cell_bin_ms`` averages
+    whole-cell response current -> smooth(..., 100) -> ``whole_cell_bin_ms`` averages
     ==================  ==================================================
 
     The reduction is a **block average** (:func:`_block_average`), never
@@ -3938,6 +3942,8 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                     baseline = int(min(0.1 * sample_rate, trace.size))
                     trace = trace - float(np.mean(trace[:baseline]))
                 trace = trace + baseline_shift
+                trace, _ = preprocess_whole_cell_trace(
+                    trace, sample_rate, bin_ms=None)
             width = min(stimulus.size, trace.size)
             # The stimulus stays in raw intensity units: its contrast is
             # sigma/mean, and fit_ln_model normalises the filter by the ratio
@@ -3986,6 +3992,7 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
         spike_detection_method=('whole_epoch_kmeans' if spiking else 'not_applicable'),
         psth_processing_order=('smooth_then_downsample' if spiking else 'not_applicable'),
         whole_cell_bin_ms=float(whole_cell_bin_ms),
+        whole_cell_smoothing=('matlab_smooth_100' if whole_cell else 'not_applicable'),
         whole_cell_baseline_shift_pa=(baseline_shift if whole_cell else 0.0),
         align_epoch_means=bool(align_epoch_means),
         whole_cell_baseline_target=baseline_target_method,
@@ -6200,6 +6207,7 @@ def save_condition_output(
         h5.attrs['spike_detection_method'] = analysis.spike_detection_method
         h5.attrs['psth_processing_order'] = analysis.psth_processing_order
         h5.attrs['whole_cell_bin_ms'] = float(analysis.whole_cell_bin_ms)
+        h5.attrs['whole_cell_smoothing'] = analysis.whole_cell_smoothing
         h5.attrs['whole_cell_baseline_shift_pa'] = float(
             analysis.whole_cell_baseline_shift_pa)
         h5.attrs['align_epoch_means'] = bool(analysis.align_epoch_means)
@@ -9181,6 +9189,7 @@ def subset_analysis(analysis: ConditionAnalysis,
         spike_detection_method=analysis.spike_detection_method,
         psth_processing_order=analysis.psth_processing_order,
         whole_cell_bin_ms=analysis.whole_cell_bin_ms,
+        whole_cell_smoothing=analysis.whole_cell_smoothing,
         whole_cell_baseline_shift_pa=analysis.whole_cell_baseline_shift_pa,
         align_epoch_means=analysis.align_epoch_means,
         whole_cell_baseline_target=analysis.whole_cell_baseline_target,
@@ -9230,6 +9239,7 @@ def save_analysis(analysis: ConditionAnalysis, path) -> Path:
         'spike_detection_method': analysis.spike_detection_method,
         'psth_processing_order': analysis.psth_processing_order,
         'whole_cell_bin_ms': float(analysis.whole_cell_bin_ms),
+        'whole_cell_smoothing': analysis.whole_cell_smoothing,
         'whole_cell_baseline_shift_pa': float(
             analysis.whole_cell_baseline_shift_pa),
         'align_epoch_means': bool(analysis.align_epoch_means),
@@ -9287,6 +9297,7 @@ def load_analysis(path) -> ConditionAnalysis:
         spike_detection_method=meta.get('spike_detection_method', 'legacy/unspecified'),
         psth_processing_order=meta.get('psth_processing_order', 'legacy/unspecified'),
         whole_cell_bin_ms=meta.get('whole_cell_bin_ms', 5.0),
+        whole_cell_smoothing=meta.get('whole_cell_smoothing', 'legacy/unspecified'),
         whole_cell_baseline_shift_pa=meta.get(
             'whole_cell_baseline_shift_pa', 0.0),
         align_epoch_means=meta.get('align_epoch_means', True),
@@ -9724,7 +9735,7 @@ def response_qc_signature(
             float(spike_high_pass_hz), float(psth_sigma_ms),
             float(whole_cell_bin_ms), bool(align_epoch_means),
             baseline_target_method, baseline_shift,
-            'whole_epoch_kmeans/matlab_movmedian/smooth_then_downsample-v2')
+            'whole_epoch_kmeans/matlab_movmedian/whole_cell_smooth100-v3')
 
 
 def inspect_recording_conditions(
@@ -11176,7 +11187,7 @@ def _review_figure_options(saved, group, rec_type):
 
 def build_cell_review_browser(
         protocol_cells: Optional[pd.DataFrame] = None, cell_indices=None, *, output_dir=None,
-        raw_traces: bool = False):
+        raw_traces: bool = False, processed_traces: bool = False):
     """Adapt VariableMeanNoise saved conditions to the shared review browser.
 
     Keep/Remove retain cell x recording-type scope. Example flags retain
@@ -11185,44 +11196,32 @@ def build_cell_review_browser(
     from retinanalysis.utils.browse import saved_figure_review_browser
     import tempfile
 
-    raw_cache = tempfile.TemporaryDirectory(prefix='vmn-raw-review-') if raw_traces else None
+    # The former raw_traces flag remains a compatibility alias. Inspection
+    # now renders only the processed signal, never an extra raw-amplifier PNG.
+    processed_traces = bool(processed_traces or raw_traces)
+    trace_cache = (tempfile.TemporaryDirectory(prefix='vmn-processed-review-')
+                   if processed_traces else None)
+    trace_panel = 'Processed trace' if processed_traces else 'Raw trace'
 
     def figure_options(saved, group, rec_type):
-        if group != 'Raw trace' or not raw_traces:
+        if group != trace_panel or not processed_traces:
             return _review_figure_options(saved, group, rec_type)
-        path = Path(raw_cache.name) / f'{saved.cell_index}-{rec_type}.png'
+        path = Path(trace_cache.name) / f'{saved.cell_index}-{rec_type}-processed.png'
         if not path.exists():
             import matplotlib.pyplot as plt
             catalog = pd.read_csv(saved.output_dir / 'tables' / 'epoch_catalog.csv')
             catalog = catalog.loc[catalog.assigned_rec_type.eq(rec_type)]
             figure = plot_raw_epoch_traces(
-                saved.exp_name, catalog, rec_type, raw=True, group_label=rec_type)
+                saved.exp_name, catalog, rec_type, downsample=1,
+                spike_median_window_samples=100, spike_high_pass_hz=300.0,
+                whole_cell_bin_ms=None, group_label=rec_type)
             if figure is None:
                 return []
             try:
                 figure.savefig(path, dpi=120)
             finally:
                 plt.close(figure)
-        filtered_options = [
-            ('Filtered trace', saved_path)
-            for label, saved_path in _review_figure_options(saved, group, rec_type)]
-        if rec_type == 'extracellular':
-            filtered_path = Path(raw_cache.name) / f'{saved.cell_index}-filtered.png'
-            if not filtered_path.exists():
-                import matplotlib.pyplot as plt
-                catalog = pd.read_csv(saved.output_dir / 'tables' / 'epoch_catalog.csv')
-                catalog = catalog.loc[catalog.assigned_rec_type.eq(rec_type)]
-                figure = plot_raw_epoch_traces(
-                    saved.exp_name, catalog, rec_type, downsample=1,
-                    spike_median_window_samples=100, spike_high_pass_hz=300.0,
-                    group_label=rec_type)
-                if figure is not None:
-                    try:
-                        figure.savefig(filtered_path, dpi=120)
-                    finally:
-                        plt.close(figure)
-            filtered_options = [('Filtered trace', filtered_path)]
-        return [('Raw amplifier', path), *filtered_options]
+        return [('Processed trace', path)]
 
     directory = condition_output_dir(output_dir)
     if protocol_cells is None:
@@ -11261,8 +11260,7 @@ def build_cell_review_browser(
 
     browser = saved_figure_review_browser(
         options, load_item=load, sections=sections,
-        panels=('Raw trace', 'LN model', 'Temporal LN', 'Decoding'),
-        toggle_panels=('Raw trace',) if raw_traces else (),
+        panels=(trace_panel, 'LN model', 'Temporal LN', 'Decoding'),
         figure_options=figure_options,
         describe=lambda saved, rec_type: (
             saved_cell_review_line(saved, rec_type)
@@ -11276,7 +11274,9 @@ def build_cell_review_browser(
     state['cell_selector'] = state['selector']
     state['rec_type_selector'] = state['section_selector']
     browser._vmn_browser_state = state
-    browser._vmn_raw_cache = raw_cache
+    browser._vmn_raw_cache = trace_cache  # legacy handle for notebook integrations
+    if processed_traces:
+        state['figure_selectors'][trace_panel].layout.display = 'none'
     return browser
 
 
