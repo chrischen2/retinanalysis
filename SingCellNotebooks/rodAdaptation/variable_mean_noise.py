@@ -11138,9 +11138,9 @@ def build_cell_review_browser(
             finally:
                 plt.close(figure)
         filtered_options = [
-            (f'Filtered / preprocessed trace | {label}', saved_path)
+            ('Filtered trace', saved_path)
             for label, saved_path in _review_figure_options(saved, group, rec_type)]
-        return [('Original amplifier trace', path), *filtered_options]
+        return [('Raw amplifier', path), *filtered_options]
 
     directory = condition_output_dir(output_dir)
     completed = saved_cell_analysis_index(
@@ -11173,6 +11173,7 @@ def build_cell_review_browser(
     browser = saved_figure_review_browser(
         options, load_item=load, sections=sections,
         panels=('Raw trace', 'LN model', 'Temporal LN', 'Decoding'),
+        toggle_panels=('Raw trace',) if raw_traces else (),
         figure_options=figure_options,
         describe=lambda saved, rec_type: (
             saved_cell_review_line(saved, rec_type)

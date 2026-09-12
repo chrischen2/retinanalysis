@@ -150,7 +150,7 @@ def lazy_tabs(titles, render, description: str = '', widths=None):
 def saved_figure_review_browser(
         options, *, load_item, sections, panels, figure_options, describe,
         review_flags, set_keep, set_example, item_description='Cell:',
-        section_description='Recording:'):
+        section_description='Recording:', toggle_panels=()):
     """Browse saved PNGs and review an item using caller-supplied adapters.
 
     ``load_item(key)`` returns any caller-owned record. ``sections(item)`` gives
@@ -160,6 +160,7 @@ def saved_figure_review_browser(
     ``set_keep(item, section, bool)`` and ``set_example(item, bool)`` persist
     decisions; example scope is chosen by the caller. No database or protocol
     dependency, automatic display, or file mutation occurs on opening.
+    Panels listed in ``toggle_panels`` show all figure choices as buttons.
 
     The returned widget's ``review_state`` exposes selectors and buttons for
     notebook integration and testing. Missing images show an empty panel;
@@ -179,7 +180,12 @@ def saved_figure_review_browser(
     keep = widgets.Button(description='Keep', button_style='success', icon='check')
     remove = widgets.Button(description='Remove', button_style='danger', icon='trash')
     example = widgets.Button(description='Set example', icon='star-o')
-    selectors = {name: widgets.Dropdown(description=name + ':') for name in panels}
+    selectors = {
+        name: (widgets.ToggleButtons(description=name + ':',
+                                     style={'button_width': 'auto'},
+                                     layout=widgets.Layout(width='100%'))
+               if name in toggle_panels else widgets.Dropdown(description=name + ':'))
+        for name in panels}
     images = {name: widgets.Image(format='png', layout=widgets.Layout(
         width='100%', height='auto')) for name in panels}
     state = dict(item=None, selector=selector, section_selector=section_selector,
