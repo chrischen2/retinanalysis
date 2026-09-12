@@ -171,3 +171,18 @@ def test_pooled_clustering_rejects_small_events_promoted_by_empty_epochs(monkeyp
     assert len(local_times[2]) == 1       # contamination promoted locally
     assert fit_sizes == [11]              # one fit using every candidate
     assert [len(times) for times in pooled_times] == [1, 1, 0]
+
+
+def test_whole_epoch_clustering_preserves_sparse_spikes_and_rejects_quiet_noise():
+    """Quiet seconds must not redefine the spike class or veto true spikes."""
+    rng = np.random.default_rng(42)
+    trace = rng.normal(0, 1, 40000)
+    expected = np.arange(1000, 9000, 300)
+    x = np.arange(-20, 21)
+    waveform = -20 * np.exp(-(x / 2) ** 2) + 5 * np.exp(-((x - 6) / 3) ** 2)
+    for sample in expected:
+        trace[sample - 20:sample + 21] += waveform
+    detected, _, _ = spike_detector.detector(trace, max_trial_length_s=None)
+    assert len(detected[0]) == len(expected)
+    np.testing.assert_allclose(detected[0], expected, atol=2, rtol=0)
+    assert not np.any(detected[0] >= 10000)

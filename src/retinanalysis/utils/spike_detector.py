@@ -137,13 +137,19 @@ def detector(data_matrix, check_detection=False, sample_rate=1e4, refractory_per
     mode intentionally uses one fit across all trials and therefore does not
     section that shared fit.
 
+    Set ``max_trial_length_s=None`` to cluster each complete epoch, including
+    quiet intervals, against one spike/noise boundary. This prevents a quiet
+    one-second section from promoting its largest noise peaks to spikes.
+
     Returns ``(spike_times, spike_amplitudes, refractory_violations)``, each a
     list with one entry per trial. Spike times are in samples. ``verbose=True``
     prints per-trial diagnostics; by default only the caller sees the counts.
     """
     refractory_period_dp = refractory_period * sample_rate  # datapoints
     search_window_dp = search_window * sample_rate  # datapoints
-    max_trial_length_dp = int(max_trial_length_s * sample_rate)  # Convert seconds to datapoints
+    max_trial_length_dp = (np.asarray(data_matrix).shape[-1]
+                           if max_trial_length_s is None else
+                           int(max_trial_length_s * sample_rate))
 
     data_matrix = preprocess_spike_traces(
         data_matrix, sample_rate=sample_rate,

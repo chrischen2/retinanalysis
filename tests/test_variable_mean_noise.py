@@ -880,6 +880,7 @@ def test_load_block_converts_spike_preprocessing_ms_to_detector_samples(
 
     assert calls == [{
         'cutoff_frequency': 250.0,
+        'max_trial_length_s': None,
         'median_window_samples': 15,
     }]
 
@@ -1232,16 +1233,8 @@ def test_fit_sigmoid_reports_a_constrained_fit():
     assert clean['at_bounds'] == ()
 
 
-def test_psth_binning_matches_smoothing_at_the_full_rate():
-    """Binning then smoothing must equal smoothing then binning.
-
-    The PSTH used to be laid down at the amplifier's 10 kHz, Gaussian-smoothed
-    there, and only then block-averaged to the analysis rate -- a 302k-sample
-    array convolved with an 801-tap kernel per epoch, which was most of the
-    cost of loading a condition. Convolution commutes with the boxcar that
-    block-averaging applies, so doing it at the reduced rate is the same trace
-    for ~100x less arithmetic; this pins that they agree.
-    """
+def test_psth_smooths_exact_samples_before_downsampling():
+    """The processing path equals acquisition-rate convolution then averaging."""
     from scipy.ndimage import gaussian_filter1d
 
     rng = np.random.default_rng(0)
@@ -1255,12 +1248,16 @@ def test_psth_binning_matches_smoothing_at_the_full_rate():
     fast = vmn._spike_rate(spikes, n_samples, sample_rate, step, sigma_ms)
 
     assert fast.shape == slow.shape
-    assert np.corrcoef(slow, fast)[0, 1] > 0.999
-    # Absolute agreement relative to the peak rate, not to zero: the two orders
-    # differ only by where the boxcar falls, which is sub-bin.
-    assert np.max(np.abs(slow - fast)) < 0.05 * slow.max()
-    # Total spike count is preserved either way.
-    assert abs(fast.sum() - slow.sum()) < 0.01 * slow.sum()
+    np.testing.assert_allclose(fast, slow, rtol=1e-12, atol=1e-12)
+    assert fast.sum() / (sample_rate / step) == pytest.approx(len(spikes))
+
+
+def test_psth_preserves_sub_bin_spike_timing():
+    early = vmn._spike_rate([100], 1000, 10000., 10, 10.)
+    late = vmn._spike_rate([109], 1000, 10000., 10, 10.)
+    assert not np.array_equal(early, late)
+    assert early.sum() / 1000 == pytest.approx(1.)
+    assert late.sum() / 1000 == pytest.approx(1.)
 
 
 def test_epoch_response_summary_reports_exact_mean_firing_rate(monkeypatch):

@@ -1585,36 +1585,24 @@ def _excluded_epoch_set(excluded_epochs) -> set:
 
 def _spike_rate(spike_samples, n_samples: int, sample_rate: float,
                 downsample: int, sigma_ms: float) -> np.ndarray:
-    """A smoothed PSTH at the *reduced* rate, in Hz.
+    """Detect at acquisition resolution, smooth in Hz, then block-average.
 
-    Bin first, then smooth. The old order -- lay the spikes down at the
-    amplifier's 10 kHz, Gaussian-smooth there, then block-average to 1 kHz --
-    convolves a 302k-sample array with an 801-tap kernel per epoch, which cost
-    3.4 s for 19 epochs and was most of the time spent loading a condition.
-    Binning to the analysis rate first makes it a 30k-sample array and an
-    81-tap kernel, ~100x less arithmetic.
-
-    The result is the same to within rounding: block-averaging is a boxcar,
-    convolution commutes, and the Gaussian band-limits the train well below the
-    reduced Nyquist either way, so decimating before or after the smoothing
-    gives the same trace. Binning first is also the textbook PSTH -- a
-    histogram of spike counts, then smoothed.
+    ``sigma_ms`` is the Gaussian standard deviation (10 ms by default).
+    Smoothing precedes every reduction, preserving sub-bin spike timing.
+    Reflecting boundaries preserve the integral for a complete epoch.
     """
     from scipy.ndimage import gaussian_filter1d
 
     step = max(int(downsample), 1)
-    n_bins = n_samples // step
-    if n_bins <= 0:
+    if n_samples <= 0:
         return np.zeros(0, dtype=float)
     times = np.asarray(spike_samples, dtype=np.int64)
-    times = times[(times >= 0) & (times < n_bins * step)]
-    counts = np.bincount(times // step, minlength=n_bins)[:n_bins].astype(float)
-    reduced_rate = sample_rate / step
-    rate_hz = counts * reduced_rate
-    sigma_bins = float(sigma_ms) / 1e3 * reduced_rate
-    if sigma_bins > 0:
-        rate_hz = gaussian_filter1d(rate_hz, sigma_bins)
-    return rate_hz
+    times = times[(times >= 0) & (times < n_samples)]
+    rate_hz = np.bincount(times, minlength=n_samples).astype(float) * sample_rate
+    sigma_samples = float(sigma_ms) / 1e3 * sample_rate
+    if sigma_samples > 0:
+        rate_hz = gaussian_filter1d(rate_hz, sigma_samples)
+    return _block_average(rate_hz, step)
 
 
 def epoch_response_window(params, sample_rate: float,
@@ -2817,19 +2805,23 @@ def load_block(exp_name: str, block_id: int, spiking: bool,
 
     The arrays are handed out as-is rather than copied -- they are large, and
     every caller here reads them. Spike detection uses the supplied median and
-    high-pass settings, which are part of the cache key. Do not write into what
-    this returns.
+    high-pass settings, which are part of the cache key. Candidates are
+    clustered over the full epoch so quiet seconds cannot invent a local
+    spike class. Do not write into what this returns.
     """
     import retinanalysis as ra
 
     spike_settings = ((None if spike_median_window_ms is None else
                        float(spike_median_window_ms)),
                       float(spike_high_pass_hz)) if spiking else (None, None)
-    key = (str(exp_name), int(block_id), bool(spiking), *spike_settings)
+    key = (str(exp_name), int(block_id), bool(spiking), *spike_settings,
+           'whole-epoch-v1')
     hit = _cache_get(_BLOCK_CACHE, key)
     if hit is not None:
         return hit
-    detector_kwargs = {'cutoff_frequency': float(spike_high_pass_hz)}
+    # A quiet second must share the spike/noise boundary of its full epoch.
+    detector_kwargs = {'cutoff_frequency': float(spike_high_pass_hz),
+                       'max_trial_length_s': None}
     block = ra.SCResponseBlock(exp_name, int(block_id), b_spiking=False,
                                b_LED=True, verbose=False)
     amp = np.asarray(block.amp_data, dtype=float)
@@ -3427,6 +3419,8 @@ class ConditionAnalysis:
     spike_median_window_ms: Optional[float] = 5.0
     spike_high_pass_hz: float = 300.0
     psth_sigma_ms: float = 10.0
+    spike_detection_method: str = 'legacy/unspecified'
+    psth_processing_order: str = 'legacy/unspecified'
     whole_cell_bin_ms: float = 5.0
     whole_cell_baseline_shift_pa: float = 0.0
     align_epoch_means: bool = True
@@ -3924,19 +3918,13 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                 row, sample_rate, amp.shape[1])
             n_samples = epoch_stop - epoch_start
             if spiking:
-                # Built at the reduced rate directly -- see `_spike_rate`. It
-                # is upsampled back by repetition only so the trimming and
-                # alignment below stay in amplifier samples like the stimulus;
-                # `_block_average` then returns exactly these values.
+                # Smooth exact spike times at the acquisition rate. Trimming
+                # and the single final block average below are shared with
+                # the stimulus so their sample alignment is preserved.
                 samples = (np.asarray(spike_times[index], dtype=np.int64)
                            - epoch_start)
-                reduced = _spike_rate(samples, n_samples,
-                                      sample_rate, downsample, psth_sigma_ms)
-                trace = np.repeat(reduced, max(int(downsample), 1))
-                if trace.size < n_samples:
-                    trace = np.concatenate(
-                        [trace, np.full(n_samples - trace.size,
-                                        trace[-1] if trace.size else 0.0)])
+                trace = _spike_rate(samples, n_samples,
+                                    sample_rate, 1, psth_sigma_ms)
             else:
                 trace = amp[index, epoch_start:epoch_stop]
                 if subtract_baseline:
@@ -3988,6 +3976,8 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
         spike_median_window_ms=spike_median_window_ms,
         spike_high_pass_hz=float(spike_high_pass_hz),
         psth_sigma_ms=float(psth_sigma_ms),
+        spike_detection_method=('whole_epoch_kmeans' if spiking else 'not_applicable'),
+        psth_processing_order=('smooth_then_downsample' if spiking else 'not_applicable'),
         whole_cell_bin_ms=float(whole_cell_bin_ms),
         whole_cell_baseline_shift_pa=(baseline_shift if whole_cell else 0.0),
         align_epoch_means=bool(align_epoch_means),
@@ -6200,6 +6190,8 @@ def save_condition_output(
             float(analysis.spike_median_window_ms))
         h5.attrs['spike_high_pass_hz'] = float(analysis.spike_high_pass_hz)
         h5.attrs['psth_sigma_ms'] = float(analysis.psth_sigma_ms)
+        h5.attrs['spike_detection_method'] = analysis.spike_detection_method
+        h5.attrs['psth_processing_order'] = analysis.psth_processing_order
         h5.attrs['whole_cell_bin_ms'] = float(analysis.whole_cell_bin_ms)
         h5.attrs['whole_cell_baseline_shift_pa'] = float(
             analysis.whole_cell_baseline_shift_pa)
@@ -9179,6 +9171,8 @@ def subset_analysis(analysis: ConditionAnalysis,
         spike_median_window_ms=analysis.spike_median_window_ms,
         spike_high_pass_hz=analysis.spike_high_pass_hz,
         psth_sigma_ms=analysis.psth_sigma_ms,
+        spike_detection_method=analysis.spike_detection_method,
+        psth_processing_order=analysis.psth_processing_order,
         whole_cell_bin_ms=analysis.whole_cell_bin_ms,
         whole_cell_baseline_shift_pa=analysis.whole_cell_baseline_shift_pa,
         align_epoch_means=analysis.align_epoch_means,
@@ -9226,6 +9220,8 @@ def save_analysis(analysis: ConditionAnalysis, path) -> Path:
         'spike_median_window_ms': analysis.spike_median_window_ms,
         'spike_high_pass_hz': float(analysis.spike_high_pass_hz),
         'psth_sigma_ms': float(analysis.psth_sigma_ms),
+        'spike_detection_method': analysis.spike_detection_method,
+        'psth_processing_order': analysis.psth_processing_order,
         'whole_cell_bin_ms': float(analysis.whole_cell_bin_ms),
         'whole_cell_baseline_shift_pa': float(
             analysis.whole_cell_baseline_shift_pa),
@@ -9281,6 +9277,8 @@ def load_analysis(path) -> ConditionAnalysis:
         spike_median_window_ms=meta.get('spike_median_window_ms', 5.0),
         spike_high_pass_hz=meta.get('spike_high_pass_hz', 300.0),
         psth_sigma_ms=meta.get('psth_sigma_ms', 10.0),
+        spike_detection_method=meta.get('spike_detection_method', 'legacy/unspecified'),
+        psth_processing_order=meta.get('psth_processing_order', 'legacy/unspecified'),
         whole_cell_bin_ms=meta.get('whole_cell_bin_ms', 5.0),
         whole_cell_baseline_shift_pa=meta.get(
             'whole_cell_baseline_shift_pa', 0.0),
@@ -9718,7 +9716,8 @@ def response_qc_signature(
              float(spike_median_window_ms)),
             float(spike_high_pass_hz), float(psth_sigma_ms),
             float(whole_cell_bin_ms), bool(align_epoch_means),
-            baseline_target_method, baseline_shift)
+            baseline_target_method, baseline_shift,
+            'whole_epoch_kmeans/smooth_then_downsample-v1')
 
 
 def inspect_recording_conditions(
