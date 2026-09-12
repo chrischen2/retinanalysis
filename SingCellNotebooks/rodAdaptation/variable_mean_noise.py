@@ -11138,7 +11138,10 @@ def build_cell_review_browser(
                 figure.savefig(path, dpi=120)
             finally:
                 plt.close(figure)
-        return [('Original amplifier trace', path)]
+        filtered_options = [
+            (f'Filtered / preprocessed trace | {label}', saved_path)
+            for label, saved_path in _review_figure_options(saved, group, rec_type)]
+        return [('Original amplifier trace', path), *filtered_options]
 
     directory = condition_output_dir(output_dir)
     completed = saved_cell_analysis_index(
