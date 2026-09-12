@@ -1646,7 +1646,7 @@ def epoch_response_summary(
         stim_time_ms: Optional[float] = None,
         light_contrast: Optional[float] = None,
         excluded_epochs=(),
-        spike_median_window_ms: Optional[float] = 5.0,
+        spike_median_window_ms: Optional[float] = 10.0,
         spike_high_pass_hz: float = 300.0,
         whole_cell_bin_ms: float = 5.0,
         whole_cell_baseline_shift_pa: float = 0.0,
@@ -1744,7 +1744,7 @@ def plot_traces(exp_name: str, block_ids: Sequence[int], rec_type: str,
                 stim_time_ms: Optional[float] = None,
                 light_contrast: Optional[float] = None,
                 excluded_epochs=(),
-                spike_median_window_ms: Optional[float] = 5.0,
+                spike_median_window_ms: Optional[float] = 10.0,
                 spike_high_pass_hz: float = 300.0,
                 psth_sigma_ms: float = 10.0,
                 whole_cell_bin_ms: float = 5.0,
@@ -1844,7 +1844,7 @@ def plot_raw_epoch_traces(
         rec_type: str,
         remove_epochs: Sequence[int] = (),
         downsample: int = 20,
-        spike_median_window_ms: Optional[float] = 5.0,
+        spike_median_window_ms: Optional[float] = 10.0,
         spike_high_pass_hz: float = 300.0,
         whole_cell_bin_ms: float = 5.0,
         whole_cell_baseline_shift_pa: float = 0.0,
@@ -2799,7 +2799,7 @@ def clear_caches() -> None:
 
 
 def load_block(exp_name: str, block_id: int, spiking: bool,
-               spike_median_window_ms: Optional[float] = 5.0,
+               spike_median_window_ms: Optional[float] = 10.0,
                spike_high_pass_hz: float = 300.0):
     """``(amp, sample_rate, spike_times)`` for one block, memoised.
 
@@ -2815,7 +2815,7 @@ def load_block(exp_name: str, block_id: int, spiking: bool,
                        float(spike_median_window_ms)),
                       float(spike_high_pass_hz)) if spiking else (None, None)
     key = (str(exp_name), int(block_id), bool(spiking), *spike_settings,
-           'whole-epoch-v1')
+           'whole-epoch-matlab-median-v2')
     hit = _cache_get(_BLOCK_CACHE, key)
     if hit is not None:
         return hit
@@ -3416,7 +3416,7 @@ class ConditionAnalysis:
     # the group mean and the windowed models are built from exactly the same
     # data rather than reloaded and re-reduced.
     sampling_interval: float = np.nan
-    spike_median_window_ms: Optional[float] = 5.0
+    spike_median_window_ms: Optional[float] = 10.0
     spike_high_pass_hz: float = 300.0
     psth_sigma_ms: float = 10.0
     spike_detection_method: str = 'legacy/unspecified'
@@ -3651,7 +3651,7 @@ def analyze_condition(exp_name: str, block_ids: Sequence[int],
                       filter_length_s: float = 1.0,
                       downsample: int = 10,
                       psth_sigma_ms: float = 10.0,
-                      spike_median_window_ms: Optional[float] = 5.0,
+                      spike_median_window_ms: Optional[float] = 10.0,
                       spike_high_pass_hz: float = 300.0,
                       whole_cell_bin_ms: float = 5.0,
                       n_bins: int = 100,
@@ -9594,7 +9594,7 @@ def run_core_ln_analysis(
         frequency_cutoff: Optional[float] = None,
         n_bins: int = 100,
         psth_sigma_ms: float = 10.0,
-        spike_median_window_ms: Optional[float] = 5.0,
+        spike_median_window_ms: Optional[float] = 10.0,
         spike_high_pass_hz: float = 300.0,
         whole_cell_bin_ms: float = 5.0,
         mean_window_s: float = 2.0,
@@ -9687,7 +9687,7 @@ def response_qc_signature(
         min_firing_rate_hz: float,
         min_whole_cell_modulation_pa: float,
         low_response_epoch_fraction: float,
-        spike_median_window_ms: Optional[float] = 5.0,
+        spike_median_window_ms: Optional[float] = 10.0,
         spike_high_pass_hz: float = 300.0,
         psth_sigma_ms: float = 10.0,
         whole_cell_bin_ms: float = 5.0,
@@ -9717,7 +9717,7 @@ def response_qc_signature(
             float(spike_high_pass_hz), float(psth_sigma_ms),
             float(whole_cell_bin_ms), bool(align_epoch_means),
             baseline_target_method, baseline_shift,
-            'whole_epoch_kmeans/smooth_then_downsample-v1')
+            'whole_epoch_kmeans/matlab_movmedian/smooth_then_downsample-v2')
 
 
 def inspect_recording_conditions(
@@ -9729,7 +9729,7 @@ def inspect_recording_conditions(
         min_firing_rate_hz: float,
         min_whole_cell_modulation_pa: float,
         low_response_epoch_fraction: float,
-        spike_median_window_ms: Optional[float] = 5.0,
+        spike_median_window_ms: Optional[float] = 10.0,
         spike_high_pass_hz: float = 300.0,
         psth_sigma_ms: float = 10.0,
         whole_cell_bin_ms: float = 5.0,
@@ -9920,7 +9920,7 @@ def run_core_condition_analyses(
         low_response_epoch_fraction: float,
         skip_seconds: float = 1.0,
         downsample: int = 10,
-        spike_median_window_ms: Optional[float] = 5.0,
+        spike_median_window_ms: Optional[float] = 10.0,
         spike_high_pass_hz: float = 300.0,
         psth_sigma_ms: float = 10.0,
         whole_cell_bin_ms: float = 5.0,
@@ -10015,7 +10015,7 @@ def run_reconstruction_analyses(
         direction_min_change_quantile: float,
         trace_seconds: Tuple[float, float],
         downsample: int = 10,
-        spike_median_window_ms: Optional[float] = 5.0,
+        spike_median_window_ms: Optional[float] = 10.0,
         spike_high_pass_hz: float = 300.0,
         psth_sigma_ms: float = 10.0,
         whole_cell_bin_ms: float = 5.0,
@@ -10150,7 +10150,7 @@ class CellAnalysisSettings:
     align_epoch_means: bool = True
     whole_cell_baseline_target: str = 'first_epoch'
     whole_cell_baseline_shift_pa: float = 0.0
-    spike_median_window_ms: Optional[float] = 5.0
+    spike_median_window_ms: Optional[float] = 10.0
     spike_high_pass_hz: float = 300.0
     psth_sigma_ms: float = 10.0
     whole_cell_bin_ms: float = 5.0

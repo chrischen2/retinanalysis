@@ -50,7 +50,7 @@ def block_average(trace: np.ndarray, factor: int) -> np.ndarray:
 
 
 def preprocess_spike_trace(trace: np.ndarray, sample_rate: float,
-                           median_window_ms: Optional[float] = 5.0,
+                           median_window_ms: Optional[float] = 10.0,
                            high_pass_hz: float = 300.0) -> np.ndarray:
     """Median-detrend and high-pass one trace exactly as the detector does."""
     from retinanalysis.utils.spike_detector import preprocess_spike_traces

@@ -2636,7 +2636,7 @@ def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
         assert stored.attrs['n_epochs'] == 4
         assert stored.attrs['cell_index'] == 19
         assert stored.attrs['mean_rate_hz'] == pytest.approx(39.5)
-        assert stored.attrs['spike_median_window_ms'] == 5.0
+        assert stored.attrs['spike_median_window_ms'] == 10.0
         assert stored.attrs['spike_high_pass_hz'] == 300.0
         assert stored.attrs['psth_sigma_ms'] == 10.0
         assert stored.attrs['whole_cell_bin_ms'] == 5.0
@@ -2658,7 +2658,7 @@ def test_condition_output_keeps_selected_led_metadata_and_excludes_lnk(
     assert 'output_version' not in index
     assert index.loc[0, [
         'spike_median_window_ms', 'spike_high_pass_hz',
-        'psth_sigma_ms', 'whole_cell_bin_ms']].tolist() == [5.0, 300.0, 10.0, 5.0]
+        'psth_sigma_ms', 'whole_cell_bin_ms']].tolist() == [10.0, 300.0, 10.0, 5.0]
     assert index.loc[0, 'whole_cell_baseline_shift_pa'] == 1250.0
     assert index.loc[0, 'whole_cell_baseline_target'] == 'first_epoch'
     assert bool(index.loc[0, 'align_epoch_means'])

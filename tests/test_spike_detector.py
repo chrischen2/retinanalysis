@@ -45,7 +45,7 @@ def test_get_rebounds_handles_empty_candidates():
 
 
 def test_detector_removes_moving_median_before_high_pass(monkeypatch):
-    """The default 50-sample moving median removes slow baseline offsets."""
+    """The default 100-sample moving median removes slow baseline offsets."""
     trace = np.r_[np.full(150, 4.0), np.full(150, 40.0)]
     captured = {}
 
@@ -62,24 +62,28 @@ def test_detector_removes_moving_median_before_high_pass(monkeypatch):
     assert np.max(np.abs(detrended)) <= 36.0
 
 
-def test_detector_default_median_window_is_50_samples(monkeypatch):
-    import scipy.ndimage
-
+def test_detector_default_median_window_is_100_samples(monkeypatch):
     captured = {}
-
-    def capture_median(values, size, mode):
-        captured['size'] = size
-        captured['mode'] = mode
+    def capture_median(values, window):
+        captured['window'] = window
         return np.zeros_like(values)
+    monkeypatch.setattr(spike_detector, 'moving_median', capture_median)
+    monkeypatch.setattr(spike_detector, 'high_pass_filter',
+                        lambda values, cutoff, interval: np.zeros_like(values))
+    spike_detector.detector(np.zeros(200), sample_rate=10_000.0)
+    assert captured == {'window': 100}
 
-    monkeypatch.setattr(scipy.ndimage, 'median_filter', capture_median)
-    monkeypatch.setattr(
-        spike_detector, 'high_pass_filter',
-        lambda values, cutoff, interval: np.zeros_like(values))
 
-    spike_detector.detector(np.zeros(100), sample_rate=10_000.0)
-
-    assert captured == {'size': (1, 50), 'mode': 'nearest'}
+def test_moving_median_matches_matlab_even_window_and_shrinking_endpoints():
+    traces = np.vstack([np.arange(10.), np.arange(10.)[::-1]])
+    expected = np.array([[.5, 1., 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.],
+                         [8.5, 8., 7.5, 6.5, 5.5, 4.5, 3.5, 2.5, 1.5, 1.]])
+    np.testing.assert_array_equal(spike_detector.moving_median(traces, 4), expected)
+    for window in (3, 100):
+        half = window // 2
+        expected = np.array([[np.median(row[max(0, i-half):min(len(row), i+window-half)])
+                              for i in range(len(row))] for row in traces])
+        np.testing.assert_array_equal(spike_detector.moving_median(traces, window), expected)
 
 
 def test_detector_consumes_shared_preprocessed_trace(monkeypatch):

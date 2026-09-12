@@ -91,11 +91,11 @@ def detector(data_matrix, check_detection=False, sample_rate=1e4, refractory_per
              min_peak_amplitude=0, n_clusters=2, threshold_spike_factor=3,
              remove_refractory_violations=True, max_trial_length_s=1, str_save_dir=None,
              verbose=False, cluster_across_trials=False,
-             median_window_samples=50):
+             median_window_samples=100):
     """Detect spikes in extracellular / cell-attached traces; port of SpikeDetectorNew.m.
 
     Each row of ``data_matrix`` is one trial. Before high-pass filtering, a
-    50-sample moving median is subtracted from each trace (5 ms at the default
+    100-sample moving median is subtracted from each trace (10 ms at the default
     10 kHz sample rate), preventing abrupt baseline shifts from becoming
     candidate spikes. Set ``median_window_samples`` to 0 or ``None`` to
     disable that detrending. Every remaining local extremum is
@@ -564,8 +564,22 @@ def get_rebounds(peaks_ind, trace, search_interval):
 
     return r
 
+def moving_median(traces, window):
+    """MATLAB ``movmedian(trace, window)`` for finite amplifier samples.
+
+    Even windows straddle the current and previous sample and average the
+    middle pair. End windows shrink instead of replicating endpoint values.
+    Each row is processed independently.
+    """
+    import pandas as pd
+
+    values = np.asarray(traces, dtype=float)
+    return (pd.DataFrame(values.T).rolling(window=int(window), center=True,
+                                           min_periods=1).median().to_numpy().T)
+
+
 def preprocess_spike_traces(data_matrix, sample_rate=1e4,
-                            median_window_samples=50,
+                            median_window_samples=100,
                             cutoff_frequency=300):
     """Return the exact voltage traces consumed by :func:`detector`.
 
@@ -586,12 +600,10 @@ def preprocess_spike_traces(data_matrix, sample_rate=1e4,
     if not np.isfinite(cutoff) or not 0 < cutoff < rate / 2:
         raise ValueError('cutoff_frequency must lie between 0 and Nyquist')
     if median_window_samples:
-        from scipy.ndimage import median_filter
-
         window = int(median_window_samples)
         if window < 1:
             raise ValueError('median_window_samples must be positive, 0, or None')
-        baseline = median_filter(traces, size=(1, window), mode='nearest')
+        baseline = moving_median(traces, window)
         traces = traces - baseline
     return high_pass_filter(traces, cutoff, 1 / rate)
 
