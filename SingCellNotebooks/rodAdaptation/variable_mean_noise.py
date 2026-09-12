@@ -1852,7 +1852,8 @@ def plot_raw_epoch_traces(
         row_height: float = 1.15,
         width: float = 12.0,
         group_label: str = '',
-        raw: bool = False):
+        raw: bool = False,
+        spike_median_window_samples: Optional[int] = None):
     """Plot the analysis-ready amplifier response in one row per epoch.
 
     Rows follow the cell-wide chronological ``epoch_number`` labels. Spike
@@ -1865,6 +1866,8 @@ def plot_raw_epoch_traces(
 
     With ``raw=True``, show original amplifier samples without filtering,
     binning, display averaging, or baseline adjustment.
+    ``spike_median_window_samples`` overrides the millisecond setting when
+    the inspector needs an exact sample-count window at any acquisition rate.
     """
     import matplotlib.pyplot as plt
     from retinanalysis.utils import style
@@ -1905,7 +1908,9 @@ def plot_raw_epoch_traces(
             display_rate = rate
         elif spiking:
             processed = preprocess_spike_trace(
-                full_trace, rate, median_window_ms=spike_median_window_ms,
+                full_trace, rate, median_window_ms=(spike_median_window_ms
+                    if spike_median_window_samples is None else
+                    1e3 * spike_median_window_samples / rate),
                 high_pass_hz=spike_high_pass_hz)[start:stop]
             reduced = _block_average(processed, display_factor)
             display_rate = rate / display_factor
@@ -1936,6 +1941,8 @@ def plot_raw_epoch_traces(
     group_text = f' | assigned {group_label}' if group_label else ''
     median_label = ('off' if spike_median_window_ms is None else
                     f'{float(spike_median_window_ms):g} ms')
+    if spike_median_window_samples is not None:
+        median_label = f'{spike_median_window_samples:g} samples'
     shift_label = ('' if not whole_cell or baseline_shift == 0 else
                    f' + manual baseline shift {baseline_shift:+g} pA')
     processing = (f'{median_label} median subtraction + '
@@ -11199,6 +11206,22 @@ def build_cell_review_browser(
         filtered_options = [
             ('Filtered trace', saved_path)
             for label, saved_path in _review_figure_options(saved, group, rec_type)]
+        if rec_type == 'extracellular':
+            filtered_path = Path(raw_cache.name) / f'{saved.cell_index}-filtered.png'
+            if not filtered_path.exists():
+                import matplotlib.pyplot as plt
+                catalog = pd.read_csv(saved.output_dir / 'tables' / 'epoch_catalog.csv')
+                catalog = catalog.loc[catalog.assigned_rec_type.eq(rec_type)]
+                figure = plot_raw_epoch_traces(
+                    saved.exp_name, catalog, rec_type, downsample=1,
+                    spike_median_window_samples=100, spike_high_pass_hz=300.0,
+                    group_label=rec_type)
+                if figure is not None:
+                    try:
+                        figure.savefig(filtered_path, dpi=120)
+                    finally:
+                        plt.close(figure)
+            filtered_options = [('Filtered trace', filtered_path)]
         return [('Raw amplifier', path), *filtered_options]
 
     directory = condition_output_dir(output_dir)
