@@ -12461,13 +12461,25 @@ def _adaptation_curve_grid(summary: pd.DataFrame, *, curve: str = 'nonlinearity'
     return pd.concat(pieces, ignore_index=True) if pieces else pd.DataFrame()
 
 
+def _adaptation_heatmap_grid(table: pd.DataFrame, value: str):
+    """Align window-specific generator coordinates without extrapolating support."""
+    x = np.linspace(table.x.min(), table.x.max(), 201)
+    rows, times = [], []
+    for centre, block in table.groupby('centre_s', sort=True):
+        samples = block.groupby('x')[value].mean().sort_index()
+        rows.append(np.interp(x, samples.index.to_numpy(float),
+                              samples.to_numpy(float), left=np.nan, right=np.nan))
+        times.append(centre)
+    return pd.DataFrame(rows, index=times, columns=x)
+
+
 def plot_population_adaptation_selectivity_map(summary: pd.DataFrame,
         *, cell_types=('ON-midget', 'ON-parasol'), light_state='high'):
     """Plot midget-versus-parasol preference over generator drive and time.
 
-    Color is the bounded preference index ``(M-P)/(|M|+|P|)``.  A separate
-    response panel is intentionally retained by the caller: preference alone
-    is not evidence when both classes are silent.
+    Color is the bounded preference index ``(M-P)/(|M|+|P|)``.
+    Smooth color interpolation is display-only; population values are unchanged.
+    Preference alone does not indicate response strength.
     """
     import matplotlib.pyplot as plt
     from retinanalysis.utils import style
@@ -12501,18 +12513,23 @@ def plot_population_adaptation_selectivity_map(summary: pd.DataFrame,
     if not maps:
         return None
     table = pd.concat(maps, ignore_index=True)
-    pivot = table.pivot_table(index='centre_s', columns='x', values='preference',
-                              aggfunc='mean').sort_index()
+    pivot = _adaptation_heatmap_grid(table, 'preference')
     if pivot.empty or not np.isfinite(pivot.to_numpy(float)).any():
         return None
     style.apply_publication_style()
     fig, ax = plt.subplots(figsize=(8.4, 4.5))
     mesh = ax.pcolormesh(pivot.columns.to_numpy(float), pivot.index.to_numpy(float),
-                         pivot.to_numpy(float), cmap='coolwarm', vmin=-1, vmax=1,
-                         shading='auto')
-    fig.colorbar(mesh, ax=ax, label='midget–parasol preference')
+                         np.ma.masked_invalid(pivot.to_numpy(float)),
+                         cmap='PRGn', vmin=-1, vmax=1,
+                         shading='gouraud' if min(pivot.shape) > 1 else 'auto',
+                         rasterized=True)
+    colorbar = fig.colorbar(mesh, ax=ax, ticks=[-1, 0, 1],
+                           label='relative response (M − P) / (|M| + |P|)')
+    colorbar.ax.set_yticklabels([f'{present[1]} higher', 'equal',
+                                f'{present[0]} higher'])
     ax.set(xlabel='generator contrast', ylabel='time since luminance step (s)',
-           title=f'{light_state} light: adaptation selectivity map')
+           title=f'{light_state} light: relative midget / parasol response\n'
+                 'Smooth display · preference does not indicate response strength')
     ax.axvline(0, color='0.5', lw=.7)
     fig.tight_layout()
     return fig
@@ -12559,7 +12576,7 @@ def plot_population_response_selectivity_trajectory(summary: pd.DataFrame,
 
 def plot_population_local_sensitivity_map(summary: pd.DataFrame,
         *, cell_type='ON-midget', light_state='high'):
-    """Show local NL slope as a generator-by-adaptation heat map."""
+    """Show local NL slope with smooth display-only color interpolation."""
     import matplotlib.pyplot as plt
     from retinanalysis.utils import style
     grid = _adaptation_curve_grid(summary, states=(light_state,))
@@ -12572,17 +12589,22 @@ def plot_population_local_sensitivity_map(summary: pd.DataFrame,
         slope = np.abs(np.gradient(block.y.to_numpy(float), block.x.to_numpy(float)))
         pieces.append(pd.DataFrame({'centre_s': centre, 'x': block.x, 'slope': slope}))
     table = pd.concat(pieces, ignore_index=True)
-    pivot = table.pivot_table(index='centre_s', columns='x', values='slope', aggfunc='mean')
+    pivot = _adaptation_heatmap_grid(table, 'slope')
     if pivot.empty or not np.isfinite(pivot.to_numpy(float)).any():
         return None
     scale = np.nanmax(np.abs(pivot.to_numpy(float)))
     style.apply_publication_style()
     fig, ax = plt.subplots(figsize=(8.4, 4.5))
-    mesh = ax.pcolormesh(pivot.columns, pivot.index, pivot, cmap='magma',
-                         vmin=0, vmax=scale if scale > 0 else 1, shading='auto')
-    fig.colorbar(mesh, ax=ax, label='local NL sensitivity |dR/dg|')
+    mesh = ax.pcolormesh(pivot.columns, pivot.index,
+                         np.ma.masked_invalid(pivot.to_numpy(float)), cmap='YlGnBu',
+                         vmin=0, vmax=scale if scale > 0 else 1,
+                         shading='gouraud' if min(pivot.shape) > 1 else 'auto',
+                         rasterized=True)
+    fig.colorbar(mesh, ax=ax, label='response change per generator contrast |dR/dg|')
     ax.set(xlabel='generator contrast', ylabel='time since luminance step (s)',
-           title=f'{cell_type}, {light_state} light: local sensitivity')
+           title=f'{cell_type}, {light_state} light: local sensitivity\n'
+                 'Smooth display · darker colors = greater sensitivity')
+    ax.axvline(0, color='0.5', lw=.7)
     fig.tight_layout()
     return fig
 
@@ -12681,7 +12703,6 @@ def iter_population_adaptation_figures(result: Mapping[str, object]):
         return
     for name, maker in (
             ('selectivity map', plot_population_adaptation_selectivity_map),
-            ('response trajectory', plot_population_response_selectivity_trajectory),
             ('midget local sensitivity', lambda s: plot_population_local_sensitivity_map(
                 s, cell_type='ON-midget')),
             ('parasol local sensitivity', lambda s: plot_population_local_sensitivity_map(

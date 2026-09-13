@@ -3458,6 +3458,22 @@ def test_resaving_condition_replaces_all_older_temporal_bins(tmp_path, monkeypat
     assert len(list(tmp_path.rglob('*.h5'))) == 1
 
 
+def test_adaptation_heatmap_aligns_window_grids_without_extrapolation():
+    import pandas as pd
+
+    rows = pd.DataFrame({'centre_s': [5., 5., 15., 15.],
+                         'x': [-1., 1., -.8, .8],
+                         'slope': [0., 2., .2, 1.8]})
+    grid = vmn._adaptation_heatmap_grid(rows, 'slope')
+    assert grid.shape == (2, 201)
+    np.testing.assert_allclose(grid.loc[5.], grid.columns.to_numpy() + 1.)
+    interior = np.abs(grid.columns.to_numpy()) < .8
+    np.testing.assert_allclose(grid.loc[15.].to_numpy()[interior],
+                               grid.columns.to_numpy()[interior] + 1.)
+    assert np.isnan(grid.loc[15.].iloc[0])
+    assert np.isnan(grid.loc[15.].iloc[-1])
+
+
 def test_selectivity_map_handles_empty_and_different_generator_grids():
     import pandas as pd
     import matplotlib.pyplot as plt
