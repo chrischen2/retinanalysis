@@ -12715,29 +12715,84 @@ def iter_population_adaptation_figures(result: Mapping[str, object]):
 
     contrast = result.get('directional_saturation_contrast')
     if isinstance(contrast, pd.DataFrame) and not contrast.empty:
-        import matplotlib.pyplot as plt
-        from retinanalysis.utils import style
-        style.apply_publication_style()
-        fig, axes = plt.subplots(1, 3, figsize=(11.0, 3.5), sharex=False)
-        metrics = [('gain_dec_minus_inc', 'gain: decrement − increment'),
-                   ('accuracy_dec_minus_inc', 'accuracy: decrement − increment'),
-                   ('error_inc_minus_dec', 'error: increment − decrement')]
-        for ax, (metric, label) in zip(axes, metrics):
-            for cell_type, block in contrast.groupby('cell_type', dropna=False):
-                values = pd.to_numeric(block[metric], errors='coerce').dropna()
-                if values.empty:
-                    continue
-                ax.scatter([cell_type] * len(values), values, alpha=.55, s=22,
-                           label=str(cell_type))
-                ax.plot([cell_type], [values.mean()], marker='_', ms=16,
-                        color='black', lw=2)
-            ax.axhline(0, color='0.5', lw=.7)
-            ax.set_ylabel(label)
-            ax.tick_params(axis='x', rotation=35)
-        axes[0].legend(frameon=False, fontsize=7)
-        fig.suptitle('Matched positive-generator bright-light decoding')
-        fig.tight_layout()
-        yield 'increment/decrement decoding contrast', fig
+        for key, block in contrast.groupby(['rec_type', 'mode'], dropna=False):
+            figure = plot_population_directional_contrast(block)
+            if figure is not None:
+                figure.suptitle('Matched positive-generator bright-light decoding'
+                               f' | {key[0]} | {key[1]}')
+                yield f'increment/decrement decoding contrast | {key}', figure
+
+
+def plot_population_directional_contrast(contrast: pd.DataFrame):
+    """Plot mean +/- SEM of cell contrasts, with reproducible jittered cell dots.
+
+    Call once per recording type and decoder mode. Average retained conditions
+    within each physical cell before computing the population mean and SEM.
+    Accuracy differences are displayed in percentage points; saved metrics
+    and the gain/error normalization are unchanged. A singleton has no SEM.
+    """
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    if contrast is None or contrast.empty:
+        return None
+    for column in ('rec_type', 'mode'):
+        if contrast[column].nunique(dropna=False) > 1:
+            raise ValueError(f'Plot one {column} at a time')
+    metrics = [
+        ('gain_dec_minus_inc', 'Recovered change gain', 'decrement − increment', 1.),
+        ('accuracy_dec_minus_inc', 'Direction accuracy',
+         'decrement − increment (percentage points)', 100.),
+        ('error_inc_minus_dec', 'Normalized reconstruction error',
+         'increment − decrement (stimulus-change SD)', 1.),
+    ]
+    columns = [metric for metric, *_ in metrics]
+    rows = contrast.copy()
+    rows[columns] = rows[columns].apply(pd.to_numeric, errors='coerce').replace(
+        [np.inf, -np.inf], np.nan)
+    cells = rows.groupby(['cell_type', 'cell_id'], dropna=False)[columns].mean()
+    if not np.isfinite(cells.to_numpy(float)).any():
+        return None
+    style.apply_publication_style()
+    fig, axes = plt.subplots(1, 3, figsize=(12., 4.6))
+    cell_types = sorted(cells.index.get_level_values('cell_type').unique(), key=str)
+    rng = np.random.default_rng(0)
+    colors = {'ON-midget': '#009E73', 'ON-parasol': '#8064A2',
+              'OFF-midget': '#D55E00', 'OFF-parasol': '#0072B2'}
+    for position, cell_type in enumerate(cell_types):
+        block = cells.xs(cell_type, level='cell_type')
+        jitter = rng.uniform(-.16, .16, len(block))
+        for ax, (metric, title, label, scale) in zip(axes, metrics):
+            values = block[metric].to_numpy(float) * scale
+            valid = np.isfinite(values)
+            values = values[valid]
+            if not len(values):
+                continue
+            ax.scatter(position + jitter[valid], values, s=30, alpha=.65,
+                       color=colors.get(cell_type, '#777777'),
+                       edgecolors='white', linewidths=.4, zorder=2)
+            sem = (float(np.std(values, ddof=1) / np.sqrt(len(values)))
+                   if len(values) > 1 else None)
+            ax.errorbar(position, float(np.mean(values)), yerr=sem,
+                        fmt='D', color='black', markersize=6, capsize=6,
+                        elinewidth=1.8, zorder=3)
+            ax.text(position, .98, f'n = {len(values)}',
+                    transform=ax.get_xaxis_transform(), ha='center', va='top',
+                    fontsize=9)
+    for ax, (_, title, label, _) in zip(axes, metrics):
+        ax.axhline(0, color='0.55', lw=.8, ls='--', zorder=1)
+        ax.set(title=title, ylabel=label, xlim=(-.5, len(cell_types) - .5))
+        ax.set_xticks(range(len(cell_types)), cell_types)
+        ax.tick_params(axis='both', pad=5)
+        ax.margins(y=.2)
+    fig.suptitle('Matched positive-generator bright-light decoding')
+    fig.text(.5, .02, 'Black diamonds: mean ± SEM | dots: individual cells '
+             '(conditions averaged within cell)\n'
+             'Positive = larger decrement gain / higher decrement accuracy / '
+             'lower decrement error. SEM omitted for n = 1.',
+             ha='center', va='bottom', fontsize=9)
+    fig.tight_layout(rect=(0, .12, 1, .93))
+    return fig
 
 
 def select_population_rows(frame: pd.DataFrame,

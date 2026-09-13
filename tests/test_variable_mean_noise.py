@@ -1611,6 +1611,41 @@ def test_directional_saturation_contrast_is_paired_within_cell():
     assert paired.error_inc_minus_dec.iloc[0] == pytest.approx(.6)
 
 
+def test_directional_contrast_plot_weights_cells_and_shows_sem():
+    import pandas as pd
+    import matplotlib.pyplot as plt
+
+    rows = pd.DataFrame({
+        'cell_id': ['A', 'A', 'B'], 'cell_type': ['ON-midget'] * 3,
+        'rec_type': ['extracellular'] * 3, 'mode': ['per_window'] * 3,
+        'gain_dec_minus_inc': [0., 2., 5.],
+        'accuracy_dec_minus_inc': [0., .2, .5],
+        'error_inc_minus_dec': [0., .4, 1.],
+    })
+    original = rows.copy(deep=True)
+    fig = vmn.plot_population_directional_contrast(rows)
+    ax = fig.axes[0]
+    dots = ax.collections[0].get_offsets()
+    np.testing.assert_allclose(dots[:, 1], [1., 5.])
+    assert len(set(dots[:, 0])) == 2
+    errorbar = ax.containers[0]
+    np.testing.assert_allclose(np.asarray(errorbar.lines[0].get_ydata(), float), [3.])
+    np.testing.assert_allclose(errorbar.lines[2][0].get_segments()[0][:, 1],
+                               [1., 5.])
+    np.testing.assert_allclose(fig.axes[1].collections[0].get_offsets()[:, 1],
+                               [10., 50.])
+    pd.testing.assert_frame_equal(rows, original)
+    fig.canvas.draw()
+    plt.close(fig)
+
+    singleton = vmn.plot_population_directional_contrast(rows.iloc[:1])
+    assert not singleton.axes[0].containers[0].has_yerr
+    plt.close(singleton)
+    rows.loc[2, 'mode'] = 'full'
+    with pytest.raises(ValueError, match='one mode'):
+        vmn.plot_population_directional_contrast(rows)
+
+
 def test_reconstruct_traces_can_attach_encoding_generator():
     rng = np.random.default_rng(4)
     stimulus = rng.standard_normal((3, 2000))
