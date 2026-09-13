@@ -1646,6 +1646,74 @@ def test_directional_contrast_plot_weights_cells_and_shows_sem():
         vmn.plot_population_directional_contrast(rows)
 
 
+def test_directional_dynamics_pairs_times_before_averaging_conditions():
+    import pandas as pd
+    import matplotlib.pyplot as plt
+
+    records = []
+    def add(condition, cell, stages, gain_shift=0.):
+        for stage in stages:
+            bounds = [(2., 6.), (10., 14.), (40., 44.)][stage]
+            for bin_index, (lo, hi) in enumerate((bounds, (bounds[1], bounds[1] + 4))):
+                for direction in ('increment', 'decrement'):
+                    dec = direction == 'decrement'
+                    records.append(dict(
+                        condition_id=condition, cell_id=cell, cell_type='ON-midget',
+                        cell_index=7, rec_type='extracellular', light_regime='scotopic',
+                        stim_seconds=50., mode='per_window', light_condition='bright',
+                        operating_point='positive', window=f'{lo:g}-{hi:g} s',
+                        direction=direction, n_changes=(10 if bin_index == 0 else 30),
+                        direction_accuracy=(.6 + .1 * stage if dec else .2 + .2 * bin_index),
+                        gain_delta=(.5 + .1 * stage + gain_shift if dec else .2),
+                        nrmse_delta=(.7 - .1 * stage if dec else 1.)))
+    add('A1', 'A', [0, 1, 2])
+    add('A2', 'A', [1, 2], gain_shift=10.)
+    add('B1', 'B', [0, 1])  # no last: cannot contribute a spurious paired change
+    add('B2', 'B', [2])  # same cell, different condition: still not a valid pair
+    # This large value crosses the first/second boundary and must be excluded.
+    for direction in ('increment', 'decrement'):
+        row = dict(records[0], window='9-12 s', direction=direction, gain_delta=100.)
+        records.append(row)
+    rows = pd.DataFrame(records).sample(frac=1., random_state=3)
+    original = rows.copy(deep=True)
+    result = vmn.population_directional_decoding_dynamics(rows)
+    pd.testing.assert_frame_equal(rows, original)
+    assert set(result['cells'].cell_id) == {'A'}
+    assert len(result['cells']) == 3
+    first = result['condition_windows'].query('condition_id == "A1" and stage == 0').iloc[0]
+    assert first.direction_accuracy_increment == pytest.approx(.35)
+    assert first.accuracy_dec_minus_inc == pytest.approx(.25)
+    assert first.gain_dec_minus_inc == pytest.approx(.3)
+    assert first.error_inc_minus_dec == pytest.approx(.3)
+    # A2 has a large baseline gain offset, but the same within-condition change.
+    assert len(result['changes']) == 1
+    for metric in ('gain_dec_minus_inc', 'accuracy_dec_minus_inc', 'error_inc_minus_dec'):
+        assert result['changes'][metric].iloc[0] == pytest.approx(.1)
+    first_audit = result['audit'].query('condition_id == "A1" and stage == "first"').iloc[0]
+    assert first_audit.actual_start_s == 2.
+    assert first_audit.status == 'partial coverage'
+    assert first_audit.n_boundary_bins_excluded == 1
+    assert first_audit.coverage_fraction == pytest.approx(8 / 9)
+    assert set(first_audit.source_windows) == {'2-6 s', '6-10 s'}
+    assert not result['audit'].query('condition_id == "B1"').second_last_included.any()
+    # Directional dynamics remain available without eligible temporal LN curves.
+    figures = list(vmn.iter_population_adaptation_figures(
+        {'directional_decoding_dynamics': result}))
+    assert len(figures) == 1
+    fig = figures[0][1]
+    assert len(fig.axes) == 6
+    assert fig.axes[0].get_title() == 'Recovered change gain'
+    assert fig.axes[1].get_title() == 'Direction accuracy'
+    assert fig.axes[2].get_title() == 'Normalized reconstruction error'
+    assert not fig.axes[3].containers[0].has_yerr  # one paired cell
+    fig.canvas.draw()
+    plt.close(fig)
+    with pytest.raises(ValueError, match='nonoverlapping'):
+        vmn.population_directional_decoding_dynamics(rows, windows=((1, 10), (9, 20), (40, 50)))
+    with pytest.raises(ValueError, match='Duplicate'):
+        vmn.population_directional_decoding_dynamics(pd.concat([rows, rows.iloc[:1]]))
+
+
 def test_reconstruct_traces_can_attach_encoding_generator():
     rng = np.random.default_rng(4)
     stimulus = rng.standard_normal((3, 2000))

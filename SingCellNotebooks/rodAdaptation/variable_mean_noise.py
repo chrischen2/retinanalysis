@@ -12342,6 +12342,7 @@ def high_quality_population_ln_analysis(
             if not normalized_parameters.empty:
                 parameter_pieces.append(normalized_parameters)
         if not directional.empty:
+            directional['light_regime'] = classification_row.light_regime
             directional['light_contrast'] = metadata.get('light_contrast', np.nan)
             directional_pieces.append(directional)
 
@@ -12699,19 +12700,24 @@ def iter_population_class_overlay_figures(result, *, example_cell_indices=None):
 def iter_population_adaptation_figures(result: Mapping[str, object]):
     """Yield all exploratory adaptation visualizations for Section 6c."""
     summary = result.get('temporal_curve_summary')
-    if not isinstance(summary, pd.DataFrame) or summary.empty:
-        return
-    for name, maker in (
-            ('selectivity map', plot_population_adaptation_selectivity_map),
-            ('midget local sensitivity', lambda s: plot_population_local_sensitivity_map(
-                s, cell_type='ON-midget')),
-            ('parasol local sensitivity', lambda s: plot_population_local_sensitivity_map(
-                s, cell_type='ON-parasol'))):
-        for key, block in summary.groupby(['rec_type', 'light_regime', 'duration_group_s'],
-                                          dropna=False):
-            figure = maker(block)
-            if figure is not None:
-                yield f'{name} | {key}', figure
+    if isinstance(summary, pd.DataFrame) and not summary.empty:
+        for name, maker in (
+                ('selectivity map', plot_population_adaptation_selectivity_map),
+                ('midget local sensitivity', lambda s: plot_population_local_sensitivity_map(
+                    s, cell_type='ON-midget')),
+                ('parasol local sensitivity', lambda s: plot_population_local_sensitivity_map(
+                    s, cell_type='ON-parasol'))):
+            for key, block in summary.groupby(['rec_type', 'light_regime', 'duration_group_s'],
+                                              dropna=False):
+                figure = maker(block)
+                if figure is not None:
+                    yield f'{name} | {key}', figure
+
+    dynamics = result.get('directional_decoding_dynamics')
+    if dynamics is None:
+        dynamics = population_directional_decoding_dynamics(
+            result.get('directional_decoding', pd.DataFrame()))
+    yield from iter_population_decoding_dynamics_figures(dynamics)
 
     contrast = result.get('directional_saturation_contrast')
     if isinstance(contrast, pd.DataFrame) and not contrast.empty:
@@ -12721,6 +12727,229 @@ def iter_population_adaptation_figures(result: Mapping[str, object]):
                 figure.suptitle('Matched positive-generator bright-light decoding'
                                f' | {key[0]} | {key[1]}')
                 yield f'increment/decrement decoding contrast | {key}', figure
+
+
+def population_directional_decoding_dynamics(
+        frame: pd.DataFrame, *, windows=((1., 10.), (10., 20.), (40., 50.)),
+        durations=(50., 60.)) -> dict:
+    """Compare gain, accuracy and error across first/second/last intervals.
+
+    Accuracy is weighted by n_changes within each condition and interval. Gain
+    and normalized error retain their saved-bin means (these are means of local
+    estimates, not pooled regression slopes or pooled RMSE). Conditions are
+    then averaged within cell. Only bins with both directions valid
+    contribute. Trajectories use conditions present at all three times; the
+    primary last-minus-second comparison pairs those two intervals independently.
+    Saved bins crossing interval edges cannot be split from summary statistics.
+    Coverage and exclusions are returned explicitly rather than filling gaps.
+    """
+    windows = tuple((float(lo), float(hi)) for lo, hi in windows)
+    if (len(windows) != 3 or any(not np.isfinite(lo + hi) or hi <= lo
+                               for lo, hi in windows)
+            or any(windows[i][1] > windows[i + 1][0] for i in range(2))):
+        raise ValueError('Provide three ordered, nonoverlapping first/second/last intervals')
+    result = {'windows': windows, 'condition_windows': pd.DataFrame(),
+              'cells': pd.DataFrame(), 'changes': pd.DataFrame(),
+              'audit': pd.DataFrame()}
+    if frame is None or frame.empty:
+        return result
+    rows = frame[frame.light_condition.eq('bright') &
+                 frame.operating_point.eq('positive')].copy()
+    if rows.empty:
+        return result
+    if 'light_regime' not in rows:
+        rows['light_regime'] = 'unclassified'
+    required = ['condition_id', 'cell_id', 'cell_type', 'rec_type',
+                'stim_seconds', 'mode', 'window', 'n_changes', 'direction_accuracy',
+                'gain_delta', 'nrmse_delta']
+    missing = sorted(set(required) - set(rows))
+    if missing:
+        raise ValueError(f'Directional dynamics table is missing {missing}')
+    for column in ('n_changes', 'direction_accuracy', 'gain_delta', 'nrmse_delta', 'stim_seconds'):
+        rows[column] = pd.to_numeric(rows[column], errors='coerce')
+    keys = ['condition_id', 'cell_id', 'cell_type', 'rec_type', 'light_regime',
+            'stim_seconds', 'mode']
+    metrics = ['gain_dec_minus_inc', 'accuracy_dec_minus_inc', 'error_inc_minus_dec']
+    records, audits = [], []
+    for key, block in rows.groupby(keys, dropna=False, sort=True):
+        metadata = dict(zip(keys, key))
+        for column in ('cell_index', 'light_contrast'):
+            if column in block:
+                metadata[column] = block[column].iloc[0]
+        if float(metadata['stim_seconds']) not in durations:
+            audits.append({**metadata, 'stage': 'all', 'status': 'excluded duration',
+                           'n_bins': 0, 'source_windows': (),
+                           'actual_start_s': np.nan, 'actual_end_s': np.nan,
+                           'coverage_fraction': 0.,
+                           'trajectory_included': False, 'second_last_included': False})
+            continue
+        # Each saved bin must identify one estimate per direction. Duplicates
+        # would double-count samples, so fail instead of silently averaging them.
+        block = block[block.direction.isin(('increment', 'decrement'))]
+        if block.duplicated(['window', 'direction']).any():
+            raise ValueError('Duplicate condition/window/direction decoding rows')
+        bins = block.pivot(index='window', columns='direction',
+                           values=['direction_accuracy', 'gain_delta', 'nrmse_delta', 'n_changes'])
+        needed = [(metric, direction) for metric in ('direction_accuracy', 'gain_delta', 'nrmse_delta', 'n_changes')
+                  for direction in ('increment', 'decrement')]
+        bins = bins.reindex(columns=pd.MultiIndex.from_tuples(needed))
+        valid = np.isfinite(bins.to_numpy(float)).all(axis=1)
+        for direction in ('increment', 'decrement'):
+            valid &= bins['direction_accuracy', direction].between(0, 1)
+            valid &= bins['n_changes', direction].gt(0)
+            valid &= bins['nrmse_delta', direction].ge(0)
+        bins = bins.loc[valid]
+        bounds = [_window_bounds(str(label)) for label in bins.index]
+        starts = np.array([lo for lo, _ in bounds])
+        ends = np.array([hi for _, hi in bounds])
+        selected_stages, condition_records, condition_audits = set(), [], []
+        for stage, (lo, hi) in enumerate(windows):
+            mask = (starts >= lo - 1e-9) & (ends <= hi + 1e-9) & (ends > starts)
+            piece = bins.loc[mask]
+            overlaps = (starts < hi) & (ends > lo)
+            audit = {**metadata, 'stage': ('first', 'second', 'last')[stage],
+                     'target_start_s': lo, 'target_end_s': hi,
+                     'n_bins': len(piece),
+                     'source_windows': tuple(piece.index.astype(str)),
+                     'n_boundary_bins_excluded': int((overlaps & ~mask).sum()),
+                     'actual_start_s': float(starts[mask].min()) if mask.any() else np.nan,
+                     'actual_end_s': float(ends[mask].max()) if mask.any() else np.nan,
+                     'covered_s': float(np.sum(ends[mask] - starts[mask]))}
+            audit['coverage_fraction'] = audit['covered_s'] / (hi - lo)
+            audit['status'] = ('no eligible bins' if piece.empty else
+                               'complete' if np.isclose(audit['covered_s'], hi - lo)
+                               else 'partial coverage')
+            condition_audits.append(audit)
+            if piece.empty:
+                continue
+            record = {**metadata, 'stage': stage}
+            for direction in ('increment', 'decrement'):
+                n = piece['n_changes', direction].to_numpy(float)
+                accuracy = piece['direction_accuracy', direction].to_numpy(float)
+                record[f'direction_accuracy_{direction}'] = float(np.average(accuracy, weights=n))
+                for metric in ('gain_delta', 'nrmse_delta'):
+                    record[f'{metric}_{direction}'] = float(piece[metric, direction].mean())
+                record[f'{direction}_n_changes'] = float(n.sum())
+            record['gain_dec_minus_inc'] = record['gain_delta_decrement'] - record['gain_delta_increment']
+            record['accuracy_dec_minus_inc'] = record['direction_accuracy_decrement'] - record['direction_accuracy_increment']
+            record['error_inc_minus_dec'] = record['nrmse_delta_increment'] - record['nrmse_delta_decrement']
+            condition_records.append(record)
+            selected_stages.add(stage)
+        trajectory = selected_stages == {0, 1, 2}
+        second_last = {1, 2}.issubset(selected_stages)
+        for record in condition_records:
+            record.update(trajectory_included=trajectory, second_last_included=second_last)
+        for audit in condition_audits:
+            audit.update(trajectory_included=trajectory, second_last_included=second_last)
+        records.extend(condition_records)
+        audits.extend(condition_audits)
+    result['audit'] = pd.DataFrame(audits)
+    conditions = pd.DataFrame(records)
+    result['condition_windows'] = conditions
+    if conditions.empty:
+        return result
+    cell_keys = ['cell_id', 'cell_type', 'rec_type', 'light_regime', 'mode']
+    complete = conditions[conditions.trajectory_included]
+    result['cells'] = complete.groupby(cell_keys + ['stage'], dropna=False)[metrics].mean().reset_index()
+    paired = conditions[conditions.second_last_included & conditions.stage.isin((1, 2))]
+    # Difference within the SAME condition before averaging conditions per cell.
+    if not paired.empty:
+        wide = paired.pivot(index=keys, columns='stage', values=metrics)
+        delta = pd.DataFrame({metric: wide[metric, 2] - wide[metric, 1]
+                              for metric in metrics}).reset_index()
+        result['changes'] = delta.groupby(cell_keys, dropna=False)[metrics].mean().reset_index()
+    return result
+
+
+def iter_population_decoding_dynamics_figures(dynamics: Mapping[str, object]):
+    """Show paired decoding contrasts and the primary second-to-last change."""
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils import style
+
+    changes = dynamics.get('changes', pd.DataFrame())
+    cells = dynamics.get('cells', pd.DataFrame())
+    if changes.empty:
+        return
+    windows = dynamics['windows']
+    group_keys = ['rec_type', 'light_regime', 'mode']
+    metrics = [('gain_dec_minus_inc', 'Recovered change gain', 'decrement − increment', 1.),
+               ('accuracy_dec_minus_inc', 'Direction accuracy', 'decrement − increment (percentage points)', 100.),
+               ('error_inc_minus_dec', 'Normalized reconstruction error',
+                'increment − decrement (stimulus-change SD)', 1.)]
+    colors = {'ON-midget': '#009E73', 'ON-parasol': '#8064A2',
+              'OFF-midget': '#D55E00', 'OFF-parasol': '#0072B2'}
+    for key, delta in changes.groupby(group_keys, dropna=False):
+        trajectories = cells.copy()
+        audit = dynamics['audit'].copy()
+        for col, value in zip(group_keys, key):
+            trajectories = trajectories[trajectories[col].eq(value)]
+            audit = audit[audit[col].eq(value)]
+        style.apply_publication_style()
+        fig, axes = plt.subplots(2, 3, figsize=(13., 8.))
+        types = sorted(delta.cell_type.unique())
+        rng = np.random.default_rng(0)
+        for type_index, cell_type in enumerate(types):
+            color = colors.get(cell_type, '#777777')
+            offset = (type_index - (len(types) - 1) / 2) * .18
+            part = trajectories[trajectories.cell_type.eq(cell_type)]
+            change = delta[delta.cell_type.eq(cell_type)].sort_values('cell_id')
+            jitter_delta = rng.uniform(-.13, .13, len(change))
+            for column, (metric, title, label, scale) in enumerate(metrics):
+                ax = axes[0, column]
+                wide = part.pivot(index='cell_id', columns='stage', values=metric).reindex(columns=[0, 1, 2])
+                if not wide.empty:
+                    values = wide.to_numpy(float) * scale
+                    jitter = np.random.default_rng(type_index).uniform(-.045, .045, len(wide))
+                    for row, dx in zip(values, jitter):
+                        ax.plot(np.arange(3) + offset + dx, row, '-o', color=color,
+                                alpha=.18, lw=.6, ms=3, zorder=1)
+                    sem = (values.std(axis=0, ddof=1) / np.sqrt(len(values))
+                           if len(values) > 1 else None)
+                    ax.errorbar(np.arange(3) + offset, values.mean(axis=0), yerr=sem,
+                                fmt='o-', color=color, capsize=4, ms=6, lw=1.8,
+                                label=f'{cell_type} (n={len(values)})', zorder=3)
+                ax = axes[1, column]
+                values = change[metric].to_numpy(float) * scale
+                ax.scatter(type_index + jitter_delta, values, color=color, alpha=.6,
+                           s=26, edgecolors='white', linewidths=.3)
+                sem = float(values.std(ddof=1) / np.sqrt(len(values))) if len(values) > 1 else None
+                ax.errorbar(type_index, values.mean(), yerr=sem, fmt='D', color='black',
+                            capsize=5, ms=6, zorder=3)
+                ax.text(type_index, .98, f'n = {len(values)}', transform=ax.get_xaxis_transform(),
+                        ha='center', va='top', fontsize=9)
+        for column, (metric, title, label, scale) in enumerate(metrics):
+            ax = axes[0, column]
+            ax.set(title=title, ylabel=label,
+                   xlim=(-.35, 2.35))
+            ax.set_xticks(range(3), [f'{stage}\nwithin {lo:g}–{hi:g} s'
+                                    for stage, (lo, hi) in zip(('First', 'Second', 'Last'), windows)])
+            ax.axhline(0, color='.55', ls='--', lw=.8)
+            if ax.get_legend_handles_labels()[0]:
+                ax.legend(frameon=False, fontsize=8, loc='best')
+            else:
+                ax.text(.5, .5, 'No cells with all three intervals', transform=ax.transAxes,
+                        ha='center', fontsize=9)
+            ax = axes[1, column]
+            ax.set(title='Last − second: ' + title.lower(), ylabel='change in ' + ('percentage points' if column == 1 else
+                                             'gain contrast' if column == 0 else 'error contrast'),
+                   xlim=(-.5, len(types) - .5))
+            ax.set_xticks(range(len(types)), types)
+            ax.axhline(0, color='.55', ls='--', lw=.8)
+            ax.margins(y=.2)
+        for ax in axes.flat:
+            ax.tick_params(axis='both', pad=5)
+        partial = int(audit.status.eq('partial coverage').sum())
+        earliest = audit.loc[audit.stage.eq('first'), 'actual_start_s'].min()
+        coverage_note = (f'Earliest first-interval bin starts at {earliest:g} s. '
+                         if np.isfinite(earliest) else '')
+        fig.suptitle('Positive-generator decoding dynamics | ' + ' | '.join(map(str, key)))
+        fig.text(.5, .02,
+                 'Mean ± SEM; faint lines/dots = paired cells. Conditions averaged within cell.\n'
+                 'Top: same conditions at all three times. Bottom: conditions paired at second and last.\n'
+                 + coverage_note + f'Whole saved bins only; {partial} condition/intervals have partial coverage (see audit).',
+                 ha='center', va='bottom', fontsize=9)
+        fig.tight_layout(rect=(0, .115, 1, .95))
+        yield 'Decoding gain / accuracy / error dynamics | ' + ' | '.join(map(str, key)), fig
 
 
 def plot_population_directional_contrast(contrast: pd.DataFrame):
