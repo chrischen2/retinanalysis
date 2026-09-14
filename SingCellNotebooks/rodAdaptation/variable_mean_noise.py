@@ -11085,22 +11085,52 @@ def _example_review_store(output_dir=None):
     from retinanalysis.utils.review_store import ReviewStore
 
     return ReviewStore(condition_output_dir(output_dir) / 'example_cells.csv',
-                       keys=('date', 'cell_label'),
-                       columns=('cell_index', 'date', 'cell_label', 'is_example'),
+                       keys=('date', 'cell_label', 'rec_type'),
+                       columns=('cell_index', 'date', 'cell_label', 'rec_type', 'is_example'),
                        boolean_columns=('is_example',))
 
 
-def load_example_cells(output_dir=None) -> pd.DataFrame:
-    """Explicit cell-level example flags; unlisted cells default to False."""
-    return _example_review_store(output_dir).read()
+def load_example_cells(output_dir=None, *, available_conditions=None) -> pd.DataFrame:
+    """Recording-type-specific examples; unlisted pairs default to False.
+
+    Legacy physical-cell flags expand to currently saved recording types in
+    memory, matching the Keep migration. The next example action persists the
+    explicit recording-type schema without changing the other modes' flags.
+    ``available_conditions`` limits a read-only flag lookup to already loaded
+    identities, avoiding a population HDF5 scan when navigating the inspector.
+    """
+    from retinanalysis.utils.review_store import ReviewStore
+
+    store = _example_review_store(output_dir)
+    if store.path.exists() and 'rec_type' not in pd.read_csv(store.path, nrows=0):
+        legacy = ReviewStore(store.path, keys=('date', 'cell_label'),
+                             columns=('cell_index', 'date', 'cell_label', 'is_example'),
+                             boolean_columns=('is_example',)).read()
+        if legacy.empty:
+            return pd.DataFrame(columns=store.columns)
+        available = (load_condition_index(store.path.parent)
+                     if available_conditions is None else available_conditions)[
+            ['date', 'cell_label', 'rec_type']].drop_duplicates()
+        frame = legacy.merge(available, on=['date', 'cell_label'], how='inner')
+    else:
+        frame = store.read()
+    return (frame.reindex(columns=store.columns)
+            .drop_duplicates(['date', 'cell_label', 'rec_type'], keep='last')
+            .reset_index(drop=True))
 
 
-def set_cell_example(saved: SavedCellAnalysis, is_example: bool = True, *,
+def set_cell_example(saved: SavedCellAnalysis, rec_type: str, is_example: bool = True, *,
                      output_dir=None) -> pd.DataFrame:
-    """Persist a physical cell's example flag independently of Keep/Remove."""
+    """Persist one cell-recording pair's example flag independently of Keep."""
+    rec_type = str(rec_type)
+    available = set(saved.conditions.rec_type.astype(str))
+    if rec_type not in available:
+        raise ValueError(f'recording type {rec_type!r} is not available for cell '
+                         f'{int(saved.cell_index)}; choose from {sorted(available)}')
     frame = _example_review_store(output_dir).update(
-        dict(date=str(saved.exp_name), cell_label=str(saved.cell_label)),
-        dict(cell_index=int(saved.cell_index), is_example=bool(is_example)))
+        dict(date=str(saved.exp_name), cell_label=str(saved.cell_label), rec_type=rec_type),
+        dict(cell_index=int(saved.cell_index), is_example=bool(is_example)),
+        frame=load_example_cells(output_dir))
     export_kept_cell_selection(output_dir)
     return frame
 
@@ -11109,20 +11139,21 @@ def saved_cell_review_flags(frame: pd.DataFrame, *, output_dir=None) -> pd.DataF
     """Attach the same persisted Keep and Example flags used by both browsers."""
     rows = frame.copy()
     kept = load_high_quality_cells(output_dir)
-    examples = load_example_cells(output_dir)
+    examples = load_example_cells(output_dir, available_conditions=rows)
     keep_keys = set(zip(kept.date.astype(str), kept.cell_label.astype(str),
                         kept.rec_type.astype(str)))
     example_keys = set(zip(examples.loc[examples.is_example, 'date'].astype(str),
-                           examples.loc[examples.is_example, 'cell_label'].astype(str)))
+                           examples.loc[examples.is_example, 'cell_label'].astype(str),
+                           examples.loc[examples.is_example, 'rec_type'].astype(str)))
     rows['keep'] = [(str(r.date), str(r.cell_label), str(r.rec_type)) in keep_keys
                     for r in rows.itertuples()]
-    rows['is_example'] = [(str(r.date), str(r.cell_label)) in example_keys
+    rows['is_example'] = [(str(r.date), str(r.cell_label), str(r.rec_type)) in example_keys
                           for r in rows.itertuples()]
     return rows
 
 
 def export_kept_cell_selection(output_dir=None) -> Path:
-    """Write a batch-ready CSV; Keep is per recording type, Example per cell.
+    """Write a batch-ready CSV; Keep and Example are per cell-recording pair.
 
     One row per retained recording type preserves the selection when only one
     mode of a cell passes review. An example flag alone never implies Keep.
@@ -11190,8 +11221,8 @@ def build_cell_review_browser(
         raw_traces: bool = False, processed_traces: bool = False):
     """Adapt VariableMeanNoise saved conditions to the shared review browser.
 
-    Keep/Remove retain cell x recording-type scope. Example flags retain
-    physical-cell scope. Existing CSVs and notebook calls stay compatible.
+    Keep/Remove and Example flags each use cell x recording-type scope.
+    Existing physical-cell Example CSVs migrate on the next example action.
     """
     from retinanalysis.utils.browse import saved_figure_review_browser
     import tempfile
@@ -11250,13 +11281,10 @@ def build_cell_review_browser(
                 + sorted(available - set(RECORDING_TYPES)))
 
     def flags(saved, rec_type):
-        reviewed = load_high_quality_cells(directory)
-        kept = bool((reviewed.date.astype(str).eq(str(saved.exp_name))
-                     & reviewed.cell_label.astype(str).eq(str(saved.cell_label))
-                     & reviewed.rec_type.astype(str).eq(str(rec_type))).any())
-        example = _example_review_store(directory).flag(
-            dict(date=str(saved.exp_name), cell_label=str(saved.cell_label)), 'is_example')
-        return kept, example
+        row = saved_cell_review_flags(pd.DataFrame([dict(
+            date=str(saved.exp_name), cell_label=str(saved.cell_label),
+            rec_type=str(rec_type))]), output_dir=directory).iloc[0]
+        return bool(row.keep), bool(row.is_example)
 
     browser = saved_figure_review_browser(
         options, load_item=load, sections=sections,
@@ -11268,7 +11296,8 @@ def build_cell_review_browser(
         review_flags=flags,
         set_keep=lambda saved, rec_type, keep: set_cell_visual_inspection(
             saved, rec_type, keep, output_dir=directory),
-        set_example=lambda saved, value: set_cell_example(saved, value, output_dir=directory))
+        set_example=lambda saved, rec_type, value: set_cell_example(
+            saved, rec_type, value, output_dir=directory), example_by_section=True)
     # Compatibility for existing notebook integrations and widget diagnostics.
     state = browser.review_state
     state['cell_selector'] = state['selector']

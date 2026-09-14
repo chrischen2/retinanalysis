@@ -43,12 +43,18 @@ def test_review_store_legacy_boolean_and_invalid_value(tmp_path):
         store.read()
 
 
-def test_generic_browser_navigation_persistence_and_errors(tmp_path):
+def test_generic_browser_navigation_persistence_and_errors(tmp_path, monkeypatch):
     # A different protocol's units and conditions: no VMN-shaped records.
     png = base64.b64decode(
         'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=')
     image = tmp_path / 'response.png'
     image.write_bytes(png)
+    reads = []
+    original_read = type(image).read_bytes
+    def read_once(path):
+        reads.append(path)
+        return original_read(path)
+    monkeypatch.setattr(type(image), 'read_bytes', read_once)
     kept = ReviewStore(tmp_path / 'keep.csv', keys=('unit', 'condition'),
                        columns=('unit', 'condition'))
     examples = ReviewStore(tmp_path / 'example.csv', keys=('unit',),
@@ -81,6 +87,7 @@ def test_generic_browser_navigation_persistence_and_errors(tmp_path):
     browser = make()
     state = browser.review_state
     assert loads == [1]  # unselected records are not loaded
+    assert reads == [image]  # options/value observers must not duplicate PNG reads
     assert state['figure_images']['Response'].value == png
     assert len(state['figure_selectors']['Response'].options) == 1
     assert not state['is_example']

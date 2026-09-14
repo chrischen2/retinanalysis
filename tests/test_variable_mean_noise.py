@@ -215,11 +215,17 @@ def test_visual_browser_filters_figures_and_decisions_by_recording_type(
     assert state['example_button'].description == 'Unset example'
     assert bool(vmn.load_example_cells(tmp_path).iloc[0].is_example)
     state['rec_type_selector'].value = 'extracellular'
-    assert state['is_example'] is True  # physical cell flag spans recording types
+    assert state['is_example'] is False  # decisions are independent across recording types
+    state['example_button'].click()
+    assert state['is_example'] is True
     reloaded = vmn.build_cell_review_browser(pd.DataFrame(), output_dir=tmp_path)
     assert reloaded._vmn_browser_state['is_example'] is True
     reloaded._vmn_browser_state['example_button'].click()
-    assert not bool(vmn.load_example_cells(tmp_path).iloc[0].is_example)
+    flags = vmn.load_example_cells(tmp_path).set_index('rec_type').is_example
+    assert bool(flags['exc'])
+    assert not bool(flags['extracellular'])
+    state['rec_type_selector'].value = 'exc'
+    assert state['is_example'] is True
     assert decisions == [('exc', True), ('exc', False)]
 
 # RandStream('mt19937ar', 'Seed', 42).randn(1, 64), from MATLAB R2025b.
@@ -3715,7 +3721,7 @@ def test_review_csv_round_trip_preserves_modes_examples_and_remaps_indices(tmp_p
                                  'stim_seconds': [50., 50.]}), tables={})
     registry = pd.DataFrame([dict(cell_index=12, exp_name=saved.exp_name,
                                    cell_label=saved.cell_label)])
-    vmn.set_cell_example(saved, True, output_dir=tmp_path)
+    vmn.set_cell_example(saved, 'extracellular', True, output_dir=tmp_path)
     assert vmn.load_kept_cell_batch_selection(registry, output_dir=tmp_path) == ((), {})
     vmn.set_cell_visual_inspection(saved, 'extracellular', True, output_dir=tmp_path)
     vmn.set_cell_visual_inspection(saved, 'exc', True, output_dir=tmp_path)
@@ -3730,13 +3736,52 @@ def test_review_csv_round_trip_preserves_modes_examples_and_remaps_indices(tmp_p
                                     rec_type=['extracellular', 'exc']))
     flags = vmn.saved_cell_review_flags(conditions, output_dir=tmp_path)
     assert flags.keep.tolist() == [True, False]
-    assert flags.is_example.tolist() == [True, True]
-    vmn.set_cell_example(saved, False, output_dir=tmp_path)
+    assert flags.is_example.tolist() == [True, False]
+    vmn.set_cell_example(saved, 'extracellular', False, output_dir=tmp_path)
     assert not pd.read_csv(tmp_path / 'kept_cell_selection.csv').is_example.any()
     with pytest.raises(ValueError, match='registry matches'):
         vmn.load_kept_cell_batch_selection(registry.iloc[:0], output_dir=tmp_path)
     vmn.set_cell_visual_inspection(saved, 'extracellular', False, output_dir=tmp_path)
     assert vmn.load_kept_cell_batch_selection(registry, output_dir=tmp_path) == ((), {})
+
+
+def test_example_flags_migrate_legacy_cells_and_preserve_other_modes(monkeypatch, tmp_path):
+    import pandas as pd
+    from types import SimpleNamespace
+
+    path = tmp_path / 'example_cells.csv'
+    pd.DataFrame([
+        dict(cell_index=2, date='2025-01-01_A', cell_label='Cell2', is_example=True),
+        dict(cell_index=3, date='2025-01-01_A', cell_label='Cell3', is_example=False),
+    ]).to_csv(path, index=False)
+    original = path.read_bytes()
+    available = pd.DataFrame(dict(date=['2025-01-01_A'] * 3,
+                                 cell_label=['Cell2', 'Cell2', 'Cell3'],
+                                 rec_type=['extracellular', 'exc', 'exc']))
+    scans = []
+    monkeypatch.setattr(vmn, 'load_condition_index',
+                        lambda *_a, **_k: scans.append(True) or available.copy())
+    migrated = vmn.load_example_cells(tmp_path)
+    assert migrated.is_example.tolist() == [True, True, False]
+    assert path.read_bytes() == original  # reads never rewrite the legacy CSV
+    flags = vmn.saved_cell_review_flags(available, output_dir=tmp_path)
+    assert flags.is_example.tolist() == [True, True, False]
+    assert len(scans) == 1  # browser flag lookups reuse known identities
+    saved = SimpleNamespace(cell_index=2, exp_name='2025-01-01_A', cell_label='Cell2',
+        conditions=pd.DataFrame({'rec_type': ['extracellular', 'exc']}), tables={})
+    vmn.set_cell_example(saved, 'exc', False, output_dir=tmp_path)
+    explicit = vmn.load_example_cells(tmp_path)
+    selected = explicit.query('cell_label == "Cell2"').set_index('rec_type').is_example
+    assert selected.to_dict() == {'extracellular': True, 'exc': False}
+    assert not explicit.query('cell_label == "Cell3"').is_example.any()
+    assert 'rec_type' in pd.read_csv(path)
+    assert len(scans) == 2  # only the first migration write needs all identities
+    vmn.set_cell_example(saved, 'exc', True, output_dir=tmp_path)
+    vmn.set_cell_example(saved, 'extracellular', False, output_dir=tmp_path)
+    assert len(scans) == 2
+    assert vmn.saved_cell_review_flags(available, output_dir=tmp_path).is_example.tolist() == [False, True, False]
+    with pytest.raises(ValueError, match='not available'):
+        vmn.set_cell_example(saved, 'inh', True, output_dir=tmp_path)
 
 
 def test_batch_restores_saved_baseline_with_new_window_and_preserves_flags(monkeypatch, tmp_path):

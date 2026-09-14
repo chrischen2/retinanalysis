@@ -150,7 +150,7 @@ def lazy_tabs(titles, render, description: str = '', widths=None):
 def saved_figure_review_browser(
         options, *, load_item, sections, panels, figure_options, describe,
         review_flags, set_keep, set_example, item_description='Cell:',
-        section_description='Recording:', toggle_panels=()):
+        section_description='Recording:', toggle_panels=(), example_by_section=False):
     """Browse saved PNGs and review an item using caller-supplied adapters.
 
     ``load_item(key)`` returns any caller-owned record. ``sections(item)`` gives
@@ -160,6 +160,8 @@ def saved_figure_review_browser(
     ``set_keep(item, section, bool)`` and ``set_example(item, bool)`` persist
     decisions; example scope is chosen by the caller. No database or protocol
     dependency, automatic display, or file mutation occurs on opening.
+    With ``example_by_section=True``, the example callback receives
+    ``set_example(item, section, bool)``, matching the Keep callback.
     Panels listed in ``toggle_panels`` show all figure choices as buttons.
 
     The returned widget's ``review_state`` exposes selectors and buttons for
@@ -192,8 +194,11 @@ def saved_figure_review_browser(
                  figure_selectors=selectors, figure_images=images, keep_button=keep,
                  remove_button=remove, example_button=example, status=status,
                  is_example=False, loading=False)
+    updating_choices = False
 
     def show_image(panel):
+        if updating_choices:
+            return
         path = selectors[panel].value
         images[panel].value = Path(path).read_bytes() if path else b''
 
@@ -208,6 +213,7 @@ def saved_figure_review_browser(
         status.value = f'Visual inspection: {decision} | {flag}'
 
     def show_section(_change=None):
+        nonlocal updating_choices
         if state['loading'] or state['item'] is None:
             return
         section = section_selector.value
@@ -218,12 +224,19 @@ def saved_figure_review_browser(
             status.value = 'No review sections available.'
         else:
             info.value = '<b>' + html.escape(describe(state['item'], section)) + '</b>'
-        for panel, dropdown in selectors.items():
-            choices = (figure_options(state['item'], panel, section) if enabled else [])
-            choices = [(label, str(path)) for label, path in choices if Path(path).is_file()]
-            dropdown.options = choices or [('not available', '')]
-            dropdown.value = choices[0][1] if choices else ''
-            dropdown.disabled = not bool(choices)
+        # Updating options can also fire the value observer. Read each PNG
+        # once after the choices settle instead of loading it twice.
+        updating_choices = True
+        try:
+            for panel, dropdown in selectors.items():
+                choices = (figure_options(state['item'], panel, section) if enabled else [])
+                choices = [(label, str(path)) for label, path in choices if Path(path).is_file()]
+                dropdown.options = choices or [('not available', '')]
+                dropdown.value = choices[0][1] if choices else ''
+                dropdown.disabled = not bool(choices)
+        finally:
+            updating_choices = False
+        for panel in selectors:
             show_image(panel)
         if enabled:
             refresh_status()
@@ -265,7 +278,10 @@ def saved_figure_review_browser(
     def toggle_example(_button):
         # Read current persisted state so a second browser cannot stale-toggle it.
         _, current = review_flags(state['item'], section_selector.value)
-        set_example(state['item'], not current)
+        if example_by_section:
+            set_example(state['item'], section_selector.value, not current)
+        else:
+            set_example(state['item'], not current)
         refresh_status()
 
     selector.observe(guarded(show_item), names='value')
