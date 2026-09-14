@@ -11199,9 +11199,11 @@ def load_kept_cell_batch_selection(protocol_cells: pd.DataFrame, *, output_dir=N
 def _review_figure_options(saved, group, rec_type):
     """VariableMeanNoise figure-manifest routing; UI lives in utils.browse."""
     figures = saved.figures
-    if group == 'Raw trace':
+    if group in ('Raw trace', 'Processed trace'):
         rows = figures[figures.section.eq('section2')
                        & figures.figure.astype(str).eq(f'raw-{rec_type}')]
+        return [('Saved processed trace', row.path)
+                for row in rows.itertuples(index=False)]
     elif group == 'LN model':
         rows = figures[figures.figure.eq('static-ln')]
     elif group == 'Temporal LN':
@@ -11210,7 +11212,7 @@ def _review_figure_options(saved, group, rec_type):
         rows = figures[figures.section.eq('section4')]
     rows = rows.copy()
     rows['condition'] = rows.condition.fillna('all').replace('', 'all')
-    if group != 'Raw trace':
+    if group not in ('Raw trace', 'Processed trace'):
         rows = rows[rows.condition.astype(str).str.startswith(f'{rec_type}__')]
     return [(f'{row.condition or "all"} | {row.figure}', row.path)
             for row in rows.itertuples(index=False)]
@@ -11219,40 +11221,16 @@ def _review_figure_options(saved, group, rec_type):
 def build_cell_review_browser(
         protocol_cells: Optional[pd.DataFrame] = None, cell_indices=None, *, output_dir=None,
         raw_traces: bool = False, processed_traces: bool = False):
-    """Adapt VariableMeanNoise saved conditions to the shared review browser.
+    """Browse saved PNGs without loading or preprocessing amplifier traces.
 
     Keep/Remove and Example flags each use cell x recording-type scope.
     Existing physical-cell Example CSVs migrate on the next example action.
     """
     from retinanalysis.utils.browse import saved_figure_review_browser
-    import tempfile
-
-    # The former raw_traces flag remains a compatibility alias. Inspection
-    # now renders only the processed signal, never an extra raw-amplifier PNG.
-    processed_traces = bool(processed_traces or raw_traces)
-    trace_cache = (tempfile.TemporaryDirectory(prefix='vmn-processed-review-')
-                   if processed_traces else None)
-    trace_panel = 'Processed trace' if processed_traces else 'Raw trace'
-
-    def figure_options(saved, group, rec_type):
-        if group != trace_panel or not processed_traces:
-            return _review_figure_options(saved, group, rec_type)
-        path = Path(trace_cache.name) / f'{saved.cell_index}-{rec_type}-processed.png'
-        if not path.exists():
-            import matplotlib.pyplot as plt
-            catalog = pd.read_csv(saved.output_dir / 'tables' / 'epoch_catalog.csv')
-            catalog = catalog.loc[catalog.assigned_rec_type.eq(rec_type)]
-            figure = plot_raw_epoch_traces(
-                saved.exp_name, catalog, rec_type, downsample=1,
-                spike_median_window_samples=100, spike_high_pass_hz=300.0,
-                whole_cell_bin_ms=None, group_label=rec_type)
-            if figure is None:
-                return []
-            try:
-                figure.savefig(path, dpi=120)
-            finally:
-                plt.close(figure)
-        return [('Processed trace', path)]
+    # Section 2 bulk output already contains preprocessed traces. Its legacy
+    # raw-* manifest names refer to those saved PNGs, not unprocessed signals.
+    # The old trace flags remain accepted for notebook-call compatibility.
+    trace_panel = 'Processed trace'
 
     directory = condition_output_dir(output_dir)
     if protocol_cells is None:
@@ -11289,7 +11267,7 @@ def build_cell_review_browser(
     browser = saved_figure_review_browser(
         options, load_item=load, sections=sections,
         panels=(trace_panel, 'LN model', 'Temporal LN', 'Decoding'),
-        figure_options=figure_options,
+        figure_options=_review_figure_options,
         describe=lambda saved, rec_type: (
             saved_cell_review_line(saved, rec_type)
             + f' | CSV: {directory / "kept_cell_selection.csv"}'),
@@ -11303,9 +11281,7 @@ def build_cell_review_browser(
     state['cell_selector'] = state['selector']
     state['rec_type_selector'] = state['section_selector']
     browser._vmn_browser_state = state
-    browser._vmn_raw_cache = trace_cache  # legacy handle for notebook integrations
-    if processed_traces:
-        state['figure_selectors'][trace_panel].layout.display = 'none'
+    browser._vmn_raw_cache = None  # legacy attribute; saved PNGs need no trace cache
     return browser
 
 

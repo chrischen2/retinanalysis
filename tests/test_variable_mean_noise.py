@@ -187,6 +187,10 @@ def test_visual_browser_filters_figures_and_decisions_by_recording_type(
                             'cell_label': 'Cell2', 'output_dir': str(tmp_path),
                         }]))
     monkeypatch.setattr(vmn, 'load_saved_cell_analysis', lambda *_a, **_k: saved)
+    def no_processing(*_args, **_kwargs):
+        pytest.fail('Saved-figure inspection must never reload or preprocess amplifier traces')
+    monkeypatch.setattr(vmn, 'plot_raw_epoch_traces', no_processing)
+    monkeypatch.setattr(vmn, 'load_block', no_processing)
     decisions = []
     monkeypatch.setattr(
         vmn, 'set_cell_visual_inspection',
@@ -195,18 +199,29 @@ def test_visual_browser_filters_figures_and_decisions_by_recording_type(
             columns=vmn.HIGH_QUALITY_CELL_COLUMNS))
 
     browser = vmn.build_cell_review_browser(
-        pd.DataFrame(), output_dir=tmp_path)
+        pd.DataFrame(), output_dir=tmp_path, processed_traces=True)
     state = browser._vmn_browser_state
 
     assert tuple(state['rec_type_selector'].options) == (
         'extracellular', 'exc')
+    assert bytes(state['figure_images']['Processed trace'].value) == b'extracellular-raw-extracellular'
     state['rec_type_selector'].value = 'exc'
     assert all(
         'exc' in str(selector.value)
         for selector in state['figure_selectors'].values())
+    assert bytes(state['figure_images']['Processed trace'].value) == b'exc-raw-exc'
     state['keep_button'].click()
     state['remove_button'].click()
     assert decisions == [('exc', True), ('exc', False)]
+
+    # Missing saved trace is an empty panel, never an on-the-fly regeneration.
+    from pathlib import Path
+    Path(paths[('extracellular', 'raw-extracellular')]).unlink()
+    state['rec_type_selector'].value = 'extracellular'
+    assert bytes(state['figure_images']['Processed trace'].value) == b''
+    assert state['figure_selectors']['Processed trace'].options == (('not available', ''),)
+    assert state['figure_selectors']['Processed trace'].layout.display != 'none'
+    state['rec_type_selector'].value = 'exc'
 
     assert state['is_example'] is False
     assert state['example_button'].description == 'Set example'
