@@ -876,6 +876,48 @@ def test_whole_cell_smoothing_is_identical_in_raw_plot_and_ln_input(monkeypatch)
     plt.close(figure)
 
 
+def test_cell_block_cache_reuses_blocks_and_releases_memory_on_failure(monkeypatch):
+    import retinanalysis as ra
+
+    reads, detections = [], []
+    class FakeResponseBlock:
+        def __init__(self, exp_name, block_id, **kwargs):
+            reads.append(block_id)
+            self.amp_data = np.full((2, 40), float(block_id))
+            self.amp_sample_rate = 2000.
+        def get_spike_times(self, **kwargs):
+            detections.append(kwargs)
+            self.spike_times = [np.array([3, 9])] * 2
+
+    vmn.clear_caches()
+    monkeypatch.setattr(ra, 'SCResponseBlock', FakeResponseBlock)
+    with pytest.raises(RuntimeError, match='failed fit'):
+        with vmn._cell_block_cache():
+            first = [vmn.load_block('synthetic', i, False) for i in range(7)]
+            second = [vmn.load_block('synthetic', i, False) for i in range(7)]
+            assert reads == list(range(7))  # working set exceeds the old four-block cache
+            assert all(a is b for a, b in zip(first, second))
+            a = vmn.load_block('synthetic', 0, True)
+            assert vmn.load_block('synthetic', 0, True) is a
+            vmn.load_block('synthetic', 0, True, spike_high_pass_hz=250.)
+            assert len(detections) == 2  # settings remain part of cache identity
+            vmn.clear_caches()
+            assert not vmn._CELL_BLOCK_CACHE
+            raise RuntimeError('failed fit')
+    assert vmn._CELL_BLOCK_CACHE is None
+    vmn.clear_caches()
+
+
+def test_cell_block_cache_enforces_byte_limit(monkeypatch):
+    monkeypatch.setattr(vmn, 'CELL_BLOCK_CACHE_BYTES', 64)
+    with vmn._cell_block_cache():
+        for index in range(3):
+            vmn._remember_cell_block(index, (np.zeros(4), 1000., None))
+        assert list(vmn._CELL_BLOCK_CACHE) == [1, 2]
+        vmn._remember_cell_block(3, (np.zeros(9), 1000., None))
+        assert list(vmn._CELL_BLOCK_CACHE) == [1, 2]  # oversized block is not retained
+
+
 def test_load_block_converts_spike_preprocessing_ms_to_detector_samples(
         monkeypatch):
     import retinanalysis as ra
@@ -1757,6 +1799,25 @@ def test_reconstruct_traces_can_attach_encoding_generator():
     assert traces.generator.notna().all()
     assert not vmn.generator_direction_decoding(
         traces, generator_models={1.: model}).empty
+
+
+def test_decode_recovery_scores_existing_traces_without_recomputing(monkeypatch):
+    import pandas as pd
+
+    stimulus, response = _polarity_dataset(n_epochs=4, n_time=8000)
+    analysis = vmn.ConditionAnalysis(
+        exp_name='synthetic', block_ids=[1], rec_type='extracellular',
+        sample_rate=1000., units='Hz', light_means=[1.], n_epochs={1.: 4},
+        sampling_interval=.001, stimulus={1.: stimulus}, response={1.: response})
+    settings = dict(window_seconds=2., steady_state_s=2., decode_bin_ms=25., verbose=False)
+    expected = vmn.decode_recovery(analysis, **settings)
+    traces = pd.concat([vmn.reconstruct_traces(analysis, mode=mode, **settings)
+                        for mode in ('per_window', 'steady_state')], ignore_index=True)
+    monkeypatch.setattr(vmn, 'reconstruct_traces',
+                        lambda *a, **k: pytest.fail('Already reconstructed'))
+    actual = vmn.decode_recovery(analysis, traces=traces, **settings)
+    pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+    assert vmn.decode_recovery(analysis, traces=pd.DataFrame(), **settings).empty
 
 
 def test_steady_state_mode_never_scores_its_training_stretch():

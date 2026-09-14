@@ -57,6 +57,7 @@ from __future__ import annotations
 import html
 import warnings
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
@@ -2786,6 +2787,34 @@ STIMULUS_CACHE_MAX = 64
 BLOCK_CACHE_MAX = 4
 _STIMULUS_CACHE: "OrderedDict[tuple, np.ndarray]" = OrderedDict()
 _BLOCK_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
+CELL_BLOCK_CACHE_BYTES = 512 * 1024 ** 2
+_CELL_BLOCK_CACHE = None
+
+
+@contextmanager
+def _cell_block_cache():
+    """Retain blocks across one cell's stages, then release the extra memory."""
+    global _CELL_BLOCK_CACHE
+    previous = _CELL_BLOCK_CACHE
+    if previous is None:
+        _CELL_BLOCK_CACHE = OrderedDict()
+    try:
+        yield
+    finally:
+        _CELL_BLOCK_CACHE = previous
+
+
+def _remember_cell_block(key, value):
+    if _CELL_BLOCK_CACHE is None:
+        return value
+    amp, _, spikes = value
+    size = amp.nbytes + (sum(np.asarray(s).nbytes for s in spikes)
+                         if spikes is not None else 0)
+    if size <= CELL_BLOCK_CACHE_BYTES:
+        _CELL_BLOCK_CACHE[key] = (value, size)
+        while sum(item[1] for item in _CELL_BLOCK_CACHE.values()) > CELL_BLOCK_CACHE_BYTES:
+            _CELL_BLOCK_CACHE.popitem(last=False)
+    return value
 
 
 def _cache_get(cache: OrderedDict, key):
@@ -2811,6 +2840,8 @@ def clear_caches() -> None:
     """
     _STIMULUS_CACHE.clear()
     _BLOCK_CACHE.clear()
+    if _CELL_BLOCK_CACHE is not None:
+        _CELL_BLOCK_CACHE.clear()
 
 
 def load_block(exp_name: str, block_id: int, spiking: bool,
@@ -2831,9 +2862,13 @@ def load_block(exp_name: str, block_id: int, spiking: bool,
                       float(spike_high_pass_hz)) if spiking else (None, None)
     key = (str(exp_name), int(block_id), bool(spiking), *spike_settings,
            'whole-epoch-matlab-median-v2')
+    if _CELL_BLOCK_CACHE is not None:
+        cell_hit = _cache_get(_CELL_BLOCK_CACHE, key)
+        if cell_hit is not None:
+            return cell_hit[0]
     hit = _cache_get(_BLOCK_CACHE, key)
     if hit is not None:
-        return hit
+        return _remember_cell_block(key, hit)
     # A quiet second must share the spike/noise boundary of its full epoch.
     detector_kwargs = {'cutoff_frequency': float(spike_high_pass_hz),
                        'max_trial_length_s': None}
@@ -2850,8 +2885,8 @@ def load_block(exp_name: str, block_id: int, spiking: bool,
         # returns None, so read the attribute rather than the return value.
         block.get_spike_times(**detector_kwargs)
         spike_times = block.spike_times
-    return _cache_put(_BLOCK_CACHE, key, (amp, rate, spike_times),
-                      BLOCK_CACHE_MAX)
+    return _remember_cell_block(key, _cache_put(
+        _BLOCK_CACHE, key, (amp, rate, spike_times), BLOCK_CACHE_MAX))
 
 
 def matlab_randn(seed: int, n: int) -> np.ndarray:
@@ -4873,7 +4908,8 @@ def reconstruct_stimulus(analysis: ConditionAnalysis,
                          min_window_s: float = MIN_DECODE_WINDOW_S,
                          decode_bin_ms: float = 25.0,
                          noise_ratio: float = 0.1,
-                         verbose: bool = True) -> pd.DataFrame:
+                         verbose: bool = True,
+                         traces: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     """Reconstruct the stimulus trace window by window and score it by phase.
 
     A linear decoding filter is fitted from response back onto stimulus
@@ -4905,11 +4941,18 @@ def reconstruct_stimulus(analysis: ConditionAnalysis,
     and the transient is over within about 3 s. Use 0 to include the complete
     onset; use a positive value deliberately to exclude onset/settling, knowing
     that the omitted interval cannot then support an adaptation claim.
+
+    ``traces`` can reuse the output of :func:`reconstruct_traces` for these
+    same analysis/settings; a combined frame is filtered to ``mode``. This
+    lets the batch score the exact reconstructions already used in its plots.
     """
-    traces = reconstruct_traces(
-        analysis, mode=mode, steady_state_s=steady_state_s,
-        window_seconds=window_seconds, min_window_s=min_window_s,
-        decode_bin_ms=decode_bin_ms, noise_ratio=noise_ratio, verbose=False)
+    if traces is None:
+        traces = reconstruct_traces(
+            analysis, mode=mode, steady_state_s=steady_state_s,
+            window_seconds=window_seconds, min_window_s=min_window_s,
+            decode_bin_ms=decode_bin_ms, noise_ratio=noise_ratio, verbose=False)
+    elif not traces.empty:
+        traces = traces[traces['mode'].eq(mode)]
     if traces.empty:
         if verbose:
             print(f'  {mode}: no windows reconstructed')
@@ -10102,7 +10145,7 @@ def run_reconstruction_analyses(
         decoded = decode_recovery(
             analysis, window_seconds=selected_window,
             decode_bin_ms=decode_bin_ms, steady_state_s=steady_state_s,
-            verbose=verbose)
+            verbose=verbose, traces=traces)
         results[key] = {
             'analysis': analysis, 'decode_window_s': selected_window,
             'window_selection': window_selection, 'traces': traces,
@@ -10416,6 +10459,7 @@ def save_cell_analysis_run(
         figure_manifest=figure_manifest, table_paths=table_paths)
 
 
+@_cell_block_cache()
 def run_cell_sections_2_to_5(
         cell_index: int,
         protocol_cells: pd.DataFrame,
