@@ -3400,6 +3400,47 @@ def test_nested_condition_paths_are_discovered_without_duplicate_names(tmp_path)
     assert len(paths) == 2
 
 
+def test_saved_spike_review_png_refresh_uses_full_rate_and_current_filter(monkeypatch, tmp_path):
+    import json
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    from retinanalysis.utils.spike_detector import preprocess_spike_traces
+
+    rate = 10000.
+    raw = np.sin(np.arange(2000) * .7) + np.where(np.arange(2000) < 1000, 0., 80.)
+    catalog = pd.DataFrame([dict(block_id=1, block_epoch=0, epoch_number=0,
+                                 assigned_rec_type='extracellular')])
+    monkeypatch.setattr(vmn, 'load_block', lambda *_a, **_k: (raw[None, :], rate, None))
+    monkeypatch.setattr(vmn, 'epoch_response_window', lambda _row, _rate, size: (0, size, None))
+    old = vmn.plot_raw_epoch_traces('2020-01-01_A', catalog, 'extracellular')
+    manifest = vmn.save_cell_analysis_figures({'extracellular': old}, {}, {}, tmp_path)
+    path = manifest.iloc[0].path
+    assert not vmn.saved_spike_trace_is_current(path)  # legacy default averages 20 samples
+    (tmp_path / 'tables').mkdir()
+    manifest.to_csv(tmp_path / 'tables/figure_manifest.csv', index=False)
+    catalog.to_csv(tmp_path / 'tables/epoch_catalog.csv', index=False)
+    (tmp_path / 'run_manifest.json').write_text(json.dumps(dict(
+        cell_index=1, exp_name='2020-01-01_A', cell_label='Cell1',
+        settings={'downsample': 20, 'spike_high_pass_hz': 100., 'figure_dpi': 60})))
+    plotted = []
+    plotter = vmn.plot_raw_epoch_traces
+    def inspect_plot(*args, **kwargs):
+        fig = plotter(*args, **kwargs)
+        plotted.append(fig.axes[0].lines[0].get_ydata().copy())
+        return fig
+    monkeypatch.setattr(vmn, 'plot_raw_epoch_traces', inspect_plot)
+    result = vmn.refresh_saved_spike_trace_png(tmp_path)
+    assert result['status'] == 'refreshed'
+    assert vmn.saved_spike_trace_is_current(path)
+    assert len(plotted[0]) == len(raw)
+    np.testing.assert_allclose(plotted[0], preprocess_spike_traces(
+        raw, sample_rate=rate, median_window_samples=100, cutoff_frequency=300)[0])
+    assert vmn.refresh_saved_spike_trace_png(tmp_path)['status'] == 'already current'
+    assert len(plotted) == 1  # idempotent: no regeneration of a current PNG
+    assert not list(tmp_path.rglob('.trace-refresh-*'))
+    plt.close('all')
+
+
 def test_save_cell_analysis_figures_writes_and_closes_every_plot(tmp_path):
     import matplotlib.pyplot as plt
     from types import SimpleNamespace

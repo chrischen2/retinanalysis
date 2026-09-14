@@ -1960,6 +1960,12 @@ def plot_raw_epoch_traces(
         f'{"raw amplifier traces" if raw else "preprocessed amplifier traces | " + processing} | '
         f'epoch labels {first_epoch}–{last_epoch}', fontsize=10, y=1.0)
     fig.tight_layout()
+    fig._vmn_trace_preprocessing = dict(
+        version=1, rec_type=str(rec_type), raw=bool(raw),
+        downsample=display_factor, max_points=max_points,
+        spike_median_window_samples=spike_median_window_samples,
+        spike_high_pass_hz=float(spike_high_pass_hz),
+        whole_cell_bin_ms=whole_cell_bin_ms)
     return fig
 
 
@@ -10255,7 +10261,11 @@ def save_cell_analysis_figures(
             return
         prefix = f'{condition}__' if condition else ''
         path = directory / f'{section}__{prefix}{_safe_output_token(name)}.png'
-        figure.savefig(path, dpi=int(dpi), bbox_inches='tight')
+        import json
+        trace_settings = getattr(figure, '_vmn_trace_preprocessing', None)
+        metadata = ({'retinanalysis_trace_preprocessing': json.dumps(trace_settings)}
+                    if trace_settings is not None else None)
+        figure.savefig(path, dpi=int(dpi), bbox_inches='tight', metadata=metadata)
         entries.append({
             'section': section, 'condition': condition, 'figure': name,
             'path': str(path),
@@ -10458,8 +10468,8 @@ def run_cell_sections_2_to_5(
 
     raw_figures = plot_raw_epoch_traces_by_recording_type(
         exp_name, epoch_table, remove_epochs=effective_remove_epochs,
-        spike_median_window_ms=settings.spike_median_window_ms,
-        spike_high_pass_hz=settings.spike_high_pass_hz,
+        downsample=1, spike_median_window_samples=100,
+        spike_high_pass_hz=300.0,
         whole_cell_bin_ms=settings.whole_cell_bin_ms,
         whole_cell_baseline_shift_pa=settings.whole_cell_baseline_shift_pa)
 
@@ -11196,13 +11206,89 @@ def load_kept_cell_batch_selection(protocol_cells: pd.DataFrame, *, output_dir=N
     return tuple(sorted(overrides)), overrides
 
 
+def saved_spike_trace_is_current(path) -> bool:
+    """Inspect PNG metadata without decoding pixels or loading amplifier data."""
+    import json
+    from PIL import Image
+
+    try:
+        with Image.open(path) as image:
+            settings = json.loads(image.info.get('retinanalysis_trace_preprocessing', '{}'))
+        return all(settings.get(key) == value for key, value in dict(
+            version=1, rec_type='extracellular', raw=False, downsample=1,
+            max_points=None, spike_median_window_samples=100,
+            spike_high_pass_hz=300.).items())
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+
+
+def refresh_saved_spike_trace_png(cell_dir, *, force=False) -> dict:
+    """Overwrite one saved spike-review PNG with current full-rate preprocessing.
+
+    Uses the saved epoch catalog and removal settings. No model fitting,
+    condition HDF5, review decisions, or other recording types are changed.
+    The PNG is replaced atomically only after its preprocessing tag validates.
+    """
+    import json
+    import tempfile
+    import matplotlib.pyplot as plt
+
+    cell_dir = Path(cell_dir)
+    manifest = pd.read_csv(cell_dir / 'tables' / 'figure_manifest.csv')
+    entries = manifest[manifest.section.eq('section2') &
+                       manifest.figure.eq('raw-extracellular')]
+    if len(entries) != 1:
+        raise ValueError(f'{cell_dir}: expected one saved extracellular trace PNG')
+    path = Path(entries.iloc[0].path)
+    if path.resolve().parent != (cell_dir / 'figures').resolve():
+        raise ValueError(f'Trace PNG is outside the selected cell figure directory: {path}')
+    with (cell_dir / 'run_manifest.json').open() as stream:
+        run = json.load(stream)
+    result = dict(cell_index=run['cell_index'], exp_name=run['exp_name'],
+                  cell_label=run['cell_label'], path=str(path))
+    if not force and saved_spike_trace_is_current(path):
+        return {**result, 'status': 'already current'}
+    catalog = pd.read_csv(cell_dir / 'tables' / 'epoch_catalog.csv')
+    catalog = catalog[catalog.assigned_rec_type.eq('extracellular')].sort_values(
+        'epoch_number', kind='stable')
+    if catalog.empty:
+        raise ValueError(f'{cell_dir}: no extracellular epochs in saved catalog')
+    settings = run.get('settings', {})
+    remove = set(map(int, settings.get('remove_epochs', [])))
+    if 'removed_mean_condition' in catalog:
+        removed_mean = catalog.removed_mean_condition.astype(str).str.lower().isin(('true', '1'))
+        remove.update(catalog.loc[removed_mean, 'epoch_number'].astype(int))
+    figure = plot_raw_epoch_traces(
+        run['exp_name'], catalog, 'extracellular', remove_epochs=sorted(remove),
+        downsample=1, spike_median_window_samples=100, spike_high_pass_hz=300.,
+        group_label='extracellular')
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.trace-refresh-',
+                                     suffix='.png', delete=False) as stream:
+        temporary = Path(stream.name)
+    try:
+        figure.savefig(temporary, dpi=int(settings.get('figure_dpi', 180)),
+                       bbox_inches='tight', metadata={
+                           'retinanalysis_trace_preprocessing': json.dumps(
+                               figure._vmn_trace_preprocessing)})
+        if not saved_spike_trace_is_current(temporary):
+            raise ValueError('Refreshed PNG did not retain the full-rate preprocessing tag')
+        temporary.replace(path)
+    finally:
+        plt.close(figure)
+        temporary.unlink(missing_ok=True)
+    return {**result, 'status': 'refreshed', 'n_epochs': len(catalog)}
+
+
 def _review_figure_options(saved, group, rec_type):
     """VariableMeanNoise figure-manifest routing; UI lives in utils.browse."""
     figures = saved.figures
     if group in ('Raw trace', 'Processed trace'):
         rows = figures[figures.section.eq('section2')
                        & figures.figure.astype(str).eq(f'raw-{rec_type}')]
-        return [('Saved processed trace', row.path)
+        return [(('Saved processed trace · full sample rate'
+                  if saved_spike_trace_is_current(row.path) else
+                  'Older spike preprocessing — refresh saved trace PNG')
+                 if rec_type == 'extracellular' else 'Saved processed trace', row.path)
                 for row in rows.itertuples(index=False)]
     elif group == 'LN model':
         rows = figures[figures.figure.eq('static-ln')]
