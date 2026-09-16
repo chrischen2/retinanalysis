@@ -11377,8 +11377,8 @@ def build_cell_review_browser(
     trace_panel = 'Processed trace'
 
     directory = condition_output_dir(output_dir)
+    saved_index = load_condition_index(directory)
     if protocol_cells is None:
-        saved_index = load_condition_index(directory)
         saved_index['cell_index'] = saved_index.current_cell_index.fillna(
             saved_index.cell_index)
         protocol_cells = (saved_index.rename(columns={'date': 'exp_name'})
@@ -11391,8 +11391,12 @@ def build_cell_review_browser(
     export_kept_cell_selection(directory)
     options = [(f'{int(row.cell_index)} | {row.date} | {row.cell_label}',
                 int(row.cell_index)) for row in completed.itertuples(index=False)]
-    cell_types = {}
+    cell_types, recording_types = {}, {}
     for row in completed.itertuples(index=False):
+        conditions = saved_index[
+            saved_index.date.astype(str).eq(str(row.date))
+            & saved_index.cell_label.astype(str).eq(str(row.cell_label))]
+        recording_types[int(row.cell_index)] = tuple(conditions.rec_type.dropna().unique())
         match = (protocol_cells[protocol_cells.cell_index.eq(row.cell_index)]
                  if 'cell_index' in protocol_cells else pd.DataFrame())
         label = (match.iloc[0].get('cell_type', match.iloc[0].get('cell_type_short', ''))
@@ -11432,12 +11436,14 @@ def build_cell_review_browser(
             saved, rec_type, keep, output_dir=directory),
         set_example=lambda saved, rec_type, value: set_cell_example(
             saved, rec_type, value, output_dir=directory), example_by_section=True,
-        item_groups=cell_types, group_description='Cell type:')
+        item_groups=cell_types, group_description='Cell type:',
+        item_sections=recording_types)
     # Compatibility for existing notebook integrations and widget diagnostics.
     state = browser.review_state
     state['cell_selector'] = state['selector']
     state['rec_type_selector'] = state['section_selector']
     state['cell_type_selector'] = state['group_selector']
+    state['rec_type_filter'] = state['section_filter']
     browser._vmn_browser_state = state
     browser._vmn_raw_cache = None  # legacy attribute; saved PNGs need no trace cache
     return browser

@@ -201,6 +201,9 @@ def test_visual_browser_filters_figures_and_decisions_by_recording_type(
                             'cell_label': 'Cell2', 'output_dir': str(tmp_path),
                         }]))
     monkeypatch.setattr(vmn, 'load_saved_cell_analysis', lambda *_a, **_k: saved)
+    monkeypatch.setattr(vmn, 'load_condition_index', lambda *_a, **_k:
+                        saved.conditions.assign(date=saved.exp_name,
+                                                cell_label=saved.cell_label))
     def no_processing(*_args, **_kwargs):
         pytest.fail('Saved-figure inspection must never reload or preprocess amplifier traces')
     monkeypatch.setattr(vmn, 'plot_raw_epoch_traces', no_processing)
@@ -216,6 +219,13 @@ def test_visual_browser_filters_figures_and_decisions_by_recording_type(
         pd.DataFrame(), output_dir=tmp_path, processed_traces=True)
     state = browser._vmn_browser_state
 
+    assert state['rec_type_filter'].options == (
+        ('All', None), ('exc', 'exc'), ('extracellular', 'extracellular'))
+    state['rec_type_filter'].value = 'exc'
+    assert state['rec_type_selector'].options == ('exc',)
+    assert bytes(state['figure_images']['Processed trace'].value) == b'exc-raw-exc'
+    state['rec_type_filter'].value = None
+    state['rec_type_selector'].value = 'extracellular'
     assert tuple(state['rec_type_selector'].options) == (
         'extracellular', 'exc')
     assert bytes(state['figure_images']['Processed trace'].value) == b'extracellular-raw-extracellular'

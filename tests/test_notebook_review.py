@@ -36,6 +36,41 @@ def test_browser_group_filter_preserves_selection_and_loads_only_new_item():
     assert decisions == []
 
 
+def test_recording_filter_intersects_cell_type_and_handles_empty_selection():
+    loads, decisions = [], []
+    recordings = {1: ('spike', 'exc'), 2: ('spike',), 3: ('exc',)}
+    browser = saved_figure_review_browser(
+        [('one', 1), ('two', 2), ('three', 3)],
+        item_groups={1: 'midget', 2: 'parasol', 3: 'midget'},
+        item_sections=recordings, load_item=lambda key: loads.append(key) or key,
+        sections=lambda item: recordings[item], panels=('Trace',),
+        figure_options=lambda *args: [], describe=lambda *args: '',
+        review_flags=lambda *args: (False, False),
+        set_keep=lambda *args: decisions.append(args),
+        set_example=lambda *args: decisions.append(args))
+    state = browser.review_state
+    state['section_filter'].value = 'exc'
+    assert state['selector'].options == (('one', 1), ('three', 3))
+    assert state['section_selector'].options == ('exc',)
+    assert loads == [1]  # changing recording within the cell needs no data reload
+    state['selector'].value = 3
+    assert state['section_selector'].value == 'exc'
+    state['group_selector'].value = 'parasol'
+    assert state['selector'].options == ()
+    assert state['item'] is None
+    assert state['keep_button'].disabled and state['example_button'].disabled
+    assert state['figure_images']['Trace'].value == b''
+    assert 'No cells match' in state['status'].value
+    assert loads == [1, 3]  # empty intersections must not load None
+    state['section_filter'].value = None
+    assert state['selector'].value == 2
+    assert state['section_selector'].value == 'spike'
+    state['group_selector'].value = None
+    assert state['selector'].value == 2
+    assert loads == [1, 3, 2]
+    assert decisions == []
+
+
 def test_review_store_identity_defaults_and_independent_updates(tmp_path):
     store = ReviewStore(tmp_path / 'examples.csv', keys=('experiment', 'unit'),
                         columns=('experiment', 'unit', 'index', 'example'),

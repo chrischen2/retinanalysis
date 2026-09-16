@@ -151,7 +151,8 @@ def saved_figure_review_browser(
         options, *, load_item, sections, panels, figure_options, describe,
         review_flags, set_keep, set_example, item_description='Cell:',
         section_description='Recording:', toggle_panels=(), example_by_section=False,
-        item_groups=None, group_description='Group:'):
+        item_groups=None, group_description='Group:', item_sections=None,
+        section_filter_description='Recording type:'):
     """Browse saved PNGs and review an item using caller-supplied adapters.
 
     ``load_item(key)`` returns any caller-owned record. ``sections(item)`` gives
@@ -166,6 +167,8 @@ def saved_figure_review_browser(
     Panels listed in ``toggle_panels`` show all figure choices as buttons.
     ``item_groups`` maps item keys to labels for an optional dropdown filter.
     Filtering reuses the supplied index and keeps the current item when possible.
+    ``item_sections`` maps keys to available sections for a second filter that
+    intersects the group filter and selects that section in every matching item.
 
     The returned widget's ``review_state`` exposes selectors and buttons for
     notebook integration and testing. Missing images show an empty panel;
@@ -188,6 +191,14 @@ def saved_figure_review_browser(
             description=group_description, layout=widgets.Layout(width='320px'))
     section_selector = widgets.Dropdown(options=(), description=section_description,
                                         layout=widgets.Layout(width='320px'))
+    section_filter = None
+    if item_sections is not None:
+        item_sections = {key: tuple(item_sections.get(key, ())) for _, key in options}
+        available = sorted({section for values in item_sections.values() for section in values})
+        section_filter = widgets.Dropdown(
+            options=[('All', None)] + [(name, name) for name in available],
+            description=section_filter_description, style={'description_width': 'initial'},
+            layout=widgets.Layout(width='320px'))
     info, status = widgets.HTML(), widgets.HTML()
     keep = widgets.Button(description='Keep', button_style='success', icon='check')
     remove = widgets.Button(description='Remove', button_style='danger', icon='trash')
@@ -203,7 +214,8 @@ def saved_figure_review_browser(
     state = dict(item=None, selector=selector, section_selector=section_selector,
                  figure_selectors=selectors, figure_images=images, keep_button=keep,
                  remove_button=remove, example_button=example, status=status,
-                 is_example=False, loading=False, group_selector=group_selector)
+                 is_example=False, loading=False, group_selector=group_selector,
+                 section_filter=section_filter)
     updating_choices = False
 
     def show_image(panel):
@@ -251,6 +263,16 @@ def saved_figure_review_browser(
         if enabled:
             refresh_status()
 
+    def update_sections():
+        current = section_selector.value
+        choices = list(sections(state['item'])) if state['item'] is not None else []
+        if section_filter is not None and section_filter.value is not None:
+            choices = [section for section in choices if section == section_filter.value]
+        if tuple(choices) != section_selector.options:
+            section_selector.options = choices
+            section_selector.value = current if current in choices else (choices[0] if choices else None)
+        section_selector.disabled = not bool(choices)
+
     def show_item(_change=None):
         state['loading'] = True
         state['item'] = None
@@ -264,13 +286,16 @@ def saved_figure_review_browser(
         for image in images.values():
             image.value = b''
         try:
-            state['item'] = load_item(selector.value)
-            section_selector.options = list(sections(state['item']))
-            section_selector.value = (section_selector.options[0]
-                                      if section_selector.options else None)
+            if selector.value is not None:
+                state['item'] = load_item(selector.value)
+            update_sections()
         finally:
             state['loading'] = False
-        section_selector.disabled = not bool(section_selector.options)
+        if state['item'] is None:
+            for dropdown in selectors.values():
+                dropdown.options = [('not available', '')]
+            status.value = 'No cells match these filters.'
+            return
         show_section()
 
     def guarded(action):
@@ -298,21 +323,36 @@ def saved_figure_review_browser(
     selector.observe(on_item_change, names='value')
     def filter_items(_change):
         current = selector.value
-        selected = [option for option in options if group_selector.value is None
-                    or item_groups[option[1]] == group_selector.value]
+        selected = [option for option in options
+                    if (group_selector is None or group_selector.value is None
+                        or item_groups[option[1]] == group_selector.value)
+                    and (section_filter is None or section_filter.value is None
+                         or section_filter.value in item_sections[option[1]])]
         # Updating dropdown options resets its value. Avoid intermediate loads
         # and preserve the selected recording/figure when the item still matches.
         selector.unobserve(on_item_change, names='value')
         try:
             selector.options = selected
             selector.value = (current if current in [key for _, key in selected]
-                              else selected[0][1])
+                              else selected[0][1] if selected else None)
+            selector.disabled = not bool(selected)
         finally:
             selector.observe(on_item_change, names='value')
         if selector.value != current:
             show_item()
+        elif state['item'] is not None:
+            old_section = section_selector.value
+            state['loading'] = True
+            try:
+                update_sections()
+            finally:
+                state['loading'] = False
+            if section_selector.value != old_section:
+                show_section()
     if group_selector is not None:
         group_selector.observe(guarded(filter_items), names='value')
+    if section_filter is not None:
+        section_filter.observe(guarded(filter_items), names='value')
     section_selector.observe(guarded(show_section), names='value')
     for panel, dropdown in selectors.items():
         dropdown.observe(guarded(lambda _change, name=panel: show_image(name)), names='value')
@@ -320,7 +360,8 @@ def saved_figure_review_browser(
     remove.on_click(guarded(lambda _button: decide(False)))
     example.on_click(guarded(toggle_example))
     show_item()
-    box = widgets.VBox(([group_selector] if group_selector is not None else []) + [
+    filters = [widget for widget in (group_selector, section_filter) if widget is not None]
+    box = widgets.VBox(([widgets.HBox(filters)] if filters else []) + [
         widgets.HBox([selector, section_selector]), info,
         widgets.HBox([keep, remove, example]), status,
         widgets.GridBox([widgets.VBox([widgets.HTML('<b>' + html.escape(name) + '</b>'),
