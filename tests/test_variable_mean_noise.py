@@ -3196,7 +3196,13 @@ def test_low_light_normalization_is_independent_of_high_light(temporal):
     normalized = vmn.normalize_population_ln_curves(changed, temporal=temporal)
     pd.testing.assert_frame_equal(original[original.light_state.eq('low')],
                                   normalized[normalized.light_state.eq('low')])
-    np.testing.assert_allclose(original.y_normalized, normalized.y_normalized)
+    nl = original.curve.eq('nonlinearity')
+    np.testing.assert_allclose(original.loc[nl, 'y_normalized'],
+                               normalized.loc[nl, 'y_normalized'])
+    np.testing.assert_array_equal(normalized.loc[~nl, 'y_normalized'],
+                                  normalized.loc[~nl, 'y'])
+    np.testing.assert_array_equal(normalized.loc[nl, 'x_population'],
+                                  normalized.loc[nl, 'x'])
 
 
 def test_temporal_curve_normalization_preserves_change_between_windows():
@@ -3211,9 +3217,9 @@ def test_temporal_curve_normalization_preserves_change_between_windows():
     early = low_filter[low_filter.order.eq(0)].y_normalized.max()
     late = low_filter[low_filter.order.eq(1)].y_normalized.max()
 
-    assert normalized.groupby('light_state').filter_scale.first().to_dict() == {'low': 2., 'high': 4.}
-    assert early == pytest.approx(.5)
-    assert late == pytest.approx(1.)
+    assert normalized.filter_scale.eq(1.).all()
+    assert early == pytest.approx(1.)
+    assert late == pytest.approx(2.)
 
 
 def test_temporal_nonlinearity_parameters_follow_normalized_axes():
@@ -4521,6 +4527,8 @@ def test_temporal_ln_response_normalization_and_absolute_mode(rec_type):
             temporal, temporal=True, rec_types=None, normalized_ln=normalized_ln)
         np.testing.assert_allclose(curves.x_population[curves.curve.eq('nonlinearity')],
                                    curves.x[curves.curve.eq('nonlinearity')])
+        filters = curves[curves.curve.eq('filter')]
+        np.testing.assert_array_equal(filters.y_normalized, filters.y)
         for state in ('low', 'high'):
             block = curves[curves.light_state.eq(state) & curves.curve.eq('nonlinearity')]
             scale = block.response_scale.iloc[0]

@@ -11803,11 +11803,11 @@ def normalize_population_ln_curves(
         ) -> pd.DataFrame:
     """Prepare low/high curves on their original contrast-generator coordinates.
 
-    Response and filter scales are separate for each low/high light condition,
+    Response scales are separate for each low/high light condition,
     shared over all retained temporal windows. Spike scale is maximum response;
     whole-cell scale is maximum absolute response, retaining current polarity.
-    Each filter uses its own light level's peak absolute amplitude. Absolute
-    mode applies no response/filter scaling. Generator values are never rescaled.
+    Filters retain their saved amplitudes, matching the per-cell LN plots.
+    Absolute mode disables response scaling. Generator values are used directly.
     """
     if curves is None or curves.empty:
         return pd.DataFrame() if curves is None else curves.copy()
@@ -11838,28 +11838,21 @@ def normalize_population_ln_curves(
     scale_keys = ['condition_id', 'light_state']
     for group_key, block in selected.groupby(scale_keys, dropna=False):
         group_key = group_key if isinstance(group_key, tuple) else (group_key,)
-        filter_y = block.loc[block.curve.eq('filter'), 'y'].to_numpy(float)
         nl_y = block.loc[block.curve.eq('nonlinearity'), 'y'].to_numpy(float)
-        filter_scale = float(np.max(np.abs(filter_y))) if filter_y.size else np.nan
         response_scale = (float(np.max(nl_y))
                           if nl_y.size and str(block.rec_type.iloc[0]) == 'extracellular'
                           else float(np.max(np.abs(nl_y))) if nl_y.size else np.nan)
         scales.append({**dict(zip(scale_keys, group_key)),
-                       'filter_scale': filter_scale if normalized_ln else 1.,
+                       'filter_scale': 1.,
                        'response_scale': response_scale if normalized_ln else 1.,
                        'generator_scale': 1.})
     selected = selected.merge(pd.DataFrame(scales), on=scale_keys, how='left')
     selected['x_population'] = selected.x
     selected.loc[selected.curve.eq('filter'), 'x_population'] *= 1e3
     nl_mask = selected.curve.eq('nonlinearity')
-    selected.loc[nl_mask, 'x_population'] = (
-        selected.loc[nl_mask, 'x']
-        / selected.loc[nl_mask, 'generator_scale'])
     selected['y_normalized'] = np.nan
     filter_mask = selected.curve.eq('filter')
-    selected.loc[filter_mask, 'y_normalized'] = (
-        selected.loc[filter_mask, 'y']
-        / selected.loc[filter_mask, 'filter_scale'])
+    selected.loc[filter_mask, 'y_normalized'] = selected.loc[filter_mask, 'y']
     selected.loc[nl_mask, 'y_normalized'] = (
         selected.loc[nl_mask, 'y']
         / selected.loc[nl_mask, 'response_scale'])
@@ -12004,7 +11997,7 @@ def normalize_temporal_ln_parameters(
         if parameter in rows:
             rows[parameter] = pd.to_numeric(rows[parameter], errors='coerce')
     rows['alpha_normalized'] = rows.alpha / rows.response_scale
-    rows['beta_normalized'] = rows.beta * rows.generator_scale
+    rows['beta_normalized'] = rows.beta
     rows['gamma_normalized'] = rows.gamma
     rows['epsilon_normalized'] = rows.epsilon / rows.response_scale
     # Signed derivative at the sigmoid midpoint for alpha * Phi(beta*x + gamma).
@@ -12058,7 +12051,7 @@ def _population_ln_title(block: pd.DataFrame) -> str:
 
 def plot_population_static_ln_curves(
         summary: pd.DataFrame, *, normalized_ln: bool = True):
-    """Plot normalized static filter/nonlinearity population mean ± SEM."""
+    """Plot saved filters and optionally y-normalized nonlinearities, mean ± SEM."""
     import matplotlib.pyplot as plt
     from retinanalysis.utils import style
 
@@ -12067,10 +12060,9 @@ def plot_population_static_ln_curves(
     style.apply_publication_style()
     fig, axes = plt.subplots(1, 2, figsize=(9.0, 3.8))
     colors = {'low': '#4477AA', 'high': '#CC6677'}
-    prefix = 'normalized ' if normalized_ln else ''
     units = 'Hz' if summary.rec_type.iloc[0] == 'extracellular' else 'pA'
     for ax, curve, xlabel, ylabel in (
-            (axes[0], 'filter', 'filter lag (ms)', prefix + 'filter'),
+            (axes[0], 'filter', 'filter lag (ms)', 'filter'),
             (axes[1], 'nonlinearity', 'generator (contrast units)',
              'normalized response' if normalized_ln else f'response ({units})')):
         for state in ('low', 'high'):
@@ -12099,7 +12091,7 @@ def plot_population_static_ln_curves(
 
 def plot_population_temporal_ln_curves(
         summary: pd.DataFrame, *, normalized_ln: bool = True):
-    """Plot normalized temporal filters and nonlinearities at low/high light."""
+    """Plot saved temporal filters and optionally y-normalized nonlinearities."""
     import matplotlib.pyplot as plt
     from matplotlib import colormaps, colors as mpl_colors
     from retinanalysis.utils import style
@@ -12147,8 +12139,7 @@ def plot_population_temporal_ln_curves(
             ax.set_xlabel('filter lag (ms)' if curve == 'filter'
                           else 'generator (contrast units)')
             units = 'Hz' if summary.rec_type.iloc[0] == 'extracellular' else 'pA'
-            ax.set_ylabel(('normalized filter' if normalized_ln else 'filter')
-                          if curve == 'filter' else
+            ax.set_ylabel('filter' if curve == 'filter' else
                           ('normalized response' if normalized_ln else f'response ({units})'))
             if curve == 'nonlinearity':
                 ax.set_xlim(-1., 1.)
@@ -12816,7 +12807,7 @@ def plot_population_class_overlays(summary: pd.DataFrame,
     axes[0].set(xlabel='generator contrast', ylabel=('normalized response' if normalized_ln
                                                   else f'response ({units})'),
                 title=f'{light_state} light: NL overlays'); axes[0].set_xlim(-1, 1)
-    axes[1].set(xlabel='filter lag (ms)', ylabel=('normalized filter' if normalized_ln else 'filter'),
+    axes[1].set(xlabel='filter lag (ms)', ylabel='filter',
                 title=f'{light_state} light: temporal-filter overlays')
     axes[0].legend(frameon=False, fontsize=7, ncol=2)
     fig.tight_layout()
