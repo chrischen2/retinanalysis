@@ -11541,7 +11541,7 @@ def high_quality_population_overview_analysis(*, output_dir=None) -> dict:
     }
 
 
-POPULATION_TEMPORAL_DURATIONS = (50., 55., 60.)
+POPULATION_TEMPORAL_MIN_DURATION_S = 50.
 # Display coordinates only: five equal windows over 1-50 s in the 50 s reference.
 POPULATION_TEMPORAL_CENTRES_S = (5.9, 15.7, 25.5, 35.3, 45.1)
 POPULATION_TEMPORAL_TIME_LABEL = 'Approx. time (s; aligned by window order)'
@@ -11558,7 +11558,7 @@ def population_ln_condition_counts(
     """Count contributing cells and low/high pairs for Section 6c.
 
     Static counts pool all recording durations. With ``temporal=True``, only
-    50, 55 and 60 s recordings contribute to the common ordinal-window group.
+    recordings lasting at least 50 s contribute to the common ordinal-window group.
     """
     population_groups = (POPULATION_TEMPORAL_GROUPS if temporal
                          else POPULATION_STATIC_GROUPS)
@@ -11575,7 +11575,9 @@ def population_ln_condition_counts(
     if temporal:
         duration = pd.to_numeric(
             paired_conditions.stim_seconds, errors='coerce')
-        paired_conditions = paired_conditions.loc[duration.isin(POPULATION_TEMPORAL_DURATIONS)].copy()
+        paired_conditions = paired_conditions.loc[
+            np.isfinite(duration)
+            & duration.ge(POPULATION_TEMPORAL_MIN_DURATION_S)].copy()
         paired_conditions['duration_group_s'] = 50.0
     conditions = paired_conditions[
         ['cell_id', 'condition_id', *population_groups]].drop_duplicates()
@@ -11587,7 +11589,7 @@ def population_ln_condition_counts(
 
 
 def _prepare_population_temporal_rows(frame: pd.DataFrame) -> pd.DataFrame:
-    """Select the first five saved windows from 50/55/60 s recordings.
+    """Select the first five saved windows from recordings lasting at least 50 s.
 
     Window order is the requested approximate alignment: retain the entire
     fifth fit even when its original end exceeds 50 s. Never truncate a fit,
@@ -11600,7 +11602,8 @@ def _prepare_population_temporal_rows(frame: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f'temporal population rows require {sorted(missing)}')
     duration = pd.to_numeric(frame.stim_seconds, errors='coerce')
     order = pd.to_numeric(frame.order, errors='coerce')
-    rows = frame.loc[duration.isin(POPULATION_TEMPORAL_DURATIONS)
+    rows = frame.loc[np.isfinite(duration)
+                     & duration.ge(POPULATION_TEMPORAL_MIN_DURATION_S)
                      & order.isin(range(len(POPULATION_TEMPORAL_CENTRES_S)))].copy()
     rows['duration_group_s'] = 50.0  # reference display axis, not an actual time cutoff
     return rows
@@ -11609,8 +11612,8 @@ def _prepare_population_temporal_rows(frame: pd.DataFrame) -> pd.DataFrame:
 def align_population_temporal_times(curves, parameters):
     """Assign common display midpoints by saved window order without refitting.
 
-    The first five windows from 50/55/60 s recordings map to the 50 s reference
-    centres, irrespective of their original widths. Fitted values, saved
+    The first five windows from recordings lasting at least 50 s map to the
+    50 s reference centres, irrespective of their original widths. Fitted values, saved
     labels and bounds are unchanged. Original times remain in the audit.
     """
     frames, audit = [], []
@@ -11971,7 +11974,7 @@ def _population_ln_title(block: pd.DataFrame) -> str:
     row = block.iloc[0]
     title = f'{row.cell_type} | {row.rec_type} | {row.light_regime}'
     if 'duration_group_s' in block:
-        title += ' | 50/55/60 s recordings · saved windows 1–5'
+        title += ' | ≥50 s recordings · saved windows 1–5'
     else:
         title += ' | all durations and contrasts pooled'
     return title
@@ -12261,7 +12264,7 @@ def high_quality_population_ln_analysis(
     independent of Section 6b. Review matching includes recording type, so a
     retained extracellular recording never admits a rejected whole-cell
     recording from the same cell. Static curves pool all contrasts and epoch
-    durations. Temporal results pool contrast for 50/55/60 s recordings,
+    durations. Temporal results pool contrast for recordings lasting at least 50 s,
     aligning their first five saved windows by order on an approximate time axis. ``normalized_ln=False``
     displays absolute responses and parameters; generator units stay unchanged.
     Every condition is additionally split into photopic/scotopic from
@@ -12370,7 +12373,8 @@ def high_quality_population_ln_analysis(
             if not included:
                 continue
             static = load_condition_table(h5, 'ln_curves')
-            temporal_eligible = float(metadata['stim_seconds']) in POPULATION_TEMPORAL_DURATIONS
+            temporal_eligible = (np.isfinite(metadata['stim_seconds'])
+                                 and float(metadata['stim_seconds']) >= POPULATION_TEMPORAL_MIN_DURATION_S)
             temporal = (load_condition_table(h5, 'temporal_ln_curves')
                         if temporal_eligible else pd.DataFrame())
             parameters = (load_condition_table(h5, 'temporal_summary')
@@ -12822,7 +12826,7 @@ def iter_population_adaptation_figures(result: Mapping[str, object]):
 
 def population_directional_decoding_dynamics(
         frame: pd.DataFrame, *, windows=((1., 10.), (10., 20.), (40., 50.)),
-        durations=POPULATION_TEMPORAL_DURATIONS) -> dict:
+        durations=None) -> dict:
     """Compare gain, accuracy and error across first/second/last intervals.
 
     Accuracy is weighted by n_changes within each condition and interval. Gain
@@ -12833,6 +12837,8 @@ def population_directional_decoding_dynamics(
     primary last-minus-second comparison pairs those two intervals independently.
     Saved bins crossing interval edges cannot be split from summary statistics.
     Coverage and exclusions are returned explicitly rather than filling gaps.
+    ``durations=None`` includes all finite durations >=50 s; an explicit
+    sequence can restrict the comparison to specified durations.
     """
     windows = tuple((float(lo), float(hi)) for lo, hi in windows)
     if (len(windows) != 3 or any(not np.isfinite(lo + hi) or hi <= lo
@@ -12867,7 +12873,11 @@ def population_directional_decoding_dynamics(
         for column in ('cell_index', 'light_contrast'):
             if column in block:
                 metadata[column] = block[column].iloc[0]
-        if float(metadata['stim_seconds']) not in durations:
+        duration = float(metadata['stim_seconds'])
+        duration_included = (np.isfinite(duration) and (
+            duration >= POPULATION_TEMPORAL_MIN_DURATION_S if durations is None
+            else duration in durations))
+        if not duration_included:
             audits.append({**metadata, 'stage': 'all', 'status': 'excluded duration',
                            'n_bins': 0, 'source_windows': (),
                            'actual_start_s': np.nan, 'actual_end_s': np.nan,

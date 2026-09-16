@@ -117,7 +117,7 @@ def test_section_6c_runs_high_quality_population_ln_analysis():
 
     assert 'population-ln-heading' in cells
     assert '**all contrasts and durations**' in cells['population-ln-heading']
-    assert '**50, 55, and 60 s recordings**' in cells[
+    assert '**all recordings lasting at least 50 s**' in cells[
         'population-ln-heading']
     source = cells['population-ln-analysis']
     assert "POPULATION_REC_TYPES = ('extracellular', 'exc')" in source
@@ -128,7 +128,7 @@ def test_section_6c_runs_high_quality_population_ln_analysis():
     assert 'temporal_parameter_window_combine=' in source
     assert 'high_quality_population_ln_analysis' in source
     assert "population_ln['temporal_condition_counts']" in source
-    assert '50/55/60 s recordings, saved windows 1-5' in source
+    assert '>=50 s recordings, saved windows 1-5' in source
     assert 'normalized_ln=NORMALIZED_LN' in source
     assert 'iter_population_ln_figures' in source
     assert 'high_quality_cells' not in source
@@ -1707,6 +1707,24 @@ def test_directional_contrast_plot_weights_cells_and_shows_sem():
     rows.loc[2, 'mode'] = 'full'
     with pytest.raises(ValueError, match='one mode'):
         vmn.plot_population_directional_contrast(rows)
+
+
+@pytest.mark.parametrize('duration,included', [(40., False), (49.9, False),
+    (50., True), (50.5, True), (55., True), (56., True), (60., True), (75., True)])
+def test_directional_dynamics_accepts_all_long_durations(duration, included):
+    import pandas as pd
+
+    rows = pd.DataFrame([dict(condition_id='a', cell_id='a', cell_type='ON-midget',
+        rec_type='extracellular', stim_seconds=duration, mode='per_window',
+        light_condition='bright', operating_point='positive', window=window,
+        direction=direction, n_changes=20, direction_accuracy=.6,
+        gain_delta=.5, nrmse_delta=.8)
+        for window in ('2-6 s', '10-14 s', '40-44 s')
+        for direction in ('increment', 'decrement')])
+    result = vmn.population_directional_decoding_dynamics(rows)
+    assert (not result['changes'].empty) == included
+    explicit = vmn.population_directional_decoding_dynamics(rows, durations=(60.,))
+    assert (not explicit['changes'].empty) == (duration == 60.)
 
 
 def test_directional_dynamics_pairs_times_before_averaging_conditions():
@@ -3640,11 +3658,12 @@ def test_temporal_alignment_uses_saved_order_even_for_different_original_layouts
     assert params[params.condition_id.eq('sixty')].centre_s.tolist() == [5.9, 15.7, 25.5, 35.3]
 
 
-def test_ordinal_alignment_preserves_all_three_lengths_and_saved_fit_values():
+def test_ordinal_alignment_accepts_all_long_durations_and_preserves_saved_fits():
     import pandas as pd
 
     records = []
-    for duration, count in [(30., 5), (50., 5), (55., 5), (60., 6)]:
+    for duration, count in [(30., 5), (40., 5), (49.9, 5), (50., 5), (50.5, 5),
+                            (55., 5), (56., 5), (60., 6), (75., 5)]:
         edges = np.linspace(1., duration, count + 1)
         for order, (lo, hi) in enumerate(zip(edges[:-1], edges[1:])):
             records.append(dict(condition_id=f'cell-{duration}', stim_seconds=duration,
@@ -3654,10 +3673,10 @@ def test_ordinal_alignment_preserves_all_three_lengths_and_saved_fit_values():
     saved = original.copy(deep=True)
     curves, parameters, audit = vmn.align_population_temporal_times(original, original)
     pd.testing.assert_frame_equal(original, saved)  # the saved inputs are never changed
-    assert len(parameters) == 15
-    assert parameters.groupby('order').condition_id.nunique().tolist() == [3]*5
+    assert len(parameters) == 30
+    assert parameters.groupby('order').condition_id.nunique().tolist() == [6]*5
     assert parameters.groupby('order').centre_s.first().tolist() == list(vmn.POPULATION_TEMPORAL_CENTRES_S)
-    expected = saved[saved.stim_seconds.isin([50., 55., 60.]) & saved.order.lt(5)]
+    expected = saved[saved.stim_seconds.ge(50.) & saved.order.lt(5)]
     pd.testing.assert_frame_equal(parameters[['window', 'alpha', 'beta', 'gamma', 'epsilon']],
                                   expected[['window', 'alpha', 'beta', 'gamma', 'epsilon']])
     np.testing.assert_array_equal(parameters.original_centre_s, expected.centre_s)
