@@ -6143,7 +6143,8 @@ def _read_model_input(group):
 
 
 def load_saved_lnk_inputs(cell_index: int, *, output_dir=None,
-                          protocol_cells=None, fit_static: bool = True):
+                          protocol_cells=None, fit_static: bool = True,
+                          rec_types=None):
     """Restore all saved conditions by stable cell index, without raw-data loading.
 
     Returns ``(reconstruction_by_condition, core_by_condition)`` for the LNK
@@ -6151,12 +6152,15 @@ def load_saved_lnk_inputs(cell_index: int, *, output_dir=None,
     never applied again. Static LN fits can be rebuilt from these samples for
     the one-state comparison; no kinetic fit is run here. Legacy summary-only
     files must be regenerated once with the reviewed baseline settings.
+    ``rec_types`` filters the index before reading model inputs or fitting LN.
     """
     import h5py
 
     index = load_condition_index(output_dir, protocol_cells=protocol_cells)
     rows = index[pd.to_numeric(index.current_cell_index, errors='coerce')
                  .fillna(index.cell_index).eq(int(cell_index))]
+    if rec_types is not None:
+        rows = rows[rows.rec_type.isin(rec_types)]
     if rows.empty:
         raise FileNotFoundError(f'No saved conditions for cell_index {cell_index}')
     reconstruction, cores = {}, {}
@@ -6747,10 +6751,12 @@ def plot_population_metrics(summary: pd.DataFrame, x: str,
 # step and it is not implemented here.
 #
 # The state is driven by the cell's own rectified drive and returns to the
-# nonlinearity by exactly one of two routes, which is the experiment:
+# nonlinearity through one of three candidate mechanisms:
 #
 #   multiplicative   r = alpha exp(-k a') Phi(beta g + gamma) + eps  -> SLOPE
 #   subtractive      r = alpha Phi(beta g + gamma - k a') + eps       -> SHIFT
+#   combined         r = alpha exp(-k a') Phi(beta g + gamma) + eps + b a'
+#                    -> GAIN + VERTICAL RESPONSE BASELINE
 #
 # where a' is the state standardised to zero mean and unit variance. Neither
 # its mean nor its scale is identifiable -- the mean is absorbed by `alpha`
@@ -6763,7 +6769,7 @@ def plot_population_metrics(summary: pd.DataFrame, x: str,
 # couplings are not two settings of one mechanism, and which one a cell needs
 # is a model comparison rather than a parameter readout.
 # --------------------------------------------------------------------------
-LNK_COUPLINGS = ('multiplicative', 'subtractive')
+LNK_COUPLINGS = ('multiplicative', 'subtractive', 'combined')
 
 
 @dataclass
@@ -6787,7 +6793,7 @@ class LNKModel:
     state_dt_s: float = np.nan
     r2: float = np.nan            # held-out epochs, adaptive model
     r2_train: float = np.nan
-    r2_static: float = np.nan     # held-out epochs, same model with k = 0
+    r2_static: float = np.nan     # held-out epochs, adaptation disabled
     n_train_epochs: int = 0
     n_test_epochs: int = 0
     n_warmup_epochs: int = 0
@@ -6796,6 +6802,9 @@ class LNKModel:
     state: np.ndarray = field(default_factory=lambda: np.zeros(0))
     generator: np.ndarray = field(default_factory=lambda: np.zeros(0))
     at_bounds: Tuple[str, ...] = ()
+    optimizer_success: Optional[bool] = None
+    nfev: int = 0
+    test_epochs: Tuple[int, ...] = ()
 
     @property
     def r2_gain(self) -> float:
@@ -7378,6 +7387,9 @@ def _lnk_predict(generator, params, coupling: str, dt: float,
         return alpha * np.exp(-k * centred) * drive + epsilon, state
     if coupling == 'subtractive':
         return alpha * ndtr(argument - k * centred) + epsilon, state
+    if coupling == 'combined':
+        return (alpha * np.exp(-k * centred) * drive + epsilon
+                + float(params['baseline_shift']) * centred), state
     raise ValueError(f'coupling must be one of {LNK_COUPLINGS}')
 
 
@@ -7528,7 +7540,7 @@ def normalized_residual(predicted, measured, dt: float,
 
 @dataclass
 class _LNKSetup:
-    """Everything both LNK variants need before any parameter is fitted."""
+    """Shared input and filter preparation for the one-state variants."""
 
     stimulus: np.ndarray
     response: np.ndarray
@@ -7760,8 +7772,13 @@ def fit_lnk(analysis: ConditionAnalysis,
             static_analysis: Optional[ConditionAnalysis] = None,
             filter_n_starts: int = 8,
             warmup_epochs: int = 0,
+            _initial_params: Optional[dict] = None,
             _setup: Optional[_LNKSetup] = None) -> Optional[LNKModel]:
     """Fit an LN cascade plus one slow adaptive state to the whole recording.
+
+    ``combined`` extends multiplicative gain with a signed vertical offset
+    ``baseline_shift * a'`` in response units; subtractive retains its existing
+    horizontal generator shift. Each uses the same single adaptive state.
 
     Fitted on ``analysis.sequence_*`` -- every accepted epoch concatenated in
     recorded order. Because ``interpulseInterval`` is 0 the epochs are
@@ -7840,7 +7857,7 @@ def fit_lnk(analysis: ConditionAnalysis,
     is sound because it is driven by the stimulus alone. The first
     ``warmup_epochs`` are also integrated but not fitted or scored, avoiding a
     bias from the forced initial state ``a0=0``. ``r2_static`` is the same
-    model with ``k`` forced to zero -- a nested baseline, so
+    model with all adaptive modulation disabled -- a nested baseline, so
     ``r2_gain`` is what the adaptive state buys and nothing else.
 
     Returns ``None`` with a printed reason when the sequence is too short or
@@ -7902,8 +7919,10 @@ def fit_lnk(analysis: ConditionAnalysis,
     # a bias that cannot be seen from inside the fit.
     filter_names = tuple(f'{name}_{level:g}' for level in levels
                          for name in PARAM_FILTER_NAMES) if fit_filter else ()
-    names = ('alpha', 'beta', 'gamma', 'epsilon', 'log_tau_on', 'log_tau_off',
-             'k') + filter_names
+    core_names = ('alpha', 'beta', 'gamma', 'epsilon', 'log_tau_on', 'log_tau_off', 'k')
+    if coupling == 'combined':
+        core_names += ('baseline_shift',)
+    names = core_names + filter_names
     # Same bounds for both couplings, so neither is handicapped in the
     # comparison. `k` is signed: positive suppresses the response as the cell
     # adapts, negative would be facilitation, and the data decides which.
@@ -7930,12 +7949,25 @@ def fit_lnk(analysis: ConditionAnalysis,
     guess = np.r_[guess_nl, np.log(tau_on_start), np.log(tau_off_start), 0.5]
     lower = np.r_[lower_nl, np.log(tau_min), np.log(tau_min), -k_limit]
     upper = np.r_[upper_nl, np.log(tau_max), np.log(tau_max), k_limit]
+    if coupling == 'combined':
+        # The offset is response units per SD of adaptation; use the same
+        # response-amplitude bounds as the sigmoid, including whole-cell units.
+        shift_limit = max(abs(lower_nl[0]), abs(upper_nl[0]))
+        guess = np.r_[guess, 0.]
+        lower = np.r_[lower, -shift_limit]
+        upper = np.r_[upper, shift_limit]
     if fit_filter:
         shape_lower = np.array([0.1, 1e-4, 1e-4, 1e-3, -720.0])
         shape_upper = np.array([20.0, 5.0, 5.0, 20.0, 720.0])
         guess = np.r_[guess, np.concatenate([shape_params[l] for l in levels])]
         lower = np.r_[lower, np.tile(shape_lower, len(levels))]
         upper = np.r_[upper, np.tile(shape_upper, len(levels))]
+    if _initial_params is not None:
+        for index, name in enumerate(names):
+            value = (_initial_params.get(name) if not name.startswith('log_tau_')
+                     else np.log(_initial_params[name[4:]]))
+            if value is not None and np.isfinite(value):
+                guess[index] = value
 
     rng = np.random.default_rng(random_state)
     unique_epochs = np.asarray(_epoch_order(epochs), dtype=int)
@@ -7965,7 +7997,7 @@ def fit_lnk(analysis: ConditionAnalysis,
     is_warmup = np.isin(epochs, warmup)
     train = ~is_test & ~is_warmup
 
-    n_core = 7
+    n_core = len(core_names)
 
     def unpack(vector):
         raw = dict(zip(names, (float(v) for v in vector)))
@@ -8011,6 +8043,8 @@ def fit_lnk(analysis: ConditionAnalysis,
         draw[4] = rng.uniform(np.log(tau_min), np.log(tau_max))
         draw[5] = rng.uniform(np.log(tau_min), np.log(tau_max))
         draw[6] = rng.uniform(-k_limit, k_limit)
+        if coupling == 'combined':
+            draw[7] = rng.uniform(-np.std(response), np.std(response))
         starts.append(np.clip(draw, lower, upper))
 
     result = None
@@ -8082,7 +8116,9 @@ def fit_lnk(analysis: ConditionAnalysis,
         n_train_epochs=int(score_epochs.size - n_test), n_test_epochs=int(n_test),
         n_warmup_epochs=int(n_warmup),
         predicted=predicted, predicted_static=predicted_static, state=state,
-        generator=generator, at_bounds=at_bounds)
+        generator=generator, at_bounds=at_bounds,
+        optimizer_success=bool(result.success), nfev=int(result.nfev),
+        test_epochs=tuple(int(epoch) for epoch in test_epochs))
     if verbose:
         print(f'  {coupling:>14}: r²={model.r2:.3f} held out '
               f'(static {model.r2_static:.3f}, gain {model.r2_gain:+.3f}) | '
@@ -8688,6 +8724,9 @@ def nonlinearity_timelapse(analysis: ConditionAnalysis, model: LNKModel,
                 curve = alpha * np.exp(-k * a_bar) * ndtr(beta * grid + gamma) + epsilon
             elif model.coupling == 'subtractive':
                 curve = alpha * ndtr(beta * grid + gamma - k * a_bar) + epsilon
+            elif model.coupling == 'combined':
+                curve = (alpha * np.exp(-k * a_bar) * ndtr(beta * grid + gamma)
+                         + epsilon + float(params['baseline_shift']) * a_bar)
             else:
                 raise ValueError(f'unknown coupling {model.coupling!r}')
             # Measured response over the same samples, binned on the generator.
@@ -8854,7 +8893,7 @@ def plot_nonlinearity_timelapse(analysis: ConditionAnalysis, model: LNKModel,
         ax = axes[row][1]
         trajectory = (block[['order', 't_mid_s', 'state']]
                       .drop_duplicates('order').sort_values('order'))
-        if model.coupling == 'multiplicative':
+        if model.coupling in ('multiplicative', 'combined'):
             converted = np.exp(-float(model.params['k']) * trajectory.state)
             continuous = (np.exp(-float(model.params['k']) * mean_state)
                           if mean_state is not None else None)
@@ -8877,6 +8916,15 @@ def plot_nonlinearity_timelapse(analysis: ConditionAnalysis, model: LNKModel,
         ax.plot(trajectory.t_mid_s, converted, 'o-', color='#7B3294',
                 lw=1.6, ms=4)
         ax.set_ylabel(ylabel, fontsize=9)
+        if model.coupling == 'combined':
+            offset_ax = ax.twinx()
+            offset = float(model.params['baseline_shift'])
+            offset_ax.axhline(0., color='0.7', lw=.7, ls=':')
+            offset_ax.plot(trajectory.t_mid_s, offset * trajectory.state,
+                           's--', color='#008837', ms=3)
+            if mean_state is not None:
+                offset_ax.plot(state_time, offset * mean_state, color='#008837', alpha=.5)
+            offset_ax.set_ylabel(f'baseline shift ({analysis.units})', color='#008837', fontsize=8)
         if row == 0:
             ax.set_title(f'kinetic conversion ({model.coupling})', fontsize=10)
         if row == len(means) - 1:
@@ -8947,7 +8995,7 @@ def plot_nonlinearity_timelapse(analysis: ConditionAnalysis, model: LNKModel,
 
 def compare_lnk_couplings(analysis: ConditionAnalysis, verbose: bool = True,
                           **kwargs) -> Dict[str, Optional[LNKModel]]:
-    """Fit both couplings on the same data and say which the cell prefers.
+    """Compare gain, horizontal shift, and gain plus vertical baseline shift.
 
     The comparison is the experiment: a slope change and a shift are different
     mechanisms, not two settings of one, so the held-out difference between
@@ -8962,13 +9010,24 @@ def compare_lnk_couplings(analysis: ConditionAnalysis, verbose: bool = True,
             filter_n_starts=kwargs.get('filter_n_starts', 8))
     if setup is None:
         return {coupling: None for coupling in LNK_COUPLINGS}
-    models = {coupling: fit_lnk(analysis, coupling=coupling, verbose=verbose,
-                                _setup=setup, **kwargs)
-              for coupling in LNK_COUPLINGS}
-    fitted = {name: m for name, m in models.items() if m is not None}
-    if verbose and len(fitted) == 2:
-        best = max(fitted, key=lambda n: fitted[n].r2)
-        margin = abs(fitted['multiplicative'].r2 - fitted['subtractive'].r2)
+    # A single seed guarantees identical held-out epochs even if the caller
+    # requests an unseeded run. The combined start uses training fit only.
+    if kwargs.get('random_state', 0) is None:
+        kwargs['random_state'] = int(np.random.default_rng().integers(0, 2**31))
+    models = {}
+    for coupling in LNK_COUPLINGS:
+        if verbose:
+            print(f'  fitting {coupling} ...', flush=True)
+        initial = models.get('multiplicative') if coupling == 'combined' else None
+        models[coupling] = fit_lnk(
+            analysis, coupling=coupling, verbose=verbose, _setup=setup,
+            _initial_params=(initial.params if initial is not None else None), **kwargs)
+    fitted = {name: m for name, m in models.items()
+              if m is not None and np.isfinite(m.r2) and m.optimizer_success is not False}
+    if verbose and len(fitted) == len(LNK_COUPLINGS):
+        ranking = sorted(fitted, key=lambda n: fitted[n].r2, reverse=True)
+        best = ranking[0]
+        margin = fitted[best].r2 - fitted[ranking[1]].r2
         print(f'  -> prefers {best} by {margin:.3f} held-out r²'
               + ('  (margin is small; treat as undecided)' if margin < 0.01 else ''))
     return models
@@ -8986,12 +9045,18 @@ def lnk_summary(models: Dict[str, Optional[LNKModel]]) -> pd.DataFrame:
                      'tau_on_s': model.params.get('tau_on', np.nan),
                      'tau_off_s': model.params.get('tau_off', np.nan),
                      'k': model.params.get('k', np.nan),
+                     'baseline_shift': model.params.get('baseline_shift', 0.),
                      'alpha': model.params.get('alpha', np.nan),
                      'beta': model.params.get('beta', np.nan),
                      'gamma': model.params.get('gamma', np.nan),
+                     'epsilon': model.params.get('epsilon', np.nan),
+                     'n_params': len(model.params),
                      'filter_source': model.filter_source,
                      'n_warmup_epochs': model.n_warmup_epochs,
                      'n_test_epochs': model.n_test_epochs,
+                     'optimizer_success': model.optimizer_success,
+                     'nfev': model.nfev,
+                     'test_epochs': model.test_epochs,
                      'at_bounds': ','.join(model.at_bounds)})
     return pd.DataFrame(rows)
 
@@ -9068,7 +9133,7 @@ def plot_lnk_fit(analysis: ConditionAnalysis,
 
     smooth_t = ((np.arange(smooth(response).size) + 0.5) * step * dt
                 + lo * dt)
-    palette = {'multiplicative': '#D55E00', 'subtractive': '#0072B2',
+    palette = {'multiplicative': '#D55E00', 'subtractive': '#0072B2', 'combined': '#CC79A7',
                'two_state': '#009E73'}
     ax_trace.plot(smooth_t, smooth(response), color='0.3', lw=1.3,
                   label='response')
@@ -9106,6 +9171,9 @@ def plot_lnk_fit(analysis: ConditionAnalysis,
         for value, ls, tag in ((low, '-', 'adapted low'), (high, '--', 'adapted high')):
             if name == 'multiplicative':
                 curve = p['alpha'] * np.exp(-p['k'] * value) * norm.cdf(argument) + p['epsilon']
+            elif name == 'combined':
+                curve = (p['alpha'] * np.exp(-p['k'] * value) * norm.cdf(argument)
+                         + p['epsilon'] + p['baseline_shift'] * value)
             else:
                 curve = p['alpha'] * norm.cdf(argument - p['k'] * value) + p['epsilon']
             ax_nl.plot(grid_g, curve, ls=ls, lw=1.6, color=palette[name],
@@ -9128,7 +9196,9 @@ def plot_lnk_fit(analysis: ConditionAnalysis,
     ax_bar.set_ylabel('held-out r²', fontsize=9)
     ax_bar.set_title('same filter and nonlinearity throughout;\n'
                      'only the state differs', fontsize=9.5)
-    ax_bar.set_ylim(0, max(values) * 1.22)
+    finite_values = np.asarray(values)[np.isfinite(values)]
+    if finite_values.size:
+        ax_bar.set_ylim(min(0., finite_values.min() - .05), max(.1, finite_values.max() + .1))
 
     fig.suptitle(f'{analysis_label(analysis)} | LN cascade with '
                  f'one slow adaptive state', fontsize=11)
@@ -13326,6 +13396,119 @@ def population_decoding_analysis(
     }
 
 
+def select_saved_lnk_cells(*, cell_indices=None, use_examples=True,
+                          cell_types=('ON-midget', 'ON-parasol'),
+                          rec_types=('extracellular',), output_dir=None):
+    """Select saved cell/recording pairs before loading or fitting any traces."""
+    rows = load_condition_index(output_dir).copy()
+    rows['cell_index'] = pd.to_numeric(rows.current_cell_index, errors='coerce').fillna(
+        pd.to_numeric(rows.cell_index, errors='coerce'))
+    rows = rows[rows.cell_index.notna()].copy()
+    if cell_types is not None:
+        allowed = {_normalize_cell_type(value) for value in cell_types}
+        rows = rows[rows.cell_type.map(_normalize_cell_type).isin(allowed)]
+    if rec_types is not None:
+        rows = rows[rows.rec_type.isin(rec_types)]
+    if cell_indices is not None:
+        rows = rows[rows.cell_index.isin(normalize_cell_indices(cell_indices))]
+    elif use_examples:
+        examples = load_example_cells(output_dir, available_conditions=rows)
+        chosen = examples.loc[examples.is_example, ['date', 'cell_label', 'rec_type']]
+        rows = rows.merge(chosen.drop_duplicates(), on=['date', 'cell_label', 'rec_type'], how='inner')
+    else:
+        raise ValueError('Set explicit cell_indices or enable use_examples; no implicit all-cell run.')
+    keys = ['cell_index', 'date', 'cell_label', 'cell_type', 'rec_type']
+    result = rows.groupby(keys, dropna=False).size().rename('n_conditions').reset_index()
+    result['cell_index'] = result.cell_index.astype(int)
+    return result.sort_values(['cell_type', 'cell_index', 'rec_type']).reset_index(drop=True)
+
+
+def summarize_selected_lnk_fits(scores):
+    """Compare complete condition pairs, then give every physical cell equal weight.
+
+    Failed/nonfinite fits are retained in the input score audit, but an incomplete
+    three-way condition cannot contribute a winner or favor a partially fitted model.
+    """
+    if scores.empty:
+        return dict(condition_winners=pd.DataFrame(), cell_scores=pd.DataFrame(),
+                    cell_winners=pd.DataFrame(), cell_type_summary=pd.DataFrame())
+    keys = ['cell_index', 'date', 'cell_label', 'cell_type', 'rec_type',
+            'duration_ms', 'light_contrast']
+    valid = scores[np.isfinite(scores.r2_heldout)
+                   & scores.optimizer_success.fillna(False).astype(bool)].copy()
+    complete = valid.groupby(keys, dropna=False).coupling.transform('nunique').eq(len(LNK_COUPLINGS))
+    paired = valid[complete]
+    condition_winners = []
+    for identity, block in paired.groupby(keys, dropna=False):
+        ranked = block.sort_values('r2_heldout', ascending=False)
+        condition_winners.append(dict(zip(keys, identity)) | dict(
+            best_model=(ranked.coupling.iloc[0] if ranked.r2_heldout.iloc[0]
+                        - ranked.r2_heldout.iloc[1] > 1e-12 else 'tie'),
+            best_r2=ranked.r2_heldout.iloc[0],
+            margin=ranked.r2_heldout.iloc[0] - ranked.r2_heldout.iloc[1]))
+    cell_keys = keys[:5]
+    cell_scores = paired.groupby(cell_keys + ['coupling'], dropna=False).agg(
+        r2_heldout=('r2_heldout', 'mean'), r2_gain=('r2_gain', 'mean'),
+        n_conditions=('r2_heldout', 'size')).reset_index()
+    winners = []
+    for identity, block in cell_scores.groupby(cell_keys, dropna=False):
+        ranked = block.sort_values('r2_heldout', ascending=False)
+        winners.append(dict(zip(cell_keys, identity)) | dict(
+            best_model=(ranked.coupling.iloc[0] if ranked.r2_heldout.iloc[0]
+                        - ranked.r2_heldout.iloc[1] > 1e-12 else 'tie'),
+            best_r2=ranked.r2_heldout.iloc[0],
+            margin=ranked.r2_heldout.iloc[0] - ranked.r2_heldout.iloc[1],
+            n_conditions=int(ranked.n_conditions.iloc[0])))
+    cell_winners = pd.DataFrame(winners)
+    summary = cell_scores.groupby(['cell_type', 'rec_type', 'coupling']).agg(
+        n_cells=('r2_heldout', 'size'), mean_r2=('r2_heldout', 'mean'),
+        sem_r2=('r2_heldout', 'sem'), mean_gain_over_static=('r2_gain', 'mean')).reset_index()
+    if not summary.empty:
+        wins = cell_winners.groupby(['cell_type', 'rec_type', 'best_model']).size().rename('wins')
+        summary = summary.merge(wins, left_on=['cell_type', 'rec_type', 'coupling'],
+                                right_index=True, how='left')
+        summary['wins'] = summary.wins.fillna(0).astype(int)
+        summary['rank'] = summary.groupby(['cell_type', 'rec_type']).mean_r2.rank(
+            method='min', ascending=False).astype(int)
+        summary = summary.sort_values(['cell_type', 'rec_type', 'rank'])
+    return dict(condition_winners=pd.DataFrame(condition_winners), cell_scores=cell_scores,
+                cell_winners=cell_winners, cell_type_summary=summary)
+
+
+def run_selected_one_state_lnk(selection, *, output_dir=None, make_figures=False, **kwargs):
+    """Fit selected saved cell/recording pairs and summarize all three variants."""
+    results, audits, errors = {}, [], []
+    for index, cell in selection.groupby('cell_index', sort=True):
+        if kwargs.get('verbose', True):
+            print(f'\n=== cell index {int(index)} | {cell.cell_type.iloc[0]} | '
+                  f'{cell.date.iloc[0]} | {cell.cell_label.iloc[0]} ===')
+        try:
+            reconstruction, cores = load_saved_lnk_inputs(
+                int(index), output_dir=output_dir, rec_types=tuple(cell.rec_type.unique()))
+        except (ValueError, FileNotFoundError) as exc:
+            errors.append(dict(cell_index=int(index), error=str(exc)))
+            if kwargs.get('verbose', True):
+                print(f'cell {int(index)} skipped: {exc}')
+            continue
+        conditions = run_one_state_lnk_conditions(
+            reconstruction, cores, make_figures=make_figures, **kwargs)
+        results[int(index)] = conditions
+        for key, result in conditions.items():
+            metadata = cell[cell.rec_type.eq(key[0])].iloc[0]
+            for name in LNK_COUPLINGS:
+                model = result['models'].get(name)
+                row = (lnk_summary({name: model}).iloc[0].to_dict() if model is not None
+                       else dict(coupling=name, r2_heldout=np.nan, r2_gain=np.nan,
+                                 optimizer_success=False))
+                row.update({col: metadata[col] for col in
+                            ['cell_index', 'date', 'cell_label', 'cell_type', 'rec_type']})
+                row.update(duration_ms=key[1], light_contrast=key[2] if len(key) > 2 else np.nan)
+                audits.append(row)
+    scores = pd.DataFrame(audits)
+    return dict(results=results, scores=scores, errors=pd.DataFrame(errors),
+                **summarize_selected_lnk_fits(scores))
+
+
 def run_one_state_lnk_conditions(
         reconstruction_by_condition: Dict[Tuple[str, float, float], dict],
         core_by_condition: Dict[Tuple[str, float, float], CoreLNAnalysis],
@@ -13336,8 +13519,11 @@ def run_one_state_lnk_conditions(
         view_s: Tuple[float, float] = (25.0, 95.0),
         nl_windows: int = 5,
         nl_warmup_epochs: int = 1,
+        make_figures: bool = True,
+        random_state: Optional[int] = 0,
+        max_nfev: int = 400,
         verbose: bool = True) -> Dict[Tuple[str, float, float], dict]:
-    """Fit and visualize both one-state LNK couplings for every condition."""
+    """Fit all three one-state LNK couplings for every selected condition."""
     results = {}
     for key, reconstruction in reconstruction_by_condition.items():
         rec_type, duration = key[:2]
@@ -13352,13 +13538,16 @@ def run_one_state_lnk_conditions(
         models = compare_lnk_couplings(
             analysis, static_analysis=core.analysis, state_dt_ms=state_dt_ms,
             warmup_epochs=warmup_epochs, n_restarts=n_restarts,
-            test_fraction=test_fraction, verbose=verbose)
-        figure = plot_lnk_fit(analysis, models, seconds=view_s)
+            test_fraction=test_fraction, random_state=random_state,
+            max_nfev=max_nfev, verbose=verbose)
+        figure = plot_lnk_fit(analysis, models, seconds=view_s) if make_figures else None
         if verbose:
             print(lnk_summary(models).round(3).to_string(index=False))
         timelapse_by_coupling, timelapse_figures, summaries = {}, {}, []
         fitted = {name: model for name, model in models.items() if model is not None}
         for name, model in fitted.items():
+            if not make_figures:
+                continue
             curves = nonlinearity_timelapse(
                 analysis, model, n_windows=nl_windows,
                 warmup_epochs=nl_warmup_epochs)
@@ -13372,7 +13561,10 @@ def run_one_state_lnk_conditions(
                 warmup_epochs=nl_warmup_epochs)
         if verbose and summaries:
             print(pd.concat(summaries, ignore_index=True).round(3).to_string(index=False))
-        preferred = max(fitted, key=lambda name: fitted[name].r2) if fitted else None
+        scored = {name: model for name, model in fitted.items()
+                  if np.isfinite(model.r2) and model.optimizer_success is not False}
+        preferred = (max(scored, key=lambda name: scored[name].r2)
+                     if len(scored) == len(LNK_COUPLINGS) else None)
         if verbose and preferred is not None:
             print(f'preferred coupling by held-out r2: {preferred}')
         results[key] = {
@@ -13478,5 +13670,6 @@ __all__ = [
     'load_condition_index', 'load_population_table', 'select_population_rows',
     'population_overview_analysis', 'population_temporal_analysis',
     'population_decoding_analysis', 'run_one_state_lnk_conditions',
+    'select_saved_lnk_cells', 'run_selected_one_state_lnk', 'summarize_selected_lnk_fits',
     'run_two_state_lnk_conditions',
 ]

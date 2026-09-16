@@ -2304,6 +2304,8 @@ def _adapting_cell(coupling='multiplicative', n_epochs=6, epoch_s=10.0,
 
     if coupling == 'multiplicative':
         clean = 100.0 * np.exp(-k_true * centred) * drive + 5.0
+    elif coupling == 'combined':
+        clean = 100.0 * np.exp(-k_true * centred) * drive + 5.0 + 200.0 * centred
     else:
         clean = 100.0 * norm.cdf(2.0 * generator - 0.5 - k_true * centred) + 5.0
     response = clean + 3.0 * rng.standard_normal(clean.size)
@@ -2391,7 +2393,10 @@ def test_lnk_identifies_which_coupling_generated_the_data():
         models = vmn.compare_lnk_couplings(analysis, verbose=False)
         assert all(m is not None for m in models.values())
         best = max(models, key=lambda name: models[name].r2)
-        assert best == truth, (truth, {n: round(m.r2, 4) for n, m in models.items()})
+        # The nested combined model may tie or slightly improve a gain-only
+        # truth on noisy held-out data; do not require a complexity penalty.
+        allowed = {truth, 'combined'} if truth == 'multiplicative' else {truth}
+        assert best in allowed, (truth, {n: round(m.r2, 4) for n, m in models.items()})
 
 
 @pytest.mark.slow
@@ -2452,7 +2457,7 @@ def test_nonlinearity_timelapse_is_one_basis_transformed_by_each_motif():
     for coupling in vmn.LNK_COUPLINGS:
         params = {'alpha': -11_000.0, 'beta': 1.8, 'gamma': -0.2,
                   'epsilon': 1_000.0, 'tau_on': 1.0, 'tau_off': 2.0,
-                  'k': 0.7}
+                  'k': 0.7, 'baseline_shift': 400.0}
         model = vmn.LNKModel(
             coupling=coupling, params=params, generator=generator,
             state=raw_state, sampling_interval=dt, state_dt_s=dt,
@@ -2472,6 +2477,10 @@ def test_nonlinearity_timelapse_is_one_basis_transformed_by_each_motif():
                 expected = (params['alpha'] * np.exp(-params['k'] * state)
                             * ndtr(params['beta'] * x + params['gamma'])
                             + params['epsilon'])
+            elif coupling == 'combined':
+                expected = (params['alpha'] * np.exp(-params['k'] * state)
+                            * ndtr(params['beta'] * x + params['gamma'])
+                            + params['epsilon'] + params['baseline_shift'] * state)
             else:
                 expected = (params['alpha'] * ndtr(
                     params['beta'] * x + params['gamma'] - params['k'] * state)
@@ -2480,7 +2489,7 @@ def test_nonlinearity_timelapse_is_one_basis_transformed_by_each_motif():
 
         figure = vmn.plot_nonlinearity_timelapse(analysis, model, curves,
                                                   warmup_epochs=0)
-        assert figure is not None and len(figure.axes) == 4
+        assert figure is not None and len(figure.axes) == (5 if coupling == 'combined' else 4)
         assert figure.axes[2].get_ylabel() == 'current (pA)'
         plt.close(figure)
 
@@ -2551,6 +2560,90 @@ def test_compare_lnk_couplings_prepares_the_generator_once(monkeypatch):
     assert len(prepared) == 1
     assert fitted == [(name, sentinel) for name in vmn.LNK_COUPLINGS]
     assert result == {name: None for name in vmn.LNK_COUPLINGS}
+
+
+def test_combined_lnk_recovers_gain_and_vertical_offset_on_shared_test_epochs():
+    from types import SimpleNamespace
+    rng = np.random.default_rng(12)
+    epochs = np.repeat(np.arange(16), 150)
+    light = np.where(epochs % 2, 1., .2)
+    generator = rng.normal(size=epochs.size) * light
+    truth = dict(alpha=80., beta=1.3, gamma=-.3, epsilon=35.,
+                 tau_on=1.5, tau_off=2.5, k=.35, baseline_shift=18.)
+    response, state = vmn._lnk_predict(generator, truth, 'combined', .02, 1)
+    gain_only, _ = vmn._lnk_predict(generator, truth, 'multiplicative', .02, 1)
+    np.testing.assert_allclose(response - gain_only,
+                               18. * (state - state.mean()) / state.std())
+    response += rng.normal(scale=.2, size=response.size)
+    analysis = SimpleNamespace(rec_type='extracellular', sequence_light_mean=light)
+    setup = vmn._LNKSetup(
+        stimulus=generator, response=response, epochs=epochs, generator=generator,
+        dt=.02, filter_pts=4, levels=[.2, 1.],
+        filters={.2: np.ones(4), 1.: np.ones(4)}, filter_r2={},
+        shape_params={.2: np.ones(5), 1.: np.ones(5)}, init_level=1.,
+        build_generator=None, static_nl_guess=np.array([80., 1.3, -.3, 35.]))
+    models = vmn.compare_lnk_couplings(analysis, _setup=setup, warmup_epochs=1,
+                                     verbose=False, max_nfev=400)
+    assert all(model is not None for model in models.values())
+    assert models['combined'].optimizer_success
+    assert len({model.test_epochs for model in models.values()}) == 1
+    assert models['combined'].r2 > .999
+    assert models['combined'].r2 > max(models[name].r2 for name in ('multiplicative', 'subtractive'))
+    assert models['combined'].params['baseline_shift'] == pytest.approx(18., abs=.5)
+    params = dict(truth, baseline_shift=0.)
+    combined, _ = vmn._lnk_predict(generator, params, 'combined', .02, 1)
+    gain, _ = vmn._lnk_predict(generator, params, 'multiplicative', .02, 1)
+    np.testing.assert_array_equal(combined, gain)
+
+
+def test_selected_lnk_filters_examples_by_recording_and_explicit_indices(monkeypatch):
+    import pandas as pd
+    saved = pd.DataFrame(dict(
+        cell_index=[1, 1, 2, 3], current_cell_index=[11, 11, 12, 13],
+        date=['a', 'a', 'b', 'c'], cell_label=['Cell1', 'Cell1', 'Cell2', 'Cell3'],
+        cell_type=['ON-midget', 'ON-midget', 'ON-parasol', 'OFF-midget'],
+        rec_type=['extracellular', 'exc', 'extracellular', 'extracellular']))
+    examples = saved.iloc[[1, 2, 3]].assign(is_example=True)
+    monkeypatch.setattr(vmn, 'load_condition_index', lambda *_a, **_k: saved.copy())
+    monkeypatch.setattr(vmn, 'load_example_cells', lambda *_a, **_k: examples.copy())
+    selected = vmn.select_saved_lnk_cells()
+    assert selected.cell_index.tolist() == [12]  # example for exc does not select spike
+    explicit = vmn.select_saved_lnk_cells(cell_indices=[11])
+    assert explicit.cell_index.tolist() == [11]
+    assert explicit.rec_type.tolist() == ['extracellular']
+    with pytest.raises(ValueError, match='explicit cell_indices'):
+        vmn.select_saved_lnk_cells(use_examples=False)
+
+
+def test_selected_lnk_summary_weights_cells_and_excludes_incomplete_conditions():
+    import pandas as pd
+    rows = []
+    for index, n_conditions, values in [(1, 1, [.9, .4, .8]), (2, 3, [.1, .9, .8])]:
+        for condition in range(n_conditions):
+            for coupling, score in zip(vmn.LNK_COUPLINGS, values):
+                rows.append(dict(cell_index=index, date=str(index), cell_label='Cell1',
+                                 cell_type='ON-midget', rec_type='extracellular',
+                                 duration_ms=50000., light_contrast=.1 * (condition + 1),
+                                 coupling=coupling, r2_heldout=score, r2_gain=score-.1,
+                                 optimizer_success=True))
+    rows.append(dict(rows[0], cell_index=3, r2_heldout=.99))  # missing other two fits
+    failed = [dict(row, cell_index=4, optimizer_success=row['coupling'] != 'combined')
+              for row in rows[:3]]
+    summary = vmn.summarize_selected_lnk_fits(pd.DataFrame(rows + failed))
+    assert set(summary['cell_winners'].cell_index) == {1, 2}
+    assert len(summary['condition_winners']) == 4
+    table = summary['cell_type_summary'].set_index('coupling')
+    assert table.loc['multiplicative', 'mean_r2'] == pytest.approx(.5)
+    assert table.loc['subtractive', 'mean_r2'] == pytest.approx(.65)
+    assert table.loc['combined', 'rank'] == 1
+    assert table.loc['combined', 'wins'] == 0  # best group mean need not win individual cells
+    assert table.n_cells.eq(2).all()
+    incomplete = vmn.summarize_selected_lnk_fits(pd.DataFrame(failed))
+    assert incomplete['cell_type_summary'].empty
+    tied = pd.DataFrame(rows[:3]).assign(r2_heldout=.8)
+    tied_summary = vmn.summarize_selected_lnk_fits(tied)
+    assert tied_summary['cell_winners'].best_model.tolist() == ['tie']
+    assert tied_summary['cell_type_summary'].wins.eq(0).all()
 
 
 def test_param_filter_recovers_a_known_shape():
@@ -4491,6 +4584,10 @@ def test_saved_lnk_inputs_restore_adjusted_sequences_by_index(tmp_path, monkeypa
     restored, cores = vmn.load_saved_lnk_inputs(
         19, output_dir=tmp_path, protocol_cells=registry)
     assert fitted == [cores[key].analysis]
+    with pytest.raises(FileNotFoundError):
+        vmn.load_saved_lnk_inputs(19, output_dir=tmp_path, protocol_cells=registry,
+                                 rec_types=('extracellular',))
+    assert fitted == [cores[key].analysis]  # excluded recording is never fitted
     for original, loaded in ((analysis, cores[key].analysis),
                              (reconstruction, restored[key]['analysis'])):
         for name in ('sequence_response', 'sequence_stimulus',
