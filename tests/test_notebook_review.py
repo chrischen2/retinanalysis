@@ -9,6 +9,33 @@ from retinanalysis.utils.browse import saved_figure_review_browser
 from retinanalysis.utils.review_store import ReviewStore
 
 
+def test_browser_group_filter_preserves_selection_and_loads_only_new_item():
+    loads, decisions = [], []
+    browser = saved_figure_review_browser(
+        [('one', 1), ('two', 2), ('three', 3)],
+        item_groups={1: 'ON-midget', 2: 'ON-parasol', 3: 'ON-midget'},
+        group_description='Cell type:', load_item=lambda key: loads.append(key) or key,
+        sections=lambda item: ['spike', 'exc'], panels=('Trace',),
+        figure_options=lambda *args: [], describe=lambda item, section: str(item),
+        review_flags=lambda *args: (False, False),
+        set_keep=lambda *args: decisions.append(args),
+        set_example=lambda *args: decisions.append(args))
+    state = browser.review_state
+    state['section_selector'].value = 'exc'
+    state['group_selector'].value = 'ON-midget'
+    assert state['selector'].options == (('one', 1), ('three', 3))
+    assert loads == [1]  # same cell/recording: filtering needs no image/data reload
+    assert state['section_selector'].value == 'exc'
+    state['selector'].value = 3
+    state['group_selector'].value = None
+    assert state['selector'].value == 3
+    assert loads == [1, 3]
+    state['group_selector'].value = 'ON-parasol'
+    assert state['selector'].value == 2
+    assert loads == [1, 3, 2]  # one load, not an intermediate reset to cell 1
+    assert decisions == []
+
+
 def test_review_store_identity_defaults_and_independent_updates(tmp_path):
     store = ReviewStore(tmp_path / 'examples.csv', keys=('experiment', 'unit'),
                         columns=('experiment', 'unit', 'index', 'example'),

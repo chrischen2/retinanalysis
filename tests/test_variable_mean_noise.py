@@ -138,6 +138,20 @@ def test_section_6c_runs_high_quality_population_ln_analysis():
     assert ids.index('population-ln-analysis') < ids.index('ea098e58')
 
 
+def test_comparison_cell_type_filter_retains_mismatches_and_unmatched_rows():
+    import pandas as pd
+    rows = pd.DataFrame({
+        'matlab_cell_type': ['OnMidget', 'ON-parasol', 'OFF-midget'],
+        'saved_cell_type': ['RGC\\ON-midget', 'ON-midget', None]})
+    original = rows.copy(deep=True)
+    assert vmn.filter_matlab_saved_comparison_cell_types(rows, 'ON-midget').index.tolist() == [0, 1]
+    assert vmn.filter_matlab_saved_comparison_cell_types(rows, 'ON-parasol').index.tolist() == [1]
+    assert vmn.filter_matlab_saved_comparison_cell_types(rows, 'OFF-midget').index.tolist() == [2]
+    assert vmn.filter_matlab_saved_comparison_cell_types(rows, 'OFF-parasol').empty
+    pd.testing.assert_frame_equal(vmn.filter_matlab_saved_comparison_cell_types(rows), original)
+    pd.testing.assert_frame_equal(rows, original)
+
+
 def test_visual_browser_ln_menu_uses_measured_vs_predicted_figure():
     import pandas as pd
     from types import SimpleNamespace
@@ -3089,7 +3103,7 @@ def _saved_ln_curve_rows(condition_id, rec_type, levels, temporal=False,
     return pd.DataFrame(rows)
 
 
-def test_population_ln_normalization_uses_joint_low_high_scale():
+def test_population_ln_normalization_uses_separate_low_high_scales():
     import pandas as pd
 
     spike = _saved_ln_curve_rows('spike', 'extracellular', [.1, 1.0, 10.0])
@@ -3103,13 +3117,28 @@ def test_population_ln_normalization_uses_joint_low_high_scale():
     spike_nl = normalized[
         normalized.condition_id.eq('spike')
         & normalized.curve.eq('nonlinearity')]
-    assert spike_nl.response_scale.unique().tolist() == [20.0]
+    assert spike_nl.groupby('light_state').response_scale.first().to_dict() == {'low': .2, 'high': 20.}
+    assert spike_nl.groupby('light_state').y_normalized.max().eq(1.).all()
     assert spike_nl.y_normalized.max() == pytest.approx(1.0)
     exc_nl = normalized[
         normalized.condition_id.eq('exc')
         & normalized.curve.eq('nonlinearity')]
-    assert exc_nl.response_scale.unique().tolist() == [30.0]
+    assert exc_nl.groupby('light_state').response_scale.first().to_dict() == pytest.approx({'low': .3, 'high': 30.})
+    assert exc_nl.groupby('light_state').y_normalized.min().eq(-1.).all()
     assert exc_nl.y_normalized.min() == pytest.approx(-1.0)
+
+
+@pytest.mark.parametrize('temporal', [False, True])
+def test_low_light_normalization_is_independent_of_high_light(temporal):
+    import pandas as pd
+    rows = _saved_ln_curve_rows('test', 'extracellular', [1., 2.], temporal=temporal)
+    original = vmn.normalize_population_ln_curves(rows, temporal=temporal)
+    changed = rows.copy()
+    changed.loc[changed.lightMean.eq(2.), 'y'] *= 1000.
+    normalized = vmn.normalize_population_ln_curves(changed, temporal=temporal)
+    pd.testing.assert_frame_equal(original[original.light_state.eq('low')],
+                                  normalized[normalized.light_state.eq('low')])
+    np.testing.assert_allclose(original.y_normalized, normalized.y_normalized)
 
 
 def test_temporal_curve_normalization_preserves_change_between_windows():
@@ -3124,9 +3153,9 @@ def test_temporal_curve_normalization_preserves_change_between_windows():
     early = low_filter[low_filter.order.eq(0)].y_normalized.max()
     late = low_filter[low_filter.order.eq(1)].y_normalized.max()
 
-    assert normalized.filter_scale.unique().tolist() == [4.0]
-    assert early == pytest.approx(.25)
-    assert late == pytest.approx(.5)
+    assert normalized.groupby('light_state').filter_scale.first().to_dict() == {'low': 2., 'high': 4.}
+    assert early == pytest.approx(.5)
+    assert late == pytest.approx(1.)
 
 
 def test_temporal_nonlinearity_parameters_follow_normalized_axes():

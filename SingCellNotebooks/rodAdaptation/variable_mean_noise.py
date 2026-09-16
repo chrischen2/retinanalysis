@@ -2453,6 +2453,19 @@ def audit_matlab_roster_discovery(
     return out
 
 
+def filter_matlab_saved_comparison_cell_types(frame, cell_types=None):
+    """Filter either annotation, retaining mismatches and unmatched references."""
+    if cell_types is None or frame.empty:
+        return frame.copy()
+    requested = (cell_types,) if isinstance(cell_types, str) else tuple(cell_types)
+    allowed = {_normalize_cell_type(value) for value in requested}
+    mask = pd.Series(False, index=frame.index)
+    for column in ('matlab_cell_type', 'saved_cell_type'):
+        if column in frame:
+            mask |= frame[column].fillna('').map(_normalize_cell_type).isin(allowed)
+    return frame.loc[mask].copy()
+
+
 def compare_matlab_roster_to_saved(
         roster: pd.DataFrame,
         saved_cells: pd.DataFrame,
@@ -11357,6 +11370,7 @@ def build_cell_review_browser(
     Existing physical-cell Example CSVs migrate on the next example action.
     """
     from retinanalysis.utils.browse import saved_figure_review_browser
+    import json
     # Section 2 bulk output already contains preprocessed traces. Its legacy
     # raw-* manifest names refer to those saved PNGs, not unprocessed signals.
     # The old trace flags remain accepted for notebook-call compatibility.
@@ -11377,6 +11391,18 @@ def build_cell_review_browser(
     export_kept_cell_selection(directory)
     options = [(f'{int(row.cell_index)} | {row.date} | {row.cell_label}',
                 int(row.cell_index)) for row in completed.itertuples(index=False)]
+    cell_types = {}
+    for row in completed.itertuples(index=False):
+        match = (protocol_cells[protocol_cells.cell_index.eq(row.cell_index)]
+                 if 'cell_index' in protocol_cells else pd.DataFrame())
+        label = (match.iloc[0].get('cell_type', match.iloc[0].get('cell_type_short', ''))
+                 if not match.empty else '')
+        manifest = Path(row.output_dir) / 'run_manifest.json'
+        if manifest.is_file():
+            with manifest.open() as stream:
+                label = json.load(stream).get('cell_type') or label
+        cell_types[int(row.cell_index)] = (str(label).strip()
+                                           if pd.notna(label) and str(label).strip() else 'Unknown')
 
     def load(index):
         return load_saved_cell_analysis(
@@ -11405,11 +11431,13 @@ def build_cell_review_browser(
         set_keep=lambda saved, rec_type, keep: set_cell_visual_inspection(
             saved, rec_type, keep, output_dir=directory),
         set_example=lambda saved, rec_type, value: set_cell_example(
-            saved, rec_type, value, output_dir=directory), example_by_section=True)
+            saved, rec_type, value, output_dir=directory), example_by_section=True,
+        item_groups=cell_types, group_description='Cell type:')
     # Compatibility for existing notebook integrations and widget diagnostics.
     state = browser.review_state
     state['cell_selector'] = state['selector']
     state['rec_type_selector'] = state['section_selector']
+    state['cell_type_selector'] = state['group_selector']
     browser._vmn_browser_state = state
     browser._vmn_raw_cache = None  # legacy attribute; saved PNGs need no trace cache
     return browser
@@ -11726,11 +11754,11 @@ def normalize_population_ln_curves(
         ) -> pd.DataFrame:
     """Prepare low/high curves on their original contrast-generator coordinates.
 
-    Temporal response scales are separate for low/high light, shared over all
-    retained windows within a condition. Spike scale is maximum response;
+    Response and filter scales are separate for each low/high light condition,
+    shared over all retained temporal windows. Spike scale is maximum response;
     whole-cell scale is maximum absolute response, retaining current polarity.
-    Static curves and filters retain a joint low/high scale. Absolute mode
-    applies no response/filter scaling. Generator values are never rescaled.
+    Each filter uses its own light level's peak absolute amplitude. Absolute
+    mode applies no response/filter scaling. Generator values are never rescaled.
     """
     if curves is None or curves.empty:
         return pd.DataFrame() if curves is None else curves.copy()
@@ -11758,11 +11786,10 @@ def normalize_population_ln_curves(
     if selected.empty:
         return selected
     scales = []
-    scale_keys = ['condition_id', 'light_state'] if temporal else ['condition_id']
+    scale_keys = ['condition_id', 'light_state']
     for group_key, block in selected.groupby(scale_keys, dropna=False):
         group_key = group_key if isinstance(group_key, tuple) else (group_key,)
-        condition = selected[selected.condition_id.eq(block.condition_id.iloc[0])]
-        filter_y = condition.loc[condition.curve.eq('filter'), 'y'].to_numpy(float)
+        filter_y = block.loc[block.curve.eq('filter'), 'y'].to_numpy(float)
         nl_y = block.loc[block.curve.eq('nonlinearity'), 'y'].to_numpy(float)
         filter_scale = float(np.max(np.abs(filter_y))) if filter_y.size else np.nan
         response_scale = (float(np.max(nl_y))
