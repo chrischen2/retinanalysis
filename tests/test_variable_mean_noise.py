@@ -98,7 +98,10 @@ def test_section_6b_contains_quality_summary_and_former_section_10():
     source = cells['high-quality-indices']
 
     assert 'compare_matlab_roster_to_saved' in source
-    assert "groupby('corrected_date', sort=True)" in source
+    assert "groupby('recorded_date', sort=True)" in source
+    assert 'summarize_matlab_date_coverage' in source
+    assert 'missing_matlab_dates' in source
+    assert source.index('display(coverage_table.style') < source.index('def show_quality_matches')
     assert 'Not matched' in source
     assert 'Saved, not kept' in source
     assert 'protocol_cells' not in source
@@ -492,6 +495,51 @@ def test_matlab_saved_comparison_uses_corrected_date_and_exact_label_case():
     assert 'cell_index 12' in indexed.loc[5, 'saved_entry']
     assert indexed.loc[6, 'match_status'] == 'not matched'
     assert indexed.loc[6, 'saved_entry'] == ''
+
+
+def test_matlab_date_coverage_keeps_missing_dates_and_counts_reference_entries_once():
+    import pandas as pd
+
+    roster = pd.DataFrame({
+        'index': range(6),
+        'calendar_date': ['2021-01-01', '2021-01-05', '2021-01-05',
+                          '2021-01-10', '2021-01-15', '2021-01-20'],
+        'cell_label': ['Cell1', 'Cell1', 'Cell2', 'Cell1', 'Cell1', 'Cell1'],
+        'cell_type': ['OnMidget'] * 6, 'rec_type': ['exc'] * 6,
+        'epoch_len_ms': [50_000.] * 6})
+    saved = pd.DataFrame({
+        'date': ['2021-01-07_B', '2021-01-12_B', '2021-01-12_B',
+                 '2021-01-17_B', '2021-01-20_B', '2021-01-30_B'],
+        'cell_label': ['Cell1', 'Cell1', 'Cell1', 'Other', 'Cell1', 'Cell1'],
+        'cell_type': ['ON-midget', 'ON-parasol', 'ON-parasol',
+                      'ON-midget', 'ON-midget', 'ON-midget'],
+        'rec_type': ['exc'] * 6, 'stim_time_ms': [50_000.] * 6,
+        'stim_seconds': [50.] * 6, 'cell_index': [1, 2, 2, 3, 4, 5]})
+    kept = saved.iloc[[1]][['date', 'cell_label', 'rec_type']]
+    comparison = vmn.compare_matlab_roster_to_saved(roster, saved, show=False)
+    coverage = vmn.summarize_matlab_date_coverage(comparison, saved, kept)
+    dates = coverage.set_index('matlab_date')
+    assert len(dates) == roster.calendar_date.nunique() == 5
+    assert coverage.matlab_entries.sum() == len(roster)
+    assert dates.loc['2021-01-01', 'status'] == 'Missing date'
+    assert dates.loc['2021-01-01', 'corrected_date'] == '2021-01-03'
+    assert dates.loc['2021-01-05', 'status'] == 'Partial coverage'
+    assert dates.loc['2021-01-05', 'matched_entries'] == 1
+    assert dates.loc['2021-01-05', 'kept_entries'] == 0  # saved but not kept is still found
+    assert dates.loc['2021-01-10', 'status'] == 'All entries found'
+    assert dates.loc['2021-01-10', 'matched_entries'] == 1  # two saved contrasts
+    assert dates.loc['2021-01-10', 'kept_entries'] == 1
+    assert dates.loc['2021-01-10', 'type_disagreements'] == 1
+    assert dates.loc['2021-01-15', 'status'] == 'No matching entries'
+    assert dates.loc['2021-01-20', 'status'] == 'All entries found'
+    assert dates.loc['2021-01-20', 'fallback_entries'] == 1
+    assert dates.loc['2021-01-20', 'saved_dates'] == '2021-01-20_B'
+
+    empty_comparison = vmn.compare_matlab_roster_to_saved(roster, pd.DataFrame(), show=False)
+    empty = vmn.summarize_matlab_date_coverage(empty_comparison, pd.DataFrame())
+    assert empty.status.eq('Missing date').all()
+    assert empty.missing_entries.sum() == len(roster)
+    assert vmn.summarize_matlab_date_coverage(comparison.iloc[:0], saved).empty
 
 
 def test_apply_recording_type_exclusions_preserves_condition_audit():

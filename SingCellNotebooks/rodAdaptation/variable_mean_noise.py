@@ -2592,6 +2592,49 @@ def compare_matlab_roster_to_saved(
     return result
 
 
+def summarize_matlab_date_coverage(comparison, saved_cells, kept_cells=None):
+    """One row per MATLAB date, including dates with no saved analysis.
+
+    Count reference entries once even when several contrasts match. Existence
+    of saved analysis is independent of the Keep CSV. A recorded-date fallback
+    establishes coverage only when the original matcher found the entry there.
+    """
+    columns = ['matlab_date', 'corrected_date', 'saved_dates', 'status',
+               'matlab_entries', 'matched_entries', 'missing_entries',
+               'kept_entries', 'type_disagreements', 'fallback_entries']
+    if comparison.empty:
+        return pd.DataFrame(columns=columns)
+    dates = saved_cells.get('date', pd.Series(dtype=str)).dropna().astype(str)
+    calendar_dates = dates.str.extract(r'^(\d{4}-\d{2}-\d{2})', expand=False)
+    kept_keys = (set() if kept_cells is None or kept_cells.empty else set(zip(
+        kept_cells.date.astype(str), kept_cells.cell_label.astype(str),
+        kept_cells.rec_type.astype(str))))
+    rows = []
+    for (recorded, corrected), block in comparison.groupby(
+            ['recorded_date', 'corrected_date'], sort=True, dropna=False):
+        matched = block[block.match_status.ne('not matched')]
+        total = block.matlab_index.nunique()
+        found = matched.matlab_index.nunique()
+        kept = matched[[
+            (str(row.saved_date), str(row.saved_cell_label), str(row.saved_rec_type))
+            in kept_keys for row in matched.itertuples()]] if not matched.empty else matched
+        saved_dates = sorted(set(dates[calendar_dates.eq(corrected)])
+                             | set(matched.saved_date.dropna().astype(str)))
+        status = ('Missing date' if not saved_dates else
+                  'No matching entries' if not found else
+                  'Partial coverage' if found < total else 'All entries found')
+        rows.append(dict(
+            matlab_date=recorded, corrected_date=corrected,
+            saved_dates=', '.join(saved_dates), status=status,
+            matlab_entries=total, matched_entries=found, missing_entries=total-found,
+            kept_entries=kept.matlab_index.nunique(),
+            type_disagreements=matched.loc[
+                matched.match_status.eq('candidate'), 'matlab_index'].nunique(),
+            fallback_entries=matched.loc[
+                matched.date_match_source.eq('recorded-date fallback'), 'matlab_index'].nunique()))
+    return pd.DataFrame(rows, columns=columns)
+
+
 def resolve_roster_files(roster: pd.DataFrame, root=None,
                          offset_days: int = SAVED_DATE_OFFSET_DAYS,
                          fallback_offsets: Sequence[int] = FALLBACK_OFFSETS,
@@ -13390,7 +13433,8 @@ __all__ = [
     'summary_path', 'load_summary', 'load_cell',
     'DATE_OFFSETS', 'SAVED_DATE_OFFSET_DAYS', 'FALLBACK_OFFSETS',
     'SINGLE_CELL_ROOT', 'metadata_files', 'corrected_dates',
-    'compare_matlab_roster_to_saved', 'audit_matlab_roster_discovery',
+    'compare_matlab_roster_to_saved', 'summarize_matlab_date_coverage',
+    'audit_matlab_roster_discovery',
     'resolve_roster_files',
     'find_blocks', 'find_protocol_cells', 'cell_blocks', 'duration_conditions',
     'recording_duration_conditions', 'recording_type_from_metadata',
