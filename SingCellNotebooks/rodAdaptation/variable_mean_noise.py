@@ -10004,7 +10004,7 @@ def run_core_condition_analyses(
 
     Other durations use temporal_n_windows. The legacy target-width mode
     (temporal_n_windows=None) is unchanged. Population analysis still enforces
-    its strict 50 s boundary using the actual saved window endpoints.
+    its first-five-window comparison using saved window order.
     """
     expected = response_qc_signature(
         exp_name, block_ids, conditions, max_epochs,
@@ -11541,6 +11541,12 @@ def high_quality_population_overview_analysis(*, output_dir=None) -> dict:
     }
 
 
+POPULATION_TEMPORAL_DURATIONS = (50., 55., 60.)
+# Display coordinates only: five equal windows over 1-50 s in the 50 s reference.
+POPULATION_TEMPORAL_CENTRES_S = (5.9, 15.7, 25.5, 35.3, 45.1)
+POPULATION_TEMPORAL_TIME_LABEL = 'Approx. time (s; aligned by window order)'
+
+
 POPULATION_STATIC_GROUPS = ('cell_type', 'rec_type', 'light_regime')
 POPULATION_TEMPORAL_GROUPS = (
     'cell_type', 'rec_type', 'light_regime', 'duration_group_s')
@@ -11552,7 +11558,7 @@ def population_ln_condition_counts(
     """Count contributing cells and low/high pairs for Section 6c.
 
     Static counts pool all recording durations. With ``temporal=True``, only
-    50 and 60 s recordings contribute to the common first-50-s group.
+    50, 55 and 60 s recordings contribute to the common ordinal-window group.
     """
     population_groups = (POPULATION_TEMPORAL_GROUPS if temporal
                          else POPULATION_STATIC_GROUPS)
@@ -11569,7 +11575,7 @@ def population_ln_condition_counts(
     if temporal:
         duration = pd.to_numeric(
             paired_conditions.stim_seconds, errors='coerce')
-        paired_conditions = paired_conditions.loc[duration.isin((50., 60.))].copy()
+        paired_conditions = paired_conditions.loc[duration.isin(POPULATION_TEMPORAL_DURATIONS)].copy()
         paired_conditions['duration_group_s'] = 50.0
     conditions = paired_conditions[
         ['cell_id', 'condition_id', *population_groups]].drop_duplicates()
@@ -11580,109 +11586,59 @@ def population_ln_condition_counts(
         .reindex(columns=columns))
 
 
-def _prepare_population_temporal_rows(
-        frame: pd.DataFrame, *, truncate_at_s: float = 50.0) -> pd.DataFrame:
-    """Use only 50/60 s recordings and windows wholly inside the first 50 s.
+def _prepare_population_temporal_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    """Select the first five saved windows from 50/55/60 s recordings.
 
-    A fit crossing the boundary cannot be truncated after fitting: exclude it.
-    Saved labels (or explicit start/end times) provide the required bounds.
+    Window order is the requested approximate alignment: retain the entire
+    fifth fit even when its original end exceeds 50 s. Never truncate a fit,
+    interpolate across time, or renumber a missing window.
     """
     if frame is None or frame.empty:
         return pd.DataFrame() if frame is None else frame.copy()
-    if 'stim_seconds' not in frame:
-        raise ValueError('temporal population rows require stim_seconds')
-    rows = frame.loc[pd.to_numeric(frame.stim_seconds, errors='coerce')
-                     .isin((50., 60.))].copy()
-    rows['duration_group_s'] = 50.0
-    if rows.empty:
-        return rows
-    if 'window' in rows:
-        bounds = rows.window.astype(str).map(_window_bounds)
-        end = bounds.map(lambda pair: pair[1])
-    elif 'end_s' in rows:
-        end = pd.to_numeric(rows.end_s, errors='coerce')
-    elif {'start_s', 'centre_s'}.issubset(rows.columns):
-        end = (2 * pd.to_numeric(rows.centre_s, errors='coerce')
-               - pd.to_numeric(rows.start_s, errors='coerce'))
-    else:
-        raise ValueError('temporal rows require window bounds to enforce the first 50 s')
-    if end.isna().any():
-        raise ValueError('could not locate temporal window ends')
-    return rows.loc[end.le(float(truncate_at_s) + 1e-9)].copy()
+    missing = {'stim_seconds', 'order'} - set(frame)
+    if missing:
+        raise ValueError(f'temporal population rows require {sorted(missing)}')
+    duration = pd.to_numeric(frame.stim_seconds, errors='coerce')
+    order = pd.to_numeric(frame.order, errors='coerce')
+    rows = frame.loc[duration.isin(POPULATION_TEMPORAL_DURATIONS)
+                     & order.isin(range(len(POPULATION_TEMPORAL_CENTRES_S)))].copy()
+    rows['duration_group_s'] = 50.0  # reference display axis, not an actual time cutoff
+    return rows
 
 
 def align_population_temporal_times(curves, parameters):
-    """Use a common 50 s reference time for each retained temporal window.
+    """Assign common display midpoints by saved window order without refitting.
 
-    Input curves/parameters have already passed the strict original-end <=50 s
-    filter. This changes display timestamps only, never fit values or window
-    bounds. Thirty-second rows are excluded defensively. The most recently saved
-    50 s condition supplies the reference layout; incompatible older layouts
-    are excluded from temporal analysis. Tables without save provenance fall
-    back to the most common observed layout. If no 50 s condition is available,
-    the most recently saved 60 s layout supplies the reference instead.
+    The first five windows from 50/55/60 s recordings map to the 50 s reference
+    centres, irrespective of their original widths. Fitted values, saved
+    labels and bounds are unchanged. Original times remain in the audit.
     """
-    frames = [frame.loc[pd.to_numeric(frame.stim_seconds, errors='coerce')
-                        .isin((50., 60.))].copy() if not frame.empty else frame.copy()
-              for frame in (curves, parameters)]
-    reference_duration = 50. if any(
-        not frame.empty and frame.stim_seconds.eq(50.).any()
-        for frame in frames) else 60.
-    references = []
-    for frame in frames:
-        if not frame.empty and 'centre_s' in frame:
-            references.append(frame.loc[frame.stim_seconds.eq(reference_duration),
-                [c for c in ('condition_id', 'order', 'centre_s', 'saved_at_ns')
-                 if c in frame]].drop_duplicates())
-    reference = pd.Series(dtype=float)
-    if references:
-        candidates = pd.concat(references, ignore_index=True).drop_duplicates(
-            ['condition_id', 'order']).sort_values('order')
-        # Select one actual saved layout, never a median of incompatible grids.
-        layouts = candidates.groupby('condition_id').centre_s.apply(
-            lambda values: tuple(np.round(values.to_numpy(float), 6)))
-        counts = layouts.value_counts()
-        if len(counts):
-            chosen = sorted(counts.index, key=lambda key: (-counts[key], len(key), key))[0]
-            condition = layouts[layouts.map(lambda value: value == chosen)].index[0]
-            if 'saved_at_ns' in candidates and candidates.saved_at_ns.notna().any():
-                latest = candidates.dropna(subset=['saved_at_ns']).sort_values(
-                    ['saved_at_ns', 'condition_id'])
-                condition = latest.iloc[-1].condition_id
-            reference = candidates[candidates.condition_id.eq(condition)].set_index('order').centre_s
-    audit = []
-    for index, frame in enumerate(frames):
+    frames, audit = [], []
+    reference = pd.Series(POPULATION_TEMPORAL_CENTRES_S)
+    for source in (curves, parameters):
+        frame = _prepare_population_temporal_rows(source)
         if frame.empty or 'centre_s' not in frame:
+            frames.append(frame)
             continue
-        frame['original_centre_s'] = frame.centre_s
-        compatible = pd.Series(True, index=frame.index)
-        if len(reference):
-            # Compatible window orders must map to distinct nearest reference
-            # centres. An old dense grid cannot be relabelled as a coarse grid.
-            ref_times = reference.to_numpy(float)
-            ref_orders = reference.index.to_numpy()
-            for condition, block in frame.groupby('condition_id'):
-                times = block[['order', 'centre_s']].drop_duplicates().sort_values('order')
-                nearest = ref_orders[np.abs(times.centre_s.to_numpy()[:, None]
-                                             - ref_times[None, :]).argmin(axis=1)]
-                valid = (len(nearest) == len(set(nearest))
-                         and np.array_equal(nearest, times.order.to_numpy()))
-                if block.stim_seconds.iloc[0] == reference_duration:
-                    valid = (valid and len(times) == len(reference)
-                             and np.allclose(times.centre_s, ref_times, atol=.02, rtol=0))
-                compatible.loc[block.index] = valid
-        mapped = frame.order.map(reference)
-        frame['time_alignment_status'] = np.where(
-            mapped.notna(), f'{reference_duration:g} s reference by window order',
-            'no reference; original time')
-        frame['centre_s'] = mapped.fillna(frame.original_centre_s)
-        frame['time_alignment_included'] = compatible
-        frame.loc[~compatible, 'time_alignment_status'] = (
-            'excluded: incompatible saved window layout; rerun with current batch window count')
+        if 'original_centre_s' not in frame:
+            frame['original_centre_s'] = frame.centre_s
+        if 'window' in frame:
+            bounds = frame.window.astype(str).map(_window_bounds)
+            frame['original_start_s'] = bounds.map(lambda pair: pair[0])
+            frame['original_end_s'] = bounds.map(lambda pair: pair[1])
+        else:
+            if 'start_s' in frame:
+                frame['original_start_s'] = frame.start_s
+            if 'end_s' in frame:
+                frame['original_end_s'] = frame.end_s
+        frame['centre_s'] = pd.to_numeric(frame.order).map(reference)
+        frame['time_alignment_status'] = 'approximate: saved window order; 50 s reference midpoint'
+        frame['time_alignment_included'] = True
         audit.append(frame[[c for c in ('condition_id', 'cell_index', 'rec_type',
-            'stim_seconds', 'order', 'original_centre_s', 'centre_s',
-            'time_alignment_status', 'time_alignment_included') if c in frame]].drop_duplicates())
-        frames[index] = frame.loc[compatible].copy()
+            'stim_seconds', 'order', 'window', 'original_start_s', 'original_end_s',
+            'original_centre_s', 'centre_s', 'time_alignment_status',
+            'time_alignment_included') if c in frame]].drop_duplicates())
+        frames.append(frame)
     return (*frames, pd.concat(audit, ignore_index=True).drop_duplicates()
             if audit else pd.DataFrame())
 
@@ -12015,7 +11971,7 @@ def _population_ln_title(block: pd.DataFrame) -> str:
     row = block.iloc[0]
     title = f'{row.cell_type} | {row.rec_type} | {row.light_regime}'
     if 'duration_group_s' in block:
-        title += f' | {float(row.duration_group_s):g} s temporal group'
+        title += ' | 50/55/60 s recordings · saved windows 1–5'
     else:
         title += ' | all durations and contrasts pooled'
     return title
@@ -12121,7 +12077,7 @@ def plot_population_temporal_ln_curves(
         colorbar = fig.colorbar(
             plt.cm.ScalarMappable(norm=color_norm, cmap=color_map),
             ax=axes.ravel().tolist(), fraction=.025, pad=.02)
-        colorbar.set_label('time since luminance step (s)')
+        colorbar.set_label(POPULATION_TEMPORAL_TIME_LABEL)
     fig.suptitle(_population_ln_title(summary))
     return fig
 
@@ -12167,7 +12123,7 @@ def plot_population_temporal_parameters(
             for group in np.unique(segment):
                 mask = segment == group
                 ax.plot(x[mask], y[mask], color=colors[state], lw=1.3)
-        ax.set_xlabel('time since luminance step (s)')
+        ax.set_xlabel(POPULATION_TEMPORAL_TIME_LABEL)
         ax.set_ylabel(ylabel)
     axes[0, 0].legend(frameon=False, title='light mean')
     fig.suptitle(_population_ln_title(summary) + '\nLines connect unchanged condition cohorts only')
@@ -12200,7 +12156,7 @@ def _resample_condition_ln_curves(
                 'condition_id', 'date', 'cell_label', 'cell_type',
                 'rec_type', 'stim_seconds', 'light_contrast', 'lightMean',
                 'light_regime', 'duration_group_s', 'light_state', 'curve',
-                'whole_cell_baseline_shift_pa', 'cell_index', 'order', 'saved_at_ns'):
+                'whole_cell_baseline_shift_pa', 'cell_index', 'order', 'window', 'saved_at_ns'):
             if column in block:
                 piece[column] = identity[column]
         if temporal and 'window' in block:
@@ -12305,8 +12261,8 @@ def high_quality_population_ln_analysis(
     independent of Section 6b. Review matching includes recording type, so a
     retained extracellular recording never admits a rejected whole-cell
     recording from the same cell. Static curves pool all contrasts and epoch
-    durations. Temporal results pool contrast for 50/60 s recordings only,
-    retaining windows ending no later than 50 s. ``normalized_ln=False``
+    durations. Temporal results pool contrast for 50/55/60 s recordings,
+    aligning their first five saved windows by order on an approximate time axis. ``normalized_ln=False``
     displays absolute responses and parameters; generator units stay unchanged.
     Every condition is additionally split into photopic/scotopic from
     its low/high whole-trace filter time to peak and the configurable threshold.
@@ -12414,7 +12370,7 @@ def high_quality_population_ln_analysis(
             if not included:
                 continue
             static = load_condition_table(h5, 'ln_curves')
-            temporal_eligible = float(metadata['stim_seconds']) in (50., 60.)
+            temporal_eligible = float(metadata['stim_seconds']) in POPULATION_TEMPORAL_DURATIONS
             temporal = (load_condition_table(h5, 'temporal_ln_curves')
                         if temporal_eligible else pd.DataFrame())
             parameters = (load_condition_table(h5, 'temporal_summary')
@@ -12663,7 +12619,7 @@ def plot_population_adaptation_selectivity_map(summary: pd.DataFrame,
                            label='relative response (M − P) / (|M| + |P|)')
     colorbar.ax.set_yticklabels([f'{present[1]} higher', 'equal',
                                 f'{present[0]} higher'])
-    ax.set(xlabel='generator contrast', ylabel='time since luminance step (s)',
+    ax.set(xlabel='generator contrast', ylabel=POPULATION_TEMPORAL_TIME_LABEL,
            title=f'{light_state} light: relative midget / parasol response\n'
                  'Smooth display · preference does not indicate response strength')
     ax.axvline(0, color='0.5', lw=.7)
@@ -12737,7 +12693,7 @@ def plot_population_local_sensitivity_map(summary: pd.DataFrame,
                          shading='gouraud' if min(pivot.shape) > 1 else 'auto',
                          rasterized=True)
     fig.colorbar(mesh, ax=ax, label='response change per generator contrast |dR/dg|')
-    ax.set(xlabel='generator contrast', ylabel='time since luminance step (s)',
+    ax.set(xlabel='generator contrast', ylabel=POPULATION_TEMPORAL_TIME_LABEL,
            title=f'{cell_type}, {light_state} light: local sensitivity\n'
                  'Smooth display · darker colors = greater sensitivity')
     ax.axvline(0, color='0.5', lw=.7)
@@ -12866,7 +12822,7 @@ def iter_population_adaptation_figures(result: Mapping[str, object]):
 
 def population_directional_decoding_dynamics(
         frame: pd.DataFrame, *, windows=((1., 10.), (10., 20.), (40., 50.)),
-        durations=(50., 60.)) -> dict:
+        durations=POPULATION_TEMPORAL_DURATIONS) -> dict:
     """Compare gain, accuracy and error across first/second/last intervals.
 
     Accuracy is weighted by n_changes within each condition and interval. Gain

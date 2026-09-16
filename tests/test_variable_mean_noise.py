@@ -117,7 +117,7 @@ def test_section_6c_runs_high_quality_population_ln_analysis():
 
     assert 'population-ln-heading' in cells
     assert '**all contrasts and durations**' in cells['population-ln-heading']
-    assert '**only 50 and 60 s recordings**' in cells[
+    assert '**50, 55, and 60 s recordings**' in cells[
         'population-ln-heading']
     source = cells['population-ln-analysis']
     assert "POPULATION_REC_TYPES = ('extracellular', 'exc')" in source
@@ -128,7 +128,7 @@ def test_section_6c_runs_high_quality_population_ln_analysis():
     assert 'temporal_parameter_window_combine=' in source
     assert 'high_quality_population_ln_analysis' in source
     assert "population_ln['temporal_condition_counts']" in source
-    assert '50/60 s recordings, first 50 s' in source
+    assert '50/55/60 s recordings, saved windows 1-5' in source
     assert 'normalized_ln=NORMALIZED_LN' in source
     assert 'iter_population_ln_figures' in source
     assert 'high_quality_cells' not in source
@@ -3618,7 +3618,7 @@ def test_population_temporal_times_use_fifty_second_axis_and_exclude_thirty():
     assert parameters.groupby('order').centre_s.nunique().eq(1).all()
 
 
-def test_temporal_alignment_uses_latest_layout_not_majority_or_mixed_medians():
+def test_temporal_alignment_uses_saved_order_even_for_different_original_layouts():
     import pandas as pd
     rows = []
     for name, duration, centres, saved in [
@@ -3632,11 +3632,41 @@ def test_temporal_alignment_uses_latest_layout_not_majority_or_mixed_medians():
                     for i, t in enumerate(centres))
     frame = pd.DataFrame(rows)
     curves, params, audit = vmn.align_population_temporal_times(frame, frame)
-    assert set(curves.condition_id) == {'latest', 'sixty'}
+    assert set(curves.condition_id) == {'old_a', 'old_b', 'latest', 'sixty'}
     assert params.groupby('order').centre_s.first().is_monotonic_increasing
     assert params.alpha.eq(42.).all()
-    assert not audit[audit.condition_id.str.startswith('old')].time_alignment_included.any()
+    assert audit.time_alignment_included.all()
+    assert curves.order.max() == 4
     assert params[params.condition_id.eq('sixty')].centre_s.tolist() == [5.9, 15.7, 25.5, 35.3]
+
+
+def test_ordinal_alignment_preserves_all_three_lengths_and_saved_fit_values():
+    import pandas as pd
+
+    records = []
+    for duration, count in [(30., 5), (50., 5), (55., 5), (60., 6)]:
+        edges = np.linspace(1., duration, count + 1)
+        for order, (lo, hi) in enumerate(zip(edges[:-1], edges[1:])):
+            records.append(dict(condition_id=f'cell-{duration}', stim_seconds=duration,
+                order=order, window=f'{lo:.1f}-{hi:.1f} s', centre_s=(lo+hi)/2,
+                alpha=duration+order, beta=order+1., gamma=-order, epsilon=duration))
+    original = pd.DataFrame(records)
+    saved = original.copy(deep=True)
+    curves, parameters, audit = vmn.align_population_temporal_times(original, original)
+    pd.testing.assert_frame_equal(original, saved)  # the saved inputs are never changed
+    assert len(parameters) == 15
+    assert parameters.groupby('order').condition_id.nunique().tolist() == [3]*5
+    assert parameters.groupby('order').centre_s.first().tolist() == list(vmn.POPULATION_TEMPORAL_CENTRES_S)
+    expected = saved[saved.stim_seconds.isin([50., 55., 60.]) & saved.order.lt(5)]
+    pd.testing.assert_frame_equal(parameters[['window', 'alpha', 'beta', 'gamma', 'epsilon']],
+                                  expected[['window', 'alpha', 'beta', 'gamma', 'epsilon']])
+    np.testing.assert_array_equal(parameters.original_centre_s, expected.centre_s)
+    fifth = audit[audit.order.eq(4)].set_index('stim_seconds')
+    assert fifth.loc[55., 'original_end_s'] == 55.
+    assert fifth.loc[60., 'original_end_s'] > 50.
+    assert fifth.centre_s.eq(45.1).all()
+    again, _, _ = vmn.align_population_temporal_times(curves, parameters)
+    pd.testing.assert_frame_equal(again, curves)  # original provenance survives a second pass
 
 
 def test_fitted_population_nl_uses_saved_parameters_and_preserves_filter():
@@ -4286,20 +4316,20 @@ def test_population_light_regime_requires_both_extremes_below_threshold():
     assert not result.loc['missing', 'classification_complete']
 
 
-def test_temporal_population_maps_long_epochs_to_50_and_truncates():
+def test_temporal_population_keeps_first_five_including_fifty_five_seconds():
     import pandas as pd
 
     rows = pd.DataFrame({
         'stim_seconds': [30., 50., 55., 55., 60., 60.],
         'window': ['28-30 s', '47-50 s', '47-50 s', '50-53 s',
                    '47-50 s', '50-53 s'],
-        'value': np.arange(6),
+        'value': np.arange(6), 'order': [4, 4, 4, 5, 4, 5],
     })
 
     grouped = vmn._prepare_population_temporal_rows(rows)
 
-    assert grouped.value.tolist() == [1, 4]
-    assert grouped.duration_group_s.tolist() == [50., 50.]
+    assert grouped.value.tolist() == [1, 2, 4]
+    assert grouped.duration_group_s.tolist() == [50., 50., 50.]
 
 
 def test_saved_lnk_inputs_restore_adjusted_sequences_by_index(tmp_path, monkeypatch):
@@ -4414,12 +4444,13 @@ def test_temporal_ln_response_normalization_and_absolute_mode(rec_type):
                 assert row.epsilon_normalized == row.epsilon
 
 
-def test_temporal_population_excludes_windows_crossing_fifty_seconds():
+def test_temporal_population_keeps_fifth_fit_crossing_fifty_seconds():
     import pandas as pd
     rows = pd.DataFrame({'stim_seconds': [30., 50., 60., 60., 55.],
-                         'window': ['0-3 s', '47-50 s', '47-50 s', '49-51 s', '0-3 s']})
+                         'window': ['0-3 s', '47-50 s', '47-50 s', '49-51 s', '0-3 s'],
+                         'order': [0, 4, 4, 4, 0]})
     selected = vmn._prepare_population_temporal_rows(rows)
-    assert selected.index.tolist() == [1, 2]
+    assert selected.index.tolist() == [1, 2, 3, 4]
 
 
 def test_population_nonlinearity_preserves_contrast_units_and_plot_limits():
